@@ -563,9 +563,10 @@ struct CheckLowerAtomic
     bool native;
     bool postfix;
     bool discard;
-    // An _Atomic lvalue's object's segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT), which its direct accesses take
-    // (its LOAD, SET, ATOMIC_RMW and ATOMIC_CAS); a library call takes its address as it is, as clang's does.
+    // The object's segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT), which native accesses take; a library call
+    // takes its address as it is, as clang's does. Generic values/results and CAS's expected pointer keep their own.
     uint64_t segment;
+    uint8_t pointer_segments[3];
 };
 
 struct CheckLowerAbi
@@ -1323,11 +1324,7 @@ static uint64_t check_lower_access_value(const TypeTable* types, uint8_t class, 
 // its 36 and keeps the space apart from the flat one, as the override does here.
 static uint64_t check_lower_segment_override(const TypeTable* types, TypeId type)
 {
-    const uint32_t space = type_address_space(type_object_qualifiers(types, type));
-    const uint32_t target = space - BUSTER_TYPE_SPACE_TARGET;
-    static const uint8_t segments[3] = { BUSTER_TYPED_SEGMENT_GS, BUSTER_TYPED_SEGMENT_FS, BUSTER_TYPED_SEGMENT_SS };
-    const uint64_t segment = space >= BUSTER_TYPE_SPACE_TARGET && target >= 256 && target <= 258 ? segments[target - 256] : 0;
-    return segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
+    return (uint64_t)check_program_segment(types, type) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
 }
 
 // Whether an access of a class's value at an object of `type` is a volatile one the typed stream marks (#3310,
@@ -8409,9 +8406,11 @@ static void check_lower_atomic_cas_direct(CheckLowerWriter* writer, uint32_t nod
         const uint32_t old = check_lower_temporary(writer, class);
         const uint32_t success = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
         const uint32_t end = check_lower_label(writer);
+        const uint64_t expected_segment = __builtin_expect(writer->segments, 0) ? (uint64_t)check_program_argument_segment(program, node, 1) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT : 0;
+        writer->segment_entries = writer->segment_entries || expected_segment != 0;
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, success);
         check_lower_mark(writer, end);
-        check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_SET, class, expected_segment);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, old);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, expected);
         check_lower_instruction(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, end);
@@ -8430,7 +8429,7 @@ static void check_lower_atomic_cas_direct(CheckLowerWriter* writer, uint32_t nod
         check_lower_instruction(writer, BUSTER_TYPED_ATOMIC_CAS, class, cas);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, desired);
         check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, class, kept);
-        check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, expected_segment);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, expected);
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, desired);
         check_lower_convert(writer, desired_type, object);
@@ -16485,29 +16484,10 @@ static TypeId check_lower_atomic_space(const CheckLowerWriter* writer, uint32_t 
     return check_lower_segment(writer->program->types, effect->object_type) ? effect->object_type : check_lower_atomic_pointee(writer, node);
 }
 
-// Whether an atomic builtin has a pointer argument past its object's (a compare-exchange's expected value, a generic
-// builtin's value or result) into a segment's space: its LOAD or SET through it would take no override.
-static bool check_lower_atomic_other_segment(const CheckLowerWriter* writer, uint32_t node)
-{
-    const CheckProgram* program = writer->program;
-    const CheckGraph* graph = &program->input->graph;
-    const TypeTable* types = program->types;
-    const uint32_t first = graph->argument_offsets[node];
-    bool result = false;
-    for (uint32_t k = 1; !result && k < graph->argument_counts[node]; k += 1)
-    {
-        const TypeId pointer = type_strip_aligned(types, check_stream_type(program->stream, graph->argument_nodes[first + k]));
-        const uint8_t kind = type_kind(types, pointer);
-        result = (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind)) && check_lower_segment(types, type_element(types, pointer));
-    }
-    return result;
-}
-
 // A node that loads from or stores to a segment's space (check_lower_segment), which the lowering refuses by name: an
 // lvalue read (not an address taken, `&` or a member's or a subscript's base), or an assignment's, a compound
-// assignment's or an increment's or decrement's operand; a bit of a vector of bool, read or written, whose type has lost
-// its vector's space (another element takes its vector's override: check_lower_element_segment); and an atomic builtin's object, which its pointer argument reaches (its object type's space, or its
-// pointer's pointee's: check_lower_atomic_pointee).
+// assignment's or an increment's or decrement's operand, or a vector element whose type has lost its vector's space.
+// Atomic builtins carry their pointer arguments' overrides in their direct entries, representation plans or helpers.
 static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t node, const CheckValue* value, bool address)
 {
     const CheckProgram* program = writer->program;
@@ -16517,19 +16497,20 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     const uint32_t target = graph->operand0[node];
     const bool store = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && target < stream->count;
     const bool element = op == CHECK_OP_SUBSCRIPT && (value->flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && target < stream->count;
-    // An atomic builtin's object takes the override where a direct plan (#1059) takes the builtin, without a helper:
-    // its LOAD or SET, ATOMIC_RMW, ATOMIC_CAS, or a fetch's loop of a LOAD and ATOMIC_CAS.
-    const uint32_t helper = op == CHECK_OP_BUILTIN_ATOMIC ? check_program_builtin_index(writer->output->helpers.uses, writer->output->helpers.use_count, sizeof(CheckProgramHelperUse), node)
-                                                          : BUSTER_CHECK_NONE;
-    const uint32_t atomic = op == CHECK_OP_BUILTIN_ATOMIC ? check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node)
-                                                          : BUSTER_CHECK_NONE;
-    const CheckBuiltinAtomicEffect* effect = atomic != BUSTER_CHECK_NONE ? stream->atomics + atomic : NULL;
-    const TypeId atomic_space = effect != NULL ? check_lower_atomic_space(writer, node, effect) : 0;
-    const bool direct = effect != NULL && helper == BUSTER_CHECK_NONE && check_program_direct_fence(program, node, effect) == UINT32_MAX &&
-                        (check_program_direct_access(program, node, effect) != UINT32_MAX || check_program_direct_rmw(program, node, effect) != UINT32_MAX ||
-                         check_program_direct_cas(program, node, effect) != UINT32_MAX || check_program_direct_fetch(program, node, effect) != UINT32_MAX);
     // An array's lvalue isn't read: its value is its address, which a subscript or a member's own access reads through.
     const TypeTable* types = program->types;
+    // Native atomic plans and helpers carry every accessed pointer's override. A non-native builtin's library ABI
+    // cannot express one; in particular, a 16-byte object must not silently lose FS/GS where clang uses cmpxchg16b.
+    const uint32_t atomic = op == CHECK_OP_BUILTIN_ATOMIC ? check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node) : BUSTER_CHECK_NONE;
+    const uint32_t helper = op == CHECK_OP_BUILTIN_ATOMIC ? check_program_builtin_index(writer->output->helpers.uses, writer->output->helpers.use_count, sizeof(CheckProgramHelperUse), node) : BUSTER_CHECK_NONE;
+    const CheckBuiltinAtomicEffect* effect = atomic != BUSTER_CHECK_NONE ? stream->atomics + atomic : NULL;
+    const bool atomic_native = helper != BUSTER_CHECK_NONE ||
+                               (effect != NULL && check_builtin_atomic_c11_native(types, CBUILTIN_C11_ATOMIC_LOAD, effect->value_type, effect->object_size,
+                                                                                 effect->alignment_known && effect->minimum_alignment >= effect->object_size));
+    const CBuiltinId builtin = effect != NULL ? check_builtin_atomic_base((CBuiltinId)graph->members[node]) : CBUILTIN_NONE;
+    const bool query = builtin == CBUILTIN_ATOMIC_IS_LOCK_FREE || builtin == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || builtin == CBUILTIN_C11_ATOMIC_IS_LOCK_FREE;
+    const bool atomic_refused = effect != NULL && !atomic_native && !query &&
+                                (check_program_argument_segment(program, node, 0) != 0 || check_program_argument_segment(program, node, 1) != 0 || check_program_argument_segment(program, node, 2) != 0);
     const bool read = !address && value->category == CHECK_LVALUE && check_lower_segment(types, value->type) &&
                       !type_kind_is_array(type_kind(types, type_strip_aligned(types, value->type)));
     const bool written = store && check_lower_segment(program->types, check_stream_type(stream, target));
@@ -16559,9 +16540,7 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     const bool element_carried = element && check_stream_category(stream, target) == CHECK_LVALUE && check_lower_segment_override(types, vector) != 0 &&
                                  (check_lower_bool_vector(types, vector) ||
                                   (check_lower_class(writer, value->type) != BUSTER_TYPED_CLASS_VOID && check_lower_class(writer, value->type) <= BUSTER_TYPED_CLASS_VECTOR));
-    return ((read || written) && !carried) || (element && check_lower_segment(program->types, vector) && !element_carried) ||
-           (effect != NULL && ((check_lower_segment(types, atomic_space) && !(direct && check_lower_segment_override(types, atomic_space) != 0)) ||
-                               check_lower_atomic_other_segment(writer, node)));
+    return ((read || written) && !carried) || (element && check_lower_segment(program->types, vector) && !element_carried) || atomic_refused;
 }
 
 // The read of an object in a segment's space whose value is an address (#1447, BUSTER_CHECK_LOWER_TYPE_AGGREGATE: a
@@ -17012,7 +16991,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
                                    ? check_program_direct_fetch(program, node, stream->atomics + atomic)
                                    : UINT32_MAX;
         // A direct one's object in %fs or %gs (#1447) takes the segment's override on its LOAD, SET, ATOMIC_RMW or
-        // ATOMIC_CAS (check_lower_access's); check_lower_segment_access refuses one of another plan.
+        // ATOMIC_CAS (check_lower_access's). Other plans and helpers retain their own pointer overrides.
         const uint64_t segment = __builtin_expect(writer->segments, 0) && atomic != BUSTER_CHECK_NONE
                                      ? check_lower_segment_override(types, check_lower_atomic_space(writer, node, stream->atomics + atomic))
                                      : 0;
@@ -19136,19 +19115,22 @@ static void check_lower_asm_slot(CheckLowerWriter* writer, uint32_t object, uint
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
 }
 
-// Whether an asm statement has an output in a segment's space (check_lower_segment, #1447) that isn't a memory one: its
-// value is stored through the output's address, which the lowering's stores don't carry the segment of yet. A memory
-// operand's address is the template's, as clang's is: it drops the space there.
-static bool check_lower_asm_segment(const CheckLowerWriter* writer, const CheckInputAsm* statement, const CheckProgramAsm* plan)
+// Whether an asm statement has an output in a segment's space: its generated stores and read/write operands carry
+// that segment. A memory operand's address is the template's, as clang's is: it drops the space there.
+static bool check_lower_asm_segment(const CheckInputAsm* statement, const CheckProgramAsm* plan)
 {
     bool result = false;
     for (uint32_t k = 0; !result && k < statement->output_count; k += 1)
     {
-        const uint32_t node = statement->operands[k].node;
-        result = plan->places[k].kind != BUSTER_CHECK_ASM_MEMORY && node < writer->program->stream->count &&
-                 check_lower_segment(writer->program->types, check_stream_type(writer->program->stream, node));
+        result = plan->places[k].kind != BUSTER_CHECK_ASM_MEMORY && plan->places[k].segment != 0;
     }
     return result;
+}
+
+static uint64_t check_lower_asm_mark(CheckLowerWriter* writer, uint8_t class, uint32_t node, const CheckAsmPlace* place)
+{
+    writer->segment_entries = writer->segment_entries || place->segment != 0;
+    return check_lower_node_mark(writer, class, node) | (uint64_t)place->segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
 }
 
 // The address of a copy of vector expression `node`'s value, of `type` (#1846): a frame object of its bytes, which the
@@ -19175,7 +19157,7 @@ static void check_lower_asm_value(CheckLowerWriter* writer, const CheckAsmPlace*
 {
     if (place->m64 && place->object != BUSTER_CHECK_NONE)
     {
-        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, check_lower_asm_mark(writer, BUSTER_TYPED_CLASS_U64, place->object, place));
         check_lower_expression(writer, place->object, true, 0);
     }
     else if (place->m64)
@@ -19230,6 +19212,10 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
     const CheckProgramAsm* plan = writer->body != NULL ? check_program_asm_plan_of(asms, b, control.target, input->asm_count) : 0;
     const CheckInputAsm* statement = plan != 0 ? input->asm_statements + control.target : 0;
     const uint32_t count = statement != 0 ? statement->output_count + statement->input_count : 0;
+    if (plan != NULL && plan->planned && plan->reason == NULL && count <= BUSTER_CHECK_ASM_OPERANDS && __builtin_expect(writer->segments, 0))
+    {
+        writer->segment_entries = writer->segment_entries || check_lower_asm_segment(statement, plan);
+    }
     if (plan == 0 || !plan->planned)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
@@ -19241,10 +19227,6 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
     else if (count > BUSTER_CHECK_ASM_OPERANDS)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
-    }
-    else if (__builtin_expect(writer->segments, 0) && check_lower_asm_segment(writer, statement, plan))
-    {
-        check_lower_unsupported(writer, "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one");
     }
     else if (plan->row != 0)
     {
@@ -19264,7 +19246,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                 {
                     // A volatile output's read is a volatile access (#3329), as the empty template's are below.
                     const uint8_t read = check_lower_class(writer, place->type);
-                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, read, check_lower_node_mark(writer, read, node));
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, read, check_lower_asm_mark(writer, read, node, place));
                     check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
                 }
                 check_lower_expression(writer, node, true, 0);
@@ -19418,7 +19400,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
             else if (passed && place->written && place->kind != BUSTER_CHECK_ASM_MEMORY)
             {
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_node_mark(writer, class, node));
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_asm_mark(writer, class, node, place));
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_asm_slot(writer, object, place->slot);
             }
@@ -19444,7 +19426,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             {
                 // A `+` x87 operand's value, through its address the slot holds.
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_node_mark(writer, class, node));
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_asm_mark(writer, class, node, place));
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_asm_slot(writer, object, place->slot);
                 check_lower_asm_slot(writer, object, place->value);
@@ -19475,7 +19457,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                 check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, local);
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, place->size | check_lower_node_mark(writer, BUSTER_TYPED_CLASS_VECTOR, node));
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, place->size | check_lower_asm_mark(writer, BUSTER_TYPED_CLASS_VECTOR, node, place));
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_asm_slot(writer, object, place->slot);
                 check_lower_asm_slot(writer, object, place->value);
@@ -19484,7 +19466,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             {
                 // A `+` register operand's value, through its address the slot holds.
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_node_mark(writer, class, node));
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_asm_mark(writer, class, node, place));
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_asm_slot(writer, object, place->slot);
                 check_lower_asm_slot(writer, object, place->value);
@@ -19539,7 +19521,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                 const CheckAsmPlace* output = plan->places + place->tied;
                 const uint8_t output_class = check_lower_class(writer, output->type);
                 const TypeId placed = check_asm_tied_type(types, place->type, output->type);
-                check_lower_instruction(writer, BUSTER_TYPED_SET, output_class, check_lower_node_mark(writer, output_class, statement->operands[place->tied].node));
+                check_lower_instruction(writer, BUSTER_TYPED_SET, output_class, check_lower_asm_mark(writer, output_class, statement->operands[place->tied].node, output));
                 if (placed != output->type)
                 {
                     check_lower_instruction(writer, BUSTER_TYPED_CONVERT, output_class, 0);
@@ -19556,7 +19538,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             {
                 // A `+` operand's read and write, each a volatile access where it is a volatile object's (#3329).
                 const uint8_t class = check_lower_class(writer, place->type);
-                const uint64_t mark = check_lower_node_mark(writer, class, node);
+                const uint64_t mark = check_lower_asm_mark(writer, class, node, place);
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, mark);
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, mark);
                 check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);

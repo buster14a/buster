@@ -2911,7 +2911,7 @@ static __attribute__((noinline, cold)) void pp_diagnose_ucn(Preprocessor* pp, co
 // `data`, at `base`: as clang's tryReadNamedUCN, a name that isn't exactly Unicode's is an error at the name, with a note
 // where it is one loosely, whose character clang reads it as; then as tryReadUCN, that character (or the exact name's)
 // below U+00A0 is an error at the backslash. Cold: a file's bad named UCNs alone.
-static __attribute__((noinline, cold)) void pp_diagnose_named_ucn(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t offset)
+static __attribute__((noinline, cold)) void pp_diagnose_named_ucn(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t offset, bool skipped)
 {
     const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
     uint8_t name[BUSTER_PP_NAMED_UCN_NAME_BYTES];
@@ -2924,12 +2924,12 @@ static __attribute__((noinline, cold)) void pp_diagnose_named_ucn(Preprocessor* 
         uint32_t code_point = 0;
         const bool exact = length < sizeof(name) && unicode_name_strict(name, shown, &code_point);
         bool found = exact;
-        if (exact)
+        if (exact && !skipped)
         {
             // -pedantic's (#1447), at the backslash, before its character's error.
             pp_diagnose_group(pp, PP_WARNING_DELIMITED_ESCAPE, base + offset, "named escape sequences are a Clang extension");
         }
-        if (!exact)
+        if (!exact && !skipped)
         {
             UnicodeNameDiagnosis diagnosis;
             unicode_name_diagnose(name, shown, false, &diagnosis);
@@ -2954,9 +2954,9 @@ static __attribute__((noinline, cold)) void pp_diagnose_named_ucn(Preprocessor* 
 }
 
 // Read only the exceptional errors in this consumed file-token range. Macro definitions diagnose once when read,
-// never each time expanded. Excluded group bodies never call this; directive lines still do. Header queries defer
-// it until their opaque spans are known.
-static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end)
+// never each time expanded. A skipped range takes only hard errors of a decoded UCN's character: its malformed-name
+// diagnostics and extension warnings stay suppressed. Header queries defer this until their opaque spans are known.
+static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end, bool skipped)
 {
     const PPFileData* data = &pp->datas[context->data];
     uint32_t low = 0;
@@ -2977,10 +2977,10 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
         {
             opaque = start >= span->begin && start < span->end;
         }
-        if (!opaque)
+        if (!opaque && (!skipped || error.kind == BUSTER_PP_UCN_ERROR || error.kind == BUSTER_PP_NAMED_UCN_ERROR))
         {
             const uint32_t saved_position = pp->diagnostic_position;
-            if (pp->diagnostic_run_first != BUSTER_PP_NONE)
+            if (!skipped && pp->diagnostic_run_first != BUSTER_PP_NONE)
             {
                 pp->diagnostic_position = pp->diagnostic_run_first + error.token - begin;
             }
@@ -3023,7 +3023,7 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                 }
                 case BUSTER_PP_NAMED_UCN_ERROR:
                 case BUSTER_PP_NAMED_UCN_EXTENSION:
-                    pp_diagnose_named_ucn(pp, data, pp->ranges[context->range].base, error.offset);
+                    pp_diagnose_named_ucn(pp, data, pp->ranges[context->range].base, error.offset, skipped);
                     break;
                 case BUSTER_PP_NAMED_UCN_INCOMPLETE:
                     pp_diagnose_group(pp, PP_WARNING_UNICODE, location, "incomplete universal character name; treating as '\\' followed by identifier");
@@ -3058,7 +3058,17 @@ BUSTER_INLINE void pp_read_raw_errors(Preprocessor* pp, const PPContext* context
 {
     if (pp->datas[context->data].raw_error_count != 0)
     {
-        pp_read_raw_errors_slow(pp, context, begin, end);
+        pp_read_raw_errors_slow(pp, context, begin, end, false);
+    }
+}
+
+// A skipped group's raw lexer still rejects basic, control and surrogate UCNs (#1447). Read the sparse exceptional
+// records, without walking its tokens or publishing the warnings that raw lexing suppresses.
+BUSTER_INLINE void pp_read_skipped_ucns(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end)
+{
+    if (pp->datas[context->data].raw_error_count != 0 && begin < end)
+    {
+        pp_read_raw_errors_slow(pp, context, begin, end, true);
     }
 }
 
@@ -9328,7 +9338,7 @@ static const char* pp_conditional_name(uint8_t kind)
 // The notes of the directives a skip passes over (PPFileData.note_*), from directive `from` (not included) to `to`
 // (the next directive of the group, or the directive count for a skip to the end of the file): what clang reports as
 // it skips them, at their names.
-static void pp_report_skipped(Preprocessor* pp, const PPContext* context, const PPFileData* data, uint32_t from, uint32_t to)
+static void pp_report_skipped(Preprocessor* pp, const PPContext* context, const PPFileData* data, uint32_t from, uint32_t to, uint32_t begin)
 {
     uint32_t low = 0;
     uint32_t high = data->note_count;
@@ -9343,6 +9353,9 @@ static void pp_report_skipped(Preprocessor* pp, const PPContext* context, const 
     {
         const uint32_t d = data->note_directives[last];
         const uint8_t notes = data->note_kinds[last];
+        const uint32_t name_token = data->directive_hash[d] + 1;
+        pp_read_skipped_ucns(pp, context, begin, name_token);
+        begin = name_token;
         const uint32_t name = pp_token_location(pp, context, data, data->directive_hash[d] + 1);
         const char* spelling = pp_conditional_name(data->directive_kind[d]);
         if ((notes & BUSTER_PP_NOTE_ELIFDEF) != 0 && pp->options.language.standard < 2023)
@@ -9354,6 +9367,7 @@ static void pp_report_skipped(Preprocessor* pp, const PPContext* context, const 
             pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#%s after #else", spelling);
         }
     }
+    pp_read_skipped_ucns(pp, context, begin, context->position);
     // A skip to the end leaves the groups opened inside it open, which are unterminated, innermost (last) first.
     for (uint32_t i = last; to == data->directive_count && i > low; i -= 1)
     {
@@ -9377,6 +9391,7 @@ static uint32_t pp_skip_relexed_group(Preprocessor* pp, const PPContext* context
     const bool valid = capacity == 0 || (openers != 0 && seen_else != 0);
     uint32_t next = BUSTER_PP_NONE;
     uint32_t depth = 0;
+    uint32_t begin = context->position;
     if (!valid)
     {
         pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory checking a re-lexed condition");
@@ -9388,6 +9403,9 @@ static uint32_t pp_skip_relexed_group(Preprocessor* pp, const PPContext* context
         const bool branch = kind == PP_DIRECTIVE_ELIF || kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF || kind == PP_DIRECTIVE_ELSE;
         const bool closes = kind == PP_DIRECTIVE_ENDIF;
         next = depth == 0 && (branch || closes) ? e : BUSTER_PP_NONE;
+        const uint32_t end = data->directive_hash[e] + (next == BUSTER_PP_NONE ? 1 : 0);
+        pp_read_skipped_ucns(pp, context, begin, end);
+        begin = end;
         if (opens)
         {
             openers[depth] = e;
@@ -9413,6 +9431,10 @@ static uint32_t pp_skip_relexed_group(Preprocessor* pp, const PPContext* context
             depth -= 1;
         }
     }
+    if (valid && next == BUSTER_PP_NONE)
+    {
+        pp_read_skipped_ucns(pp, context, begin, data->token_count);
+    }
     for (uint32_t i = depth; next == BUSTER_PP_NONE && i > 0; i -= 1)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, pp_token_location(pp, context, data, data->directive_hash[openers[i - 1]] + 1), "unterminated conditional directive");
@@ -9425,6 +9447,7 @@ static uint32_t pp_skip_relexed_group(Preprocessor* pp, const PPContext* context
 static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
 {
     const PPFileData* data = &pp->datas[context->data];
+    const uint32_t begin = context->position;
     const uint32_t next = context->hidden_directives ? pp_skip_relexed_group(pp, context, data) : data->directive_next[d];
     if (next == BUSTER_PP_NONE)
     {
@@ -9440,9 +9463,9 @@ static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
     {
         pp->conditionals[pp->conditional_count - 1].skipping = true;
     }
-    if (!context->hidden_directives && data->note_count != 0)
+    if (!context->hidden_directives && (data->note_count != 0 || data->raw_error_count != 0))
     {
-        pp_report_skipped(pp, context, data, d, context->next_directive);
+        pp_report_skipped(pp, context, data, d, context->next_directive, begin);
     }
 }
 

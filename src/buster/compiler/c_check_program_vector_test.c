@@ -782,9 +782,9 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
 
 }
 
-// Accesses in a segment's space (#1447) that the lowering refuses by name, which compiled without the segment before: a
-// bit of a vector of bool, an atomic builtin's object (which its pointer reaches), and an asm statement's register output
-// (stored through its address). Clang's code has %gs or %fs on each.
+// Accesses in a segment's space (#1447) that still need another representation: a volatile vector's element, an atomic
+// builtin past the native width and an aggregate copy past the target's inline limit. Refuse them before dropping an
+// override; native atomic plans and register asm outputs run against clang in check_test_program_segments.
 static void check_test_program_segment_refusals(CheckTest* test, const X86Target* target)
 {
     static const struct
@@ -797,26 +797,18 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         // those), but an element of a volatile vector.
         { "segment-volatile-vector-element", "typedef int V __attribute__((vector_size(16)));int tested(volatile V __seg_fs*p){return (*p)[1];}",
           "element access through volatile vectors" },
-        // An atomic builtin's object in a segment's space takes the override where a direct plan takes the builtin
-        // (check_test_program_segments runs those); a generic one by pointer, __sync_lock_release and __atomic_clear,
-        // which take another plan, are refused. (A generic exchange whose result pointer is in another space than the
-        // object's is clang's error, #2233: c_check_address_space_driver_test.c.)
-        { "segment-atomic-generic-load", "int tested(int __seg_fs*p,int*r){__atomic_load(p,r,5);return *r;}",
+        // Native-width atomic plans and asm register outputs retain their overrides. Non-native atomic builtins still
+        // need a segmented 16-byte path or a library ABI that can represent their offsets.
+        { "segment-atomic-wide-load", "void tested(__int128 __seg_fs*p,__int128*r){__atomic_load(p,r,5);}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-sync-lock-release", "void tested(int __seg_gs*p){__sync_lock_release(p);}",
+        { "segment-atomic-wide-result", "void tested(__int128*p,__int128 __seg_gs*r){__atomic_load(p,r,5);}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-clear", "void tested(char __seg_gs*p){__atomic_clear(p,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-expected", "_Bool tested(int*p,int __seg_gs*e){return __atomic_compare_exchange_n(p,e,1,0,5,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-c11-atomic-expected", "_Bool tested(_Atomic int*p,int __seg_fs*e){return __c11_atomic_compare_exchange_strong(p,e,1,5,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-generic-result", "void tested(int*p,int __seg_gs*r){__atomic_load(p,r,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-asm-register-output", "void tested(int __seg_gs*p){__asm__(\"movl $1,%0\":\"=r\"(*p));}",
-          "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
-        { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
-          "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
+        { "segment-asm-boolean-element", "typedef _Bool V __attribute__((ext_vector_type(8)));void tested(V __seg_fs*p){__asm__(\"movb $1,%0\":\"=r\"((*p)[3]));}",
+          "inline assembly outputs to bits of boolean vectors in a segment's address space" },
+        { "segment-asm-atomic-output", "void tested(_Atomic int __seg_fs*p){__asm__(\"movl $1,%0\":\"=r\"(*p));}",
+          "non-flag inline assembly outputs to atomic objects in a segment's address space" },
+        { "segment-asm-atomic-read-write", "void tested(_Atomic double __seg_fs*p){__asm__(\"\":\"+x\"(*p));}",
+          "non-flag inline assembly outputs to atomic objects in a segment's address space" },
         // An aggregate's copy past 8 of the target's widest vector registers, which clang stops on too ("cannot lower
         // memory intrinsic in address space"): from the segment and into it.
         { "segment-struct-copy-past-limit", "struct S{char c[1025];};void tested(struct S*q,struct S __seg_fs*p){*q=*p;}",

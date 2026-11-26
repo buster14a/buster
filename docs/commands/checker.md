@@ -91,7 +91,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --quiet-roots-only | --unused-comparison-only |
   --float-precision-only | --reach-filter-only | --branch-truth-only |
-  --record-extensions-only | --auto-qualifiers-only |
+  --record-extensions-only | --auto-qualifiers-only | --invalid-records-only | --format-matches-only |
   --run-modes-only | --common-warnings-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -170,6 +170,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--invalid-records-only` runs `c_check_invalid_record_driver_test.c` (#1447):
+  typed member and bit-field errors, invalid-record propagation, valid sibling
+  diagnostics, independent initializer errors, and preserved output after a
+  rejected compilation. `--format-matches-only` runs
+  `c_check_format_matches_driver_test.c` (#1447): reference contracts,
+  declaration visibility, body checking, malformed strings, source locations
+  and warning policy. Both use original runtime fixtures and compare complete
+  ordered Clang diagnostics in GNU17/C23 through one and three requested lanes
+  and deferred bodies.
   `--float-precision-only` runs `c_check_float_precision_driver_test.c` (#1875):
   `-Wimplicit-float-conversion`'s and `-Wliteral-range`'s floating comparisons
   against clang's complete output, with their controls and policies

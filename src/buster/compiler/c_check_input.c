@@ -427,7 +427,20 @@ typedef enum CheckInputMessage
     CHECK_INPUT_GENERIC_DEFAULT,
     // A nullability specifier at the deduced base's level with a non-pointer deduction (#1844).
     CHECK_INPUT_AUTO_TYPE_NULLABILITY,
+    // A rejected record member (#1447): the retained type and width let the cold renderer preserve Clang's
+    // diagnostic after the field recovers. Only this member's uses are poisoned; its siblings remain checked.
+    CHECK_INPUT_BIT_FIELD,
+    CHECK_INPUT_FUNCTION_MEMBER,
 } CheckInputMessage;
+
+typedef enum CheckInputBitField
+{
+    CHECK_INPUT_BIT_FIELD_TYPE,
+    CHECK_INPUT_BIT_FIELD_NEGATIVE,
+    CHECK_INPUT_BIT_FIELD_WIDE,
+    CHECK_INPUT_BIT_FIELD_ZERO,
+    CHECK_INPUT_BIT_FIELD_TOO_WIDE,
+} CheckInputBitField;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
 typedef enum CheckInputArrayList
@@ -607,6 +620,8 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_GENERIC_COMPATIBLE] = "type in generic association compatible with previously specified type",
     [CHECK_INPUT_GENERIC_DEFAULT] = "duplicate default generic association",
     [CHECK_INPUT_AUTO_TYPE_NULLABILITY] = "nullability specifier cannot be applied to non-pointer type",
+    [CHECK_INPUT_BIT_FIELD] = "invalid bit-field",
+    [CHECK_INPUT_FUNCTION_MEMBER] = "field declared as a function",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -7818,6 +7833,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
         const bool deferring = attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR || attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
                                attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED || attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE ||
                                attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || attribute->kind == CHECK_ATTRIBUTE_FORMAT ||
+                               attribute->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES ||
                                attribute->kind == CHECK_ATTRIBUTE_ALIGNAS ||
                                ((reader->statement_attributes || rejected_declaration) && attribute->kind == CHECK_ATTRIBUTE_ALIGNED);
         const bool tag_type = reader->tag_attributes && (attribute->kind == CHECK_ATTRIBUTE_REGPARM || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE);
@@ -7998,7 +8014,8 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
         }
         else if (!attribute->resolved && (attribute->schema == CHECK_ATTRIBUTE_INTEGER_LIST || attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS))
         {
-            for (uint32_t argument = attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS; valid && argument < attribute->argument_count; argument += 1)
+            const uint32_t integers = attribute->argument_count - (attribute->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES && attribute->argument_count != 0);
+            for (uint32_t argument = attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS; valid && argument < integers; argument += 1)
             {
                 uint32_t first;
                 uint32_t last;
@@ -10288,6 +10305,21 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
     return result;
 }
 
+// Invalid record elements poison containing fields and their aggregate initializers, while pointers to them
+// remain ordinary pointer types. The recovery bit is read only after the complete element type is reached.
+static bool check_input_invalid_record_type(const TypeTable* types, TypeId type)
+{
+    TypeId element = type != 0 ? type_strip_aligned(types, type) : 0;
+    uint8_t kind = element != 0 ? type_kind(types, element) : BUSTER_TYPE_KIND_NONE;
+    while (type_kind_is_array(kind))
+    {
+        element = type_strip_aligned(types, type_element(types, element));
+        kind = type_kind(types, element);
+    }
+    return (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) &&
+           (types->types.flags[type_index(element)] & BUSTER_TYPE_RECORD_INVALID) != 0;
+}
+
 typedef struct CheckTagFrame CheckTagFrame;
 struct CheckTagFrame
 {
@@ -10961,6 +10993,10 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     reader->declarator_common = frame->member_attributes;
                     frame->member_run = check_input_declarator_begin(reader, frame->member_base, i, frame->close);
                     valid = frame->member_run != 0;
+                    if (valid)
+                    {
+                        frame->member_run->recover = true;
+                    }
                 }
                 CheckDeclaratorRun* run = valid ? frame->member_run : 0;
                 if (run != 0)
@@ -10977,6 +11013,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     CheckInputAttributes* common_attributes = frame->member_attributes;
                     uint32_t name;
                     uint32_t parameters;
+                    const bool invalid_declarator = run->invalid || run->parameter_invalid;
                     TypeId type = check_input_declarator_end(reader, run, &i, &name, &parameters);
                     frame->member_run = 0;
                     failed_token = name != BUSTER_CHECK_NONE ? name : declarator;
@@ -10991,6 +11028,9 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     }
                     valid &= (check_input_overload_flags(attributes) & BUSTER_CHECK_OVERLOADABLE) == 0;
                     uint32_t width = BUSTER_TYPE_NOT_BIT_FIELD;
+                    uint64_t field_bits = 0;
+                    bool field_negative = false;
+                    bool width_outside = false;
                     bool widthless = false;
                     if (i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_COLON)
                     {
@@ -11019,7 +11059,17 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         reader->constant_failure = begin < i ? &failure : NULL;
                         const bool repaired_width = (parser->tokens.flags[i] & BUSTER_PARSE_MEMBER_RECOVERY) != 0;
                         CheckValue width_value = { 0 };
-                        const bool read = check_input_constant_value(reader, begin, i, &bits, &width_value);
+                        bool read = check_input_constant_value(reader, begin, i, &bits, &width_value);
+                        // A width may be an unsigned 64-bit ICE outside int64's range. Preserve that magnitude
+                        // for Clang's too-wide diagnostic instead of refusing it or interpreting its high bit as a sign.
+                        const bool unsigned_range = !read && width_value.constant_kind == CHECK_CONSTANT_INTEGER && width_value.fault == CHECK_FAULT_NONE &&
+                                                    width_value.integer > INT64_MAX && width_value.integer <= UINT64_MAX &&
+                                                    check_input_integer_constant(reader, &width_value);
+                        if (unsigned_range)
+                        {
+                            check_input_constant_warning(reader, begin, i, &width_value, true);
+                            read = true;
+                        }
                         reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
                         reader->constant_failure = NULL;
                         if (read)
@@ -11047,8 +11097,11 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             }
                             width_error = check_input_recover_reports(reader, width_reports);
                         }
-                        valid &= width_error || (read && bits >= 0 && bits <= UINT32_MAX);
-                        width = width_error ? BUSTER_TYPE_NOT_BIT_FIELD : (uint32_t)bits;
+                        valid &= width_error || read;
+                        field_bits = unsigned_range ? (uint64_t)width_value.integer : (uint64_t)bits;
+                        field_negative = !unsigned_range && bits < 0;
+                        width_outside = read && (field_negative || field_bits >= BUSTER_TYPE_NOT_BIT_FIELD);
+                        width = width_error ? BUSTER_TYPE_NOT_BIT_FIELD : width_outside ? 0 : (uint32_t)field_bits;
                         // An unnamed one stays a member, unnamed, of its whole type, as clang's field (`long : zzz` aligns
                         // the record to 8), and declares something.
                         widthless = width_error;
@@ -11108,7 +11161,10 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         const bool declares = check_input_empty_declaration_tag(parser, frame->cursor, frame->member_declarator, true);
                         const bool anonymous = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && declares;
                         const uint32_t tag = anonymous ? reader->types->types.index[type_index(record)] : 0;
-                        tag_only = !anonymous || reader->types->tags.name[tag] != 0;
+                        // Clang never introduces an anonymous record's fields when that record's definition failed.
+                        // Named members of the same invalid type still remain available for ordinary member lookup.
+                        const bool invalid_anonymous = anonymous && (reader->types->types.flags[type_index(record)] & BUSTER_TYPE_RECORD_INVALID) != 0;
+                        tag_only = !anonymous || reader->types->tags.name[tag] != 0 || invalid_anonymous;
                         valid &= tag_only || type_is_complete(reader->types, record);
                         const bool missing_name = parser->tokens.kinds[declarator] == PARSE_KIND_L_SQUARE &&
                                                   (parser->tokens.flags[declarator] & BUSTER_PARSE_MEMBER_RECOVERY) != 0;
@@ -11121,6 +11177,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     if (valid && !tag_only)
                     {
                         const uint32_t identifier = name != BUSTER_CHECK_NONE ? parser->tokens.names[name] : 0;
+                        const bool variable_member = name != BUSTER_CHECK_NONE && check_input_vla_modified(reader->types, type);
                         TypeMember member =
                         {
                             .name = identifier,
@@ -11128,7 +11185,8 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             .bit_width = width,
                             .packed = attributes != 0 && attributes->packed,
                             .alignment_log2 = attributes != 0 ? attributes->alignment_log2 : 0,
-                            .invalid = name != BUSTER_CHECK_NONE && check_input_vla_modified(reader->types, type),
+                            .invalid = invalid_declarator || variable_member ||
+                                       (reader->output->recovered_count != 0 && check_input_invalid_record_type(reader->types, type)),
                         };
                         if (attributes != 0 && attributes->count != 0 && parser->language.standard >= 2023 && name != BUSTER_CHECK_NONE)
                         {
@@ -11159,7 +11217,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         }
                         // Clang rejects a variably modified field after reading its declarator. Keep the invalid field
                         // bound so later fields and declarations still get their diagnostics (#2252).
-                        if (valid && member.invalid)
+                        if (valid && variable_member)
                         {
                             // Folding a dimension did not make the entire field constant. Suppress the declarator's
                             // fold warning while keeping warnings from evaluating each dimension.
@@ -11180,15 +11238,45 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             check_input_lane_refuse(reader, reader->lane, "invalid member declarations recover in source order");
                             valid = !reader->lane && check_input_recover_reports(reader, before);
                         }
-                        valid = valid && type_check_member(reader->types, &member, true, &flexible) == TYPE_ERROR_NONE;
-                        if (!valid && !type_is_complete(reader->types, type) && type_kind(reader->types, type_strip_aligned(reader->types, type)) != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY &&
-                            type_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION)
+                        const TypeError member_error = valid ? type_check_member(reader->types, &member, true, &flexible) : TYPE_ERROR_NONE;
+                        const bool function_bit_field = width != BUSTER_TYPE_NOT_BIT_FIELD && member_kind == BUSTER_TYPE_KIND_FUNCTION;
+                        if (valid && !member.invalid && (member_error == TYPE_ERROR_BIT_FIELD || function_bit_field || (width_outside && member_error == TYPE_ERROR_NONE)))
                         {
-                            if (name != BUSTER_CHECK_NONE)
+                            const uint32_t before = reader->output->report_count;
+                            const uint64_t type_width = type_integer_width(reader->types, type);
+                            check_input_report_typed(reader, name != BUSTER_CHECK_NONE ? name : frame->member_begin, CHECK_INPUT_BIT_FIELD, type, name, (uint64_t)field_bits);
+                            if (reader->output->report_count == before + 1)
                             {
-                                reader->declared_types[name] = type;
+                                CheckInputReport* report = reader->output->reports + before;
+                                report->detail = type_width == 0 ? CHECK_INPUT_BIT_FIELD_TYPE : field_negative ? CHECK_INPUT_BIT_FIELD_NEGATIVE :
+                                                 field_bits >= (UINT64_C(1) << 61) ? CHECK_INPUT_BIT_FIELD_TOO_WIDE :
+                                                 field_bits > type_width ? CHECK_INPUT_BIT_FIELD_WIDE : CHECK_INPUT_BIT_FIELD_ZERO;
+                                report->subject = name != BUSTER_CHECK_NONE ? name + 1 : 0;
+                                report->note_kind = CHECK_INPUT_NOTE_NONE;
+                                report->sort = i;
                             }
-                            check_input_report(reader, failed_token, CHECK_INPUT_INCOMPLETE_MEMBER);
+                            check_input_lane_refuse(reader, reader->lane, "invalid member declarations recover in source order");
+                            valid = !reader->lane && check_input_recover_reports(reader, before);
+                            member.invalid = valid;
+                        }
+                        else if (valid && member_error == TYPE_ERROR_MEMBER && !member.invalid &&
+                                 (member_kind == BUSTER_TYPE_KIND_FUNCTION || member_kind == BUSTER_TYPE_KIND_VOID ||
+                                  (!type_is_complete(reader->types, type) && member_kind != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)))
+                        {
+                            const uint32_t before = reader->output->report_count;
+                            check_input_report_typed(reader, failed_token, member_kind == BUSTER_TYPE_KIND_FUNCTION ? CHECK_INPUT_FUNCTION_MEMBER :
+                                                                                                               CHECK_INPUT_INCOMPLETE_MEMBER, type, name, 0);
+                            if (reader->output->report_count == before + 1)
+                            {
+                                reader->output->reports[before].sort = i;
+                            }
+                            check_input_lane_refuse(reader, reader->lane, "invalid member declarations recover in source order");
+                            valid = !reader->lane && check_input_recover_reports(reader, before);
+                            member.invalid = valid;
+                        }
+                        else
+                        {
+                            valid = valid && member_error == TYPE_ERROR_NONE;
                         }
                         if (valid && identifier != 0 && reader->member_seen[identifier] == frame->token + 1)
                         {
@@ -15365,7 +15453,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 check_input_pragma_report(reader);
                 break;
             }
-            const bool rejected = reader->invalid_redefinition_count != 0 && check_input_invalid_redefinition(reader, declaration);
+            // A failed record definition still binds its variables and checks initializer expressions, but Clang
+            // performs no aggregate conversion against that recovery layout. Valid units pay no type walk here.
+            const bool invalid_record = reader->output->recovered_count != 0 &&
+                                        check_input_invalid_record_type(reader->types, reader->declared_types[declaration]);
+            const bool rejected = invalid_record || (reader->invalid_redefinition_count != 0 && check_input_invalid_redefinition(reader, declaration));
             check_input_initializer_prepare(reader, i, !rejected, rejected_initializer);
             if (rejected)
             {

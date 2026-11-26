@@ -144,6 +144,7 @@ typedef enum CheckInputAttributeKind
     // takes too, a qualifier of the type at the attribute's place (check_input_address_space). CheckInputAttribute.space is
     // an OpenCL one's space (BUSTER_TYPE_SPACE_*), 0 for address_space's, whose value is its argument's.
     CHECK_ATTRIBUTE_ADDRESS_SPACE,
+    CHECK_ATTRIBUTE_FORMAT_MATCHES,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -583,6 +584,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "nonnull", CHECK_ATTRIBUTE_NONNULL, CHECK_ATTRIBUTE_INTEGER_LIST, 0, 255 },
     { "returns_nonnull", CHECK_ATTRIBUTE_RETURNS_NONNULL, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "format", CHECK_ATTRIBUTE_FORMAT, CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS, 3, 3 },
+    { "format_matches", CHECK_ATTRIBUTE_FORMAT_MATCHES, CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS, 3, 3 },
     { "format_arg", CHECK_ATTRIBUTE_FORMAT_ARG, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "sentinel", CHECK_ATTRIBUTE_SENTINEL, CHECK_ATTRIBUTE_INTEGER_LIST, 0, 2 },
     { "warn_unused_result", CHECK_ATTRIBUTE_WARN_UNUSED_RESULT, CHECK_ATTRIBUTE_STRING, 0, 1 },
@@ -788,6 +790,7 @@ typedef enum CheckAttributeArgumentError
     // and a strftime format's "strftime format attribute requires 3rd parameter to be 0", at the attribute.
     CHECK_ARGUMENT_FORMAT_STRING,
     CHECK_ARGUMENT_FORMAT_RESULT,
+    CHECK_ARGUMENT_FORMAT_NONLITERAL,
     CHECK_ARGUMENT_STRFTIME,
     // A type argument's parser errors (#147): "unknown type name 'T'" (the name after the attribute's first token by the
     // number), "expected a type" and "expected ')'", at the argument.
@@ -1206,7 +1209,7 @@ static bool check_input_attribute_constant_error(CheckInputReader* reader, Check
                                              attribute->neon != 0 ? CHECK_ARGUMENT_AN_INTEGER_CONSTANT : CHECK_ARGUMENT_EXT_VECTOR_INTEGER, 0);
     }
     else if (kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || kind == CHECK_ATTRIBUTE_FORMAT_ARG || kind == CHECK_ATTRIBUTE_NONNULL || kind == CHECK_ATTRIBUTE_SENTINEL ||
-             kind == CHECK_ATTRIBUTE_ALLOC_SIZE || kind == CHECK_ATTRIBUTE_FORMAT || kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED)
+             kind == CHECK_ATTRIBUTE_ALLOC_SIZE || kind == CHECK_ATTRIBUTE_FORMAT || kind == CHECK_ATTRIBUTE_FORMAT_MATCHES || kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED)
     {
         check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_INTEGER, argument + 1);
     }
@@ -1489,12 +1492,14 @@ static bool check_input_analyzer_noreturn(const InternTable* names, const CheckI
            check_input_attribute_equal(check_input_attribute_spelling(names, attribute->name), "analyzer_noreturn");
 }
 
-// Unlike the other inherited contracts, nonnull can add parameter indices at each redeclaration.
+// Nonnull adds parameter indices; format_matches replaces only a contract of the same archetype and parameter.
 #define CHECK_INHERITED_NONNULL 32u
+#define CHECK_INHERITED_FORMAT_MATCHES 128u
 
 static uint32_t check_input_inherited_contract(const InternTable* names, const CheckInputAttribute* attribute)
 {
     const uint32_t bit = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 1u :
+                         attribute->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES ? CHECK_INHERITED_FORMAT_MATCHES :
                          attribute->kind == CHECK_ATTRIBUTE_CONST ? 2u :
                          attribute->kind == CHECK_ATTRIBUTE_PURE ? 4u :
                          attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT ? 8u :
@@ -1503,6 +1508,18 @@ static uint32_t check_input_inherited_contract(const InternTable* names, const C
                          check_input_analyzer_noreturn(names, attribute) ? 16u : 0u;
     const uint32_t result = !attribute->ignored && !attribute->subject_ignored ? bit : 0u;
     return result;
+}
+
+static bool check_input_format_matches_replaces(CheckInputReader* reader, const CheckInputAttribute* own, const CheckInputAttribute* prior)
+{
+    const Parser* parser = reader->parser;
+    const bool valid = own->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES && !own->ignored && !own->subject_ignored && own->deferred == NULL &&
+                       own->argument_count >= 3 && own->argument_values != NULL && own->argument_values[1] > 0 && own->text.pointer != NULL &&
+                       prior->argument_count >= 3 && prior->argument_values != NULL && own->argument_values[1] == prior->argument_values[1] &&
+                       parser != NULL && parser->tokens.names != NULL && own->argument_first < parser->tokens.count && prior->argument_first < parser->tokens.count;
+    const String8 own_kind = valid ? check_input_attribute_name(reader, parser->tokens.names[own->argument_first]) : (String8){ 0 };
+    const String8 prior_kind = valid ? check_input_attribute_name(reader, parser->tokens.names[prior->argument_first]) : (String8){ 0 };
+    return valid && own_kind.length != 0 && check_input_attribute_text_equal(own_kind, prior_kind);
 }
 
 // A compatible visible function redeclaration keeps its predecessor's format, value-discard, nonnull and analyzer contracts. Copy only those
@@ -1524,8 +1541,8 @@ static void check_input_contract_inherit(CheckInputReader* reader, uint32_t toke
     {
         annotated |= check_input_inherited_contract(names, own->records + i);
     }
-    // Nonnull declarations add argument obligations; a new index list does not replace the predecessor's indices.
-    const uint32_t missing = (inherit & ~annotated) | (inherit & CHECK_INHERITED_NONNULL);
+    // These two kinds can add obligations without replacing every predecessor record of the same kind.
+    const uint32_t missing = (inherit & ~annotated) | (inherit & (CHECK_INHERITED_NONNULL | CHECK_INHERITED_FORMAT_MATCHES));
     if (missing != 0)
     {
         CheckInputAttributes* copy = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
@@ -1542,6 +1559,15 @@ static void check_input_contract_inherit(CheckInputReader* reader, uint32_t toke
             for (uint32_t j = 0; own != NULL && attribute->kind == CHECK_ATTRIBUTE_NONNULL && j < own->count; j += 1)
             {
                 present |= own->records[j].kind == CHECK_ATTRIBUTE_NONNULL && own->records[j].first == attribute->first;
+            }
+            for (uint32_t j = 0; attribute->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES && !present && j < copy->count; j += 1)
+            {
+                const CheckInputAttribute* other = copy->records + j;
+                // An original record can reach this declaration by more than one inheritance path. A new own
+                // contract replaces its key, while other parameters and archetypes keep their earlier contracts.
+                present = other->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES &&
+                          (other->first == attribute->first ||
+                           (own != NULL && j < own->count && check_input_format_matches_replaces(reader, other, attribute)));
             }
             if (!present && (check_input_inherited_contract(names, attribute) & missing) != 0)
             {
@@ -2073,6 +2099,7 @@ static bool check_input_attribute_argument_value(CheckInputReader* reader, Check
             // clang's checkUInt32Argument reads a negative int, its 32 bits unsigned). assume_aligned's offset is any
             // integer, as clang's AddAssumeAlignedAttr keeps it.
             const bool index_kind = attribute->kind == CHECK_ATTRIBUTE_NONNULL || attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE || attribute->kind == CHECK_ATTRIBUTE_FORMAT ||
+                                    attribute->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES ||
                                     (attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED && argument == 1);
             valid = index_kind || (value >= 0 && value <= UINT32_MAX);
             if (valid && attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED && argument == 0)
@@ -2098,7 +2125,7 @@ static bool check_input_attribute_argument_value(CheckInputReader* reader, Check
         {
             attribute->argument_values[argument] = value;
             attribute->value = argument == 0 ? value : attribute->value;
-            attribute->resolved |= argument + 1 == attribute->argument_count;
+            attribute->resolved |= argument + 1 == attribute->argument_count || (attribute->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES && argument == 1);
         }
         else if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && !reader->output->resource && attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED && argument == 0)
         {
@@ -2211,7 +2238,8 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         const bool identifier = (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER && attribute->kind != CHECK_ATTRIBUTE_CLEANUP) ||
                                 attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_LIST ||
                                 (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS && argument == 0);
-        const bool string = attribute->schema == CHECK_ATTRIBUTE_STRING || attribute->schema == CHECK_ATTRIBUTE_STRING_LIST ||
+        const bool matches_string = attribute->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES && argument == 2;
+        const bool string = attribute->schema == CHECK_ATTRIBUTE_STRING || attribute->schema == CHECK_ATTRIBUTE_STRING_LIST || matches_string ||
                             (attribute->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS && argument != 0);
         if (valid && identifier)
         {
@@ -2222,7 +2250,7 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             {
                 check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_IDENTIFIER, 0);
             }
-            else if (!valid && attribute->kind == CHECK_ATTRIBUTE_FORMAT)
+            else if (!valid && (attribute->kind == CHECK_ATTRIBUTE_FORMAT || attribute->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES))
             {
                 const CheckInputAttributeError saved = attributes->error;
                 const uint32_t saved_first = attributes->error_first;
@@ -2252,13 +2280,13 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             // Clang delays these attributes' arguments as expressions: glibc parenthesizes the message. suppress's are
             // expressions too, whose string literals its handler takes through parentheses (checkStringLiteralArgumentAttr's
             // IgnoreParenCasts: `suppress(("a"))`).
-            while ((attribute->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS || attribute->kind == CHECK_ATTRIBUTE_SUPPRESS) && string_first + 1 < string_end &&
+            while ((attribute->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS || attribute->kind == CHECK_ATTRIBUTE_SUPPRESS || matches_string) && string_first + 1 < string_end &&
                    parser->tokens.kinds[string_first] == PARSE_KIND_L_PAREN && parser->tree.parents[string_first] == string_end - 1)
             {
                 string_first += 1;
                 string_end -= 1;
             }
-            const bool decoded = check_input_attribute_string(reader, string_first, string_end, attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL, &text);
+            const bool decoded = check_input_attribute_string(reader, string_first, string_end, attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL || matches_string, &text);
             valid = decoded;
             error = CHECK_ATTRIBUTE_ERROR_STRING;
             // diagnose_if's diagnostic type, and its warning group (#1447, clang's handleDiagnoseIfAttr): its error at the
@@ -2286,7 +2314,7 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
                 attribute->warning_group = index != UINT32_MAX ? (uint16_t)(index + 1) : 0;
                 valid = index != UINT32_MAX;
             }
-            if (valid && argument == 0)
+            if (valid && (argument == 0 || matches_string))
             {
                 attribute->text = text;
             }
@@ -2317,8 +2345,9 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
                 const uint32_t saved_first = attributes->error_first;
                 const uint32_t saved_end = attributes->error_end;
                 const uint32_t before = reader->output->report_count;
-                check_input_attribute_argument_error(reader, attributes, attribute, first, enumerated && named ? CHECK_ARGUMENT_STRING : CHECK_ARGUMENT_STRING_LITERAL, 0);
-                valid = pcs && named && check_input_attribute_defer(reader, attributes, attribute, before, saved, saved_first, saved_end);
+                check_input_attribute_argument_error(reader, attributes, attribute, matches_string ? attribute->first : first,
+                                                     matches_string ? CHECK_ARGUMENT_FORMAT_NONLITERAL : enumerated && named ? CHECK_ARGUMENT_STRING : CHECK_ARGUMENT_STRING_LITERAL, 0);
+                valid = (matches_string || (pcs && named)) && check_input_attribute_defer(reader, attributes, attribute, before, saved, saved_first, saved_end);
             }
         }
         else if (valid)
@@ -10204,10 +10233,11 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         }
         const bool allocation = attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE || attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN;
         const bool nonnull = attribute->kind == CHECK_ATTRIBUTE_NONNULL;
-        const bool format = attribute->kind == CHECK_ATTRIBUTE_FORMAT || attribute->kind == CHECK_ATTRIBUTE_FORMAT_ARG;
+        const bool format_kind = attribute->kind == CHECK_ATTRIBUTE_FORMAT || attribute->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES;
+        const bool format = format_kind || attribute->kind == CHECK_ATTRIBUTE_FORMAT_ARG;
         // format's kind, without a keyword's underscores, as clang's getFormatAttrKind knows it (#147): one it ignores, and
         // one it doesn't know, which its warning ignores; strftime's, whose third argument is 0.
-        String8 kind_name = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? check_input_attribute_name(reader, reader->parser->tokens.names[attribute->argument_first]) :
+        String8 kind_name = format_kind ? check_input_attribute_name(reader, reader->parser->tokens.names[attribute->argument_first]) :
                                                                         (String8){ 0 };
         const bool surrounded = kind_name.length >= 4 && kind_name.pointer[0] == '_' && kind_name.pointer[1] == '_' &&
                                 kind_name.pointer[kind_name.length - 2] == '_' && kind_name.pointer[kind_name.length - 1] == '_';
@@ -10221,9 +10251,9 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         };
         // A malformed format kind is its handler's deferred error, once its subject is known. It must neither become
         // an unknown format warning here nor make the parameter-index reader report a replacement error.
-        const bool identifier_error = attribute->kind == CHECK_ATTRIBUTE_FORMAT && attribute->deferred != NULL &&
+        const bool identifier_error = format_kind && attribute->deferred != NULL &&
                                       reader->parser->tokens.kinds[attribute->argument_first] != PARSE_KIND_IDENTIFIER;
-        bool recognized_format = attribute->kind != CHECK_ATTRIBUTE_FORMAT || strftime || identifier_error;
+        bool recognized_format = !format_kind || strftime || identifier_error;
         for (uint32_t k = 0; !recognized_format && k < BUSTER_ARRAY_LENGTH(format_kinds); k += 1)
         {
             recognized_format = check_input_attribute_equal(kind_name, format_kinds[k]);
@@ -10248,8 +10278,8 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         }
         else if ((allocation || nonnull || format) && attribute->deferred == NULL)
         {
-            uint32_t begin = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 1 : 0;
-            uint32_t end = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 2 : attribute->argument_count;
+            uint32_t begin = format_kind ? 1 : 0;
+            uint32_t end = format_kind ? 2 : attribute->argument_count;
             bool any_pointer = false;
             bool out_of_bounds = false;
             uint32_t failed = begin;

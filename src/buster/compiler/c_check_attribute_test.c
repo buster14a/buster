@@ -1407,12 +1407,16 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .name = "C23's unsequenced, which clang doesn't know, is ignored",
             .source = "[[unsequenced]] int f(void);\n",
         },
-        // One clang applies that the checker doesn't take is refused by name.
         {
-            .name = "an attribute clang applies and the checker doesn't take is refused",
+            .name = "format_matches retains its parameter and expected format",
             .source = "int f(const char *s, ...) __attribute__((format_matches(printf, 1, \"%d\")));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_UNKNOWN,
-            .error_word = "format_matches",
+            .last_kind = CHECK_ATTRIBUTE_FORMAT_MATCHES,
+            .count = 1,
+            .values = { 1 },
+            .function_result = BUSTER_TYPE_INT,
+            .function_parameters = { BUSTER_TYPE_CHAR },
+            .function_count = 1,
+            .pointer_parameters = 1,
         },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
