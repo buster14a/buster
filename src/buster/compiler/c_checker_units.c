@@ -362,6 +362,7 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
         memcpy(copy->priorities.priority + 1, link->priorities.priority + 1, ((uint64_t)priorities - 1) * sizeof(*link->priorities.priority));
         copy->names.count = names;
         copy->atoms.count = atoms;
+        copy->has_section_names = link->has_section_names;
         copy->symbols.count = symbols;
         copy->fixups.count = fixups;
         copy->fixups.wide_count = wides;
@@ -1803,6 +1804,7 @@ static void check_units_merge_lane(void* argument)
         {
             const Link* unit = &units[u].kept.link;
             const LinkCapacity kept = check_units_selected_counts(&merge->selection, u, unit);
+            link->has_section_names |= unit->has_section_names;
             merge->atom_base[u] = atom_at;
             merge->fixup_base[u] = fixup_at;
             merge->wide_base[u] = wide_at;

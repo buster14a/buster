@@ -177,6 +177,16 @@ struct BindOverride
     AtomId atom;
 };
 
+// Lives for one bind_end. Only the program's atoms have input section names. Members and tail objects
+// appended during resolution have none, so this index covers every round.
+typedef struct BindSections BindSections;
+struct BindSections
+{
+    Scratch scratch;
+    LinkSectionIndex index;
+    uint64_t examined;
+};
+
 typedef struct Bind Bind;
 struct Bind
 {
@@ -270,6 +280,7 @@ struct Bind
     uint32_t need;
     uint32_t provider;
     uint32_t member;
+    BindSections* sections;
 };
 
 // How many records the runtime adds to a link at most, and how many bytes of names and of atoms (with their
@@ -966,6 +977,49 @@ struct BindMemberWords
     uint32_t end;
 };
 
+// A few boundary lookups can find their sections among the first atoms. Build the index only once
+// the linear searches have examined the equivalent of one pass over the atoms.
+static bool bind_section_bound(Bind* bind, const Link* link, NameId name)
+{
+    const String8 suffix = link->has_section_names ? link_bound_suffix(link, name, NULL) : (String8){ 0 };
+    const LinkAtoms* atoms = &link->atoms;
+    BindSections* sections = bind->sections;
+    const AtomId count = atoms->count;
+    if (suffix.length != 0 && sections != NULL && sections->scratch.arena == NULL && sections->examined >= count - 1)
+    {
+        sections->scratch = scratch_begin(bind->bytes);
+        uint32_t named = 0;
+        for (AtomId atom = 1; atom < count; atom += 1)
+        {
+            named += atoms->section[atom].length != 0;
+        }
+        sections->index = link_section_index(sections->scratch.arena, atoms->section + 1, named);
+        for (AtomId atom = 1; sections->index.slots != NULL && atom < count; atom += 1)
+        {
+            const String8 section = atoms->section[atom];
+            if (section.length != 0)
+            {
+                *link_section_slot(&sections->index, section) = atom;
+            }
+        }
+    }
+    bool bound = false;
+    if (suffix.length != 0 && sections != NULL && sections->index.slots != NULL)
+    {
+        bound = *link_section_slot(&sections->index, suffix) != 0;
+    }
+    else if (suffix.length != 0)
+    {
+        const AtomId found = link_section_atom(link, suffix);
+        bound = found != 0;
+        if (sections != NULL)
+        {
+            sections->examined += bound ? found : count - 1;
+        }
+    }
+    return bound;
+}
+
 // Binds `symbol`, which nothing in the link defines; with `members`, an archive member defining it is marked needed.
 static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, BindMemberWords* members)
 {
@@ -973,14 +1027,6 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, BindMem
     const RuntimeNames* names = &runtime->global_names;
     LinkSymbols* symbols = &link->symbols;
     const NameId name = symbols->name[symbol];
-    // A __start_NAME or __stop_NAME whose NAME is a section of the link's atoms: the linker defines it at that
-    // section's bounds (executable_reference), as GNU ld and lld define them, and writes it NOTYPE, GLOBAL and
-    // PROTECTED in the symbol tables. One whose section is missing is an ordinary name: a weak reference to nothing,
-    // or an undefined reference.
-    // A library's or archive member's definition of the name resolves the reference as it resolves any other; the
-    // linker defines its own only for a reference that stays undefined (GNU ld's `undefined' rule).
-    const String8 suffix = link_bound_suffix(link, name, 0);
-    const bool bound = suffix.length != 0 && link_section_exists(link, suffix);
     const uint32_t entry = runtime_find_global_name(names, link->names.bytes[name], link->names.length[name], link->names.hash[name]);
     const SymbolId definition = entry != 0 ? names->definition[entry - 1] : 0;
     // A definition in an atom of crtendS.o or crtn.o (crtend.o or crtn.o), whose pieces bind_begin found current: the
@@ -1055,7 +1101,8 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, BindMem
             bind_import(bind, symbols, symbol, &runtime->gcc_s.exports, index);
         }
     }
-    else if (bound)
+    // GNU ld synthesizes a section boundary only after the ordinary definitions have been considered.
+    else if (bind_section_bound(bind, link, name))
     {
         symbols->source[symbol] = BUSTER_LINK_SOURCE_LINKER;
         symbols->flags[symbol] = (uint8_t)(BUSTER_LINK_SYMBOL_NOTYPE | BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_PROTECTED);
@@ -1281,12 +1328,10 @@ static void bind_shared_exports(Bind* bind, const Link* link)
     // The bounds the linker defines (bind_resolve_symbol) are a shared library's exports too, as GNU ld's and lld's
     // __start_ and __stop_ are in .dynsym; the pass above's `defined` doesn't take a linker-defined symbol (it has no
     // atom), so the few of them go after it in symbol order.
-    for (SymbolId symbol = 1; symbol < count; symbol += 1)
+    const SymbolId end = link->has_section_names ? count : 0;
+    for (SymbolId symbol = 1; symbol < end; symbol += 1)
     {
-        const NameId name = link->symbols.name[symbol];
-        const String8 suffix = source_column[symbol] == BUSTER_LINK_SOURCE_LINKER && atom_column[symbol] == 0 && name != 0 ?
-                               link_bound_suffix(link, name, 0) : (String8){ 0 };
-        const bool exported = suffix.length != 0 && link_section_exists(link, suffix);
+        const bool exported = source_column[symbol] == BUSTER_LINK_SOURCE_LINKER && atom_column[symbol] == 0 && bind_section_bound(bind, link, link->symbols.name[symbol]);
         if (exported && export_count < bind->capacity)
         {
             exports[export_count] = symbol;
@@ -2111,6 +2156,8 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
         // The global symbols added since bind_begin, then every name nothing defines, with the members they need.
         bind_match(bind, link, bind->symbols_begun, link->symbols.count);
     }
+    BindSections sections = { 0 };
+    bind->sections = &sections;
     bind->resolving = true;
     // A static runtime's members all join before anything binds: GNU ld's group scan, then archive order.
     // libgcc.a's and libc_nonshared.a's join round by round, each after the names that need it bind.
@@ -2163,5 +2210,10 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
         bind_library_exports(bind, link);
     }
     bind_check_undefined(bind);
+    bind->sections = NULL;
+    if (sections.scratch.arena != NULL)
+    {
+        scratch_end(sections.scratch);
+    }
     return bind->error == BIND_ERROR_NONE;
 }

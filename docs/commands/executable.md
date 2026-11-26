@@ -86,8 +86,10 @@ requirements. [Command index](README.md).
   `readelf -n` lists every note. Note sections of different names but the same
   largest alignment share one output section (named after the first), since
   the writer's section table is fixed; their notes stay whole and covered. A
-  link without such atoms pays one class-byte scan and writes the same bytes as
-  before. `test-checker-driver --asm-definitions-only` compares the direct
+  link whose atoms never received input section names skips section grouping.
+  For named inputs the writer indexes the section names, assigns each atom to
+  its group once and records the first and last members for boundary symbols.
+  `test-checker-driver --asm-definitions-only` compares the direct
   path's notes, sections and `PT_NOTE`s with clang's build's.
   Local-exec accesses and undefined DTPOFF32 module offsets in shared
   libraries are refused. Distinct general-/initial-exec slot columns allow
@@ -193,12 +195,11 @@ says to leave it:
   and a lane with no scratch memory to spare, then 64 bytes more at a time,
   until the link succeeds: every failure must be `EXECUTABLE_ERROR_MEMORY` and
   leave no output;
-- section bounds (#1122): hand-made atoms of three `__start_`/`__stop_`
-  sections, two sharing a bucket with plain atoms between them and one whose
-  atoms' alignments differ, and a weak `__start_` of a missing section: each
-  section's atoms must be one run, the names at its first atom and last end,
-  the weak reference 0, every lane count writing the same file, and the
-  program running;
+- section bounds (#1122) cover interleaved sections sharing a bucket,
+  members with different alignments, a singleton and a section with an aligned
+  empty last member. The test checks `__start_` and `__stop_` against each
+  section's span, checks that a missing weak reference resolves to zero, and
+  compares and runs the executables across lane counts.
 - the unwind scanner: `.eh_frame` atoms of each CIE `.eh_frame_hdr` indexes
   (GCC's in versions 1 and 3, with a personality, an LSDA and a signal frame,
   and with a personality's pointer absolute or a LEB128) and of seven it

@@ -4173,7 +4173,7 @@ static bool executable_test_section_span(const Link* link, String8 section, uint
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
-// #1122: a static executable of hand-made atoms, whose atoms refer to __start_ and __stop_ of three sections and to a
+// #1122: a static executable of hand-made atoms, whose atoms refer to __start_ and __stop_ of named sections and to a
 // weak __start_ of a missing one. `bst_sec`'s three atoms and `bst_two`'s two share a bucket with the two plain atoms
 // between them; `bst_wide`'s two have different alignments, which the section takes the largest of. The linker's names
 // must bracket exactly each section's run, whatever the atoms' ids, and every lane count must write the same file.
@@ -4186,7 +4186,8 @@ static bool executable_test_bound_sections(const ExecutableTestDirectory* direct
     bool built = executable_test_link_begin(&test, BUSTER_EXECUTABLE_PAGE_BYTES);
     Link* link = &test.link;
     const uint8_t object = BUSTER_LINK_SYMBOL_OBJECT;
-    static const char* const bound_names[] = { "bst_sec", "bst_two", "bst_wide", "bst_missing" };
+    // bst_wide and bst_tail have equal lengths and share a home slot in this fixture.
+    static const char* const bound_names[] = { "bst_sec", "bst_two", "bst_wide", "bst_one", "bst_tail", "bst_missing" };
     String8 sections[BUSTER_ARRAY_LENGTH(bound_names)] = { 0 };
     SymbolId starts[BUSTER_ARRAY_LENGTH(bound_names)] = { 0 };
     SymbolId stops[BUSTER_ARRAY_LENGTH(bound_names)] = { 0 };
@@ -4224,6 +4225,13 @@ static bool executable_test_bound_sections(const ExecutableTestDirectory* direct
     // alignment — starts only at the next 16: a run's start is its section's alignment's, not its first member's.
     const AtomId sec2 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 4, 0, 0) : 0;
     const AtomId wide1 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 4, 0, 0) : 0;
+    // A singleton keeps its original bucket even when other groups move. An empty last member still
+    // contributes its pre-alignment to the stop address.
+    const AtomId single = built ? executable_test_data(&test, BUSTER_LINK_CLASS_RODATA, 3, 5, 0, 0) : 0;
+    const AtomId tail0 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 1, 3, 0, 0) : 0;
+    const AtomId tail1 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 0, 0, 0) : 0;
+    built = built && single != 0 && tail0 != 0 && tail1 != 0 && link_set_atom_section(link, single, sections[3]) &&
+            link_set_atom_section(link, tail0, sections[4]) && link_set_atom_section(link, tail1, sections[4]);
     built = built && sec0 != 0 && between != 0 && two0 != 0 && sec1 != 0 && two1 != 0 && after != 0 && wide0 != 0 && sec2 != 0 && wide1 != 0 &&
             link_set_atom_section(link, sec0, section) && link_set_atom_section(link, sec1, section) && link_set_atom_section(link, sec2, section) &&
             link_set_atom_section(link, two0, two) && link_set_atom_section(link, two1, two) && link_set_atom_section(link, wide0, wide) &&
@@ -4245,9 +4253,9 @@ static bool executable_test_bound_sections(const ExecutableTestDirectory* direct
         executable_test_expect(&tally, written && file.pointer != 0 && (first.pointer == 0 || (file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0)),
                                "every lane count writes the same file", lanes);
         first = first.pointer == 0 ? file : first;
-        static const uint64_t spans[] = { 68, 64, 20 };
-        static const uint64_t aligns[] = { 16, 16, 32 };
-        for (uint32_t s = 0; s < 3; s += 1)
+        static const uint64_t spans[] = { 68, 64, 20, 5, 16 };
+        static const uint64_t aligns[] = { 16, 16, 32, 8, 16 };
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(spans); s += 1)
         {
             uint64_t start = UINT64_MAX;
             uint64_t end = 0;
@@ -4258,8 +4266,9 @@ static bool executable_test_bound_sections(const ExecutableTestDirectory* direct
             executable_test_expect(&tally, written && found && end - start == spans[s], "the section's run", lanes * 10 + s);
             executable_test_expect(&tally, written && found && start % aligns[s] == 0, "the run starts at its section's alignment", lanes * 10 + s);
         }
-        executable_test_expect(&tally, written && link->symbols.reference[starts[3]] == (uint32_t)(0 - BUSTER_EXECUTABLE_BASE) &&
-                                           link->symbols.source[starts[3]] == BUSTER_LINK_SOURCE_NONE,
+        const SymbolId missing = starts[BUSTER_ARRAY_LENGTH(starts) - 1];
+        executable_test_expect(&tally, written && link->symbols.reference[missing] == (uint32_t)(0 - BUSTER_EXECUTABLE_BASE) &&
+                                           link->symbols.source[missing] == BUSTER_LINK_SOURCE_NONE,
                                "a weak reference to a missing section is 0", lanes);
         executable_test_expect(&tally, written && executable_test_runs_fixture(directory, path.pointer, (const uint8_t*)"", 0), "the executable runs", lanes);
     }

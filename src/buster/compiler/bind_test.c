@@ -1308,8 +1308,8 @@ static bool bind_test_rule_holds(const BindTestRuleLink* rule, const Runtime* ru
         {
             result = result && rule->symbols[i] != 0 && symbols->atom[rule->symbols[i]] == 0 && symbols->source[rule->symbols[i]] == BUSTER_LINK_SOURCE_NONE;
         }
-        result = result && link_section_exists(link, (String8){ .pointer = (char*)"buster_sec", .length = 10 }) &&
-                 !link_section_exists(link, (String8){ .pointer = (char*)"buster_absent", .length = 13 });
+        result = result && link_section_atom(link, (String8){ .pointer = (char*)"buster_sec", .length = 10 }) != 0 &&
+                 link_section_atom(link, (String8){ .pointer = (char*)"buster_absent", .length = 13 }) == 0;
     }
     else if (which == BIND_TEST_RULE_SECTION_MISSING)
     {
