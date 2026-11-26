@@ -27,8 +27,8 @@
 //   - Sections: each atom's (its descriptor's, or its class's object section), in atom order, aligned by `.p2align`
 //     with int3 in code and zeros elsewhere, as the object writer fills its gaps. Linked-order entries name a label in
 //     their associated section and have a unique number so separate entries can share a section name.
-// What the sink doesn't print yet it refuses (ASSEMBLY_UNSUPPORTED, `reason` naming it): thread-local storage, section
-// groups, unique symbols, code without records (inline assembly's), and fixup kinds
+// What the sink doesn't print yet it refuses (ASSEMBLY_UNSUPPORTED, `reason` naming it): unknown section descriptors,
+// code without retained records, unique symbols whose type GNU as cannot represent, and fixup kinds
 // that GNU as can't spell where they are. A view that contradicts itself (records that don't encode to their atom's
 // bytes, a fixup off every field) is ASSEMBLY_INVALID: an internal error, never printed around.
 //
@@ -105,9 +105,10 @@ typedef struct AssemblyCode AssemblyCode;
 struct AssemblyCode
 {
     const X86Instruction* records;
+    // Final byte offsets for a mixed assembly unit or a C function with placed spans.
+    const uint32_t* offsets;
     const uint32_t* branches;
     const uint32_t* targets;
-    const uint32_t* offsets;
     const AssemblyRawSpan* raw_spans;
     uint32_t count;
     uint32_t branch_count;
@@ -118,6 +119,13 @@ struct AssemblyCode
     uint32_t endbr;
     AssemblyInline* templates;
     uint32_t template_count;
+    // Final frame rows, relative to the function entry inside its atom. Only -S retains them; the generated table is
+    // replaced by CFI directives whose locations follow the printed instructions, including any assembler relaxation.
+    const EmissionFrameRow* frame_rows;
+    uint32_t frame_count;
+    uint32_t frame_offset;
+    uint32_t frame_size;
+    bool frame_enabled;
 };
 
 // A unit of a link to print: its atoms (those of `unit`), each TEXT atom's code (indexed by AtomId, `code_count` entries),
@@ -136,6 +144,8 @@ struct AssemblyView
     uint32_t code_count;
     uint32_t section_count;
     uint32_t temporary_count;
+    // The generated unwind table whose functions publish frame rows in `code`. Other source-supplied tables remain.
+    AtomId cfi_atom;
     // Position-independent code's (#2101, ObjectOptions.local_unwind): an unwind table's PC32 to a global or weak symbol
     // the unit defines names a local label of the sink's at the symbol (`.Lbuster.l` and the symbol's number), as the
     // object refers to it through its section's symbol.
@@ -560,11 +570,19 @@ static bool assembly_reference(AssemblyText* text, const Link* link, const Assem
     // A displacement's absolute address is sign-extended (R_X86_64_32S, as GNU as writes one); an immediate's is any of
     // the three, by its field's width and extension, which GNU as reads from the instruction.
     const bool absolute = !relative && !rip && (kind == BUSTER_LINK_FIXUP_ABS32S || (!memory && (kind == BUSTER_LINK_FIXUP_ABS32 || kind == BUSTER_LINK_FIXUP_ABS64)));
-    const bool spelled = call || got || pc || absolute;
+    const bool tls_offset = !relative && !rip && (kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_DTPOFF32 ||
+                                                (!memory && (kind == BUSTER_LINK_FIXUP_TPOFF64 || kind == BUSTER_LINK_FIXUP_DTPOFF64)));
+    const bool tls_address = rip && (kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD);
+    const bool spelled = call || got || pc || absolute || tls_offset || tls_address;
     if (spelled)
     {
         assembly_name(text, link, names, reference->target);
-        assembly_append(text, call ? "@PLT" : got ? "@GOTPCREL" : "");
+        const char* modifier = call ? "@PLT" : got ? "@GOTPCREL" :
+                               kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_TPOFF64 ? "@TPOFF" :
+                               kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_DTPOFF64 ? "@DTPOFF" :
+                               kind == BUSTER_LINK_FIXUP_GOTTPOFF ? "@GOTTPOFF" : kind == BUSTER_LINK_FIXUP_TLSGD ? "@TLSGD" :
+                               kind == BUSTER_LINK_FIXUP_TLSLD ? "@TLSLD" : "";
+        assembly_append(text, modifier);
         assembly_addend(text, reference->addend);
     }
     return spelled;
@@ -796,7 +814,7 @@ static bool assembly_instruction(AssemblyText* text, const Link* link, const Ass
     const X86FormDescription* form = x86_form_description(record->form);
     const char* operands = assembly_operands(form->syntax);
     const bool memory = (record->mode & BUSTER_X86_MODE_MEMORY) != 0;
-    // A record GNU as encodes otherwise: its bytes, but where a relocation is in them, which the sink refuses (below).
+    // The callers split a relocated record GNU as encodes otherwise into bytes and symbolic fields before this point.
     const bool otherwise = assembly_escaped(record, form, immediate->present);
     const bool referenced = displacement->present || immediate->present;
     const bool escaped = otherwise && !referenced;
@@ -968,8 +986,7 @@ static bool assembly_instruction(AssemblyText* text, const Link* link, const Ass
             }
         }
     }
-    // A form GNU as encodes otherwise with a relocation in it (`mov $symbol, %ecx` by C7, an MPX bnd branch to a
-    // symbol), which no backend emits: refused, rather than printed as another encoding.
+    // A relocated form whose spelling changes its encoding belongs to assembly_escaped_fields in the caller.
     const bool unescaped = otherwise && referenced;
     spelled = spelled && !unescaped;
     if (!spelled)
@@ -1110,6 +1127,9 @@ struct AssemblySection
     uint64_t entry_size;
     uint32_t type;
     AtomId link;
+    uint32_t identity;
+    uint32_t group;
+    uint8_t class;
 };
 
 static AssemblySection assembly_section(const AssemblyView* view, AtomId atom)
@@ -1132,25 +1152,52 @@ static AssemblySection assembly_section(const AssemblyView* view, AtomId atom)
             .entry_size = descriptor->entry_size,
             .type = descriptor->type,
             .link = descriptor->link,
+            .identity = descriptor->identity,
         };
     }
+    result.class = class;
+    const LinkGroups groups = view->link->groups;
+    result.group = groups.count != 0 && atom < groups.atom_count ? groups.atom_groups[atom] : 0;
+    result.flags |= result.group != 0 ? SHF_GROUP : 0;
     return result;
 }
 
 static bool assembly_same_section(AssemblySection a, AssemblySection b)
 {
-    return a.name_length == b.name_length && memcmp(a.name, b.name, a.name_length) == 0 && a.flags == b.flags && a.entry_size == b.entry_size && a.type == b.type;
+    return a.name_length == b.name_length && memcmp(a.name, b.name, a.name_length) == 0 && a.flags == b.flags && a.entry_size == b.entry_size &&
+           a.type == b.type && a.link == b.link && a.identity == b.identity && a.group == b.group && a.class == b.class;
 }
 
-// `.section name,"flags",@type[,entsize][,label,unique,id]`, or false for an unknown flag or type.
-static bool assembly_section_directive(AssemblyText* text, AssemblySection section, SymbolId label, const Link* link, const AssemblyNames* names)
+// A stable GNU unique ID for a descriptor the assembler must not merge with another of the same name. The first
+// atom of an equal descriptor owns the ID, so revisiting it joins its section, as the object writer does.
+static uint32_t assembly_section_identity(const AssemblyView* view, AssemblySection section, AtomId atom, AtomId* slots, uint64_t mask)
+{
+    const uint64_t hash = link_hash((const uint8_t*)section.name, section.name_length) ^ section.flags ^ section.entry_size ^
+                          ((uint64_t)section.type << 32) ^ ((uint64_t)section.link * UINT64_C(0xc2b2ae3d27d4eb4f)) ^
+                          ((uint64_t)section.identity * UINT64_C(0x165667b19e3779f9)) ^ ((uint64_t)section.group * UINT64_C(0x9e3779b97f4a7c15)) ^
+                          ((uint64_t)section.class * UINT64_C(0x27d4eb2f165667c5));
+    uint64_t slot = hash & mask;
+    while (slots[slot] != 0 && !assembly_same_section(section, assembly_section(view, slots[slot])))
+    {
+        slot = (slot + 1) & mask;
+    }
+    if (slots[slot] == 0)
+    {
+        slots[slot] = atom;
+    }
+    return slots[slot];
+}
+
+// `.section name,"flags",@type[,entsize][,label][,signature[,comdat]][,unique,id]`.
+static bool assembly_section_directive(AssemblyText* text, AssemblySection section, SymbolId label, uint32_t identity, const Link* link, const AssemblyNames* names)
 {
     const char* type = section.type == SHT_PROGBITS ? "@progbits" : section.type == SHT_NOBITS ? "@nobits" : section.type == SHT_INIT_ARRAY ? "@init_array" :
                        section.type == SHT_FINI_ARRAY ? "@fini_array" : section.type == SHT_PREINIT_ARRAY ? "@preinit_array" : section.type == SHT_NOTE ? "@note" :
                        section.type == SHT_X86_64_UNWIND ? "@unwind" : 0;
-    const uint64_t known = SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR | SHF_MERGE | SHF_STRINGS | SHF_TLS | SHF_GNU_RETAIN | SHF_LINK_ORDER;
+    const uint64_t known = SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR | SHF_MERGE | SHF_STRINGS | SHF_TLS | SHF_GNU_RETAIN | SHF_LINK_ORDER | SHF_GROUP;
     const bool spelled = type != 0 && (section.flags & ~known) == 0 &&
-                         (section.link == 0 || (section.type == SHT_PROGBITS && section.flags == (SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER) && section.entry_size == 0));
+                         ((section.flags & SHF_GROUP) != 0) == (section.group != 0) &&
+                         (section.link == 0 || (section.type == SHT_PROGBITS && (section.flags & ~(SHF_GROUP | SHF_GNU_RETAIN)) == (SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER) && section.entry_size == 0));
     if (spelled)
     {
         assembly_append(text, "\t.section ");
@@ -1164,6 +1211,7 @@ static bool assembly_section_directive(AssemblyText* text, AssemblySection secti
         assembly_append(text, (section.flags & SHF_TLS) ? "T" : "");
         assembly_append(text, (section.flags & SHF_GNU_RETAIN) ? "R" : "");
         assembly_append(text, (section.flags & SHF_LINK_ORDER) ? "o" : "");
+        assembly_append(text, (section.flags & SHF_GROUP) ? "G" : "");
         assembly_append(text, "\",");
         assembly_append(text, type);
         if (section.flags & SHF_MERGE)
@@ -1175,8 +1223,18 @@ static bool assembly_section_directive(AssemblyText* text, AssemblySection secti
         {
             assembly_append(text, ",");
             assembly_name(text, link, names, label);
+        }
+        if (section.group != 0)
+        {
+            const LinkGroup group = link->groups.data[section.group];
+            assembly_append(text, ",");
+            assembly_identifier(text, link->names.bytes[group.name], link->names.length[group.name], true);
+            assembly_append(text, (group.flags & BUSTER_LINK_GROUP_COMDAT) != 0 ? ",comdat" : identity != 0 ? "," : "");
+        }
+        if (identity != 0)
+        {
             assembly_append(text, ",unique,");
-            assembly_unsigned(text, section.link);
+            assembly_unsigned(text, identity);
         }
         assembly_append(text, "\n");
     }
@@ -1192,9 +1250,15 @@ static void assembly_attributes(AssemblyText* text, const Link* link, const Asse
     const uint8_t flags = link->symbols.flags[symbol];
     const uint8_t binding = flags & BUSTER_LINK_SYMBOL_BINDING;
     const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
+    const AtomId atom = link->symbols.atom[symbol];
+    const bool tls = type == BUSTER_LINK_SYMBOL_TLS || (atom != 0 && atom < link->atoms.count && link_class_is_tls(link->atoms.class[atom]));
+    const bool unique = binding == BUSTER_LINK_SYMBOL_UNIQUE;
     const char* visibility = visibilities[flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT];
     const char* binding_directive = binding == BUSTER_LINK_SYMBOL_WEAK ? "\t.weak " : binding == BUSTER_LINK_SYMBOL_GLOBAL && defined ? "\t.globl " : 0;
-    const char* type_name = type == BUSTER_LINK_SYMBOL_FUNCTION ? "@function" : type == BUSTER_LINK_SYMBOL_OBJECT ? "@object" : type == BUSTER_LINK_SYMBOL_IFUNC ? "@gnu_indirect_function" : 0;
+    // GNU's unique type supplies both the binding and object type. A TLS section promotes it to TLS; a second .type
+    // would clear the unique binding. Ordinary undefined TLS references also need their explicit TLS type.
+    const char* type_name = unique ? "@gnu_unique_object" : tls ? "@tls_object" : type == BUSTER_LINK_SYMBOL_FUNCTION ? "@function" :
+                            type == BUSTER_LINK_SYMBOL_OBJECT ? "@object" : type == BUSTER_LINK_SYMBOL_IFUNC ? "@gnu_indirect_function" : 0;
     if (binding_directive != 0)
     {
         assembly_append(text, binding_directive);
@@ -1207,7 +1271,7 @@ static void assembly_attributes(AssemblyText* text, const Link* link, const Asse
         assembly_name(text, link, names, symbol);
         assembly_append(text, "\n");
     }
-    if (type_name != 0 && defined)
+    if (type_name != 0 && (defined || tls))
     {
         assembly_append(text, "\t.type ");
         assembly_name(text, link, names, symbol);
@@ -1254,11 +1318,64 @@ static void assembly_sizes(AssemblyText* text, const Link* link, const AssemblyN
     }
 }
 
-// The fixup kinds that are thread-local storage's.
-static bool assembly_tls_kind(uint8_t kind)
+// One data field, including its symbolic relocation. Explicit .reloc keeps relocation kinds that a normal
+// .long/.quad expression cannot select; its addend is already relative to the field, without instruction bias.
+static AssemblyError assembly_data_fixup(AssemblyText* text, const Link* link, const AssemblyNames* names, AtomId atom, FixupId fixup, const char** reason)
 {
-    return kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD ||
-           kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_TPOFF64 || kind == BUSTER_LINK_FIXUP_DTPOFF64;
+    const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+    const uint32_t offset = link->fixups.offset[fixup];
+    const uint64_t size = link->atoms.size[atom];
+    const uint8_t* bytes = link->atoms.bytes[atom];
+    const LinkFixupKind* description = &link_fixup_kinds[kind];
+    const uint32_t width = description->width;
+    const int64_t addend = link_fixup_addend(link, fixup);
+    const SymbolId target = link->fixups.target[fixup];
+    const bool tls_offset = kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_DTPOFF32 ||
+                            kind == BUSTER_LINK_FIXUP_TPOFF64 || kind == BUSTER_LINK_FIXUP_DTPOFF64;
+    const bool expression = kind == BUSTER_LINK_FIXUP_ABS64 || kind == BUSTER_LINK_FIXUP_ABS32 ||
+                            kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64 || tls_offset;
+    bool zero = bytes != NULL && (uint64_t)offset + width <= size && (width == 4 || width == 8);
+    for (uint32_t i = 0; zero && i < width; i += 1)
+    {
+        zero = bytes[offset + i] == 0;
+    }
+    const AssemblyError error = zero ? ASSEMBLY_OK : ASSEMBLY_INVALID;
+    if (!zero)
+    {
+        *reason = "a data fixup's field that isn't zero";
+    }
+    else
+    {
+        if (!expression)
+        {
+            assembly_append(text, "\t.reloc ., ");
+            assembly_append(text, object_relocation_names[kind]);
+            assembly_append(text, ", ");
+        }
+        else
+        {
+            assembly_append(text, width == 8 ? "\t.quad " : "\t.long ");
+        }
+        if (link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME && kind == BUSTER_LINK_FIXUP_PC32 && names->used != NULL && (names->used[target] & 4) != 0)
+        {
+            assembly_append(text, BUSTER_ASSEMBLY_PREFIX "l");
+            assembly_unsigned(text, target);
+        }
+        else
+        {
+            assembly_name(text, link, names, target);
+        }
+        const char* modifier = kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_TPOFF64 ? "@TPOFF" :
+                               kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_DTPOFF64 ? "@DTPOFF" : "";
+        assembly_append(text, expression ? modifier : "");
+        assembly_addend(text, addend);
+        assembly_append(text, expression && description->pc_relative ? "-.\n" : "\n");
+        if (!expression)
+        {
+            assembly_append(text, width == 8 ? "\t.quad 0\n" : "\t.long 0\n");
+        }
+    }
+    return error;
 }
 
 // Resolve a record's fields from the atom's offset-ordered fixups. A PC-relative field's source expression includes
@@ -1278,15 +1395,10 @@ static AssemblyError assembly_instruction_references(const Link* link, AtomId at
         const bool on_displacement = to_end == x86_fixup_distance(record->form, X86_FIXUP_DISPLACEMENT) && !displacement->present;
         const bool on_immediate = to_end == x86_fixup_distance(record->form, X86_FIXUP_IMMEDIATE) && !immediate->present;
         AssemblyReference* reference = on_displacement ? displacement : on_immediate ? immediate : NULL;
-        if (offset < at || reference == NULL)
+        if (offset < at || (uint64_t)offset + link_fixup_kinds[kind].width > end || reference == NULL)
         {
             error = ASSEMBLY_INVALID;
             *reason = "a fixup off its instruction's fields";
-        }
-        else if (assembly_tls_kind(kind))
-        {
-            error = ASSEMBLY_UNSUPPORTED;
-            *reason = "thread-local storage";
         }
         else
         {
@@ -1448,43 +1560,11 @@ static AssemblyError assembly_data_range(AssemblyText* text, const Link* link, c
         else if (fixup != 0 && fixup_at == at)
         {
             const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
-            const LinkFixupKind* description = &link_fixup_kinds[kind];
-            const uint32_t width = description->width;
-            const int64_t addend = link_fixup_addend(link, fixup);
-            const SymbolId target = link->fixups.target[fixup];
-            const bool size_kind = kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64;
-            const bool spelled = kind == BUSTER_LINK_FIXUP_ABS64 || kind == BUSTER_LINK_FIXUP_ABS32 || kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64 || size_kind;
-            bool zero = at + width <= limit;
-            for (uint32_t i = 0; zero && i < width; i += 1)
+            error = at + link_fixup_kinds[kind].width <= limit ? assembly_data_fixup(text, link, names, atom, fixup, reason) : ASSEMBLY_INVALID;
+            *reason = at + link_fixup_kinds[kind].width > limit ? "a fixup crosses the end of a byte range" : *reason;
+            if (error == ASSEMBLY_OK)
             {
-                zero = bytes[at + i] == 0;
-            }
-            if (!spelled)
-            {
-                error = ASSEMBLY_UNSUPPORTED;
-                *reason = assembly_tls_kind(kind) ? "thread-local storage" : "a relocation in data that -S doesn't print yet";
-            }
-            else if (!zero)
-            {
-                error = ASSEMBLY_INVALID;
-                *reason = "a data fixup's field that isn't zero";
-            }
-            else
-            {
-                assembly_append(text, width == 8 ? "\t.quad " : "\t.long ");
-                if (class == BUSTER_LINK_CLASS_EH_FRAME && kind == BUSTER_LINK_FIXUP_PC32 && names->used != 0 && (names->used[target] & 4) != 0)
-                {
-                    assembly_append(text, BUSTER_ASSEMBLY_PREFIX "l");
-                    assembly_unsigned(text, target);
-                }
-                else
-                {
-                    assembly_name(text, link, names, target);
-                }
-                assembly_append(text, size_kind ? "@SIZE" : "");
-                assembly_addend(text, addend);
-                assembly_append(text, description->pc_relative ? "-.\n" : "\n");
-                at += width;
+                at += link_fixup_kinds[kind].width;
                 next_fixup += 1;
             }
         }
@@ -1524,22 +1604,210 @@ static AssemblyError assembly_data(AssemblyText* text, const Link* link, const A
     return error;
 }
 
+// .cfi_escape retains a row whose 64-bit offset exceeds the assembler's named directives' signed 32-bit operands.
+// Every byte is part of one frame instruction; its location is still the symbolic boundary printed by the caller.
+static void assembly_frame_leb(AssemblyText* text, uint64_t bits, bool sign)
+{
+    bool more = true;
+    while (more)
+    {
+        uint8_t byte = (uint8_t)(bits & 0x7f);
+        bits = sign ? (uint64_t)((int64_t)bits >> 7) : bits >> 7;
+        more = sign ? !((bits == 0 && (byte & 0x40) == 0) || (bits == UINT64_MAX && (byte & 0x40) != 0)) : bits != 0;
+        byte |= more ? 0x80 : 0;
+        assembly_append(text, ", ");
+        assembly_byte(text, byte);
+    }
+}
+
+// CFI has the same symbolic instruction boundaries as the generated code. The object writer's CIE explicitly keeps
+// the six callee-saved registers in themselves; spell that baseline in each FDE and restore its rules explicitly,
+// because GNU as's standard CIE supplies only the CFA and return-address rules.
+static bool assembly_frame_at(AssemblyText* text, const AssemblyCode* code, uint64_t at, uint32_t* cursor, const char** reason)
+{
+    bool valid = !code->frame_enabled || code->frame_count == 0 || code->frame_rows != NULL;
+    if (code->frame_enabled)
+    {
+        const uint64_t start = code->frame_offset;
+        const uint64_t end = start + code->frame_size;
+        if (valid && at == start)
+        {
+            assembly_append(text, "\t.cfi_startproc\n\t.cfi_same_value 3\n\t.cfi_same_value 6\n\t.cfi_same_value 12\n\t.cfi_same_value 13\n\t.cfi_same_value 14\n\t.cfi_same_value 15\n");
+        }
+        while (valid && *cursor < code->frame_count && (uint64_t)code->frame_rows[*cursor].offset + start <= at)
+        {
+            const EmissionFrameRow row = code->frame_rows[*cursor];
+            valid = (uint64_t)row.offset + start == at && row.offset < code->frame_size;
+            if (valid)
+            {
+                const bool same = row.reg == 3 || row.reg == 6 || (row.reg >= 12 && row.reg <= 15);
+                const char* directive = row.kind == EMISSION_FRAME_CFA ? "\t.cfi_def_cfa " :
+                                        row.kind == EMISSION_FRAME_CFA_OFFSET ? "\t.cfi_def_cfa_offset " :
+                                        row.kind == EMISSION_FRAME_OFFSET ? "\t.cfi_offset " :
+                                        row.kind == EMISSION_FRAME_REGISTER ? "\t.cfi_register " :
+                                        row.kind == EMISSION_FRAME_RESTORE ? (same ? "\t.cfi_same_value " : "\t.cfi_undefined ") :
+                                        row.kind == EMISSION_FRAME_SAME_VALUE ? "\t.cfi_same_value " :
+                                        row.kind == EMISSION_FRAME_UNDEFINED ? "\t.cfi_undefined " :
+                                        row.kind == EMISSION_FRAME_REMEMBER_STATE ? "\t.cfi_remember_state" :
+                                        row.kind == EMISSION_FRAME_RESTORE_STATE ? "\t.cfi_restore_state" : NULL;
+                valid = directive != NULL;
+                if (valid)
+                {
+                    const bool wide = (row.value < INT32_MIN || row.value > INT32_MAX) &&
+                                      (row.kind == EMISSION_FRAME_CFA || row.kind == EMISSION_FRAME_CFA_OFFSET || row.kind == EMISSION_FRAME_OFFSET);
+                    if (wide)
+                    {
+                        assembly_append(text, "\t.cfi_escape ");
+                        assembly_byte(text, row.kind == EMISSION_FRAME_CFA ? 0x0c : row.kind == EMISSION_FRAME_CFA_OFFSET ? 0x0e : 0x11);
+                        if (row.kind != EMISSION_FRAME_CFA_OFFSET)
+                        {
+                            assembly_frame_leb(text, row.reg, false);
+                        }
+                        const int64_t value = row.kind == EMISSION_FRAME_OFFSET ? -(row.value / 8) : row.value;
+                        assembly_frame_leb(text, (uint64_t)value, row.kind == EMISSION_FRAME_OFFSET);
+                    }
+                    else
+                    {
+                        assembly_append(text, directive);
+                    }
+                    const bool operand = row.kind < EMISSION_FRAME_REMEMBER_STATE;
+                    const bool pair = row.kind == EMISSION_FRAME_CFA || row.kind == EMISSION_FRAME_OFFSET || row.kind == EMISSION_FRAME_REGISTER;
+                    if (!wide && operand && row.kind != EMISSION_FRAME_CFA_OFFSET)
+                    {
+                        assembly_unsigned(text, row.reg);
+                    }
+                    if (!wide && pair)
+                    {
+                        assembly_append(text, ", ");
+                    }
+                    if (!wide && (pair || row.kind == EMISSION_FRAME_CFA_OFFSET))
+                    {
+                        assembly_signed(text, row.value);
+                    }
+                    assembly_append(text, "\n");
+                    *cursor += 1;
+                }
+            }
+        }
+        valid = valid && (at != end || *cursor == code->frame_count);
+        if (valid && at == end)
+        {
+            assembly_append(text, "\t.cfi_endproc\n");
+        }
+        *reason = valid ? *reason : "an unwind row outside an instruction boundary";
+    }
+    return valid;
+}
+
+// Byte spans outside an instruction (patchable entry, inline helper wrappers, sparse assembly fragments) can contain
+// frame boundaries too. The caller prints the directives at `begin`; this splits only at boundaries strictly inside.
+static uint64_t assembly_frame_next(const AssemblyCode* code, uint64_t begin, uint64_t end, uint32_t cursor)
+{
+    uint64_t next = end;
+    if (code->frame_enabled)
+    {
+        const uint64_t start = code->frame_offset;
+        const uint64_t finish = start + code->frame_size;
+        next = start > begin && start < next ? start : next;
+        next = finish > begin && finish < next ? finish : next;
+        if (cursor < code->frame_count)
+        {
+            const uint64_t row = start + code->frame_rows[cursor].offset;
+            next = row > begin && row < next ? row : next;
+        }
+    }
+    return next;
+}
+
+static bool assembly_frame_valid(const AssemblyCode* code, uint64_t size)
+{
+    bool valid = !code->frame_enabled || ((uint64_t)code->frame_offset + code->frame_size <= size && (code->frame_count == 0 || code->frame_rows != NULL));
+    uint32_t previous = 0;
+    for (uint32_t r = 0; valid && code->frame_enabled && r < code->frame_count; r += 1)
+    {
+        const EmissionFrameRow row = code->frame_rows[r];
+        valid = row.offset >= previous && row.offset < code->frame_size && row.kind <= EMISSION_FRAME_RESTORE_STATE && row.reserved == 0;
+        previous = row.offset;
+    }
+    return valid;
+}
+
+// Only the compiler-generated table can be replaced. Prove that it is an otherwise unnamed unwind atom and that
+// every relocated FDE range belongs to exactly one published frame, with no uncovered frame or extra target.
+static bool assembly_frame_table_valid(const AssemblyView* view, const uint32_t* defined_begin, uint32_t* covered)
+{
+    const Link* link = view->link;
+    const AtomId atom = view->cfi_atom;
+    bool valid = atom < link->atoms.count && link->atoms.unit[atom] == view->unit && link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME &&
+                 link->atoms.bytes[atom] != NULL && link->atoms.fixup_count[atom] != 0 && defined_begin[atom] == defined_begin[atom + 1] &&
+                 (atom >= link->groups.atom_count || link->groups.atom_groups[atom] == 0);
+    memset(covered, 0, (uint64_t)link->atoms.count * sizeof(*covered));
+    const FixupId begin = valid ? link->atoms.fixup_begin[atom] : 0;
+    const uint32_t count = valid ? link->atoms.fixup_count[atom] : 0;
+    for (uint32_t f = 0; valid && f < count; f += 1)
+    {
+        const FixupId fixup = begin + f;
+        const uint64_t offset = link->fixups.offset[fixup];
+        const SymbolId symbol = link->fixups.target[fixup];
+        const AtomId target = symbol != 0 && symbol < link->symbols.count ? link->symbols.atom[symbol] : 0;
+        const AssemblyCode* code = view->code != NULL && target < view->code_count ? &view->code[target] : NULL;
+        valid = (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_PC32 && link_fixup_addend(link, fixup) == 0 &&
+                offset <= link->atoms.size[atom] && 8 <= link->atoms.size[atom] - offset && target != 0 && target < link->atoms.count &&
+                link->atoms.unit[target] == view->unit && link->atoms.class[target] == BUSTER_LINK_CLASS_TEXT && code != NULL && code->frame_enabled &&
+                code->frame_offset == link->symbols.value[symbol] && covered[target] == 0;
+        if (valid)
+        {
+            uint32_t range = 0;
+            memcpy(&range, link->atoms.bytes[atom] + offset + 4, sizeof(range));
+            valid = range == code->frame_size;
+            covered[target] = 1;
+        }
+    }
+    for (AtomId a = 1; valid && a < link->atoms.count; a += 1)
+    {
+        if (link->atoms.unit[a] == view->unit && view->code != NULL && a < view->code_count && view->code[a].frame_enabled)
+        {
+            valid = covered[a] != 0;
+        }
+    }
+    return valid;
+}
+
 // A standalone string directive uses the same helper and byte range as direct object emission.
-static AssemblyError assembly_inline_helper(AssemblyText* text, const Link* link, const AssemblyNames* names, AtomId atom, const AssemblyInline* piece,
+static AssemblyError assembly_inline_helper(AssemblyText* text, const Link* link, const AssemblyNames* names, AtomId atom, const AssemblyCode* code,
                                             const SymbolId* defined, uint32_t begin, uint32_t end, const char** reason)
 {
+    const AssemblyInline* piece = code->templates;
     const uint64_t size = link->atoms.size[atom];
     const uint64_t tail = (uint64_t)piece->offset + piece->size;
     uint32_t cursor = begin;
     assembly_labels(text, link, names, defined, end, &cursor, 0);
-    const bool valid = tail <= size && link->atoms.fixup_count[atom] == 0 && (cursor == end || link->symbols.value[defined[cursor]] == size);
+    bool valid = tail <= size && link->atoms.fixup_count[atom] == 0 && (cursor == end || link->symbols.value[defined[cursor]] == size);
     if (valid)
     {
         const uint8_t* bytes = link->atoms.bytes[atom];
-        assembly_plain_bytes(text, bytes, piece->offset);
-        assembly_inline_text(text, piece);
-        assembly_plain_bytes(text, bytes + tail, size - tail);
+        uint32_t frame = 0;
+        for (uint64_t at = 0; valid && at < piece->offset;)
+        {
+            valid = assembly_frame_at(text, code, at, &frame, reason);
+            const uint64_t next = assembly_frame_next(code, at, piece->offset, frame);
+            assembly_plain_bytes(text, bytes + at, next - at);
+            at = next;
+        }
+        valid = valid && assembly_frame_at(text, code, piece->offset, &frame, reason);
+        if (valid)
+        {
+            assembly_inline_text(text, piece);
+        }
+        for (uint64_t at = tail; valid && at < size;)
+        {
+            valid = (at == piece->offset && piece->size == 0) || assembly_frame_at(text, code, at, &frame, reason);
+            const uint64_t next = assembly_frame_next(code, at, size, frame);
+            assembly_plain_bytes(text, bytes + at, next - at);
+            at = next;
+        }
         assembly_labels(text, link, names, defined, end, &cursor, size);
+        valid = valid && (size == piece->offset ? true : assembly_frame_at(text, code, size, &frame, reason));
     }
     else
     {
@@ -1589,6 +1857,297 @@ static bool assembly_code_mixed(const AssemblyCode* code, const uint8_t* atom_by
         }
     }
     return valid;
+}
+
+static int assembly_offset_order(const void* left, const void* right)
+{
+    const uint32_t a = *(const uint32_t*)left;
+    const uint32_t b = *(const uint32_t*)right;
+    return (a > b) - (a < b);
+}
+
+// A retained instruction whose spelling changes its encoding or needs an overflowing source addend: keep its bytes
+// around each symbolic field. The fixups remain the Link's, including their field-relative addends.
+static AssemblyError assembly_escaped_fields(AssemblyText* text, const Link* link, const AssemblyNames* names, AtomId atom,
+                                            const X86FormDescription* form, uint64_t at, uint64_t finish, FixupId begin, FixupId end,
+                                            const char** reason)
+{
+    const uint8_t* bytes = link->atoms.bytes[atom];
+    AssemblyError error = ASSEMBLY_OK;
+    assembly_append(text, "\t# ");
+    assembly_append(text, form->mnemonic);
+    assembly_append(text, " (selected bytes with symbolic fields)\n");
+    for (FixupId fixup = begin; error == ASSEMBLY_OK && !text->full && fixup < end; fixup += 1)
+    {
+        const uint64_t offset = link->fixups.offset[fixup];
+        const uint32_t width = link_fixup_kinds[link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND].width;
+        if (offset < at || offset + width > finish)
+        {
+            error = ASSEMBLY_INVALID;
+            *reason = "overlapping or out-of-range fields in an escaped instruction";
+        }
+        else
+        {
+            assembly_plain_bytes(text, bytes + at, offset - at);
+            error = assembly_data_fixup(text, link, names, atom, fixup, reason);
+            at = offset + width;
+        }
+    }
+    if (error == ASSEMBLY_OK)
+    {
+        assembly_plain_bytes(text, bytes + at, finish - at);
+    }
+    return error;
+}
+
+// Full assembly units retain their selected instruction records at byte offsets, with directives' bytes between
+// them. Keep that fixed layout: labels, data fixups, CFI and original marker ranges share the same byte boundaries.
+static AssemblyError assembly_mixed_code(AssemblyText* text, const Link* link, const AssemblyNames* names, AtomId atom, const AssemblyCode* code,
+                                         const SymbolId* defined, uint32_t begin, uint32_t end, Arena* scratch, const char** reason)
+{
+    const uint64_t mark = scratch->length;
+    const uint32_t count = code->count;
+    const uint64_t size = link->atoms.size[atom];
+    const uint8_t* bytes = link->atoms.bytes[atom];
+    uint32_t* encoded_offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+    uint32_t* targets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+    uint8_t* encoded = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, BUSTER_X86_ENCODER_CAPACITY(count));
+    AssemblyError error = encoded_offsets != NULL && targets != NULL && encoded != NULL ? ASSEMBLY_OK : ASSEMBLY_FULL;
+    const bool shape = code->offsets != NULL && (count == 0 || code->records != NULL) && (size == 0 || bytes != NULL) && size <= UINT32_MAX;
+    const int64_t length = error == ASSEMBLY_OK && shape ? x86_encode(code->records, count, encoded, BUSTER_X86_ENCODER_CAPACITY(count), encoded_offsets, NULL) : -1;
+    if (error == ASSEMBLY_OK && (length < 0 || (uint64_t)length > UINT32_MAX))
+    {
+        error = ASSEMBLY_INVALID;
+        *reason = "invalid mixed instruction records";
+    }
+    uint32_t target_count = 0;
+    const FixupId fixup_begin = link->atoms.fixup_begin[atom];
+    const uint32_t fixup_count = link->atoms.fixup_count[atom];
+    uint32_t branch_fixup = 0;
+    uint64_t previous = 0;
+    if (error == ASSEMBLY_OK)
+    {
+        encoded_offsets[count] = (uint32_t)length;
+    }
+    for (uint32_t r = 0; error == ASSEMBLY_OK && r < count; r += 1)
+    {
+        const uint32_t start = code->offsets[r];
+        const uint32_t width = encoded_offsets[r + 1] - encoded_offsets[r];
+        const uint64_t finish = (uint64_t)start + width;
+        if (start < previous || finish > size || width == 0)
+        {
+            error = ASSEMBLY_INVALID;
+            *reason = "overlapping or out-of-range mixed instruction records";
+        }
+        else
+        {
+            const X86Instruction* record = &code->records[r];
+            const int64_t target = (int64_t)finish + record->displacement;
+            while (branch_fixup < fixup_count && link->fixups.offset[fixup_begin + branch_fixup] < start)
+            {
+                branch_fixup += 1;
+            }
+            const bool symbolic = branch_fixup < fixup_count && link->fixups.offset[fixup_begin + branch_fixup] < finish;
+            if (!symbolic && x86_form_description(record->form)->syntax == X86_SYNTAX_REL && target >= 0 && (uint64_t)target <= size)
+            {
+                targets[target_count++] = (uint32_t)target;
+            }
+            previous = finish;
+        }
+    }
+    if (error == ASSEMBLY_OK && target_count > 1)
+    {
+        qsort(targets, target_count, sizeof(uint32_t), assembly_offset_order);
+    }
+    uint32_t next_fixup = 0;
+    uint32_t next_record = 0;
+    uint32_t next_target = 0;
+    uint32_t cursor = begin;
+    uint32_t frame_cursor = 0;
+    uint32_t piece = 0;
+    uint64_t at = 0;
+    while (error == ASSEMBLY_OK && !text->full && at <= size)
+    {
+        const uint64_t symbol_at = cursor < end ? link->symbols.value[defined[cursor]] : size;
+        const uint64_t target_at = next_target < target_count ? targets[next_target] : size;
+        const uint64_t record_at = next_record < count ? code->offsets[next_record] : size;
+        const uint64_t fixup_at = next_fixup < fixup_count ? link->fixups.offset[fixup_begin + next_fixup] : size;
+        const uint64_t piece_at = piece < code->template_count ? code->templates[piece].offset : size;
+        if (symbol_at < at || target_at < at || record_at < at || fixup_at < at || piece_at < at)
+        {
+            error = ASSEMBLY_INVALID;
+            *reason = "a mixed-code label, record or fixup inside another field";
+            break;
+        }
+        assembly_labels(text, link, names, defined, end, &cursor, at);
+        if (next_target < target_count && targets[next_target] == at)
+        {
+            assembly_append(text, BUSTER_ASSEMBLY_PREFIX);
+            assembly_unsigned(text, atom);
+            assembly_append(text, ".");
+            assembly_unsigned(text, at);
+            assembly_append(text, ":\n");
+            while (next_target < target_count && targets[next_target] == at)
+            {
+                next_target += 1;
+            }
+        }
+        if (!assembly_frame_at(text, code, at, &frame_cursor, reason))
+        {
+            error = ASSEMBLY_INVALID;
+            break;
+        }
+        bool placed = false;
+        while (piece < code->template_count && code->templates[piece].offset == at)
+        {
+            const AssemblyInline* source = &code->templates[piece++];
+            const uint64_t finish = at + source->size;
+            if (finish > size || (source->size != 0 && ((next_record < count && record_at < finish) || (next_fixup < fixup_count && fixup_at < finish) ||
+                (cursor < end && link->symbols.value[defined[cursor]] < finish) || (next_target < target_count && targets[next_target] < finish) ||
+                assembly_frame_next(code, at, finish, frame_cursor) != finish)))
+            {
+                error = ASSEMBLY_INVALID;
+                *reason = "an inconsistent inline assembly range in mixed code";
+                break;
+            }
+            assembly_inline_text(text, source);
+            if (source->size != 0)
+            {
+                at = finish;
+                placed = true;
+                break;
+            }
+        }
+        if (error != ASSEMBLY_OK)
+        {
+            break;
+        }
+        if (placed)
+        {
+            continue;
+        }
+        if (at == size)
+        {
+            error = cursor == end && next_record == count && next_fixup == fixup_count && piece == code->template_count && frame_cursor == code->frame_count ?
+                    ASSEMBLY_OK : ASSEMBLY_INVALID;
+            *reason = error == ASSEMBLY_OK ? *reason : "mixed-code metadata past its atom's end";
+            break;
+        }
+        if (next_record < count && record_at == at)
+        {
+            const uint32_t r = next_record++;
+            const X86Instruction* record = &code->records[r];
+            const uint32_t width = encoded_offsets[r + 1] - encoded_offsets[r];
+            const uint32_t finish = (uint32_t)at + width;
+            const uint32_t first_fixup = next_fixup;
+            uint8_t* instruction_bytes = encoded + encoded_offsets[r];
+            AssemblyReference displacement = { 0 };
+            AssemblyReference immediate = { 0 };
+            uint64_t field_end = at;
+            bool escaped_addend = false;
+            if (assembly_frame_next(code, at, finish, frame_cursor) != finish)
+            {
+                error = ASSEMBLY_INVALID;
+                *reason = "an unwind boundary inside a mixed instruction";
+            }
+            else if ((cursor < end && link->symbols.value[defined[cursor]] < finish) ||
+                     (next_target < target_count && targets[next_target] < finish) ||
+                     (piece < code->template_count && code->templates[piece].offset < finish))
+            {
+                error = ASSEMBLY_INVALID;
+                *reason = "a label or inline boundary inside a mixed instruction";
+            }
+            while (error == ASSEMBLY_OK && next_fixup < fixup_count && link->fixups.offset[fixup_begin + next_fixup] < finish)
+            {
+                const FixupId fixup = fixup_begin + next_fixup;
+                const uint32_t offset = link->fixups.offset[fixup];
+                const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+                const uint32_t field_width = link_fixup_kinds[kind].width;
+                const uint32_t distance = finish - offset;
+                const bool on_displacement = distance == x86_fixup_distance(record->form, X86_FIXUP_DISPLACEMENT) && !displacement.present;
+                const bool on_immediate = distance == x86_fixup_distance(record->form, X86_FIXUP_IMMEDIATE) && !immediate.present;
+                AssemblyReference* reference = on_displacement ? &displacement : on_immediate ? &immediate : NULL;
+                if (offset < field_end || (uint64_t)offset + field_width > finish || reference == NULL)
+                {
+                    error = ASSEMBLY_INVALID;
+                    *reason = "a fixup off its mixed instruction's fields";
+                }
+                else
+                {
+                    const int64_t addend = link_fixup_addend(link, fixup);
+                    int64_t source_addend = addend;
+                    const bool overflow = link_fixup_kinds[kind].pc_relative && __builtin_add_overflow(addend, (int64_t)distance, &source_addend);
+                    escaped_addend = escaped_addend || overflow;
+                    *reference = (AssemblyReference){
+                        .addend = overflow ? addend : source_addend,
+                        .target = link->fixups.target[fixup],
+                        .kind = kind,
+                        .present = true,
+                    };
+                    memset(instruction_bytes + offset - at, 0, field_width);
+                    field_end = (uint64_t)offset + field_width;
+                    next_fixup += 1;
+                }
+            }
+            if (error == ASSEMBLY_OK && memcmp(instruction_bytes, bytes + at, width) != 0)
+            {
+                error = ASSEMBLY_INVALID;
+                *reason = "mixed instruction records that don't encode to their atom's bytes";
+            }
+            if (error == ASSEMBLY_OK)
+            {
+                const X86FormDescription* form = x86_form_description(record->form);
+                const bool branch = form->syntax == X86_SYNTAX_REL;
+                const int64_t target = (int64_t)finish + record->displacement;
+                if (escaped_addend || (first_fixup != next_fixup && assembly_escaped(record, form, immediate.present)))
+                {
+                    error = assembly_escaped_fields(text, link, names, atom, form, at, finish,
+                                                    fixup_begin + first_fixup, fixup_begin + next_fixup, reason);
+                }
+                else if (branch && !displacement.present && (target < 0 || (uint64_t)target > size))
+                {
+                    // A literal relative displacement may intentionally leave the atom. Preserve its selected bytes.
+                    assembly_plain_bytes(text, bytes + at, width);
+                }
+                else if (!assembly_instruction(text, link, names, names->widths, record, instruction_bytes, width, false, &displacement, &immediate, atom,
+                                               (uint32_t)target, reason))
+                {
+                    error = ASSEMBLY_UNSUPPORTED;
+                }
+            }
+            at = finish;
+        }
+        else if (next_fixup < fixup_count && fixup_at == at)
+        {
+            const FixupId fixup = fixup_begin + next_fixup++;
+            const uint32_t width = link_fixup_kinds[link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND].width;
+            if (assembly_frame_next(code, at, at + width, frame_cursor) != at + width)
+            {
+                error = ASSEMBLY_INVALID;
+                *reason = "an unwind boundary inside a mixed data fixup";
+            }
+            else
+            {
+                error = assembly_data_fixup(text, link, names, atom, fixup, reason);
+            }
+            at += width;
+        }
+        else
+        {
+            uint64_t stop = record_at < fixup_at ? record_at : fixup_at;
+            const uint64_t next_symbol = cursor < end ? link->symbols.value[defined[cursor]] : size;
+            const uint64_t next_label = next_target < target_count ? targets[next_target] : size;
+            const uint64_t next_piece = piece < code->template_count ? code->templates[piece].offset : size;
+            stop = next_symbol < stop ? next_symbol : stop;
+            stop = next_label < stop ? next_label : stop;
+            stop = next_piece < stop ? next_piece : stop;
+            stop = assembly_frame_next(code, at, stop, frame_cursor);
+            assembly_plain_bytes(text, bytes + at, stop - at);
+            at = stop;
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return error;
 }
 
 // A TEXT atom's code: its records, each after the labels of its offset (its symbols' and, for a branch's target, the
@@ -1668,17 +2227,28 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
         *reason = "instruction records that don't encode to their function's bytes";
     }
     uint32_t cursor = begin;
+    uint32_t frame = 0;
     // The function symbol can lie inside the sled, while the table refers to its start.
     for (uint32_t at = 0; error == ASSEMBLY_OK && !text->full && at < sled;)
     {
         assembly_labels(text, link, names, defined, end, &cursor, at);
+        error = assembly_frame_at(text, code, at, &frame, reason) ? error : ASSEMBLY_INVALID;
         const uint64_t next_label = cursor < end ? link->symbols.value[defined[cursor]] : sled;
         const uint32_t marked = code->endbr != 0 ? code->endbr - 1 : UINT32_MAX;
         const uint32_t until = next_label < sled ? (uint32_t)next_label : sled;
-        const uint32_t stop = at < marked && marked < until ? marked : until;
+        const uint32_t limit = at < marked && marked < until ? marked : until;
+        const uint32_t stop = (uint32_t)assembly_frame_next(code, at, limit, frame);
         if (at == marked)
         {
-            assembly_append(text, "\tendbr64\n");
+            if (assembly_frame_next(code, at, at + 4, frame) != at + 4)
+            {
+                error = ASSEMBLY_INVALID;
+                *reason = "an unwind boundary inside an instruction";
+            }
+            else
+            {
+                assembly_append(text, "\tendbr64\n");
+            }
         }
         else
         {
@@ -1700,6 +2270,12 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
             *reason = "a symbol inside an instruction";
         }
         assembly_labels(text, link, names, defined, end, &cursor, at);
+        error = assembly_frame_at(text, code, at, &frame, reason) ? error : ASSEMBLY_INVALID;
+        if (error == ASSEMBLY_OK && assembly_frame_next(code, at, record_end, frame) != record_end)
+        {
+            error = ASSEMBLY_INVALID;
+            *reason = "an unwind boundary inside an instruction";
+        }
         if (labeled[r] != 0)
         {
             assembly_append(text, BUSTER_ASSEMBLY_PREFIX);
@@ -1724,7 +2300,52 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
         const X86Instruction* record = &code->records[r];
         AssemblyReference displacement = { 0 };
         AssemblyReference immediate = { 0 };
-        error = error == ASSEMBLY_OK ? assembly_instruction_references(link, atom, record, at, record_end, &next_fixup, &displacement, &immediate, reason) : error;
+        const uint32_t first_fixup = next_fixup;
+        uint64_t field_end = at;
+        bool escaped_addend = false;
+        if (error == ASSEMBLY_OK && cursor < end && link->symbols.value[defined[cursor]] < record_end)
+        {
+            error = ASSEMBLY_INVALID;
+            *reason = "a symbol inside an instruction";
+        }
+        else if (error == ASSEMBLY_OK && piece < code->template_count && code->templates[piece].offset < record_end)
+        {
+            error = ASSEMBLY_INVALID;
+            *reason = "an inline assembly marker outside an instruction boundary";
+        }
+        while (error == ASSEMBLY_OK && next_fixup < fixup_count && link->fixups.offset[fixup_begin + next_fixup] < record_end)
+        {
+            const FixupId fixup = fixup_begin + next_fixup;
+            const uint32_t offset_in = link->fixups.offset[fixup];
+            const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+            const uint32_t field_width = link_fixup_kinds[kind].width;
+            const uint32_t to_end = record_end - offset_in;
+            const bool on_displacement = to_end == x86_fixup_distance(record->form, X86_FIXUP_DISPLACEMENT) && !displacement.present;
+            const bool on_immediate = to_end == x86_fixup_distance(record->form, X86_FIXUP_IMMEDIATE) && !immediate.present;
+            AssemblyReference* reference = on_displacement ? &displacement : on_immediate ? &immediate : 0;
+            if (offset_in < field_end || (uint64_t)offset_in + field_width > record_end || reference == 0)
+            {
+                error = ASSEMBLY_INVALID;
+                *reason = "a fixup off its instruction's fields";
+            }
+            else
+            {
+                // The source's addend: the field's, plus the distance from the field to the instruction's end for a
+                // PC-relative kind, which the assembler takes off again.
+                const int64_t addend = link_fixup_addend(link, fixup);
+                int64_t source_addend = addend;
+                const bool overflow = link_fixup_kinds[kind].pc_relative && __builtin_add_overflow(addend, (int64_t)to_end, &source_addend);
+                escaped_addend = escaped_addend || overflow;
+                *reference = (AssemblyReference){
+                    .addend = overflow ? addend : source_addend,
+                    .target = link->fixups.target[fixup],
+                    .kind = kind,
+                    .present = true,
+                };
+                field_end = (uint64_t)offset_in + field_width;
+                next_fixup += 1;
+            }
+        }
         if (error == ASSEMBLY_OK)
         {
             const X86FormDescription* form = x86_form_description(record->form);
@@ -1733,6 +2354,11 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
             {
                 error = ASSEMBLY_INVALID;
                 *reason = "a relative branch without a target";
+            }
+            else if (escaped_addend || (first_fixup != next_fixup && assembly_escaped(record, form, immediate.present)))
+            {
+                error = assembly_escaped_fields(text, link, names, atom, form, at, record_end,
+                                                fixup_begin + first_fixup, fixup_begin + next_fixup, reason);
             }
             else if (!assembly_instruction(text, link, names, names->widths, record, encoded + offset, record_end - at, false, &displacement, &immediate, atom, targets[r], reason))
             {
@@ -1751,6 +2377,7 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
     if (error == ASSEMBLY_OK)
     {
         assembly_labels(text, link, names, defined, end, &cursor, size);
+        error = assembly_frame_at(text, code, size, &frame, reason) ? error : ASSEMBLY_INVALID;
         while (piece < code->template_count && code->templates[piece].offset == size)
         {
             assembly_inline_text(text, &code->templates[piece++]);
@@ -1874,6 +2501,7 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
     const uint32_t atom_count = link->atoms.count;
     const uint32_t symbol_count = link->symbols.count;
     const uint32_t unit = view->unit;
+    bool frames = false;
     AssemblyResult result = { .error = ASSEMBLY_OK };
     AssemblyText text = {
         .arena = output,
@@ -1885,6 +2513,11 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
     SymbolId* defined = next != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, symbol_count) : 0;
     uint8_t* used = defined != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbol_count) : 0;
     result.error = used != 0 ? ASSEMBLY_OK : ASSEMBLY_FULL;
+    if (result.error == ASSEMBLY_OK && !link_groups_valid(link))
+    {
+        result.error = ASSEMBLY_INVALID;
+        result.reason = "invalid section groups";
+    }
     if (result.error == ASSEMBLY_OK)
     {
         memset(defined_begin, 0, ((uint64_t)atom_count + 1) * sizeof(*defined_begin));
@@ -1937,6 +2570,14 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
                 used[target] |= (uint8_t)(local ? 6 : 2);
             }
         }
+        for (uint32_t g = 1; g < link->groups.count; g += 1)
+        {
+            const LinkGroup group = link->groups.data[g];
+            if (group.unit == unit && group.signature != 0)
+            {
+                used[group.signature] |= 2;
+            }
+        }
     }
     const ObjectDebug* debug = view->debug != NULL && !object_debug_absent(view->debug) ? view->debug : NULL;
     if (result.error == ASSEMBLY_OK && debug != NULL)
@@ -1963,19 +2604,31 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
     {
         const uint8_t class = link->atoms.class[a];
         const bool mine = link->atoms.unit[a] == unit;
-        const bool grouped = link->groups.count != 0 && a < link->groups.atom_count && link->groups.atom_groups[a] != 0;
         const AssemblyCode* code = view->code != 0 && a < view->code_count ? &view->code[a] : 0;
+        frames = frames || (mine && code != NULL && code->frame_enabled);
         const bool uncoded = class == BUSTER_LINK_CLASS_TEXT && link->atoms.size[a] != 0 && (code == 0 || (code->records == 0 && code->template_count != 1));
-        const char* reason = !mine ? 0 : class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS ? "thread-local storage" :
-                             grouped ? "section groups (COMDAT)" :
-                             class == BUSTER_LINK_CLASS_INIT || class == BUSTER_LINK_CLASS_FINI ? "the C runtime's .init and .fini fragments" :
+        const char* reason = !mine ? 0 :
+                             (class == BUSTER_LINK_CLASS_INIT || class == BUSTER_LINK_CLASS_FINI) && (code == NULL || code->offsets == NULL) ?
+                                 "the C runtime's .init and .fini fragments" :
                              uncoded ? "code the emission made without instruction records" : 0;
-        if (reason != 0)
+        if (mine && code != NULL && !assembly_frame_valid(code, link->atoms.size[a]))
+        {
+            result.error = ASSEMBLY_INVALID;
+            result.reason = "an invalid unwind frame range";
+            result.atom = a;
+        }
+        else if (reason != 0)
         {
             result.error = ASSEMBLY_UNSUPPORTED;
             result.reason = reason;
             result.atom = a;
         }
+    }
+    if (result.error == ASSEMBLY_OK && view->cfi_atom != 0 && !assembly_frame_table_valid(view, defined_begin, next))
+    {
+        result.error = ASSEMBLY_INVALID;
+        result.reason = "an invalid replacement unwind table";
+        result.atom = view->cfi_atom;
     }
     for (SymbolId s = 1; result.error == ASSEMBLY_OK && s < symbol_count; s += 1)
     {
@@ -1983,10 +2636,11 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
         const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
         const AtomId atom = link->symbols.atom[s];
         const bool common = type == BUSTER_LINK_SYMBOL_COMMON && (used[s] & 1) != 0;
-        const char* reason = used[s] == 0 ? 0 : type == BUSTER_LINK_SYMBOL_TLS ? "thread-local storage" :
-                             common && (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_GLOBAL ? "a non-global common definition" :
+        const char* reason = used[s] == 0 ? 0 : common && (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_GLOBAL ? "a non-global common definition" :
                              common && defined_begin[atom + 1] - defined_begin[atom] != 1 ? "a common definition sharing an atom with another symbol" :
-                             (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE ? "unique symbols (STB_GNU_UNIQUE)" :
+                             (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE && atom == 0 ? "undefined unique symbols" :
+                             (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE && type != BUSTER_LINK_SYMBOL_OBJECT && type != BUSTER_LINK_SYMBOL_TLS ?
+                                 "unique symbols without object or TLS type" :
                              atom == 0 && link->symbols.name[s] == 0 ? "a reference to an undefined symbol without a name" : 0;
         if (reason != 0)
         {
@@ -2012,10 +2666,33 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
         }
         assembly_append(&text, "\"\n");
     }
+    // GNU as otherwise replaces an unused weak undefined signature with a local symbol in the group section. A
+    // cancelled expression is an ordinary use without bytes or relocations, preserving the writer's signature.
+    for (uint32_t g = 1; result.error == ASSEMBLY_OK && g < link->groups.count; g += 1)
+    {
+        const LinkGroup group = link->groups.data[g];
+        const SymbolId signature = group.signature;
+        if (group.unit == unit && signature != 0 && link->symbols.atom[signature] == 0)
+        {
+            assembly_append(&text, "\t.size ");
+            assembly_name(&text, link, &names, signature);
+            assembly_append(&text, ", ");
+            assembly_name(&text, link, &names, signature);
+            assembly_append(&text, "-");
+            assembly_name(&text, link, &names, signature);
+            assembly_append(&text, "\n");
+        }
+    }
     AssemblySection current = { .name = "" };
+    if (result.error == ASSEMBLY_OK && frames)
+    {
+        assembly_append(&text, "\t.section .eh_frame,\"a\",@unwind\n\t.p2align 3\n\t.cfi_sections .eh_frame\n");
+    }
+    AtomId* section_slots = NULL;
+    uint64_t section_mask = 0;
     for (AtomId a = 1; result.error == ASSEMBLY_OK && !text.full && a < atom_count; a += 1)
     {
-        if (link->atoms.unit[a] == unit)
+        if (link->atoms.unit[a] == unit && a != view->cfi_atom)
         {
             const uint32_t begin = defined_begin[a];
             const uint32_t end = defined_begin[a + 1];
@@ -2037,20 +2714,44 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
             const uint8_t class = link->atoms.class[a];
             const AtomId associated = section.link;
             const bool ordered = (section.flags & SHF_LINK_ORDER) != 0;
+            // A nondefault descriptor may reuse another section's name with different flags or type, including an
+            // assembler's built-in .data or .text even without ordinary atoms. Give it a stable identity; explicit
+            // descriptors equal to their class's default still join that section, as the object writer does.
+            const ObjectAtomSection* descriptor = view->sections != NULL && a < view->section_count ? &view->sections[a] : NULL;
+            const bool unique_section = ordered || section.identity != 0 || (descriptor != NULL && !object_section_is_default(descriptor, class));
+            if (unique_section && section_slots == NULL)
+            {
+                uint64_t capacity = 16;
+                while (capacity < 2 * (uint64_t)atom_count)
+                {
+                    capacity *= 2;
+                }
+                section_slots = BUSTER_ARENA_PUSH_ARRAY(scratch, AtomId, capacity);
+                if (section_slots != NULL)
+                {
+                    memset(section_slots, 0, capacity * sizeof(*section_slots));
+                    section_mask = capacity - 1;
+                }
+                else
+                {
+                    result.error = ASSEMBLY_FULL;
+                }
+            }
+            const uint32_t identity = result.error == ASSEMBLY_OK && unique_section ? assembly_section_identity(view, section, a, section_slots, section_mask) : 0;
             SymbolId label = 0;
             if (ordered && associated != 0 && associated < atom_count && link->atoms.unit[associated] == unit && link->atoms.class[associated] < class &&
                 defined_begin[associated] < defined_begin[associated + 1])
             {
                 label = defined[defined_begin[associated]];
             }
-            if (ordered != (label != 0) || ordered != (associated != 0))
+            if (result.error == ASSEMBLY_OK && (ordered != (label != 0) || ordered != (associated != 0)))
             {
                 result.error = ASSEMBLY_INVALID;
                 result.reason = "a linked-order section without an associated label in its unit";
             }
-            else if (ordered || !assembly_same_section(section, current))
+            else if (result.error == ASSEMBLY_OK && (ordered || !assembly_same_section(section, current)))
             {
-                result.error = assembly_section_directive(&text, section, label, link, &names) ? ASSEMBLY_OK : ASSEMBLY_UNSUPPORTED;
+                result.error = assembly_section_directive(&text, section, label, identity, link, &names) ? ASSEMBLY_OK : ASSEMBLY_UNSUPPORTED;
                 result.reason = result.error != ASSEMBLY_OK ? "a section type or flags -S doesn't print yet" : 0;
                 current = section;
             }
@@ -2074,15 +2775,23 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
                 assembly_append(&text, class == BUSTER_LINK_CLASS_TEXT ? ", 0xcc\n" : "\n");
             }
             const char* reason = 0;
-            if (result.error == ASSEMBLY_OK && class == BUSTER_LINK_CLASS_TEXT && link->atoms.size[a] != 0)
+            const AssemblyCode* code = view->code != NULL && a < view->code_count ? &view->code[a] : NULL;
+            const bool executable = class == BUSTER_LINK_CLASS_TEXT ||
+                                    ((class == BUSTER_LINK_CLASS_INIT || class == BUSTER_LINK_CLASS_FINI) && code != NULL && code->offsets != NULL);
+            if (result.error == ASSEMBLY_OK && executable && link->atoms.size[a] != 0)
             {
-                const AssemblyCode* code = &view->code[a];
-                result.error = code->records == NULL ? assembly_inline_helper(&text, link, &names, a, code->templates, defined, begin, end, &reason) :
+                result.error = code->offsets != NULL && code->raw_span_count == 0 ? assembly_mixed_code(&text, link, &names, a, code, defined, begin, end, scratch, &reason) :
+                               code->records == NULL ? assembly_inline_helper(&text, link, &names, a, code, defined, begin, end, &reason) :
                                                        assembly_code(&text, link, &names, a, code, defined, begin, end, scratch, &reason);
             }
             else if (result.error == ASSEMBLY_OK)
             {
                 result.error = assembly_data(&text, link, &names, a, defined, begin, end, &reason);
+                if (result.error == ASSEMBLY_OK && class == BUSTER_LINK_CLASS_TEXT && view->code != NULL && a < view->code_count && view->code[a].frame_enabled)
+                {
+                    uint32_t frame = 0;
+                    result.error = assembly_frame_at(&text, &view->code[a], 0, &frame, &reason) ? ASSEMBLY_OK : ASSEMBLY_INVALID;
+                }
             }
             if (result.error == ASSEMBLY_OK)
             {

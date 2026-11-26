@@ -433,6 +433,11 @@ struct Tier0Operation
     uint8_t operand_bytes[BUSTER_TIER0_OPERATION_OPERANDS];
     uint8_t result_class;
     uint8_t result_bytes;
+    // A secondary asm-body result (#2144): its register in BUSTER_TIER0_XMM's layout plus one, or zero for an ordinary
+    // operation. Such a row has no operands or records. CALL, SET_LOCAL, then one X86/SET_LOCAL pair per secondary
+    // result form one indivisible group; Tier 0 captures every result at CALL before restoring live values. The
+    // register alone makes this row reusable when an always_inline callee's operations are shared between sites.
+    uint8_t asm_result;
 };
 
 // An asm statement placed in its caller (#1839): a CALL whose callee is this body, not a symbol (Tier0Function.call_asm),
@@ -484,9 +489,14 @@ struct Tier0AsmBody
     // through a copy of the stores of its own where the body has stores (tier0_emit_call_record).
     uint32_t exits;
     uint32_t goto_labels;
-    // The general register its call row's result is in (#2144: an asm statement's register output, which the body then
-    // doesn't store), plus one; 0 for a row of no result or an asm goto's exit in eax.
+    // The register its call row's primary result is in (#2144: an asm statement's scalar output, which the body then
+    // doesn't store), in BUSTER_TIER0_XMM's layout plus one; 0 for a row of no result or an asm goto's exit in eax.
     uint8_t result;
+    // All scalar register results, including `result`, and the subset that has eight bytes. A nonzero mask requires
+    // the contiguous result group above; the old single-result form leaves both masks zero. General registers hold
+    // I32/U32/I64/U64, XMM registers F32/F64. The masks contain no frame register and are subsets of `touched`.
+    uint32_t result_registers;
+    uint32_t result_wide;
     // Whether the template returns (#1839): its `ret`, and the records on the straight way to it (`leave`, `pop`), leave
     // the function as clang's object does, past the epilogue. Its function keeps no local and no value in a
     // callee-saved register, as one that calls __builtin_setjmp keeps none (tier0_leaves_callee_saved), so that the way
@@ -1495,15 +1505,14 @@ static uint32_t tier0_parts_of(const uint8_t* registers, bool high, bool low, bo
 // next argument's).
 static bool tier0_aggregate_whole(AbiLocation location)
 {
-    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
+    return location.kind == BUSTER_ABI_LOCATION_STACK && (abi_location_flags(location) & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
 }
 
 // The bytes of an aggregate of `size` bytes that `location` carries: its size, or at a FIRST location its first 16 bytes
-// alone (#1844: a transparent union of a stack slot of its own past 16 bytes, in its member's registers or eightbytes'
-// slots, whose bytes past them are padding).
+// alone, or the exact PREFIX byte count (#1844: a transparent union's first member, whose bytes past it are padding).
 static uint32_t tier0_location_size(AbiLocation location, uint32_t size)
 {
-    return (location.flags & BUSTER_ABI_FLAG_FIRST) != 0 && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : size;
+    return abi_location_size(location, size);
 }
 
 // The bytes a copy of an aggregate of `size` bytes on the stack whole at `location` moves: its size, or at a PAYLOAD
@@ -1512,7 +1521,7 @@ static uint32_t tier0_location_size(AbiLocation location, uint32_t size)
 static uint32_t tier0_whole_bytes(AbiLocation location, uint32_t size)
 {
     size = tier0_location_size(location, size);
-    return (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0 ? abi_vector_payload_bytes(size) : size;
+    return (abi_location_flags(location) & BUSTER_ABI_FLAG_PAYLOAD) != 0 ? abi_vector_payload_bytes(size) : size;
 }
 
 // The bytes of the stack an aggregate of `size` bytes on the stack whole at `location` takes: its size rounded up to 8,
@@ -1520,16 +1529,18 @@ static uint32_t tier0_whole_bytes(AbiLocation location, uint32_t size)
 static uint64_t tier0_whole_slot(AbiLocation location, uint32_t size)
 {
     size = tier0_location_size(location, size);
-    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
-    return payload ? abi_vector_register_bytes(abi_vector_payload_bytes(size)) : ((uint64_t)size + 7) & ~UINT64_C(7);
+    const bool payload = (abi_location_flags(location) & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    const bool prefix = (location.flags & BUSTER_ABI_FLAG_PREFIX) != 0 && size > BUSTER_ABI_SLOT_BYTES;
+    return payload || prefix ? abi_vector_register_bytes(abi_vector_payload_bytes(size)) : ((uint64_t)size + 7) & ~UINT64_C(7);
 }
 
 // The parts of an aggregate argument or parameter of `size` bytes at `location` (none on the stack whole or ignored).
 static uint32_t tier0_location_parts(AbiLocation location, uint32_t size, Tier0Part* parts)
 {
     size = tier0_location_size(location, size);
-    const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
-    const bool low = location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
+    const uint8_t flags = abi_location_flags(location);
+    const bool high = (flags & BUSTER_ABI_FLAG_HIGH) != 0;
+    const bool low = location.kind == BUSTER_ABI_LOCATION_STACK && (flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT;
     const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && (high || low);
     return registers || slot ? tier0_parts_of(location.registers, high, low, location.kind != BUSTER_ABI_LOCATION_REGISTERS, size, parts) : 0;
@@ -1548,7 +1559,7 @@ static bool tier0_parameter_in_place(const Tier0Function* function, uint32_t p)
     const bool aligned = alignment_log2 <= BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 && location.stack_offset % (1u << alignment_log2) == 0;
     // A PAYLOAD slot (#2113) holds the payload alone, which may end before the object's size: its bytes are copied.
     // So does a FIRST one (#1844), of the object's first 16 bytes alone.
-    const bool payload = (location.flags & (BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) != 0;
+    const bool payload = (abi_location_flags(location) & (BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) != 0 || (location.flags & BUSTER_ABI_FLAG_PREFIX) != 0;
     return tier0_is_object(function, p) ? tier0_aggregate_whole(location) && aligned && !payload : location.kind == BUSTER_ABI_LOCATION_STACK;
 }
 
@@ -1710,14 +1721,16 @@ static bool tier0_parts_valid(const uint8_t* registers, bool high, bool split, u
 // an 8-byte slot, as is the high or the low eightbyte alone on the stack, with no register.
 static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, uint64_t stack_bytes)
 {
+    const uint8_t flags = abi_location_flags(location);
+    const bool prefix_valid = abi_location_prefix_valid(location, size);
     // FIRST, of a value past 16 bytes, isn't PAYLOAD's.
-    const bool first = (location.flags & BUSTER_ABI_FLAG_FIRST) != 0;
-    const bool first_valid = !first || (size > BUSTER_ABI_REGISTER_BYTES && (location.flags & BUSTER_ABI_FLAG_PAYLOAD) == 0 && location.kind != BUSTER_ABI_LOCATION_IGNORE);
+    const bool first = (flags & BUSTER_ABI_FLAG_FIRST) != 0;
+    const bool first_valid = !first || (size > BUSTER_ABI_REGISTER_BYTES && (flags & BUSTER_ABI_FLAG_PAYLOAD) == 0 && location.kind != BUSTER_ABI_LOCATION_IGNORE);
     size = tier0_location_size(location, size);
-    const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
-    const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
+    const bool high = (flags & BUSTER_ABI_FLAG_HIGH) != 0;
+    const bool low = (flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool whole = tier0_aggregate_whole(location);
-    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    const bool payload = (flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
     const uint64_t slot = whole ? tier0_whole_slot(location, size) : BUSTER_ABI_SLOT_BYTES;
     const bool stack = location.kind == BUSTER_ABI_LOCATION_STACK || location.kind == BUSTER_ABI_LOCATION_SPLIT;
     bool valid = location.kind == BUSTER_ABI_LOCATION_IGNORE || stack || location.kind == BUSTER_ABI_LOCATION_REGISTERS;
@@ -1734,7 +1747,7 @@ static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, 
     // LOW is a STACK location's alone, and PAYLOAD a whole one's, of a record past its payload (#2113).
     valid = valid && (!low || location.kind == BUSTER_ABI_LOCATION_STACK);
     valid = valid && (!payload || (whole && size > abi_vector_payload_bytes(size) && size <= 64));
-    return valid && first_valid;
+    return valid && first_valid && prefix_valid;
 }
 
 // How many x87 registers a result comes back in: st0, or st0 and st1 (a COMPLEX_X87 one), each part 16 bytes after the
@@ -2114,6 +2127,8 @@ struct Tier0RecordSpec
 // STORE and SET share RETURN's otherwise unused variant number.
 #define BUSTER_TIER0_VARIANT_ATOMIC 30
 #define BUSTER_TIER0_VARIANT_WIDE_SCALE 31
+// A VECTOR LOAD, unary X86 row and SET sharing the row's register (#2815).
+#define BUSTER_TIER0_VARIANT_VECTOR_REGISTER 31
 #define BUSTER_TIER0_VARIANT_CONVERT_HOME 16
 // A compare's alone, so they share their numbers with a store's INDEX_CONST to OFFSET_HOME.
 #define BUSTER_TIER0_VARIANT_FLAGS 21
@@ -3762,8 +3777,8 @@ static void tier0_define_templates(void)
         tier0_end(BUSTER_TYPED_JUMP_VALUE, class, BUSTER_TIER0_VARIANT_PLAIN, 0);
     }
     // Vectors: every entry tier0_emit_vector's, as the memory classes' are, but DISCARD and JUMP_VALUE, whose values stay
-    // in their slots; and the machine operations of every result class. Each is its key's plain variant alone: no
-    // constant, local or address fuses into one.
+    // in their slots; and the machine operations of every result class. A unary row can share a register with its
+    // adjacent LOAD and SET (tier0_operation_effects).
     static const uint8_t vector_kinds[] = {
         BUSTER_TYPED_CONST, BUSTER_TYPED_DUP, BUSTER_TYPED_LOAD, BUSTER_TYPED_STORE, BUSTER_TYPED_SET, BUSTER_TYPED_LOCAL, BUSTER_TYPED_STORE_LOCAL,
         BUSTER_TYPED_SET_LOCAL,
@@ -3805,6 +3820,9 @@ static void tier0_define_templates(void)
             tier0_defer(BUSTER_TYPED_X86, class, BUSTER_TIER0_VARIANT_PLAIN);
         }
     }
+    tier0_defer(BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TIER0_VARIANT_VECTOR_REGISTER);
+    tier0_defer(BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TIER0_VARIANT_VECTOR_REGISTER);
+    tier0_defer(BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TIER0_VARIANT_VECTOR_REGISTER);
 }
 
 // Whether the form choice may take inc and dec for add and sub of 1 and -1 (BUSTER_X86_CONTEXT_INC_DEC, which the
@@ -4242,16 +4260,22 @@ static bool tier0_takes_last(const Tier0Function* function, uint32_t i)
     return tier0_shapes[kind].last == BUSTER_TIER0_STACK_OPERAND && !(kind == BUSTER_TYPED_RETURN && function->classes[i] == BUSTER_TYPED_CLASS_VOID);
 }
 
-// The X86 entries' effects, from their rows' operands and results, in place of the shape's that phase 1 gives them (one
-// push of their class): a pass of its own, made after P1 over a function with vectors alone, so that the others' fusion
-// has no look for the kind. No X86 entry absorbs or is absorbed: their keys have no
-// fused variants.
+static __m512i tier0_bytes_at(const uint8_t* column, int64_t first, uint32_t count);
+
+// Replace the X86 entries' stack effects from P1 with their rows' actual effects. Mark a unary vector row between a
+// matching LOAD and SET so all three can use VECTOR(0). Each entry keeps its own effect and memory access. A branch
+// entering at the row or SET needs the ordinary slot, as does a piece wider than the target's register.
 static __attribute__((noinline)) void tier0_operation_effects(const Tier0Function* function, Tier0Entries* entries)
 {
-    for (uint32_t i = 0; i < function->count; i += 1)
+    const uint32_t count = function->count;
+    const uint32_t width = function->vector_bytes == 0 ? 64 : function->vector_bytes;
+    for (uint32_t first = 0; first < count; first += 64)
     {
-        if (function->kinds[i] == BUSTER_TYPED_X86)
+        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+        const uint64_t rows = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_X86));
+        for (uint64_t left = rows; left != 0; left &= left - 1)
         {
+            const uint32_t i = first + (uint32_t)__builtin_ctzll(left);
             const Tier0Operation* operation = &function->operations[function->values[i]];
             int32_t counts[3] = { 0, 0, 0 };
             for (uint32_t j = 0; j < operation->operand_count; j += 1)
@@ -4261,6 +4285,16 @@ static __attribute__((noinline)) void tier0_operation_effects(const Tier0Functio
             counts[tier0_stack(function->classes[i])] += 1;
             entries->integer_effects[i] = (int8_t)counts[1];
             entries->floating_effects[i] = (int8_t)counts[2];
+            // Validation has matched the LOAD and SET widths and classes to this row's input and output.
+            if (operation->operand_count == 1 && tier0_class_vector(operation->operand_classes[0]) && tier0_class_vector(operation->result_class) &&
+                operation->operand_bytes[0] <= width && operation->result_bytes <= width && i != 0 && i + 1 < count &&
+                function->kinds[i - 1] == BUSTER_TYPED_LOAD && function->kinds[i + 1] == BUSTER_TYPED_SET &&
+                !tier0_label(entries->labels, i) && !tier0_label(entries->labels, i + 1))
+            {
+                entries->variants[i - 1] = BUSTER_TIER0_VARIANT_VECTOR_REGISTER;
+                entries->variants[i] = BUSTER_TIER0_VARIANT_VECTOR_REGISTER;
+                entries->variants[i + 1] = BUSTER_TIER0_VARIANT_VECTOR_REGISTER;
+            }
         }
     }
 }
@@ -6700,9 +6734,113 @@ static const Tier0AsmBody* tier0_call_body(const Tier0Function* function, uint32
     return index != 0 && index <= function->asm_body_count ? &function->asm_bodies[index - 1] : 0;
 }
 
+static const Tier0Operation* tier0_asm_projection(const Tier0Function* function, uint32_t entry)
+{
+    const bool row = entry < function->count && function->kinds[entry] == BUSTER_TYPED_X86 &&
+                     function->values[entry] < function->operation_count && function->operations != NULL;
+    const Tier0Operation* operation = row ? function->operations + function->values[entry] : NULL;
+    return operation != NULL && operation->asm_result != 0 ? operation : NULL;
+}
+
+static bool tier0_asm_result_class(const Tier0AsmBody* body, uint32_t reg, uint32_t class)
+{
+    const uint32_t bit = reg < 32 ? 1u << reg : 0;
+    const bool wide = (body->result_wide & bit) != 0;
+    const bool typed = reg >= 16 ? class == (wide ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32) :
+                       wide ? class == BUSTER_TYPED_CLASS_I64 || class == BUSTER_TYPED_CLASS_U64 :
+                              class == BUSTER_TYPED_CLASS_I32 || class == BUSTER_TYPED_CLASS_U32;
+    return (body->result_registers & bit) != 0 && typed;
+}
+
+// Validate the whole result group before any consumer captures registers. The primary CALL and every secondary X86
+// projection are followed by their own SET_LOCAL, in source output order, each declared register exactly once.
+// The result is the last SET_LOCAL's entry, or UINT32_MAX. At most 32 outputs are representable by the mask.
+static uint32_t tier0_asm_result_group(const Tier0Function* function, uint32_t entry, const Tier0AsmBody* body)
+{
+    bool valid = body->result != 0 && body->result <= 32 && body->result_registers != 0;
+    uint32_t remaining = body->result_registers;
+    uint32_t reg = valid ? body->result - 1u : 0;
+    uint32_t class = function->classes[entry];
+    uint32_t at = entry;
+    while (valid && remaining != 0)
+    {
+        valid = tier0_asm_result_class(body, reg, class) && (remaining & (1u << reg)) != 0 && at + 1 < function->count;
+        if (valid)
+        {
+            at += 1;
+            const uint64_t local = function->values[at];
+            valid = function->kinds[at] == BUSTER_TYPED_SET_LOCAL && function->classes[at] == class && local < function->local_count &&
+                    function->local_classes[local] == class && !tier0_is_object(function, local) &&
+                    (function->local_flags[local] & (BUSTER_TYPED_LOCAL_ADDRESS_ONLY | BUSTER_TYPED_LOCAL_VOLATILE)) == 0;
+            remaining &= ~(1u << reg);
+        }
+        if (valid && remaining != 0)
+        {
+            at += 1;
+            const Tier0Operation* operation = tier0_asm_projection(function, at);
+            valid = operation != NULL && operation->asm_result <= 32 && operation->operand_count == 0 && operation->record_count == 0 &&
+                    operation->result_class == function->classes[at] && operation->result_bytes == 0;
+            reg = valid ? operation->asm_result - 1u : 0;
+            class = valid ? operation->result_class : BUSTER_TYPED_CLASS_VOID;
+        }
+    }
+    return valid ? at : UINT32_MAX;
+}
+
+// The entry after a validated result group, or after this one entry. Capturing directly into the locals absorbs
+// every SET_LOCAL and projection, so a deep call must restore the stack depths after the whole group (#2144).
+static uint32_t tier0_asm_result_end(const Tier0Function* function, uint32_t entry)
+{
+    const bool call = function->asm_body_count != 0 && function->kinds[entry] == BUSTER_TYPED_CALL;
+    const Tier0AsmBody* body = call ? tier0_call_body(function, (uint32_t)function->values[entry]) : NULL;
+    return body != NULL && body->result_registers != 0 ? entry + 2u * (uint32_t)__builtin_popcount(body->result_registers) : entry + 1;
+}
+
+// A projection is meaningful only in the contiguous group of the preceding body call. This also rejects one in a
+// function with no asm bodies, without adding a full-function scan to the common function-header validator.
+static bool tier0_asm_projection_valid(const Tier0Function* function, uint32_t entry)
+{
+    uint32_t at = entry;
+    bool valid = false;
+    for (uint32_t n = 0; !valid && at >= 2 && n < 32; n += 1)
+    {
+        if (function->kinds[at - 1] != BUSTER_TYPED_SET_LOCAL)
+        {
+            break;
+        }
+        at -= 2;
+        if (function->kinds[at] == BUSTER_TYPED_CALL && function->values[at] < function->call_count)
+        {
+            const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[at]);
+            const uint32_t last = body != NULL ? tier0_asm_result_group(function, at, body) : UINT32_MAX;
+            valid = last != UINT32_MAX && entry < last;
+            break;
+        }
+        if (tier0_asm_projection(function, at) == NULL)
+        {
+            break;
+        }
+    }
+    return valid;
+}
+
+static bool tier0_asm_result_interior(const Tier0Function* function, uint32_t entry)
+{
+    bool interior = tier0_asm_projection(function, entry) != NULL;
+    if (!interior && entry != 0 && entry < function->count && function->kinds[entry] == BUSTER_TYPED_SET_LOCAL)
+    {
+        const uint32_t prior = entry - 1;
+        const bool call = function->kinds[prior] == BUSTER_TYPED_CALL && function->values[prior] < function->call_count;
+        const Tier0AsmBody* body = call ? tier0_call_body(function, (uint32_t)function->values[prior]) : NULL;
+        interior = tier0_asm_projection(function, prior) != NULL || (body != NULL && body->result_registers != 0);
+    }
+    return interior;
+}
+
 // Whether the asm bodies (#1839) are as Tier0AsmBody has them: each named by call rows of the body target alone (whose
-// arguments are its register operands, in their registers), which only CALL entries of class VOID (or I32, an asm goto's exit) make; its block an object of the function's; and its touched
-// registers none that holds the frame (rsp, rbp, r15). Out of line and cold: few functions have them.
+// arguments are its register operands, in their registers), which CALL entries of class VOID, I32 (an asm goto's exit)
+// or a declared scalar result make; its block an object of the function's; and its touched registers none that holds
+// the frame (rsp, rbp, r15). Out of line and cold: few functions have them.
 static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Function* function)
 {
     bool valid = function->call_asm != 0 && (function->asm_body_count == 0 || function->asm_bodies != 0);
@@ -6712,6 +6850,9 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
         valid = (body->block == BUSTER_TIER0_ASM_NO_BLOCK || (body->block < function->local_count && tier0_is_object(function, body->block))) &&
                 (body->count == 0 || body->records != 0) &&
                 (body->touched & (1u << X86_REGISTER_RSP | 1u << X86_REGISTER_RBP | 1u << X86_REGISTER_R15)) == 0;
+        valid = valid && (body->result_wide & ~body->result_registers) == 0 && (body->result_registers & ~body->touched) == 0 &&
+                (body->result_registers == 0 || (body->result != 0 && body->result <= 32 &&
+                                                (body->result_registers & (1u << (body->result - 1))) != 0 && body->exits == 0 && !body->leaves));
         valid = valid && body->branch_count <= body->count && (body->branch_count == 0 || (body->branches != 0 && body->targets != 0));
         for (uint32_t b = 0; valid && b < body->branch_count; b += 1)
         {
@@ -6751,10 +6892,19 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
         const uint32_t class = function->classes[i];
         const bool returned = asm_body != 0 && asm_body->result != 0;
         valid = !body || (kind == BUSTER_TYPED_CALL && asm_body != 0 &&
-                          (returned ? asm_body->result <= 16 && asm_body->result - 1 != X86_REGISTER_RSP && asm_body->exits == 0 &&
+                          (asm_body->result_registers != 0 ? tier0_asm_result_group(function, i, asm_body) != UINT32_MAX :
+                           returned ? asm_body->result <= 16 && asm_body->result - 1 != X86_REGISTER_RSP && asm_body->exits == 0 &&
                                           ((asm_body->touched >> (asm_body->result - 1)) & 1) != 0 &&
                                           (class == BUSTER_TYPED_CLASS_I32 || class == BUSTER_TYPED_CLASS_U32 || class == BUSTER_TYPED_CLASS_I64 || class == BUSTER_TYPED_CLASS_U64) :
                                       (class == BUSTER_TYPED_CLASS_VOID || class == BUSTER_TYPED_CLASS_I32)));
+        if (valid && kind >= BUSTER_TYPED_BRANCH_FALSE && kind <= BUSTER_TYPED_JUMP_VALUE && function->values[i] < function->count)
+        {
+            valid = !tier0_asm_result_interior(function, (uint32_t)function->values[i]);
+        }
+    }
+    for (uint32_t l = 0; valid && l < function->label_count; l += 1)
+    {
+        valid = function->label_entries != NULL && !tier0_asm_result_interior(function, function->label_entries[l]);
     }
     return valid;
 }
@@ -6769,6 +6919,30 @@ static uint8_t tier0_call_result_register(const Tier0Function* function, uint32_
 {
     const Tier0AsmBody* body = tier0_call_body(function, call);
     return body != 0 && body->result != 0 ? (uint8_t)(body->result - 1) : X86_REGISTER_RAX;
+}
+
+// Result locals cannot occupy any register the body touches: tier0_assign_homes excludes the call's complete
+// clobber mask. Thus these direct stores need no scratch or sequential register shuffle, even with many outputs,
+// repeated destination locals, deep value stacks or a result live in a register the call will restore afterwards.
+static void tier0_emit_asm_results(const Tier0Function* function, const Tier0Home* homes, uint32_t entry, const Tier0AsmBody* body, Tier0Writer* writer)
+{
+    const uint32_t count = (uint32_t)__builtin_popcount(body->result_registers);
+    uint32_t reg = body->result - 1u;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const uint32_t at = entry + 1 + 2 * k;
+        const uint32_t class = function->classes[at];
+        const Tier0Home home = homes[function->values[at]];
+        const bool wide = tier0_class_bytes(class) == 8;
+        const uint32_t form = reg >= 16 ? (wide ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSS_XM32_X) :
+                                        (wide ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32);
+        tier0_put(writer, tier0_instruction(form, (uint8_t)(reg & 15), home.reg, home.is_register ? BUSTER_X86_REGISTER_DIRECT : home.mode,
+                                            home.is_register ? 0 : home.displacement, 0));
+        if (k + 1 < count)
+        {
+            reg = function->operations[function->values[at + 1]].asm_result - 1u;
+        }
+    }
 }
 
 // How many of the `below` integer depths under call row `call`'s operands it saves around itself: those in caller-saved
@@ -7170,7 +7344,12 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
         }
         tier0_emit_call_record(function, entries, homes, i, writer);
         const uint32_t result = tier0_stack(function->classes[i]);
-        if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
+        const Tier0AsmBody* body = tier0_call_body(function, call);
+        if (body != NULL && body->result_registers != 0)
+        {
+            tier0_emit_asm_results(function, homes, i, body, writer);
+        }
+        else if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
         {
             tier0_store_result(writer, returned, homes[object - 1]);
         }
@@ -8261,6 +8440,20 @@ static bool tier0_vector_zero(const Tier0Function* function, uint64_t k)
 
 #include "tier0_vector_baseline.inc"
 
+// A deep stack window may spill or fill registers between adjacent entries. Its slots already carry the value
+// across those transitions. Otherwise a unary vector row's VECTOR(0) is the first free floating register at all three entries.
+static bool tier0_vector_in_register(const Tier0Entries* entries, uint32_t i)
+{
+    bool direct = entries->variants[i] == BUSTER_TIER0_VARIANT_VECTOR_REGISTER;
+    if (direct && entries->deep != NULL)
+    {
+        const uint32_t kind = entries->key_kinds[i];
+        const uint32_t load = kind == BUSTER_TYPED_LOAD ? i : kind == BUSTER_TYPED_X86 ? i - 1 : i - 2;
+        direct = (entries->deep[load] | entries->deep[load + 1] | entries->deep[load + 2]) == 0;
+    }
+    return direct;
+}
+
 // A VECTOR entry's records (tier0_vector_entry's but X86's), its value through zmm16 (BUSTER_TIER0_VECTOR_SCRATCH), with
 // d the entry's integer depth:
 //   - CONST: zeros by vpxord and a store into slot d; any other constant, its words up to its bytes stored into slot d as
@@ -8277,7 +8470,14 @@ static void tier0_emit_vector_value(const Tier0Function* function, const Tier0En
     const uint32_t depth = entries->depths[i];
     const uint64_t value = function->values[i];
     const uint8_t scratch = BUSTER_TIER0_VECTOR_SCRATCH;
-    if (function->vector_bytes != 0 && (kind != BUSTER_TYPED_CONST || tier0_vector_zero(function, value)))
+    if (tier0_vector_in_register(entries, i))
+    {
+        const bool load = kind == BUSTER_TYPED_LOAD;
+        const uint32_t form = load ? tier0_vector_target_load(function, (uint32_t)value) : tier0_vector_target_store(function, (uint32_t)value);
+        const uint8_t base = tier0_integer_depths[depth - (load ? 1 : 2)];
+        tier0_put(writer, tier0_instruction(form, entries->floating_depths[i], base, BUSTER_X86_MEMORY_BASE, 0, 0));
+    }
+    else if (function->vector_bytes != 0 && (kind != BUSTER_TYPED_CONST || tier0_vector_zero(function, value)))
     {
         tier0_emit_vector_baseline(function, entries, frame, homes, i, writer);
     }
@@ -8344,7 +8544,11 @@ static uint32_t tier0_count_vector_value(const Tier0Function* function, const Ti
     const uint32_t kind = entries->key_kinds[i];
     const uint64_t value = function->values[i];
     uint32_t count = kind == BUSTER_TYPED_STORE ? 3 : 2;
-    if (kind == BUSTER_TYPED_CONST && !tier0_vector_zero(function, value))
+    if (tier0_vector_in_register(entries, i))
+    {
+        count = 1;
+    }
+    else if (kind == BUSTER_TYPED_CONST && !tier0_vector_zero(function, value))
     {
         count = 0;
         for (uint32_t w = 0; w < tier0_vector_words(function, value); w += 1)
@@ -8352,7 +8556,7 @@ static uint32_t tier0_count_vector_value(const Tier0Function* function, const Ti
             count += tier0_vector_word_fits(function, value, w) ? 1 : 2;
         }
     }
-    if (function->vector_bytes != 0 && (kind != BUSTER_TYPED_CONST || tier0_vector_zero(function, value)))
+    else if (function->vector_bytes != 0)
     {
         const uint32_t bytes = tier0_vector_baseline_copy_bytes(function, kind, value);
         const uint32_t chunks = (bytes + function->vector_bytes - 1) / function->vector_bytes;
@@ -8940,9 +9144,10 @@ static uint32_t tier0_count_operation_masks(const Tier0Operation* operation, con
 // unspecified bytes past the value (#556's review); the row's records with their roles placed
 // (tier0_operation_placement, and its masks' by tier0_operation_mask_plan in a function with masks, around which
 // tier0_emit_operation_masks saves and loads back the masks the records would overwrite); and a VECTOR result stored
-// whole from VECTOR(0) into its slot.
+// whole from VECTOR(0) into its slot. For a register-resident piece the adjacent LOAD and SET supply both moves.
 static void tier0_emit_operation(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
 {
+    const bool in_register = tier0_vector_in_register(entries, i);
     const Tier0Operation* operation = &function->operations[function->values[i]];
     Tier0Placement placement = tier0_operation_placement(operation, entries->depths[i], entries->floating_depths[i]);
     Tier0MaskPlan plan;
@@ -8954,18 +9159,21 @@ static void tier0_emit_operation(const Tier0Function* function, const Tier0Entri
         tier0_operation_mask_place(operation, &plan, &placement);
         tier0_emit_operation_masks(operation, frame, &plan, true, writer);
     }
-    for (uint32_t j = 0; j < operation->operand_count; j += 1)
+    if (!in_register)
     {
-        if (tier0_class_vector(operation->operand_classes[j]))
+        for (uint32_t j = 0; j < operation->operand_count; j += 1)
         {
-            tier0_put(writer, tier0_vector_slot(tier0_vector_target_load(function, operation->operand_bytes[j]), frame, placement.operands[j], (uint8_t)(placement.vector + j)));
+            if (tier0_class_vector(operation->operand_classes[j]))
+            {
+                tier0_put(writer, tier0_vector_slot(tier0_vector_target_load(function, operation->operand_bytes[j]), frame, placement.operands[j], (uint8_t)(placement.vector + j)));
+            }
         }
     }
     for (uint32_t r = 0; r < operation->record_count; r += 1)
     {
         tier0_put(writer, tier0_operation_place(operation->records[r], &placement));
     }
-    if (tier0_class_vector(operation->result_class))
+    if (!in_register && tier0_class_vector(operation->result_class))
     {
         tier0_put(writer, tier0_vector_slot(tier0_vector_target_store(function, function->vector_bytes == 0 ? 64 : operation->result_bytes), frame, (uint32_t)placement.result_depth, placement.vector));
     }
@@ -8978,11 +9186,16 @@ static void tier0_emit_operation(const Tier0Function* function, const Tier0Entri
 // How many records tier0_emit_operation writes for entry i (tier0_count_deferred's).
 static uint32_t tier0_count_operation(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
 {
+    const bool in_register = tier0_vector_in_register(entries, i);
     const Tier0Operation* operation = &function->operations[function->values[i]];
-    uint32_t count = operation->record_count + (tier0_class_vector(operation->result_class) ? 1u : 0u);
-    for (uint32_t j = 0; j < operation->operand_count; j += 1)
+    uint32_t count = operation->record_count;
+    if (!in_register)
     {
-        count += tier0_class_vector(operation->operand_classes[j]) ? 1 : 0;
+        count += tier0_class_vector(operation->result_class) ? 1 : 0;
+        for (uint32_t j = 0; j < operation->operand_count; j += 1)
+        {
+            count += tier0_class_vector(operation->operand_classes[j]) ? 1 : 0;
+        }
     }
     if (entries->mask_depths != 0)
     {
@@ -9251,15 +9464,16 @@ static Tier0DeepEntry tier0_deep_entry(const Tier0Function* function, const Tier
     const uint32_t stack = tier0_stack(function->classes[i]);
     const Tier0Shape shape = tier0_shapes[kind];
     const bool jump_value = kind == BUSTER_TYPED_JUMP_VALUE;
+    const uint32_t end = tier0_asm_result_end(function, i);
     // The stack the entry leaves a value on (1 or 2), or 0.
-    const uint32_t leaves = kind == BUSTER_TYPED_CALL || jump_value || shape.push == BUSTER_TIER0_STACK_CLASS ? stack
+    const uint32_t leaves = end != i + 1 ? 0 : kind == BUSTER_TYPED_CALL || jump_value || shape.push == BUSTER_TIER0_STACK_CLASS ? stack
                             : shape.push == BUSTER_TIER0_STACK_INTEGER                                     ? 1
                                                                                                            : 0;
     Tier0DeepEntry deep;
     deep.before[0] = entries->deep_depths[i];
     deep.before[1] = entries->deep_floating_depths[i];
-    deep.exit[0] = entries->deep_depths[i + 1] + (jump_value && stack == 1 ? 1 : 0);
-    deep.exit[1] = entries->deep_floating_depths[i + 1] + (jump_value && stack == 2 ? 1 : 0);
+    deep.exit[0] = entries->deep_depths[end] + (jump_value && stack == 1 ? 1 : 0);
+    deep.exit[1] = entries->deep_floating_depths[end] + (jump_value && stack == 2 ? 1 : 0);
     deep.window[0] = entries->depths[i];
     deep.window[1] = entries->floating_depths[i];
     deep.result[0] = leaves == 1;
@@ -9500,6 +9714,12 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
         }
         tier0_emit_call_record(function, entries, homes, i, writer);
+        const Tier0AsmBody* body = tier0_call_body(function, call);
+        const bool asm_results = body != NULL && body->result_registers != 0;
+        if (asm_results)
+        {
+            tier0_emit_asm_results(function, homes, i, body, writer);
+        }
         if (snapshot)
         {
             tier0_deep_snapshot(entries, frame, call, i, below, floating_below, true, writer);
@@ -9513,7 +9733,7 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
         {
             tier0_put(writer, tier0_memory_slot(X86_FORM_FSTP_M80, frame, below, 0));
         }
-        else if (result != 0)
+        else if (result != 0 && !asm_results)
         {
             // An integer result from its register: rax, or an asm body's own (#2144).
             const uint32_t stack = result - 1;
@@ -9883,7 +10103,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     const uint32_t result = tier0_stack(function->classes[i]);
     // An integer result is moved from its register (rax, or an asm body's own: #2144) where its depth's register is another.
     const bool moved = below < BUSTER_TIER0_INTEGER_DEPTHS && tier0_integer_depths[below] != tier0_call_result_register(function, call);
-    count += !stored && ((result == 1 && (moved || (memory && tier0_class_x87(function->classes[i])))) || (result == 2 && floating_below != 0)) ? 1 : 0;
+    const Tier0AsmBody* body = tier0_call_body(function, call);
+    count += body != NULL && body->result_registers != 0 ? (uint32_t)__builtin_popcount(body->result_registers) :
+             !stored && ((result == 1 && (moved || (memory && tier0_class_x87(function->classes[i])))) || (result == 2 && floating_below != 0)) ? 1u : 0u;
     *references += tail && !indirect ? 1 : 0;
     return count;
 }
@@ -10667,6 +10889,8 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
             if (kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL)
             {
                 const uint32_t call = (uint32_t)function->values[i];
+                const uint32_t end = tier0_asm_result_end(function, i);
+                const uint32_t after[2] = { entries->deep_depths[end], entries->deep_floating_depths[end] };
                 // A tail call leaves the function: nothing after it to fill.
                 const bool fills = kind == BUSTER_TYPED_CALL;
                 bool aggregates = false;
@@ -10688,7 +10912,9 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                 }
                 for (uint32_t s = 0; s < 2 && deep; s += 1)
                 {
-                    flags |= BUSTER_TIER0_DEEP_CALL | (before[s] <= limits[s] ? spill_flags[s] : 0) | (exit[s] <= limits[s] && fills ? fill_flags[s] : 0);
+                    // An asm result group's SET_LOCAL rows are absorbed. Refill at the group's net exit, even when
+                    // the primary's transient push put CALL past the line and its following SET_LOCAL came back.
+                    flags |= BUSTER_TIER0_DEEP_CALL | (before[s] <= limits[s] ? spill_flags[s] : 0) | (after[s] <= limits[s] && fills ? fill_flags[s] : 0);
                     slots[s] = before[s] > slots[s] ? before[s] : slots[s];
                     slots[s] = exit[s] > slots[s] ? exit[s] : slots[s];
                 }
@@ -10823,7 +11049,9 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += function->call_variadic[call] ? 1 : 0;
         uint32_t references = tail && !indirect ? 1 : 0;
         count += !tail ? tier0_count_call_record(function, entries, i, &references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes, false) : 0) + tier0_tail_finish(function, entries, call);
-        count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
+        const Tier0AsmBody* body = tier0_call_body(function, call);
+        count += body != NULL && body->result_registers != 0 ? (uint32_t)__builtin_popcount(body->result_registers) :
+                 !stored && tier0_stack(function->classes[i]) != 0 ? 1u : 0u;
         count += 2 * tier0_saved_masks(entries, i);
         uint32_t integer_arguments = 0;
         uint32_t floating_arguments = 0;
@@ -11195,7 +11423,25 @@ static __attribute__((noinline, cold)) Tier0Error tier0_asm_direct(const Tier0Fu
     {
         const bool row = function->kinds[i] == BUSTER_TYPED_CALL && entries->absorbed[i] == 0 && function->values[i] < function->call_count;
         const Tier0AsmBody* body = row ? tier0_call_body(function, (uint32_t)function->values[i]) : 0;
-        if (body != 0 && body->exits != 0 && entries->labels != 0 && tier0_asm_dispatch(function, entries, i, body))
+        if (body != NULL && body->result_registers != 0)
+        {
+            const uint32_t last = tier0_asm_result_group(function, i, body);
+            error = last != UINT32_MAX ? TIER0_OK : TIER0_ERROR_INVALID;
+            for (uint32_t e = i + 1; error == TIER0_OK && e <= last; e += 1)
+            {
+                if (entries->labels != NULL && tier0_label(entries->labels, e))
+                {
+                    error = TIER0_ERROR_INVALID;
+                }
+                else
+                {
+                    entries->absorbed[e] = 1;
+                    entries->templates[e] = BUSTER_TIER0_ENTRY_ABSORBED;
+                    entries->words[e] = BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_NO_HOLES;
+                }
+            }
+        }
+        else if (body != 0 && body->exits != 0 && entries->labels != 0 && tier0_asm_dispatch(function, entries, i, body))
         {
             const uint64_t words = (uint64_t)function->count / 64 + 1;
             if (entries->direct == 0)
@@ -12246,6 +12492,13 @@ static bool tier0_operation_valid(const Tier0Operation* operation)
     valid = valid && (result == BUSTER_TYPED_CLASS_VOID || tier0_class_integer(result) || tier0_class_floating(result) ||
                       (tier0_class_vector(result) && tier0_vector_value_bytes_valid(operation->result_bytes)) ||
                       (tier0_class_mask(result) && tier0_mask_bytes_valid(operation->result_bytes)));
+    if (operation->asm_result != 0)
+    {
+        const uint32_t reg = operation->asm_result - 1u;
+        valid = valid && reg < 32 && operation->record_count == 0 && operation->operand_count == 0 && operation->result_bytes == 0 &&
+                (reg >= 16 ? tier0_class_floating(result) : tier0_class_integer(result)) &&
+                (tier0_class_bytes(result) == 4 || tier0_class_bytes(result) == 8);
+    }
     // A row with masks (#179) names k1 to k7 by role alone, and its mask operands (or its result) and its mask scratch
     // registers come to no more than the seven a row past the mask registers borrows.
     const Tier0Masks masks = tier0_operation_masks(operation);
@@ -12411,6 +12664,10 @@ static void tier0_validate_vector(const Tier0Function* function, Tier0Validator*
         if (operation == 0 || operation->result_class != class)
         {
             tier0_reject(validator, i, "an X86 entry past the operations, or of another class than its row's result");
+        }
+        if (operation != NULL && operation->asm_result != 0 && !tier0_asm_projection_valid(function, i))
+        {
+            tier0_reject(validator, i, "an asm result projection outside its body's complete result group");
         }
         if (operation != 0 && !function->masks && (tier0_operation_masks(operation).operands != 0 || tier0_class_mask(operation->result_class)))
         {

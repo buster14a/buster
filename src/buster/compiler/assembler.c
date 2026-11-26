@@ -90,6 +90,9 @@ struct AsmSymbol
     // An explicit binding, visibility, type or size directive named this symbol.
     bool section_attributes;
     uint8_t flags;
+    // @gnu_unique_object temporarily supplies the binding. Another non-object type restores the ordinary one.
+    uint8_t unique_binding;
+    bool unique_explicit_binding;
     bool defined;
     bool absolute;
     bool explicit_binding;
@@ -146,6 +149,7 @@ typedef enum AsmFragmentKind
     ASM_ALIGN,
     ASM_ULEB,
     ASM_SLEB,
+    ASM_RELOCATION,
 } AsmFragmentKind;
 
 // How an ASM_ALIGN fragment pads: with its fill byte, or in code (no fill, or 0x90) with GNU as's NOPs, which start
@@ -172,6 +176,8 @@ struct AsmFragment
     uint32_t section;
     uint8_t fill;
     uint8_t padding;
+    // A zero-width .reloc fragment at this location; the following bytes own its field.
+    uint8_t relocation;
 };
 
 typedef struct AsmInstruction AsmInstruction;
@@ -200,10 +206,20 @@ typedef struct AsmOptions AsmOptions;
 struct AsmOptions
 {
     bool intel;
+    // The C driver's -S sink keeps the matched records before this assembly's parser is discarded.
+    bool keep_records;
     // A C unit's assembly (inline templates and file-scope asm), which follows clang's integrated assembler where it
     // differs from GNU as: `.comm` without an alignment and `.lcomm` align to 1 (#2304). `.s` files keep GNU as's rules,
     // which test-assembler's cross-check compares.
     bool integrated;
+};
+
+typedef struct AsmRecordSpan AsmRecordSpan;
+struct AsmRecordSpan
+{
+    X86Instruction* records;
+    uint32_t* offsets;
+    uint32_t count;
 };
 
 typedef struct AsmAbsolute AsmAbsolute;
@@ -225,6 +241,9 @@ typedef struct AsmResult AsmResult;
 struct AsmResult
 {
     Link link;
+    // Indexed by this result's AtomId. Offsets are bytes in that atom, with data and padding between the records.
+    AsmRecordSpan* record_spans;
+    uint32_t record_span_count;
     String8 source_name;
     ObjectOptions object_options;
     const char* error;
@@ -398,6 +417,7 @@ struct AsmParser
     uint32_t* fragment_order;
     uint32_t* fragment_begin;
     uint32_t instruction_count;
+    bool explicit_relocations;
     uint32_t numeric[10];
     AsmSection* sections;
     uint32_t* section_slots;
@@ -3353,6 +3373,46 @@ static void asm_resolve_aliases(AsmParser* parser)
 #include "assembler_cfi.c"
 #include "assembler_lines.c"
 
+// The assembly sink's exact relocation escape. Restrict the location to the current byte and the target to one
+// symbol plus an addend, so fixups retain the Link's ordered, nonoverlapping field contract.
+static void asm_explicit_relocation(AsmParser* parser, uint32_t location, uint32_t end)
+{
+    const bool here = parser->at < end && asm_is(parser, parser->at, ".");
+    parser->at += here;
+    uint8_t kind = BUSTER_LINK_FIXUP_NONE;
+    if (!here || !asm_take(parser, ','))
+    {
+        asm_fail(parser, location, ".reloc requires the current location followed by a comma");
+    }
+    else if (parser->at < end)
+    {
+        for (uint8_t k = 1; k < BUSTER_LINK_FIXUP_KINDS; k += 1)
+        {
+            kind = asm_is(parser, parser->at, object_relocation_names[k]) ? k : kind;
+        }
+        parser->at += 1;
+    }
+    if (parser->result.error == NULL && (kind == BUSTER_LINK_FIXUP_NONE || !asm_take(parser, ',')))
+    {
+        asm_fail(parser, location, "unsupported .reloc type or missing target");
+    }
+    if (parser->result.error == NULL)
+    {
+        const AsmExpr target = asm_expression(parser, end);
+        if (target.plus == 0 || target.minus != 0 || target.relocation != ASM_RELOCATION_NONE || target.value < INT64_MIN || target.value > INT64_MAX)
+        {
+            asm_fail(parser, location, ".reloc requires a symbol and a signed 64-bit addend");
+        }
+        else
+        {
+            const uint32_t fragment = asm_fragment(parser, ASM_RELOCATION, location);
+            parser->fragments[fragment].expression = target;
+            parser->fragments[fragment].relocation = kind;
+            parser->explicit_relocations = true;
+        }
+    }
+}
+
 static void asm_directive(AsmParser* parser, uint32_t end)
 {
     const uint32_t token = parser->at++;
@@ -3363,6 +3423,10 @@ static void asm_directive(AsmParser* parser, uint32_t end)
         // caller assembles the unit whole (asm_assemble) when this says a template has such a directive.
         parser->directive = true;
         asm_fail(parser, location, "inline assembly takes no directive but .intel_syntax and .att_syntax");
+    }
+    else if (asm_is(parser, token, ".reloc"))
+    {
+        asm_explicit_relocation(parser, location, end);
     }
     else if (asm_is(parser, token, ".intel_syntax") || asm_is(parser, token, ".att_syntax"))
     {
@@ -3509,7 +3573,15 @@ static void asm_directive(AsmParser* parser, uint32_t end)
             const String8 name = asm_name_text(parser, parser->at++);
             AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, name, location)];
             asm_section_attribute(parser, symbol, name, location);
-            symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | binding;
+            if (binding != BUSTER_LINK_SYMBOL_LOCAL && (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE)
+            {
+                symbol->unique_binding = binding;
+                symbol->unique_explicit_binding = true;
+            }
+            else
+            {
+                symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | binding;
+            }
             symbol->explicit_binding = true;
         } while (asm_take(parser, ','));
     }
@@ -3570,9 +3642,34 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                 {
                     type = BUSTER_LINK_SYMBOL_TLS;
                 }
+                else if (asm_is(parser, parser->at, "gnu_indirect_function"))
+                {
+                    type = BUSTER_LINK_SYMBOL_IFUNC;
+                }
+                else if (asm_is(parser, parser->at, "gnu_unique_object"))
+                {
+                    type = BUSTER_LINK_SYMBOL_OBJECT;
+                }
                 else if (!asm_is(parser, parser->at, "notype"))
                 {
                     asm_fail(parser, location, "unsupported symbol type");
+                }
+                const bool unique = asm_is(parser, parser->at, "gnu_unique_object");
+                const uint8_t binding = symbol->flags & BUSTER_LINK_SYMBOL_BINDING;
+                if (unique)
+                {
+                    if (binding != BUSTER_LINK_SYMBOL_UNIQUE)
+                    {
+                        symbol->unique_binding = binding;
+                        symbol->unique_explicit_binding = symbol->explicit_binding;
+                    }
+                    symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_UNIQUE;
+                    symbol->explicit_binding = true;
+                }
+                else if (binding == BUSTER_LINK_SYMBOL_UNIQUE && type != BUSTER_LINK_SYMBOL_OBJECT)
+                {
+                    symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | symbol->unique_binding;
+                    symbol->explicit_binding = symbol->unique_explicit_binding;
                 }
                 symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_TYPE) | type;
                 parser->at += 1;
@@ -5168,6 +5265,12 @@ static void asm_emit(AsmParser* parser)
             }
             continue;
         }
+        // Unique binding belongs to a definition. An undefined declaration keeps its ordinary binding instead.
+        if (!symbol->defined && (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE)
+        {
+            symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | symbol->unique_binding;
+            symbol->explicit_binding = symbol->unique_explicit_binding;
+        }
         // A group-only signature is a local NOTYPE symbol of its SHT_GROUP section, not an undefined Link symbol.
         // An explicitly global or referenced signature, and any definition, retain their ordinary symbol instead.
         if (symbol->group != 0 && !symbol->defined && !symbol->alias && symbol->common == 0 &&
@@ -5196,8 +5299,9 @@ static void asm_emit(AsmParser* parser)
             asm_fail(parser, symbol->location, "undefined local symbol");
             continue;
         }
-        // An undefined symbol is global unless weak: also one `.local` names, which GNU as lists as a global (#1115).
-        if (!symbol->defined && (!symbol->explicit_binding || (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL))
+        // An undefined symbol is global unless weak: also one `.local` names, which GNU as lists as a global.
+        const uint8_t binding = symbol->flags & BUSTER_LINK_SYMBOL_BINDING;
+        if (!symbol->defined && (!symbol->explicit_binding || binding == BUSTER_LINK_SYMBOL_LOCAL))
         {
             symbol->flags = (uint8_t)((symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_GLOBAL);
         }
@@ -5288,7 +5392,20 @@ static void asm_emit(AsmParser* parser)
             const uint32_t f = parser->fragment_order[position];
             AsmFragment* fragment = &parser->fragments[f];
             uint8_t* bytes = link->atoms.bytes[atom];
-            if (fragment->kind == ASM_VALUE)
+            if (fragment->kind == ASM_RELOCATION)
+            {
+                const AsmExpr target = asm_resolve(parser, fragment->expression, fragment->location);
+                const uint8_t kind = fragment->relocation;
+                const uint32_t width = link_fixup_kinds[kind].width;
+                const bool valid = target.plus != 0 && target.minus == 0 && target.value >= INT64_MIN && target.value <= INT64_MAX &&
+                                   bytes != NULL && (uint64_t)fragment->offset + width <= link->atoms.size[atom] &&
+                                   link_add_fixup(link, atom, fragment->offset, kind, parser->symbols[target.plus].link, (int64_t)target.value) != 0;
+                if (!valid)
+                {
+                    asm_fail(parser, fragment->location, "invalid or overlapping .reloc field");
+                }
+            }
+            else if (fragment->kind == ASM_VALUE)
             {
                 asm_data_value(parser, atom, fragment);
             }
@@ -5384,6 +5501,27 @@ static void asm_emit(AsmParser* parser)
                 {
                     asm_fail(parser, fragment->location, ".bss may contain only zero fill");
                 }
+            }
+        }
+    }
+    // Explicit relocation fields have the Link's zero-byte representation. Check after all following data has
+    // been written: .reloc itself consumes no bytes, and a later nonzero datum must not be silently discarded.
+    for (uint32_t f = 0; parser->explicit_relocations && parser->result.error == NULL && f < parser->fragment_count; f += 1)
+    {
+        const AsmFragment* fragment = &parser->fragments[f];
+        if (fragment->kind == ASM_RELOCATION)
+        {
+            const AtomId atom = parser->sections[fragment->section].atom;
+            const uint8_t* bytes = link->atoms.bytes[atom];
+            const uint32_t width = link_fixup_kinds[fragment->relocation].width;
+            bool zero = bytes != NULL && (uint64_t)fragment->offset + width <= link->atoms.size[atom];
+            for (uint32_t i = 0; zero && i < width; i += 1)
+            {
+                zero = bytes[fragment->offset + i] == 0;
+            }
+            if (!zero)
+            {
+                asm_fail(parser, fragment->location, ".reloc requires a zero-initialized field");
             }
         }
     }
@@ -5487,6 +5625,58 @@ static void asm_parse_source(AsmParser* parser)
     }
 }
 
+// Keep the assembler's selected instruction forms for -S, after layout and fixups. No disassembly is involved;
+// prefix-only and 32-bit-address instructions remain exact byte fragments around their symbolic data fields.
+static void asm_keep_records(AsmParser* parser)
+{
+    Link* link = &parser->result.link;
+    const uint32_t atom_count = link->atoms.count;
+    AsmRecordSpan* spans = BUSTER_ARENA_PUSH_ARRAY(parser->arena, AsmRecordSpan, atom_count);
+    X86Instruction* records = BUSTER_ARENA_PUSH_ARRAY(parser->arena, X86Instruction, (uint64_t)parser->instruction_count + 1);
+    uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, (uint64_t)parser->instruction_count + 1);
+    if (spans == NULL || records == NULL || offsets == NULL)
+    {
+        asm_fail(parser, 0, "arena exhausted retaining assembly instruction records");
+    }
+    else
+    {
+        memset(spans, 0, (uint64_t)atom_count * sizeof(AsmRecordSpan));
+        uint32_t at = 0;
+        for (uint32_t section = 1; section < parser->section_count; section += 1)
+        {
+            const AtomId atom = parser->sections[section].atom;
+            if (atom == 0)
+            {
+                continue;
+            }
+            AsmRecordSpan* span = &spans[atom];
+            span->records = records + at;
+            span->offsets = offsets + at;
+            const uint32_t end = parser->fragment_begin[section + 1];
+            for (uint32_t position = parser->fragment_begin[section]; position < end; position += 1)
+            {
+                const AsmFragment* fragment = &parser->fragments[parser->fragment_order[position]];
+                if (fragment->kind == ASM_INSTRUCTION && !parser->instructions[fragment->instruction].address32)
+                {
+                    X86Instruction record = parser->instructions[fragment->instruction].record;
+                    if ((record.mode & BUSTER_X86_MODE_RIP) != 0)
+                    {
+                        // A local RIP reference is resolved directly into the bytes by asm_instruction_fixups.
+                        const uint32_t distance = x86_fixup_distance(record.form, X86_FIXUP_DISPLACEMENT);
+                        memcpy(&record.displacement, link->atoms.bytes[atom] + fragment->offset + fragment->size - distance, 4);
+                    }
+                    records[at] = record;
+                    offsets[at] = fragment->offset;
+                    at += 1;
+                    span->count += 1;
+                }
+            }
+        }
+        parser->result.record_spans = spans;
+        parser->result.record_span_count = atom_count;
+    }
+}
+
 static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOptions options, Arena* arena)
 {
     AsmParser parser =
@@ -5529,6 +5719,10 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
     {
         asm_emit(&parser);
     }
+    if (parser.result.error == NULL && options.keep_records)
+    {
+        asm_keep_records(&parser);
+    }
     const uint64_t emitted = asm_clock();
     parser.result.lex_ns = lexed - start;
     parser.result.parse_ns = parsed - lexed;
@@ -5548,6 +5742,8 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
         parser.result.absolutes = 0;
         parser.result.absolute_count = 0;
         parser.result.directives = 0;
+        parser.result.record_spans = NULL;
+        parser.result.record_span_count = 0;
     }
     return parser.result;
 }

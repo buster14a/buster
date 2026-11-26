@@ -2399,7 +2399,7 @@ static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t
 {
     const bool whole = location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] != BUSTER_ABI_REGISTER_NONE &&
                        (location.registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
-                       (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
+                       (abi_location_flags(location) & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
     const uint32_t width = size == 16 ? 0 : size == 32 ? 1 : size == 64 ? 2 : 3;
     const IrType types[4] = { IR_V4I32, IR_V8I32, IR_V16I32, IR_VOID };
     return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
@@ -2435,7 +2435,9 @@ static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sin
     const bool marked = (value & BUSTER_TYPED_ACCESS_VOLATILE) != 0;
     const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-    ir_typed_copy_pointers(sink, destination, source, value & ~BUSTER_TYPED_ACCESS_VOLATILE, wide && !marked, marked ? BUSTER_IR_VOLATILE : 0);
+    const uint64_t bytes = value & ~BUSTER_TYPED_ACCESS_VOLATILE;
+    const uint8_t flags = marked ? BUSTER_IR_VOLATILE : !wide && bytes > BUSTER_TIER0_COPY_NARROW_BYTES ? BUSTER_IR_COPY_PIECE : 0;
+    ir_typed_copy_pointers(sink, destination, source, bytes, wide && !marked, flags);
 }
 
 // Whether the function takes or returns an aggregate by value (an object parameter, a result in registers from its bytes
@@ -2521,6 +2523,10 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
     const uint32_t block = body->block != BUSTER_TIER0_ASM_NO_BLOCK ? 1 : 0;
     const uint32_t passed = input->call_argument_counts[call];
     const uint32_t count = block + passed;
+    // Older single-result producers name only result. Normalize their descriptor here; every IR body has explicit
+    // masks, and the call's semantic type supplies that one result's width.
+    const uint32_t results = body->result_registers != 0 ? body->result_registers : body->result != 0 ? 1u << (body->result - 1u) : 0;
+    const uint32_t wide = body->result_registers != 0 ? body->result_wide : result_type == IR_I64 || result_type == IR_F64 ? results : 0;
     for (uint32_t a = 0; a < passed; a += 1)
     {
         const uint8_t class = input->argument_classes[input->call_first[call] + a];
@@ -2539,12 +2545,14 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
             .masks = body->masks,
             .stack = body->stack,
             .opaque = body->opaque,
-            .result = result_type == IR_VOID ? 0 : body->result != 0 ? body->result : X86_REGISTER_RAX + 1,
             .label_records = body->label_records,
             .label_names = body->label_names,
             .label_count = body->label_count,
             .locations = passed != 0 ? input->argument_locations + input->call_first[call] : 0,
             .passed = passed,
+            .result = body->result,
+            .result_registers = results,
+            .result_wide = wide,
         };
         output->calls[descriptor] = (IrCall){
             .argument_first = first,
@@ -3254,6 +3262,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     bool leaves = false;
     for (uint32_t k = 0; check.error == IR_OK && k < input->asm_body_count && input->asm_bodies != 0; k += 1)
     {
+        // The IR carries named labels and scalar results. Leaving the function still requires Tier 0.
         leaves |= input->asm_bodies[k].leaves;
     }
     if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || leaves))
@@ -3317,7 +3326,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_X86)
+        else if (kind == BUSTER_TYPED_X86 && input->operations[value].asm_result == 0)
         {
             if (operations == 0)
             {

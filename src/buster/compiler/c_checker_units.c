@@ -2779,6 +2779,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             ready = check_asm_index_initialize();
         }
+        // -S retains the multiversion resolvers' records through the decoder. Its shared tables must be ready before
+        // multiple units can reach their resolvers on different lanes.
+        if (ready && command->assembly)
+        {
+            ready = x86_disassembler_initialize();
+        }
         // And the intrinsic catalogue's exact table (#2654), which every unit's intrinsic set-up reads, whatever it emits.
         if (ready && !builtin_intrinsic_table_ready)
         {

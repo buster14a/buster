@@ -132,6 +132,17 @@ static bool arena_test_reservation_allowed(uint64_t bytes);
 // The user address space of x86-64's 4-level paging.
 #define BUSTER_ARENA_MAX_CAPACITY (1ull << 47)
 
+// The small zero-initialized state every compile reads or writes (#2886), together in one base page instead of
+// beside the tests' and benchmarks' large .bss arrays. The static lld link places this subsection after .bss, still
+// between __bss_start and _end, so arena_static_base_pages advises it too. Each object starts on a cache line: the
+// atomics that workers update (arena_regions, arena_medium_splits and arena_warm) share no line with another object.
+// Only the driver and checker units' production state belongs here, not standalone modules' or tests' other copies.
+#if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC && defined(BUSTER_UNIT) && (BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_CHECKER)
+#define BUSTER_START_DATA __attribute__((section(".bss.buster_start"), aligned(64)))
+#else
+#define BUSTER_START_DATA
+#endif
+
 typedef struct Arena Arena;
 struct Arena
 {
@@ -289,7 +300,7 @@ static __attribute__((unused)) void arena_page_policy(const char* setting);
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern bool arena_pages_busy;
 #elif defined(BUSTER_UNIT)
-bool arena_pages_busy;
+BUSTER_START_DATA bool arena_pages_busy;
 #else
 static bool arena_pages_busy;
 #endif
@@ -304,7 +315,7 @@ static bool arena_pages_busy;
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern bool arena_pages_medium;
 #elif defined(BUSTER_UNIT)
-bool arena_pages_medium;
+BUSTER_START_DATA bool arena_pages_medium;
 #else
 static bool arena_pages_medium;
 #endif
@@ -316,7 +327,7 @@ static bool arena_pages_medium;
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern uint32_t arena_medium_splits;
 #elif defined(BUSTER_UNIT)
-uint32_t arena_medium_splits;
+BUSTER_START_DATA uint32_t arena_medium_splits;
 #else
 static uint32_t arena_medium_splits;
 #endif
@@ -328,7 +339,7 @@ static uint32_t arena_medium_splits;
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern bool arena_executable_huge_pages;
 #elif defined(BUSTER_UNIT)
-bool arena_executable_huge_pages;
+BUSTER_START_DATA bool arena_executable_huge_pages;
 #else
 static bool arena_executable_huge_pages;
 #endif
@@ -342,7 +353,7 @@ static bool arena_executable_huge_pages;
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern bool arena_stack_base_pages;
 #elif defined(BUSTER_UNIT)
-bool arena_stack_base_pages;
+BUSTER_START_DATA bool arena_stack_base_pages;
 #else
 static bool arena_stack_base_pages;
 #endif
@@ -477,7 +488,7 @@ struct ArenaWarm
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern ArenaWarm arena_warm;
 #elif defined(BUSTER_UNIT)
-ArenaWarm arena_warm;
+BUSTER_START_DATA ArenaWarm arena_warm;
 #else
 static ArenaWarm arena_warm;
 #endif
@@ -567,7 +578,7 @@ struct ArenaLimits
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern ArenaLimits arena_limits;
 #elif defined(BUSTER_UNIT)
-ArenaLimits arena_limits;
+BUSTER_START_DATA ArenaLimits arena_limits;
 #else
 static ArenaLimits arena_limits;
 #endif
@@ -662,7 +673,7 @@ struct ArenaRegions
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern ArenaRegions arena_regions;
 #elif defined(BUSTER_UNIT)
-ArenaRegions arena_regions;
+BUSTER_START_DATA ArenaRegions arena_regions;
 #else
 static ArenaRegions arena_regions;
 #endif
@@ -4282,7 +4293,7 @@ struct LaneExitCloneArguments
 
 // The helper's stack, which only it touches, and its caller's process ID, which the caller writes before it starts it.
 static _Alignas(64) uint8_t lane_exit_stack[4096];
-static pid_t lane_exit_caller;
+static BUSTER_START_DATA pid_t lane_exit_caller;
 
 // A raw system call of up to four arguments, the helper's only way into the kernel.
 static __attribute__((unused)) long lane_exit_syscall(long number, long first, long second, long third, long fourth)
@@ -4412,7 +4423,7 @@ struct LaneExitExecutable
     uint64_t probe;
     uint64_t placed_end;
 };
-static LaneExitExecutable lane_exit_executable;
+static BUSTER_START_DATA LaneExitExecutable lane_exit_executable;
 
 // The segments of the program headers `headers`, loaded `bias` bytes from their addresses, that the kernel can map by
 // huge pages: each that is loaded read-only (code, read-only data) as far from its place in the file as a multiple of

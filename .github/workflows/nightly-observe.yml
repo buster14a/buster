@@ -1,0 +1,86 @@
+name: Nightly full-cycle observer
+
+# Independent of nightly-backfill's success, jobs and replaceable pending slot.
+# Hardware ends at 08:00; coverage publication's grace ends at 10:00 Madrid.
+on:
+  schedule:
+    - cron: '17 10 * * *'
+      timezone: Europe/Madrid
+    - cron: '17 14 * * *'
+      timezone: Europe/Madrid
+    - cron: '17 20 * * *'
+      timezone: Europe/Madrid
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'First expected calendar cycle (YYYY-MM-DD); omission starts at 2026-11-07'
+        type: string
+        default: '2026-11-07'
+  pull_request:
+    paths:
+      - '.github/workflows/nightly-observe.yml'
+      - 'tools/ci/nightly.c'
+      - 'tools/ci/nightly_observe*.c'
+      - 'tools/ci/nightly-observe.sh'
+      - 'tests/ci/nightly-observe.sh'
+
+permissions:
+  contents: read
+
+# Each scheduled/manual report has its own group; superseded PR tests may cancel.
+concurrency:
+  group: nightly-observe-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Nightly observer fixtures
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Test calendar decisions and bounded read-only collection
+        run: bash tests/ci/nightly-observe.sh
+
+  report:
+    name: Observe every expected closed calendar cycle
+    needs: test
+    if: github.event_name != 'pull_request' && github.repository_id == '1421805693' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Read ledger, exact run attempts and coverage publications
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_OBSERVE_SINCE: ${{ inputs.since || '2026-11-07' }}
+        run: bash tools/ci/nightly-observe.sh "$RUNNER_TEMP/nightly-observe"
+      - name: Publish independent cycle verdicts
+        if: always()
+        run: |
+          if [ -s "$RUNNER_TEMP/nightly-observe/report.md" ]; then
+            cat "$RUNNER_TEMP/nightly-observe/report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Nightly cycle evidence is unavailable: the observer did not finish a report. Inspect collection errors and retained inputs; coordinator success supplies no completion verdict.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Retain report and original evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-observe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/nightly-observe/**/*.json
+            ${{ runner.temp }}/nightly-observe/**/*.jsonl
+            ${{ runner.temp }}/nightly-observe/**/*.tsv
+            ${{ runner.temp }}/nightly-observe/**/*.md
+            ${{ runner.temp }}/nightly-observe/**/*.error
+            ${{ runner.temp }}/nightly-observe/workers/*.c
+          retention-days: 90
+          if-no-files-found: error

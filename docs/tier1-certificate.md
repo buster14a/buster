@@ -620,20 +620,19 @@ The decoding:
   but those, since the front end placed no record of the stack's or control's
   in a body. The saves and reloads of the values live across it in those
   registers are moves, decoded as any: one left out loses its value and is
-  refused. When the body has an `i32`, `i64` or `ptr` result (#2351), the
-  ORIGINAL also defines that value in the physical general register named by
-  `IrAsmBody.result`. Its copy into the allocated result register is decoded
-  as a move before any live-value restore; a wrong source register or a missing
-  copy is refused. An asm goto's eax exit number follows this path, and the
-  ordinary IR branches of its typed dispatch are checked as usual. Named
-  labels carry emission offsets, not additional allocation values.
+  refused. Scalar results (#2144) are then defined in the registers declared by
+  the body's result masks. The certificate rebuilds the secondary projection
+  lists from the IR, independently of the emitter, and defines each at the
+  producer's body boundary. Their captures and later uses must follow from the
+  decoded moves; a projection's later IR position does not read a register or
+  define the value again. The mixed result pressure fixtures corrupt each
+  initial output store's source register and require refusal.
+  The same capture checks cover an asm goto's eax exit number. Its typed dispatch uses ordinary IR branches.
 - **Opaque assembled asm** (#2351, `IrAsmBody.opaque`) reports
   `TIER1_CERT_EMITTED_OPAQUE`, printed as `opaque-asm`, and counts as
   `code_uncertified`. The reserved records are placeholders for bytes that
   final emission will align and splice into the function; certifying those
-  NOPs would not certify the actual template. This is an explicit unsupported
-  emitted-code shape, not a certificate of the raw bytes or a verification
-  failure. The allocation certificate still runs, and record-only bodies
+  NOPs would not certify the actual template. The emitted-code certificate records an unsupported shape. The allocation certificate still runs, and record-only bodies
   retain the checks above. A function whose body restores an explicit rsp
   input can also have the existing dynamic-frame limitation independently.
 - **Machine rows** (`TIER1_RULE_ROW`, #1284). The emitter publishes the

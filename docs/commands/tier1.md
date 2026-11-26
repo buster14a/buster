@@ -207,6 +207,26 @@ requirements. [Command index](README.md).
   dispatch on every run.
 
 
+## Copies of locals (#2818)
+
+`test-tier1-pipeline --cross-check` also compiles `tests/tier1/copy-halves.c`
+through the production driver with `--tier1-strict --verify` (#2818). Six
+builds cover x86-64, x86-64-v3 and x86-64-v4, with rematerialization on and
+off. Each checks 16 struct sizes from 33 to 256 bytes, including odd tails,
+five input seeds, locals built by eight-byte stores, cold and identical-range
+copies, volatile sources, and sequential overlapping scalar assignments.
+Destinations are one byte past a 16-byte boundary and have byte guards on both
+sides. Every byte must match the fixture's independent formula, and the
+complete output must match Clang. Assembly checks require the 64-byte local
+copy to use four high-half loads at each target, so disabling pairing fails
+the test even when the resulting scalar copies remain semantically correct.
+An inline candidate's emitted body must pair too, while its later caller
+expands the unchanged scalar summary and eliminates unread fields through
+SROA. A single assembly-emission lane puts the candidate before the caller
+to expose accidental mutation of the shared summary.
+An unobserved aggregate destination also exercises paired-copy emission with
+the source's bytes kept in a frame object by an opaque call.
+
 ## Vector-only value numbering and LICM (#2781)
 
 The C driver's default Tier 1 pipeline includes `--tier1-passes=vectors`.
@@ -482,7 +502,13 @@ designator moves to another member after the vector's keep their eight. In
 and a running last match), a `cmov` of the parity flag and no `setcc` must be
 left, and in a conditional scale by `==` (`c = p[i] == t ? c * 3 : c + 1`),
 whose accumulator recurs through the select's values by an operation, the truth
-value's `setcc`s and no parity `cmov`. In #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be
+value's `setcc`s and no parity `cmov`. In #2932's two-arm accumulations,
+`if (p[i] == t) c += 5; else c += 1`, integer and floating equality choose the
+increment independently of the accumulator. The shape check follows the
+returned register through the loop and requires exactly one arithmetic
+operation and no conditional move on that dependency. The execution oracle
+covers empty loops, both outcomes, unsigned wraparound, NaNs and signed zeros.
+In #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be
 stored back into the memory the instruction before loaded it from:
 #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be stored back
 into the memory the instruction before loaded it from. In #2843's conditional

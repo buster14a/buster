@@ -79,7 +79,25 @@ patterns are:
   walk's block: the producer materializes every slot address in the preheader,
   which dominates every use, and the address is pure with a function-global
   offset. Memory operands can fold this leaf even when it has several users;
-  an escaping address still materializes. A direct symbol's address
+  an escaping address still materializes. After the cover is chosen, a stable
+  frame leaf with several raw IR uses but just one selected operand occurrence
+  can move into that user's full-width copy or address pattern (#3644,
+  `tier1_select_sink_frame_addresses`). The existing dependency walk counts
+  those occurrences, including call arguments, indirect callees, result
+  destinations and phi edges; duplicate operands count separately. The user
+  stays at its original node and keeps its index and displacement, while the
+  entry leaf becomes covered before liveness. A plain copy keeps the frame's
+  rematerialization recipe, and an input-free constant-offset frame address
+  has the same recipe with its addend. Multiple selected users retain their
+  shared address. Incoming overflow areas, dynamic allocations, narrow values
+  and non-entry cross-block leaves keep their original placement. This avoids
+  quadratic live memberships and intervals for initialized buffers in successive
+  scopes with early returns, without changing allocation limits or frame
+  lifetimes. `test-tier1-emit` checks actual selected CFG preparation at 1,536
+  and 3,072 scopes and certifies small shared, phi, indexed and dynamic cases;
+  `test-checker-driver` compiles 1,536 scopes strictly with rematerialization on
+  and off against a separate Clang helper and compact reference, checking all
+  bytes, callee writes and early exits. A direct symbol's address
   (`IR_SYMBOL_ADDR`) ends the walk the same way (#2573), from any block, since
   it reads no value either: the operand is rip-relative, the symbol plus the
   walked displacement, and the CFG consumer gives the access's one rip-relative
@@ -1464,7 +1482,33 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `vselect m, op(a, b), w` of an `add`, `sub`, `mul`, shift, floating operation or `lane_op` only the select reads, at its lanes (#1840) | `MASKED_BINARY` | the operation's EVEX form under `k`: `vpaddd x{k}, a, b` merging into `w`, which `x` takes first by a `vmovdqa64` unless it holds it (xmm15 keeping an operand that move would overwrite), or `vpaddd x{k}{z}, a, b` where `w` is a zero vector |
 | the same at other lanes ([the SIMD IR guide](ir-simd.md)'s "Lanes") | `BINARY`, `COMPARE`, `SELECT` | the lanes' forms (`tier1_select_lane_forms`, `_compares`, `_blends`): `vpaddb` to `vpaddq`, `vpsubb` to `vpsubq`, `vpmullw`, `vpmullq`, `vpsllvw` to `vpsllvq`, `vpsrlv*`, `vpsrav*`, `vaddps` to `vdivpd`; `vpcmp[u]b` to `vpcmp[u]q`, `vcmpps` and `vcmppd` (the rows' EQ_OQ, NEQ_UQ, LT_OS, LE_OS, GT_OS and GE_OS); `vpblendmb` to `vpblendmq` |
 | `load`, `store` | `TIER1_RULE_FLOAT_LOAD`, `_STORE` and their `_ADDRESS` folds | `vmovdqu32` at the width, the address folded as a floating value's |
+| paired local COPY's `load v4i32` (#2818) | `TIER1_RULE_FLOAT_LOAD` or `_ADDRESS`, `source_width = 8` | `movsd`, `movhps` at an SSE target; `vmovsd`, `vmovhps` at an AVX target, followed by the copy's ordinary 16-byte store |
 | `phi` | `TIER1_RULE_PHI` | none: its edges' moves |
+
+A paired local copy's marked load (`BUSTER_IR_COPY_PIECE`) reads two 8-byte
+halves so each can forward from a field store that built the local. The second
+load merges into the first's register. Both loads remain within one selected
+node, whose intrinsic cost is two; they never fold into another instruction's
+wide memory operand. Unpaired scalar pieces retain their ordinary folds because
+the provenance flag is not an access effect.
+
+The ordinary vector allocation class names xmm0 through xmm14, with xmm15
+reserved for scratch. Its CFG locations are `32 + register`; an unused load's
+`NO_REGISTER` destination still performs both accesses into xmm15. VEX therefore
+suffices for both loads even at an AVX-512
+target, uses shorter encodings than EVEX, and uses the existing measured Zen 5
+rows. The destination store keeps its target's normal vector form. No new EVEX
+cost estimate or hardware measurement is required for these forms.
+
+`tier1_emit_cfg_kernel` resolves the frame base and displacement before
+expanding the node, so both load records use the final frame address, at offsets
+0 and 8. Selection leaves a symbol address in a register for a marked load;
+it does not create two relocations in a node whose symbol-reference handoff
+admits one. Displacement addition is checked before either half is emitted.
+`test-tier1-select` checks all low-register carriers, SSE/AVX/AVX-512 targets,
+indexed addresses and guard-page boundaries against byte copies, along with
+selection's metadata and scalar-fold behavior. The emitted-code certificate
+checks both halves through the same frame-aware regeneration as other nodes.
 
 A masked operation (`tier1_select_masked_binary`) has four values: the
 operation's two operands, the mask and the passthrough `w` (`values[3]`, the
@@ -1811,9 +1855,7 @@ is k0.
 ## Asm bodies (#1839)
 
 A body call ([the IR guide](ir.md)'s "Asm bodies") is `TIER1_RULE_ASM`, its
-`immediate` the body's index. It has no result or one `i32`, `i64` or `ptr`
-result in the physical general register named by `IrAsmBody.result` (one plus
-the register, #2351). Its block argument is the
+`immediate` the body's index: its optional block argument is the
 `stack_addr` of a frame object, which no register holds (no effective use, so the
 address is computed only where something else reads it), and its register
 operands (#2144, `IrAsmBody.passed`) are its effective uses, each in a register of
@@ -1822,6 +1864,10 @@ block out). The selector takes a body whose block is a `stack_addr`, which touch
 none of rsp, rbp and r15, and whose register operands are an `i32`'s, an `i64`'s
 or a `ptr`'s in a general register but the scratch r11, or a `float`'s or a
 `double`'s in xmm0 to xmm14, each register once (`tier1_select_asm_supported`).
+Its scalar results use the same register classes and widths, excluding r11 and
+xmm15, which the parallel moves need as scratch registers. The call returns the
+primary result and `IR_ASM_RESULT` nodes project the others; these projections
+select `TIER1_RULE_ASM_RESULT`, with no effective machine use or later records.
 Like a row call it is no call of a function's: no outgoing area. Only the CFG
 consumer takes it (`tier1_emit_cfg_asm`), which writes, at the node's definition
 phase:
@@ -1837,10 +1883,18 @@ phase:
 3. the body's records, each that addresses the operand block
    (`BUSTER_TIER0_ASM_BLOCK`) addressing the block's frame object from the frame's
    base register, its own branches the function's branches to their records (one
-   to the body's end the result copy's or first restore's), sized with the function's;
-4. its result, if any, copied at the IR type's width from the body's register
-   to the definition's allocated register before a restore can overwrite it;
+   to the body's end the first result capture's), sized with the function's;
+4. every result's capture (`tier1_emit_cfg_asm_results`): stores from its fixed
+   register into a spill slot first, then a parallel copy per register class;
 5. the loads back.
+
+All result intervals start at the producer's definition phase, even when pure
+instructions or another call occur before a projection's IR position. Each
+result hints its own fixed register, but does not require an allocation register
+at definition: the emitter can store it directly into its initial spill slot.
+The other results stay available while the copies resolve cycles, and no restore
+can overwrite a result before it is captured. A result's interval does not count
+as crossing the body that defines it.
 
 The body's retained labels travel to `Tier1EmitResult.asm_label_records` and
 `asm_label_names`, then the C driver's `EmittedCode`: their offsets name the
@@ -1868,10 +1922,13 @@ prologue saves once, rather than a register the body would save and restore
 around itself each time it runs; a phi's web keeps out of every body's registers
 any member crosses. If that allocation fails, the first stands and the saves
 stay. The code's certificate (`--verify`) places and compares the body's records,
-its own branches among them, reads its register operands in their registers,
-kills the registers it touches and defines its optional result in the body's
-physical register; the result copy is checked as a move ([the certificate
-guide](tier1-certificate.md)'s "Asm bodies").
+its own branches among them, reads its register operands in their registers, and
+kills the registers it touches and defines all the results in their declared
+registers before checking the captures ([the certificate guide](tier1-certificate.md)'s
+"Asm bodies"). `tier1_asm_result_test.c` exercises six mixed integer and floating
+results, both scalar widths and primary register classes, with a division between
+the producer and projections. Constrained masks force initial spills, and native
+execution checks an independent integer oracle.
 
 A whole assembled unit uses a body's opaque reserved span
 (`IrAsmBody.opaque`). Final emission replaces it with aligned bytes and rebases

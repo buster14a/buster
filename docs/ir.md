@@ -88,7 +88,7 @@ processed immediately.
 | --- | ---: | --- |
 | `op` | u8 | `IrOp`; below 64, for one-register byte tables |
 | `type` | u8 | Result type; `void` instructions cannot be value operands |
-| `flags` | u8 | Currently `BUSTER_IR_VOLATILE` on loads/stores |
+| `flags` | u8 | Opcode-specific metadata; accesses carry volatile, atomic/order, segment and `COPY_PIECE` bits |
 | `alignment_log2` | u8 | Load/store alignment as a power of two, 0 through 31 |
 | `a`, `b`, `c` | 3 × u32 | Value IDs or opcode-specific indices |
 
@@ -439,6 +439,18 @@ the same or apart, so loading each piece before storing it reads the source's
 bytes either way, overlapping pieces too; a partial overlap would need every load
 first. The pieces' alignment is unknown (`alignment_log2` 0), as a typed `LOAD`'s
 is.
+
+Nonvolatile copies larger than 32 bytes from a local mark their pieces with
+`BUSTER_IR_COPY_PIECE` (bit 7, #2818). It is an ordinary-access hint outside
+`BUSTER_IR_OBSERVABLE`, so scalar replacement, promotion and ordinary load
+folds still see the original accesses. After those passes, `ir_copy_pair`
+combines eligible adjacent i64 pairs into a `v4i32` load/store. The mark is
+not an alias promise: the pairer proves the current addresses equal or apart,
+including when forwarding connected pieces from different original copies.
+Selection reads a marked 16-byte load as two 8-byte halves and emits one
+16-byte store, preserving forwarding from the stores that built the local.
+Volatile copies keep unmarked, nonoverlapping scalar pieces; their access
+count and width do not change.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
 operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`, and
@@ -832,11 +844,8 @@ An asm statement the C driver places in its caller as an asm body
 ([the inline assembly guide](c-inline-assembly.md)'s "Asm bodies") is a body call:
 an `IR_CALL` whose descriptor names the body (`IrCall.body`, 1 plus its index in
 `IrFunction.asm_bodies`) in place of a callee, its symbol `a` 0 and its row 0,
-of no ABI records and not variadic. Its result is void or one general-register
-`i32`, `i64` or `ptr` (#2351): `IrAsmBody.result` is zero for void, otherwise
-one plus the physical register containing the result. An asm goto's result is
-its exit number in eax; the typed stream's dispatch lowers to ordinary IR
-branches, retaining its fall-through and each target. An `IrAsmBody` holds the statement's
+of no ABI records and not variadic. An asm goto returns its exit number in eax. The typed
+dispatch lowers to ordinary IR branches for fall-through and each target. An `IrAsmBody` holds the statement's
 records (borrowed from the producer, `Tier0AsmBody`'s), its own branches and their
 targets relative to its first record (a target may be the body's end), and the
 registers it writes (`touched`, rax to r15 in bits 0 to 15 and xmm0 to xmm15 in 16
@@ -855,6 +864,36 @@ travel with their body-relative record indices (`label_records`, including
 emission defines each at the body's actual location in the C function. A body
 of no instructions can still define a label at its next-record boundary.
 
+Scalar register outputs use the same register numbering. `IrAsmBody.result`
+is the primary register plus one, or zero for a void body; `result_registers`
+names every output, including the primary, and `result_wide` selects 8-byte
+outputs from that mask (the others occupy 4 bytes). A GPR output is `i32` or
+`i64`, an XMM output `f32` or `f64`. The body's `IR_CALL` returns the primary
+value in that type. An `IR_ASM_RESULT` returns a secondary: `a` names the
+body call and `b` its fixed register number, printed as
+`%n = asm_result.i64 %call register=2` for an `rdx` result.
+
+Each projection describes a value captured when its body finishes, together
+with all the other outputs. It does not defer a physical register read to the
+projection's instruction position. It follows its producer in the same block;
+each secondary register has at most one projection, and the primary cannot be
+projected again. Its ordinary consumers obey SSA dominance, including uses in
+other blocks. The parent is its only SSA operand, so rewrites remap it through
+the usual value masks. Dead projections may disappear independently; the body
+call remains an effect. CFG inlining leaves a call in place if splitting its
+block would separate a producer and projection; straight-line expansion is
+still allowed there. Tier 1 defines and captures all surviving outputs at the
+body call before restoring live registers, including outputs allocated to
+spill slots.
+
+The typed-stream adapter accepts Tier 0's contiguous result bundle: the primary
+call and its `SET_LOCAL`, followed by each secondary `X86` projection and its
+`SET_LOCAL`. A projection's `Tier0Operation.asm_result` is the register plus
+one, with no records or operands; it has no call identity to remap when a
+typed helper is inlined several times. Lowering binds it to the bundle's one
+body call. The adapter also normalizes the earlier single-result descriptor
+(`result` alone) to explicit masks using the call's result type.
+
 So every pass takes a body call as an unknown callee's of that pointer: the block
 escapes into it (neither SSA promotion nor SROA's `flagged` mode makes its slot
 values), its stores stay before the call, no load or store moves across it, and
@@ -865,12 +904,14 @@ as a row call's row is copied. Retained names prohibit inlining the function,
 since copying would define them twice. The front end removes private `.L`
 labels that no other template or directive names, leaving their local branch
 targets safe to copy. The unroller already refuses all calls. The verifier
-checks a body call's descriptor against its body (`ir_body_call_valid`): within
-the column, of no row, the appropriate void or general-register result, one
+checks a body call against its descriptor (`ir_body_call_valid`): within the column, of no row, one
 `ptr` argument or none, then a register operand's per location, each in
-registers. A result register must be touched and cannot be rsp. Branch columns
-must be in order and within the records; each label index may name a record or
-the body's end and requires both label arrays.
+registers, and the branch columns in order within the records. Its primary
+result type must match its register and width; every output must be touched,
+none may be `rsp`, and the width mask must be a subset of the result mask.
+Both verifier entry points check projection identity, type, block and
+uniqueness.
+Each retained label indexes a record or the end and requires both label columns.
 
 A whole assembled template's body has `opaque` set. Its records reserve a byte
 span that final emission replaces with the assembled unit after placement and
@@ -883,7 +924,8 @@ addresses ([the selection guide](tier1-selection.md)'s "Asm bodies" and
 [the certificate guide](tier1-certificate.md)'s "Asm bodies").
 
 The text form has no syntax for a body: the printer writes `asm #k(...)` and a
-line per body (`asm #k records=<count> branches=<count> touched=<mask>`) for
+line per body (`asm #k records=<count> branches=<count> touched=<mask>
+result=<primary-plus-one> results=<mask> wide=<mask>`) for
 diagnostics, which the parser doesn't read, so the source tools whose round trips
 print and parse the text (`test-ir-source`, `test-tier1-cfg-source`) keep the
 statements' helpers (`CheckSourceRequest.asm_helpers`), and the structural

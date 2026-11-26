@@ -147,13 +147,6 @@ struct CheckX86Call
     bool runtime_diagnostic_suppressed;
 };
 
-typedef struct CheckVectorCall CheckVectorCall;
-struct CheckVectorCall
-{
-    uint32_t node;
-    CheckVectorMember member;
-};
-
 typedef struct CheckOverloadCall CheckOverloadCall;
 struct CheckOverloadCall
 {
@@ -1914,23 +1907,16 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
     };
     if (__builtin_expect(action->op == CHECK_OP_MEMBER || action->op == CHECK_OP_ARROW, 0) && graph->vector_member_count != 0)
     {
-        uint32_t first = 0;
-        uint32_t last = graph->vector_member_count;
-        while (first < last)
+        const uint32_t count = graph->vector_member_count;
+        const CheckVectorCall* const members = graph->vector_members;
+        if (action->op == CHECK_OP_MEMBER)
         {
-            const uint32_t middle = first + (last - first) / 2;
-            if (graph->vector_members[middle].node < node)
-            {
-                first = middle + 1;
-            }
-            else
-            {
-                last = middle;
-            }
+            action->vector_member = check_vector_member_find(members, count, node);
         }
-        if (first < graph->vector_member_count && graph->vector_members[first].node == node)
+        else
         {
-            action->vector_member = &graph->vector_members[first].member;
+            action->vector_member_count = count;
+            action->vector_members = members;
         }
     }
     const uint32_t operands[] =

@@ -195,6 +195,9 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         // The hoisted addresses this block defines (#2593), which its takes and the blocks it dominates read.
         ir_typed_hoisted_starts(&sink, plan, b + 1);
         bool terminated = false;
+        // Tier 0 validates each asm result bundle as one call followed by its stores and secondary projections. Keep
+        // that call's SSA identity across the stores; no call-indexed mapping is needed for the contiguous bundle.
+        uint32_t asm_result = BUSTER_IR_NONE;
         for (uint32_t i = first; i < end; i += 1)
         {
 #if BUSTER_IR_TYPED_EMIT_SOURCES
@@ -291,11 +294,14 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 depth += 1;
                 break;
             case BUSTER_TYPED_X86:
+            {
                 depth -= input->operations[value].operand_count;
                 // A row of opmask instructions alone (#179), a scalar BMI instruction's (#141), a scalar fused multiply-add's
                 // (#1840), a vector operation, or any other row as a row call of the IR's machine row (#141), which leaves
                 // nothing on the stack for a void one.
-                stack[depth] = plan->operations[value].machine         ? ir_typed_machine_row(&sink, input->operations + value, type, stack + depth) :
+                const uint32_t projection = input->operations[value].asm_result;
+                stack[depth] = projection != 0                        ? ir_typed_emit(&sink, IR_ASM_RESULT, type, asm_result, projection - 1u, BUSTER_IR_NONE, 0) :
+                               plan->operations[value].machine         ? ir_typed_machine_row(&sink, input->operations + value, type, stack + depth) :
                                plan->operations[value].mask_bytes != 0 ? ir_typed_mask_row(&sink, plan->operations + value, stack + depth) :
                                plan->operations[value].intrinsic != 0  ? ir_typed_intrinsic(&sink, plan->operations + value, type, stack + depth) :
                                plan->operations[value].fma             ? ir_typed_fma(&sink, plan->operations + value, type, stack + depth) :
@@ -305,6 +311,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 classes[depth] = class;
                 depth += class != BUSTER_TYPED_CLASS_VOID;
                 break;
+            }
             case BUSTER_TYPED_NEG:
             case BUSTER_TYPED_NOT:
                 stack[depth - 1] = ir_typed_emit(&sink, (IrOp)ops[i], type, stack[depth - 1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
@@ -365,14 +372,16 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             }
             case BUSTER_TYPED_CALL:
             {
-                // An asm body (#1839, Tier0Function.call_asm) takes its register operands from the stack (#2144). Its
-                // optional result is an output or an asm goto's exit number; the ordinary stream retains the dispatch.
+                // An asm body (#1839, Tier0Function.call_asm) takes its register operands from the stack (#2144) and
+                // returns its primary scalar register result, if any. Its secondary result rows project this call.
+                // For asm goto the primary result is the exit number used by the ordinary dispatch.
                 const bool body = input->call_asm != 0 && input->call_asm[value] != 0;
                 depth -= input->call_argument_counts[value];
                 // An indirect call's address (U64) was pushed before its arguments, under them.
                 const bool indirect = !body && input->call_targets[value] == 0;
                 const uint32_t callee = indirect ? ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth - 1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0) : BUSTER_IR_NONE;
                 const uint32_t result = body ? ir_typed_asm_body(&sink, input, (uint32_t)value, type, stack + depth) : ir_typed_call(&sink, input, (uint32_t)value, type, stack + depth, callee);
+                asm_result = body ? result : BUSTER_IR_NONE;
                 depth -= indirect;
                 if (class != BUSTER_TYPED_CLASS_VOID)
                 {

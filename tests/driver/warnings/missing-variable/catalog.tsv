@@ -1,0 +1,35 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# The warning is off by default and under -Wall/-Wextra; its own switch and -Weverything enable it.
+definitions	definitions.c	4	0	4	-	-Wmissing-variable-declarations	initialized and tentative external definitions
+default-off	definitions.c	0	0	0	-	-	missing variable declarations are off by default
+wall-off	definitions.c	0	0	0	-	-Wall -Wextra	missing variable declarations are absent from Wall and Wextra
+everything	everything.c	2	0	2	-	-Weverything	missing variable declarations under Weverything
+definitions-c23	definitions.c	4	0	4	c23	-Wmissing-variable-declarations	missing variable declarations in C23
+disabled	definitions.c	0	0	0	-	-Wmissing-variable-declarations -Wno-missing-variable-declarations	missing variable declarations explicitly disabled
+error-enables	definitions.c	0	4	4	-	-Werror=missing-variable-declarations	Werror group enables missing variable declarations
+group-demotes	definitions.c	4	0	4	-	-Wmissing-variable-declarations -Wno-error=missing-variable-declarations	group demotion survives global Werror
+# An extern after a definition does not suppress its warning, unless it precedes a later tentative definition.
+previous-declarations	previous-declarations.c	4	0	4	-	-Wmissing-variable-declarations	only preceding declarations suppress the warning
+block-extern	block-extern.c	2	0	2	-	-Wmissing-variable-declarations	block extern declarations participate in the entity history
+declaration-controls	declaration-controls.c	0	0	0	-	-Wmissing-variable-declarations	internal and nondefining declarations are quiet
+# Initialized definitions warn immediately. Tentative objects retain first-encounter order and the last definition's place.
+tentative-order	tentative-order.c	11	0	8	-	-Wmissing-variable-declarations -Wdefault-const-init	tentative arrays and const initialization surround the missing declaration warning
+note-locations	note-locations.c	18	0	18	-	-Wmissing-variable-declarations	notes identify the written type through specifiers and record bodies
+initializer-order	initializer-order.c	9	2	6	-	-Wmissing-variable-declarations	initializer warnings and errors precede the missing declaration warning
+# The static suggestion follows semantic initializer diagnostics but precedes their queued runtime warnings.
+runtime-order	runtime-order.c	10	1	5	-	-Wmissing-variable-declarations	missing declarations lie between semantic and runtime initializer diagnostics
+initializer-recovery	initializer-recovery.c	6	5	5	-	-Wmissing-variable-declarations	invalid initializers suppress only definitions that Clang invalidates
+invalid-definitions	invalid-definitions.c	2	4	3	-	-Wmissing-variable-declarations	invalid definitions and block extern initializers do not warn
+invalid-then-tentative	invalid-then-tentative.c	1	1	1	-	-Wmissing-variable-declarations	an invalid initialized declaration does not replace a later tentative definition
+rejected-declarations	rejected-declarations.c	1	5	4	-	-Wmissing-variable-declarations	rejected declarations preserve visible extern history and exclude incomplete tentative objects
+rejected-block-extern	rejected-block-extern.c	2	1	2	-	-Wmissing-variable-declarations	rejected block extern initializers suppress only their own tentative object
+# The existing extern-initializer warning's rejection ordering is separate; initializer-order checks its valid form.
+rejected-initializer-history	rejected-initializer-history.c	2	6	2	-	-Wmissing-variable-declarations -Wno-extern-initializer	rejected initializers preserve prior extern and tentative declaration history
+mixed-recovery	mixed-recovery.c	1	2	1	-	-Wmissing-variable-declarations	a rejected block extern preserves a later rejected initializer as the acting tentative definition
+# Warning policy is read at the diagnosed definition, including the last tentative definition, not at the unit's end.
+pragma-policy	pragma-policy.c	3	2	5	-	-	pragmas enable promote demote suppress and restore the warning
+pragma-policy-enabled	pragma-policy.c	7	2	9	-	-Wmissing-variable-declarations	pragmas override the command line for initialized and tentative definitions
+system-headers	system-headers.c	5	0	5	-	-Wmissing-variable-declarations	system header definitions are ignored and their extern declarations still suppress
+system-headers-enabled	system-headers.c	7	0	7	-	-Wmissing-variable-declarations -Wsystem-headers	system header definitions under Wsystem-headers
+macro-locations	macro-locations.c	5	0	13	-	-Wmissing-variable-declarations	macro type specifiers retain complete note expansion histories

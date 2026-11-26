@@ -9,6 +9,8 @@
 // undefined object's symbol the binding of the declaration its first emitted reference names, and keeps it, so a weak
 // attribute or `#pragma weak` after that reference leaves the symbol global (GCC makes it weak; the owner's decision on
 // #1447 follows clang). That walk takes the deferred bodies too, which clang emits at the unit's end.
+// Late transparent unions (#1844) need the same eager emission points for function addresses and for indirect calls,
+// including bodies with no reference to a named function. Their optional node column shares this walk.
 
 // What the emission walk finds of the watched objects' references (CheckProgramUses): each one's earliest emission
 // point among the eager references in `first` (BUSTER_CHECK_NONE before one, 0 for an object that isn't watched); and
@@ -37,6 +39,9 @@ struct CheckProgramUses
     uint32_t record_count;
     uint32_t record_capacity;
     uint32_t source;
+    // With late transparent unions, every emitted expression's earliest eager point (graph.count entries).
+    uint32_t* abi_nodes;
+    TypeId* abi_types;
     // A reference past `record_capacity`, which leaves the replay to the deferred bits.
     bool records_full;
 };
@@ -80,6 +85,11 @@ static void check_program_symbol_initializer(const CheckProgram* program, const 
         if (write->kind == CHECK_INIT_VALUE && write->node < program->input->graph.count && check_stream_overload_head(program->stream, write->node) != 0)
         {
             check_program_symbol_reference(program, uses, write->value.object, point, program->input->graph.tokens[write->node]);
+            if (uses->abi_types != NULL && write->overload_candidate != 0 && write->overload_candidate <= program->input->graph.overload_candidate_count)
+            {
+                uses->abi_nodes[write->node] = point < uses->abi_nodes[write->node] ? point : uses->abi_nodes[write->node];
+                uses->abi_types[write->node] = program->input->graph.overload_candidates[write->overload_candidate - 1].type;
+            }
         }
     }
 }
@@ -125,6 +135,11 @@ static void check_program_symbol_expression(const CheckProgram* program, uint32_
             if (selected != NULL)
             {
                 check_program_symbol_reference(program, uses, selected->object, point, token);
+                if (uses->abi_types != NULL)
+                {
+                    uses->abi_nodes[child] = point < uses->abi_nodes[child] ? point : uses->abi_nodes[child];
+                    uses->abi_types[child] = selected->type;
+                }
             }
         }
     }
@@ -144,8 +159,8 @@ static bool check_program_symbol_bodies(CheckProgram* program, CheckProgramUses*
     for (uint32_t b = 0; valid && b < program->body_count; b += 1)
     {
         const CheckProgramBody* body = program->bodies + b;
-        bool candidate = false;
         const bool eager = program->body_eager == NULL || program->body_eager[b] != 0;
+        bool candidate = uses->abi_nodes != NULL && eager;
         for (uint32_t r = 0; (eager || uses->deferred != NULL) && !candidate && r < body->reference_count; r += 1)
         {
             const uint32_t object = program->references[body->reference_first + r];
@@ -205,6 +220,10 @@ static bool check_program_symbol_bodies(CheckProgram* program, CheckProgramUses*
                 {
                     check_target_feature_expression(&walk, &emission, item);
                     check_program_symbol_expression(program, item, walk.seen, uses, point);
+                    if (uses->abi_nodes != NULL)
+                    {
+                        uses->abi_nodes[item] = point < uses->abi_nodes[item] ? point : uses->abi_nodes[item];
+                    }
                 }
                 else
                 {

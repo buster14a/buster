@@ -1525,7 +1525,16 @@ static void tier0_test_vector_placed(Tier0TestVectorProgram* program, uint32_t k
     }
     for (uint32_t j = 0; j < kind->operand_count; j += 1)
     {
-        tier0_test_vector_simple_leaf(program, kind->operands[j], state);
+        if (kind->operand_count == 1 && result == BUSTER_TYPED_CLASS_VECTOR && tier0_test_vector_type_class(kind->operands[j]) == BUSTER_TYPED_CLASS_VECTOR)
+        {
+            // Keep the live floats across the unary row, including the VEX register limit and its deep fallback.
+            tier0_test_vector_address(program, 0, 0);
+            tier0_test_vector_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, tier0_test_vector_type_bytes(kind->operands[j]));
+        }
+        else
+        {
+            tier0_test_vector_simple_leaf(program, kind->operands[j], state);
+        }
         if (k == BUSTER_TIER0_TEST_VECTOR_ADD_S && !program->overflow)
         {
             // The placement leaves are arbitrary bits. Make each lane a finite normal float so the scalar model and
@@ -1620,6 +1629,34 @@ static void tier0_test_vector_immediate_placement(Tier0TestTally* tally, const c
                       "%s: deep row did not spill and restore every live float (spills %#x, fills %#x, wanted %#x)", name, spills, fills, live);
 }
 
+// A jump brings its vector in its slot. Join once at the widening row and once at the SET to exercise both
+// boundaries of LOAD / X86 / SET. The taken arm supplies a different vector from the straight-line load.
+static void tier0_test_vector_register_joins(Tier0TestVectorProgram* program)
+{
+    memset(program, 0, sizeof(*program));
+    const uint32_t vector = BUSTER_TYPED_CLASS_VECTOR;
+    for (uint32_t join = 0; join < 2; join += 1)
+    {
+        tier0_test_vector_address(program, 3, join * 64);
+        tier0_test_vector_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1);
+        const uint32_t branch = program->count;
+        tier0_test_vector_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 0);
+        program->constant_bytes[join] = join == 0 ? 4 : 16;
+        program->constants[8 * join] = 0x76543210u + join;
+        program->constant_count += 1;
+        tier0_test_vector_emit(program, BUSTER_TYPED_CONST, vector, join);
+        const uint32_t jump = program->count;
+        tier0_test_vector_emit(program, BUSTER_TYPED_JUMP_VALUE, vector, 0);
+        program->values[branch] = program->count;
+        tier0_test_vector_address(program, 0, 0);
+        tier0_test_vector_emit(program, BUSTER_TYPED_LOAD, vector, 4);
+        program->values[jump] = program->count + join;
+        tier0_test_vector_emit(program, BUSTER_TYPED_X86, vector, BUSTER_TIER0_TEST_VECTOR_EXTEND_B4);
+        tier0_test_vector_emit(program, BUSTER_TYPED_SET, vector, 16);
+    }
+    tier0_test_vector_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+}
+
 // Each kind at placements whose outcome this file works out apart from Tier 0: under no live values and under 8 floats
 // and 3 integers (which every kind fits); under 15 floats, the most a stream keeps live across an entry of another
 // class (their consumer's DUP, before it, takes the 16th: tier0_test_vector_adjacent), for the kinds without a VEX
@@ -1678,6 +1715,20 @@ static void tier0_test_vector_placement(Tier0TestTally* tally, uint64_t seed, Ti
                 tier0_test_vector_inputs(shared, &state);
                 tier0_test_vector_check(tally, name, &function, image, length, shared, 0);
             }
+        }
+    }
+    if (ready)
+    {
+        tier0_test_vector_register_joins(program);
+        const Tier0Function function = tier0_test_vector_function(program);
+        arena_pop_to(&arena, 0);
+        Tier0Error error = TIER0_OK;
+        const char* name = "branches into a vector conversion";
+        const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, TIER0_OK, &error);
+        if (length != 0)
+        {
+            tier0_test_vector_inputs(shared, &state);
+            tier0_test_vector_check(tally, name, &function, image, length, shared, NULL);
         }
     }
     arena_release(&arena);

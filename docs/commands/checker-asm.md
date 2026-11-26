@@ -71,11 +71,13 @@ requirements. [Command index](README.md).
   boundary and compares both kernels with Clang and independent unsigned
   models (#1359).
   `test-checker --program-asm` runs the inline-assembly source fixtures alone;
-  the full `test-checker` command continues to include them. The
-  `checker/programs/asm-directive-placement` fixture requires helper-free
-  planning at both tiers and checks bytes, alignment, sections and relocations
-  by native execution; its dead blocks exercise missing-anchor handling, and
-  the planner capacity sweep covers whole-unit allocation failure. A `target_clones`
+  the full `test-checker` command continues to include them.
+  `test-checker-driver --tier1-asm-only` runs asm bodies and the multi-result fixture
+  `tests/driver/asm-body-results.c` at both tiers against Clang, checks emitted
+  frame accesses and code certificates, and exercises both Tier 1 schedulers (#2144).
+  The `checker/programs/asm-directive-placement` fixture checks helper-free placement at both tiers,
+  including byte layout, alignment, sections, relocations, dead spans and allocation failure.
+  A `target_clones`
   body's copies, a naked one's among them, each plan their statements for
   their version's instruction set (#2247); `test-checker-driver
   --target-versions-only` runs such bodies at both tiers against clang's build
@@ -107,3 +109,16 @@ substitution. A raw `->` marker uses a zero-width asm body anchored at its
 emitted record. A standalone `.ascii` marker retains the byte range that the
 assembler gives its directive in the assembled unit. The [driver guide](driver.md#-s-1362)
 describes the supported operands and output.
+
+Other supported inline assembly uses the same constraint checks and placement
+as `-c`. Placed statements, record helpers and naked functions retain their
+sized instruction records for the assembly writer. Templates with directives
+and file-scope assembly retain the full assembler's matched records at their
+final byte offsets, together with the existing symbolic atoms and fixups.
+The writer interleaves those instructions with data, alignment bytes, labels,
+relocations and CFI. It preserves the selected layout when a directive puts
+data inside a code section. These presentation records are requested only for
+`-S`; ordinary object emission does not allocate them. The output uses
+canonical AT&T syntax, while the extraction markers above keep their literal
+substituted spelling. Existing constraint and integrated-assembler refusals
+remain the same as for object emission.

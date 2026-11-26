@@ -456,6 +456,10 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
 #include "buster/compiler/assembler_benchmark.c"
 #endif
+// The tier-neutral source and frame events and their resolution against a final layout (#1056), shared by assembly
+// presentation and the frame emitters below.
+#include "buster/compiler/emission_metadata.c"
+
 // The assembly sink (#1362): a unit of the link representation as GNU as's AT&T source, from the emission's symbolic view
 // (the link and each function's sized records), which -S writes (the emission keeps the records for it), and its
 // tests, for the test-assembly-output command, which take the assembler's matcher for their fixtures' records and its
@@ -585,10 +589,6 @@ int run_builtin_benchmark(int argc, char** argv);
 #include "buster/compiler/calling_convention_test.c"
 #endif
 int run_calling_convention_benchmark(int argc, char** argv);
-
-// The tier-neutral source and frame events and their resolution against a final layout (#1056), which the frame
-// emitters below publish and the emission consumes.
-#include "buster/compiler/emission_metadata.c"
 
 // Frame storage, explicit prologue/epilogue planning and its native instruction consumer.
 #if BUSTER_BACKEND_CONSUMER
@@ -866,6 +866,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #endif
 #if BUSTER_BACKEND_CONSUMER
 #include "buster/compiler/ir.c"
+#include "buster/compiler/ir_copy_pair.c"
 #include "buster/compiler/ir_simd_typed.c"
 #include "buster/compiler/ir_lower.c"
 #include "buster/compiler/ssa_ir.c"
@@ -942,9 +943,6 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #endif
 // #2755: Tier 1's loop unroller, --tier1-passes=+unroll.
 #include "buster/compiler/ir_optimize_unroll.c"
-#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
-#include "buster/compiler/ir_optimize_unroll_test.c"
-#endif
 // #3309: loop store motion, before promotion.
 #include "buster/compiler/ir_store_motion.c"
 #include "buster/compiler/ir_optimize_sroa.c"
@@ -963,6 +961,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_vectorize_loops.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_vectorize_loops_test.c"
+#include "buster/compiler/ir_optimize_unroll_test.c"
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_store_motion_test.c"

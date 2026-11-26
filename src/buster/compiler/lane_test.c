@@ -2403,6 +2403,46 @@ static bool lane_test_arenas(void)
     const bool end_advised = lane_test_vm_flag((uintptr_t)_end - 1, "nh", &found) && found;
     lane_test_expect(&tally, probe_advised && end_advised && bss_probe[0] == 0, "the executable's .bss may take huge pages");
 
+#if defined(BUSTER_UNIT) && BUSTER_UNIT == BUSTER_UNIT_DRIVER
+    // The small state of a compile (#2886) must share a base page and remain inside the bounds the advice covers.
+    // The marks are absent when another linker places the subsection or the build is dynamic.
+    extern char buster_start_data_begin[] __attribute__((weak));
+    extern char buster_start_data_end[] __attribute__((weak));
+    extern char __bss_start[];
+    const uintptr_t start_data_begin = (uintptr_t)buster_start_data_begin;
+    const uintptr_t start_data_end = (uintptr_t)buster_start_data_end;
+    if (start_data_begin != 0)
+    {
+        const struct
+        {
+            const void* address;
+            uint64_t bytes;
+        } objects[] = {
+            { &arena_pages_busy, sizeof(arena_pages_busy) },
+            { &arena_pages_medium, sizeof(arena_pages_medium) },
+            { &arena_medium_splits, sizeof(arena_medium_splits) },
+            { &arena_executable_huge_pages, sizeof(arena_executable_huge_pages) },
+            { &arena_stack_base_pages, sizeof(arena_stack_base_pages) },
+            { &arena_warm, sizeof(arena_warm) },
+            { &arena_limits, sizeof(arena_limits) },
+            { &arena_regions, sizeof(arena_regions) },
+            { &lane_exit_caller, sizeof(lane_exit_caller) },
+            { &lane_exit_executable, sizeof(lane_exit_executable) },
+        };
+        bool packed = start_data_begin >= (uintptr_t)__bss_start && start_data_end <= (uintptr_t)_end && start_data_end > start_data_begin &&
+                      (start_data_begin & (BUSTER_ARENA_PAGE_BYTES - 1)) == 0 && start_data_end - start_data_begin <= BUSTER_ARENA_PAGE_BYTES;
+        for (uint32_t i = 0; i < sizeof(objects) / sizeof(objects[0]); i += 1)
+        {
+            const uintptr_t address = (uintptr_t)objects[i].address;
+            packed &= address >= start_data_begin && address <= start_data_end && objects[i].bytes <= start_data_end - address &&
+                      (address & (BUSTER_LANE_CACHE_LINE_BYTES - 1)) == 0;
+        }
+        const bool start_data_advised = lane_test_vm_flag(start_data_begin, "nh", &found) && found;
+        lane_test_expect(&tally, packed, "the compile's small writable state is not together in one page of .bss");
+        lane_test_expect(&tally, start_data_advised, "the compile's small writable state's page may take huge pages");
+    }
+#endif
+
     printf("arenas: %lu checks, %lu failed\n", (unsigned long)tally.checks, (unsigned long)tally.failures);
     arena_pages_busy = started_busy;
     arena_pages_medium = started_medium;

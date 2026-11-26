@@ -635,6 +635,14 @@ cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/costs.c -o b
 build/costs --self-test --root .
 ```
 
+The five active tables were recollected on 26 November 2026 from all 60 suite
+logs of passing merge candidates 45779319802, 45779273785 and 45778920528
+(#2658). The [reproduction record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ci-work-reuse-2658-2026-11-26)
+contains the exact logs, checksums, old and new schedules and held-out runs.
+Every current heading has three measured samples in each active row. The
+schedule comparisons predict shorter longest shards; they do not measure a
+whole-candidate speedup or include vector shard one's extra compilation.
+
 - **What a cost is.** A command's time times the CPUs it held (its heading's
   `[N CPUs]`, at most the runner's 4), in seconds: `parallel`'s unit. A
   measured cost is the 90th percentile (nearest rank) of the command's samples
@@ -905,6 +913,65 @@ the policy. In short:
   requires them (#2658); `changes` runs
   `nightly --self-test`, which also fails if the build or the inventory ever
   calls `git`.
+
+## Observe closed nightly calendar cycles
+
+`nightly observe` assesses every expected closed Madrid date from
+**2026-11-07**, independently of the coordinator's success. Its read-only
+collector is `tools/ci/nightly-observe.sh`; its independent hosted workflow is
+`.github/workflows/nightly-observe.yml`, scheduled for 10:17, 14:17 and 20:17
+Europe/Madrid. It reads the existing ledger and exact coverage/run/attempt
+evidence, dispatches no work and creates no second ledger.
+
+The hardware deadline remains 08:00 Madrid, or the historical worker's earlier
+deadline. Publication/reporting has a separate two-hour grace until 10:00.
+Missing dates, failures and interruptions remain visible; targeted work cannot
+satisfy a full snapshot, and stale or unavailable evidence cannot pass. The
+report retains the original pin, a substitute's measured SHA, native
+qualification, coverage and prior attempts, with hosted preparation diagnostics
+separate. Read [the verdict, freshness, retention and recovery
+rules](../ci.md#independent-calendar-observer-3627) before interpreting results.
+
+Collect and assess the live sources on a hosted machine with read access to
+the repository and Actions artifacts, using a new output directory for each
+capture:
+
+```sh
+GITHUB_REPOSITORY=buster14a/buster bash tools/ci/nightly-observe.sh build/nightly-observation
+```
+
+To replay retained inputs without a network call, build the same C tool and
+pass the observation's recorded epoch. This example uses 12:00 UTC on
+2026-11-26; use the time that belongs to the retained inputs:
+
+```sh
+mkdir -p build
+cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/nightly.c -o build/nightly
+build/nightly observe --since 2026-11-07 --now 1795694400 \
+    --ledger build/nightly-observation/ledger.tsv \
+    --observations build/nightly-observation/observations.tsv \
+    --attempts build/nightly-observation/attempts \
+    --records build/nightly-observation/records \
+    --report build/nightly-observation/replayed.md
+```
+
+A manual `--since` subrange is explicitly partial; scheduled runs retain the
+fixed start. The 1,024-cycle bound and expired evidence produce unavailable
+observations rather than dropping old dates. Replaying an old collection
+describes its historical observation, not current freshness. Preserve inputs
+needed beyond the workflow artifacts' 90 days in `buster-performance`.
+
+Run the offline observer and existing nightly regressions:
+
+```sh
+bash tests/ci/nightly-observe.sh
+bash tests/ci/nightly.sh
+```
+
+Fixtures cover whole-date loss, early failure, interruption, late records,
+substitution, later targeted success, reruns, source failures and both Madrid
+DST transitions. Passing them verifies implementation; production completion
+and report delivery must be observed separately.
 
 ## Queue and execution timing
 

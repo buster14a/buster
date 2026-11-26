@@ -210,25 +210,51 @@ the block's load did). Tier 0 takes it as it takes a call:
   saves `cpuid`'s rbx;
 - rsp is 16-byte aligned at the template, as in a function that calls.
 
-A register output can be the call row's result instead of a store (#2144,
-`CheckProgramAsm.inline_result`, `Tier0AsmBody.result`, `IrAsmBody.result`): the first output that is
-a general register's `int` or `long` (4 or 8 bytes; not a high byte, `A`'s
-widened register, nor a register variable's) and whose lvalue is an automatic,
-non-volatile object named by itself (`check_asm_returnable`), and that the body
-touches. The body doesn't store it and the block holds no address for it; a `+`
-one's input is the object's value, passed in its register. The row's result is
-in that register, which Tier 0 moves to its depth's (`tier0_call_result_register`,
-the deep path's store too), and the lowering's SET_LOCAL after the row stores it
-into the object's local. Tier 1 gives the body call the same `i32`, `i64` or
-`ptr` result and copies it from the body's physical register to its allocated
-destination before restoring values live across the body (#2351). The `"c"`
-shift's `+r` output then costs no block slot, no address and no store through
-it in either tier. An asm goto reserves its result for the exit number in eax;
-its operand outputs are stored on every way out instead.
+A scalar register output can be a call result instead of a store through its
+address (#2144). The eligible outputs are 4- or 8-byte general-register values,
+scalar `float`/`double` values in xmm0–xmm15, and materialized flag outputs, whose
+lvalues are automatic, non-volatile, non-atomic objects named by themselves
+(`check_asm_returnable`). High bytes, `A`'s widened register, explicit register
+variables and packed vectors retain their existing paths. The body's touched
+mask must contain each returned register. A `+` output's input is the object's
+value, passed in its register; no returned output puts an address in the block.
+When no operand needs the block, no block object is made. Its unused output-store
+scratch registers also leave the touched mask; operand registers, explicit
+clobbers, template writes and returned results remain, so unrelated live values
+need no saves for stores that no longer exist.
 
-There is no call, return or frame of the template's own. `cpuid` with its four
-fixed outputs runs with its input moves, `cpuid`, and output stores or a result
-copy in its function.
+`CheckProgramAsm.inline_result` identifies the first result. Every returned
+place contributes to `Tier0AsmBody.result_registers`; `result_wide` identifies
+the eight-byte results. The typed stream contains the primary `CALL/SET_LOCAL`
+followed by one `X86/SET_LOCAL` pair per other result. These zero-record X86
+rows carry only `Tier0Operation.asm_result`, the register plus one. They refer
+to the same invocation, so their immutable rows can be shared across inline
+copies. The validator requires the complete contiguous group, with each result
+register once and no branch entering its interior. Tier 0 absorbs the group
+and writes the output locals directly from their registers before restoring
+live values, including on its deep-stack path. Its home allocation keeps
+those locals outside the body's touched registers.
+
+The IR preserves the primary call result and represents the others with
+`asm_result` projections that name the producer call and register. Tier 1
+defines all snapshots at the call's position, captures spilled outputs first,
+and resolves the remaining register transfers together before restoring live
+values. Its code certificate checks each result's declared register. Thus
+`mulq`'s rax/rdx pair and `cpuid`'s four outputs remain separate SSA values
+without output-address round trips. Tier 1 leaves scratch-register output
+shapes it cannot place to the existing Tier 0 fallback.
+
+The returned stores form an eligible suffix of the output operands. An earlier
+named local keeps its store in the body if a later indirect output could name
+the same object; this preserves output assignment order. Returned flag outputs
+take distinct general registers after the other stores, which preserve the
+template's flags. Their placement prefers registers already touched and
+excludes ordinary output registers, frame registers and the move scratch. An
+asm goto keeps its exit in eax and its existing output stores.
+
+There is no call, return or frame of the template's own. `cpuid` with four
+eligible local outputs has a body consisting of the `cpuid` instruction alone;
+its input and result transfers belong to the surrounding allocation.
 `rdtsc`, `syscall` (musl's wrappers' explicit register variables among them), a
 shift's count in `"c"`, Q's class, x87 operands (`fsqrt` on `"+t"`, fprem's
 loops), flag outputs, `ldmxcsr` and the rest place the same way. Tier 0's
