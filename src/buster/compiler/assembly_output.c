@@ -791,7 +791,7 @@ static bool assembly_instruction(AssemblyText* text, const Link* link, const Ass
     const X86FormDescription* form = x86_form_description(record->form);
     const char* operands = assembly_operands(form->syntax);
     const bool memory = (record->mode & BUSTER_X86_MODE_MEMORY) != 0;
-    // A record GNU as encodes otherwise: its bytes, but where a relocation is in them, which the sink refuses (below).
+    // The callers split a relocated record GNU as encodes otherwise into bytes and symbolic fields before this point.
     const bool otherwise = assembly_escaped(record, form, immediate->present);
     const bool referenced = displacement->present || immediate->present;
     const bool escaped = otherwise && !referenced;
@@ -963,8 +963,7 @@ static bool assembly_instruction(AssemblyText* text, const Link* link, const Ass
             }
         }
     }
-    // A form GNU as encodes otherwise with a relocation in it (`mov $symbol, %ecx` by C7, an MPX bnd branch to a
-    // symbol), which no backend emits: refused, rather than printed as another encoding.
+    // A relocated form whose spelling changes its encoding belongs to assembly_escaped_fields in the caller.
     const bool unescaped = otherwise && referenced;
     spelled = spelled && !unescaped;
     if (!spelled)
@@ -2113,7 +2112,7 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
                 error = ASSEMBLY_INVALID;
                 *reason = "a relative branch without a target";
             }
-            else if (escaped_addend)
+            else if (escaped_addend || (first_fixup != next_fixup && assembly_escaped(record, form, immediate.present)))
             {
                 error = assembly_escaped_fields(text, link, names, atom, form, at, record_end,
                                                 fixup_begin + first_fixup, fixup_begin + next_fixup, reason);
@@ -2472,7 +2471,12 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
             const uint8_t class = link->atoms.class[a];
             const AtomId associated = section.link;
             const bool ordered = (section.flags & SHF_LINK_ORDER) != 0;
-            const bool unique_section = ordered || section.identity != 0;
+            // The CFI preamble owns the default .eh_frame as UNWIND. A source assembly unit may retain a distinct
+            // PROGBITS section of that name; preserve both identities instead of redeclaring the default's type.
+            const bool separate_frame_section = frames && section.type != SHT_X86_64_UNWIND &&
+                                                section.name_length == sizeof(".eh_frame") - 1 &&
+                                                memcmp(section.name, ".eh_frame", sizeof(".eh_frame") - 1) == 0;
+            const bool unique_section = ordered || section.identity != 0 || separate_frame_section;
             if (unique_section && section_slots == NULL)
             {
                 uint64_t capacity = 16;

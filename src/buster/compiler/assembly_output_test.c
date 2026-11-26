@@ -11,8 +11,7 @@
 //     and the text of a small unit compared whole with its expected text;
 //   - TLS, groups, GNU unique objects, mixed source assembly and semantic unwind comparisons;
 //   - the refusals, each by its reason (invalid groups, unsupported common bindings and aliases,
-//     code without records, two symbols of one name, a name of the sink's prefix, a relocation GNU as encodes otherwise: an MPX
-//     bnd call), and the views that contradict themselves (records that
+//     code without records, two symbols of one name, a name of the sink's prefix), and the views that contradict themselves (records that
 //     aren't their atom's bytes, a symbol inside an instruction, a branch without a target);
 //   - the guarded tails: an output arena too small for the text, at every length short of it, and a scratch arena too
 //     small for the tables, each leaving both arenas as they were;
@@ -741,6 +740,45 @@ static void assembly_test_wide_code_addend(AssemblyTest* test)
     arena_pop_to(&test->arena, mark);
 }
 
+// GNU as shortens accumulator and register-immediate forms even with symbolic operands. Preserve the chosen bytes
+// and each relocation field in ordinary emitted code and retained mixed code, including the MPX branch prefix.
+static void assembly_test_escaped_fixups(AssemblyTest* test)
+{
+    const uint64_t mark = test->arena.length;
+    AssemblyFixture fixture;
+    assembly_fixture_begin(&fixture, &test->arena);
+    const X86Instruction records[] = {
+        { .form = X86_FORM_ADD_RM64_IMM32, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_REGISTER_DIRECT },
+        { .form = X86_FORM_MOV_RM32_IMM32, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_REGISTER_DIRECT },
+        { .form = X86_FORM_RET },
+    };
+    uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(BUSTER_ARRAY_LENGTH(records))];
+    uint32_t offsets[BUSTER_ARRAY_LENGTH(records) + 1];
+    const int64_t length = x86_encode(records, BUSTER_ARRAY_LENGTH(records), bytes, sizeof(bytes), offsets, NULL);
+    const AtomId atom = length > 0 ? link_add_atom(&fixture.link, BUSTER_LINK_CLASS_TEXT, 0, (uint64_t)length, bytes, 0) : 0;
+    fixture.valid = fixture.valid && atom != 0 && atom < BUSTER_ASSEMBLY_TEST_ATOMS;
+    if (fixture.valid)
+    {
+        fixture.code[atom] = (AssemblyCode){ .records = records, .count = BUSTER_ARRAY_LENGTH(records) };
+        assembly_fixture_define(&fixture, "escaped_fields", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, atom, 0, (uint64_t)length);
+        assembly_fixture_symbol(&fixture, "escaped_tls", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_TLS);
+        assembly_fixture_fixup(&fixture, atom, offsets[1] - 4, BUSTER_LINK_FIXUP_TPOFF32, "escaped_tls", 0);
+        assembly_fixture_fixup(&fixture, atom, offsets[2] - 4, BUSTER_LINK_FIXUP_ABS32, "escaped_data", 9);
+        assembly_fixture_function(test, &fixture, "escaped_branch", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 0, "bnd call escaped_function\nret\n");
+        static const char* const pieces[] = {
+            "\t.byte 0x48,0x81,0xc0\n\t.long escaped_tls@TPOFF\n",
+            "\t.byte 0xc7,0xc1\n\t.long escaped_data+9\n",
+            "\t.byte 0xf2,0xe8\n\t.reloc ., R_X86_64_PLT32, escaped_function-4\n\t.long 0\n",
+        };
+        assembly_test_section_fixture(test, &fixture, NULL, "escaped-fixups", pieces, BUSTER_ARRAY_LENGTH(pieces));
+        fixture.code[atom].offsets = offsets;
+        assembly_test_section_fixture(test, &fixture, NULL, "mixed-escaped-fixups", pieces, BUSTER_ARRAY_LENGTH(pieces));
+    }
+    assembly_test_check(test, fixture.valid, "construct escaped instruction fixup fixture", NULL);
+    assembly_fixture_end(&fixture);
+    arena_pop_to(&test->arena, mark);
+}
+
 static void assembly_test_groups(AssemblyTest* test)
 {
     const uint64_t mark = test->arena.length;
@@ -986,7 +1024,6 @@ enum
     ASSEMBLY_TEST_RECORDS,
     ASSEMBLY_TEST_INSIDE,
     ASSEMBLY_TEST_TARGETLESS,
-    ASSEMBLY_TEST_BND_CALL,
     ASSEMBLY_TEST_CHANGES,
 };
 
@@ -1045,10 +1082,6 @@ static void assembly_test_refusal(AssemblyTest* test, uint32_t change, AssemblyE
     {
         const AtomId branching = assembly_fixture_function(test, &fixture, "g", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 4, "jmp .L1\n.L1:\nret\n");
         fixture.code[branching].branch_count = 0;
-    }
-    if (change == ASSEMBLY_TEST_BND_CALL)
-    {
-        assembly_fixture_function(test, &fixture, "g", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 4, "bnd call external\nret\n");
     }
     const AssemblyView view = assembly_fixture_view(&fixture);
     const uint64_t output_length = test->output.length;
@@ -1790,6 +1823,7 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_unique(&test);
         assembly_test_mixed(&test);
         assembly_test_wide_code_addend(&test);
+        assembly_test_escaped_fixups(&test);
         assembly_test_tls_fixups(&test);
         assembly_test_refusal(&test, ASSEMBLY_TEST_GROUP, ASSEMBLY_INVALID, "invalid section groups");
         assembly_test_refusal(&test, ASSEMBLY_TEST_WEAK_COMMON, ASSEMBLY_UNSUPPORTED, "a non-global common definition");
@@ -1800,7 +1834,6 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_refusal(&test, ASSEMBLY_TEST_RECORDS, ASSEMBLY_INVALID, "don't encode to their function's bytes");
         assembly_test_refusal(&test, ASSEMBLY_TEST_INSIDE, ASSEMBLY_INVALID, "a symbol inside an instruction");
         assembly_test_refusal(&test, ASSEMBLY_TEST_TARGETLESS, ASSEMBLY_INVALID, "a relative branch without a target");
-        assembly_test_refusal(&test, ASSEMBLY_TEST_BND_CALL, ASSEMBLY_UNSUPPORTED, "GNU as encodes otherwise");
         assembly_test_patchable(&test, "tests/assembly-output/patchable.c", "patchable", test.cross_check);
         // GNU as refuses a section named after an ordinary symbol. Compare this spelling with direct object emission.
         assembly_test_patchable(&test, "tests/assembly-output/patchable-collisions.c", "patchable-collisions", false);

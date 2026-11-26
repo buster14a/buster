@@ -638,7 +638,9 @@ The form contract, which its tests hold GNU as to:
   record GNU as encodes otherwise whatever it is written as
   (`assembly_escaped`: the encoder tests' `x86_assembler_prefers_another_form`
   in 64-bit mode, such as `81 /0` with an immediate an imm8 holds) is its bytes,
-  `.byte`, after a comment naming it; never another encoding.
+  `.byte`, after a comment naming it. A relocated field in such a record uses
+  its symbolic data directive between the opcode and other literal bytes,
+  preserving the selected instruction length and exact relocation.
 - **Relocations.** A fixup is its target's name and its addend as the source
   writes it, never a field's bytes: a PC-relative field's addend is the link's
   plus the distance from the field to the instruction's end

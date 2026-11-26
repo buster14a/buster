@@ -490,7 +490,11 @@ static void assembly_test_cfi_object(AssemblyTest* test, AssemblyFixture* fixtur
     ObjectSymbols symbols = { 0 };
     const bool prepared = printed.error == ASSEMBLY_OK && object_prepare(&units, &fixture->link, 1, &test->scratch) &&
                           object_map_symbols(&symbols, &fixture->link, &test->scratch);
-    const Object original = prepared ? object_build(&fixture->link, &units, &symbols, 0, (ObjectOptions){ 0 }, BUSTER_S8("fixture.c"), &test->scratch) :
+    const ObjectOptions options = {
+        .atom_sections = view->sections,
+        .atom_section_count = view->section_count,
+    };
+    const Object original = prepared ? object_build(&fixture->link, &units, &symbols, 0, options, BUSTER_S8("fixture.c"), &test->scratch) :
                                       (Object){ .error = OBJECT_ERROR_FULL };
     AsmResult assembled = printed.error == ASSEMBLY_OK ?
                           asm_assemble((String8){ .pointer = (char*)printed.bytes, .length = printed.length }, test->index,
@@ -607,49 +611,61 @@ static void assembly_test_cfi_boundaries(AssemblyTest* test)
     const AtomId source_unwind = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_EH_FRAME, 3, source_table, sizeof(source_table));
     assembly_fixture_fixup(&fixture, source_unwind, 48, BUSTER_LINK_FIXUP_PC32, "signal_frame", 0);
     assembly_test_cfi_object(test, &fixture, &view, "cfi-coexist");
+    ObjectAtomSection sections[BUSTER_ASSEMBLY_TEST_ATOMS] = { 0 };
+    sections[source_unwind] = (ObjectAtomSection){ .name = BUSTER_S8(".eh_frame"), .type = SHT_PROGBITS, .flags = SHF_ALLOC };
+    view.sections = sections;
+    view.section_count = fixture.link.atoms.count;
+    assembly_test_cfi_object(test, &fixture, &view, "cfi-source-progbits");
     assembly_fixture_end(&fixture);
     arena_pop_to(&test->arena, mark);
 }
 
-// Successful semantic comparison replaces the sections' view types only, so the existing generic comparator still
-// checks every ordinary code/data byte, symbol and relocation. These views are private scratch copies in the caller.
+// Successful semantic comparison replaces the unwind sections' view types only, so the existing generic comparator
+// still checks every ordinary code/data byte, symbol and relocation. A same-named source PROGBITS section remains
+// exact. These views are private scratch copies in the caller; match section identities before changing their types.
 static bool assembly_cfi_normalize(ObjectView* ours, ObjectView* theirs, Arena* arena, char* error, uint64_t error_size)
 {
-    const uint64_t a = object_test_section_named(ours, ".eh_frame", false);
-    const uint64_t b = object_test_section_named(theirs, ".eh_frame", false);
-    bool valid = (a == 0) == (b == 0);
-    const Elf64_Shdr* first = a != 0 ? &ours->sections[a] : NULL;
-    const Elf64_Shdr* second = b != 0 ? &theirs->sections[b] : NULL;
-    const bool different = valid && first != NULL && (first->sh_size != second->sh_size || memcmp(ours->file + first->sh_offset, theirs->file + second->sh_offset, first->sh_size) != 0);
-    if (different)
+    bool valid = true;
+    for (uint64_t a = 1; valid && a < ours->section_count; a += 1)
     {
-        AssemblyCfiFrame* x = NULL;
-        AssemblyCfiFrame* y = NULL;
-        uint64_t x_count = 0;
-        uint64_t y_count = 0;
-        valid = object_test_same_section_identity(ours, a, theirs, b) && first->sh_flags == second->sh_flags &&
-                first->sh_addralign == second->sh_addralign && first->sh_entsize == second->sh_entsize &&
-                assembly_cfi_frames(ours, a, arena, &x, &x_count) && assembly_cfi_frames(theirs, b, arena, &y, &y_count) && x_count == y_count;
-        if (valid)
+        const Elf64_Shdr* first = &ours->sections[a];
+        if (first->sh_type == SHT_X86_64_UNWIND && strcmp(object_view_section_name(ours, a), ".eh_frame") == 0)
         {
-            qsort(x, x_count, sizeof(*x), assembly_cfi_frame_order);
-            qsort(y, y_count, sizeof(*y), assembly_cfi_frame_order);
-            for (uint64_t i = 0; valid && i < x_count; i += 1)
+            const uint64_t b = object_test_matching_section(theirs, ours, a);
+            const Elf64_Shdr* second = b != 0 ? &theirs->sections[b] : NULL;
+            valid = second != NULL;
+            const bool different = valid && (first->sh_size != second->sh_size ||
+                                   memcmp(ours->file + first->sh_offset, theirs->file + second->sh_offset, first->sh_size) != 0);
+            if (different)
             {
-                valid = assembly_cfi_same_frame(&x[i], &y[i]);
-            }
-        }
-        ObjectView* views[2] = { ours, theirs };
-        const uint64_t indices[2] = { a, b };
-        for (uint32_t v = 0; valid && v < 2; v += 1)
-        {
-            ObjectView* view = views[v];
-            Elf64_Shdr* sections = (Elf64_Shdr*)view->sections;
-            for (uint64_t s = 1; s < view->section_count; s += 1)
-            {
-                if (s == indices[v] || (sections[s].sh_type == SHT_RELA && sections[s].sh_info == indices[v]))
+                AssemblyCfiFrame* x = NULL;
+                AssemblyCfiFrame* y = NULL;
+                uint64_t x_count = 0;
+                uint64_t y_count = 0;
+                valid = first->sh_flags == second->sh_flags && first->sh_addralign == second->sh_addralign && first->sh_entsize == second->sh_entsize &&
+                        assembly_cfi_frames(ours, a, arena, &x, &x_count) && assembly_cfi_frames(theirs, b, arena, &y, &y_count) && x_count == y_count;
+                if (valid)
                 {
-                    sections[s].sh_type = SHT_STRTAB;
+                    qsort(x, x_count, sizeof(*x), assembly_cfi_frame_order);
+                    qsort(y, y_count, sizeof(*y), assembly_cfi_frame_order);
+                    for (uint64_t i = 0; valid && i < x_count; i += 1)
+                    {
+                        valid = assembly_cfi_same_frame(&x[i], &y[i]);
+                    }
+                }
+                ObjectView* views[2] = { ours, theirs };
+                const uint64_t indices[2] = { a, b };
+                for (uint32_t v = 0; valid && v < 2; v += 1)
+                {
+                    ObjectView* view = views[v];
+                    Elf64_Shdr* sections = (Elf64_Shdr*)view->sections;
+                    for (uint64_t s = 1; s < view->section_count; s += 1)
+                    {
+                        if (s == indices[v] || (sections[s].sh_type == SHT_RELA && sections[s].sh_info == indices[v]))
+                        {
+                            sections[s].sh_type = SHT_STRTAB;
+                        }
+                    }
                 }
             }
         }
