@@ -6233,6 +6233,14 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
             const FastType dt = ftype_decay(cc, v->type);
             if (!ftype_is_ptr(dt)) { fast_cc_bail(cc, "deref non-pointer"); return; }
             const FastType elem = ftype_deref(cc, dt);
+            // #3577: `*` of a pointer to void is the full pipeline's -Wvoid-ptr-dereference where evaluated, a dead
+            // branch's too, but under `&` (`&*p`).
+            const uint32_t void_elem = (uint32_t)((elem & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
+            if ((void_elem & (uint32_t)(ex->unevaluated == 0)) != 0 && (*osp_ptr == 0 || ops[*osp_ptr - 1u].op != FEOP_ADDR))
+            {
+                fast_cc_bail(cc, "indirection of a pointer to void");
+                return;
+            }
             if (ex->eval_only > 0) { *v = (FastVal){ .type = elem, .kind = FVAL_INDIRECT, .is_lvalue = 1u }; return; }
             // #3577: `*` of a null pointer constant whose result isn't volatile is the full pipeline's -Wnull-dereference
             // ("indirection of non-volatile null pointer will be deleted, not trap").
@@ -7456,8 +7464,10 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             const FastType bt = ftype_decay(cc, base_v.type);
             if (!ftype_is_ptr(bt)) { fast_cc_bail(cc, "subscript non-pointer"); break; }
             const FastType elem = ftype_deref(cc, bt);
-            // #3577: an integer index, and a complete element type, or the full pipeline's error.
-            if ((BUSTER_FAST_TYPE_INCOMPLETE(cc, elem) | (uint32_t)(BUSTER_FAST_OPERAND_CLASS(cc, idx_v.type) != BUSTER_FOPERAND_INTEGER)) != 0)
+            // #3577: an integer index, and a complete element type, or the full pipeline's error; void's (GNU's), which the
+            // full pipeline stops on.
+            const uint32_t void_elem = (uint32_t)((elem & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
+            if ((BUSTER_FAST_TYPE_INCOMPLETE(cc, elem) | void_elem | (uint32_t)(BUSTER_FAST_OPERAND_CLASS(cc, idx_v.type) != BUSTER_FOPERAND_INTEGER)) != 0)
             {
                 fast_cc_bail(cc, "subscript the full pipeline refuses");
                 break;

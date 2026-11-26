@@ -4434,6 +4434,8 @@ static int c_direct_unit_tests(void)
         "    switch ((int)(n == 1)) { case 8: n += 8; }\n"
         "    return n;\n"
         "}\n",
+        // 10. A pointer to void under `&` and in sizeof, which the full pipeline's -Wvoid-ptr-dereference leaves alone.
+        "void* addressed(void* p) { return &*p; }\nunsigned long measured(void* p) { return sizeof(*p); }\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4526,6 +4528,12 @@ static int c_direct_unit_tests(void)
         "int f(int x, int y) { switch (y = !x) { case 1: return 1; } return 0; }\n",
         "int f(_Bool b) { switch (+b) { case 1: return 1; } return 0; }\n",
         "int f(int x) { if (0) { switch (x < 1) { case 1: return 1; } } return 0; }\n",
+        // -Wvoid-ptr-dereference: `*` of a pointer to void, a qualified one, in a dead branch; and a subscript of one, on
+        // which the full pipeline stops.
+        "void f(void* p) { (void)*p; }\n",
+        "void f(const volatile void* p) { (void)*p; }\n",
+        "void f(void* p) { if (0) { (void)*p; } }\n",
+        "void f(void* p) { (void)p[0]; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
