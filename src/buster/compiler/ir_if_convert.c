@@ -339,7 +339,11 @@ static uint32_t ir_if_convert_filter(const IrFunction* f, uint32_t first, uint32
     }
     if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) != 0)
     {
-        m &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, f->flags + first), _mm_set1_epi8((char)key.flags));
+        // Copy provenance changes neither an access's value nor the address it proves readable. The same bit is
+        // still significant on other operations, whose flags retain their complete equality check.
+        const uint8_t mask = key.op == IR_LOAD || key.op == IR_STORE ? (uint8_t)~BUSTER_IR_COPY_PIECE : UINT8_MAX;
+        const __m128i flags = _mm_and_si128(_mm_maskz_loadu_epi8(valid, f->flags + first), _mm_set1_epi8((char)mask));
+        m &= _mm_cmpeq_epi8_mask(flags, _mm_set1_epi8((char)(key.flags & mask)));
     }
     if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_A) != 0)
     {
@@ -356,15 +360,17 @@ static uint32_t ir_if_convert_filter(const IrFunction* f, uint32_t first, uint32
     return m;
 }
 
-// Whether row q computes row r's value: the same operation, type, flags and fields, value operands compared by their
-// representatives, an address's scale and offset by content. A load's alignment doesn't change its value.
+// Whether row q computes row r's value: the same operation, type, semantic flags and fields, value operands compared
+// by their representatives, an address's scale and offset by content. A load's alignment or copy provenance doesn't
+// change its value.
 static bool ir_if_convert_same(const IrIfConvertWork* work, uint32_t r, uint32_t q)
 {
     const IrFunction* const f = work->function;
     const uint32_t* const alias = work->alias;
     const uint32_t op = f->op[r];
     const uint32_t mask = ir_value_mask(f, r);
-    bool same = f->op[q] == op && f->type[q] == f->type[r] && f->flags[q] == f->flags[r] && ir_value_mask(f, q) == mask;
+    const uint32_t flags = op == IR_LOAD || op == IR_STORE ? ~BUSTER_IR_COPY_PIECE : UINT32_MAX;
+    bool same = f->op[q] == op && f->type[q] == f->type[r] && ((f->flags[q] ^ f->flags[r]) & flags) == 0 && ir_value_mask(f, q) == mask;
     same = same && (op == IR_LOAD || f->alignment_log2[q] == f->alignment_log2[r]);
     same = same && ((mask & 1) != 0 ? alias[f->a[r]] == alias[f->a[q]] : f->a[r] == f->a[q]);
     same = same && ((mask & 2) != 0 ? alias[f->b[r]] == alias[f->b[q]] : f->b[r] == f->b[q]);

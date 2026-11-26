@@ -3255,11 +3255,13 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         record.reg = destination & 15;
         if (width == 16 && holes->source_width == 8)
         {
-            // The allocation's vector locations name xmm0..15 (bit 4 is the class). At every AVX target the VEX
-            // forms are sufficient, smaller than EVEX and already measured; the second reads the first's low half.
-            // Each half can forward from an 8-byte store that built the local. A whole 16-byte load cannot.
+            // The CFG consumer's vector locations are 32 + xmm0..15; direct callers can name the physical register.
+            // An unused result has NO_REGISTER and, like other floating loads, writes the reserved xmm15 scratch.
+            // At every AVX target the VEX forms suffice and are already measured; the second reads the first's low
+            // half. Each half can forward from an 8-byte store that built the local. A whole 16-byte load cannot.
             int32_t high = 0;
-            const bool valid = destination < 32 && !__builtin_add_overflow(record.displacement, 8, &high);
+            const bool low = destination < 16 || (destination >= 32 && destination < 48) || destination == BUSTER_TIER1_SELECT_NO_REGISTER;
+            const bool valid = low && !__builtin_add_overflow(record.displacement, 8, &high);
             if (valid)
             {
                 record.form = holes->sse ? X86_FORM_MOVSD_X_XM64 : X86_FORM_VMOVSD_X_M64;

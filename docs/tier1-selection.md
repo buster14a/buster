@@ -1475,7 +1475,9 @@ wide memory operand. Unpaired scalar pieces retain their ordinary folds because
 the provenance flag is not an access effect.
 
 The ordinary vector allocation class names xmm0 through xmm14, with xmm15
-reserved for scratch. VEX therefore suffices for both loads even at an AVX-512
+reserved for scratch. Its CFG locations are `32 + register`; an unused load's
+`NO_REGISTER` destination still performs both accesses into xmm15. VEX therefore
+suffices for both loads even at an AVX-512
 target, uses shorter encodings than EVEX, and uses the existing measured Zen 5
 rows. The destination store keeps its target's normal vector form. No new EVEX
 cost estimate or hardware measurement is required for these forms.

@@ -41,7 +41,7 @@ static bool ir_copy_test_function(Arena* arena, IrFunction* f, uint32_t padding,
     if (created)
     {
         f->result_type = IR_I64;
-        f->symbol_count = 2;
+        f->symbol_count = 3;
         f->parameter_types[0] = IR_PTR;
         f->block_offsets[f->block_count] = f->instruction_count;
         if (f->block_count == 2)
@@ -169,14 +169,14 @@ static void ir_copy_pair_tests(IrTestTally* tally, Arena* memory, Arena* scratch
                 {
                     memcpy(bytes, &pointer, sizeof(pointer));
                 }
-                const IrInterpreterFunction code = { .symbol = 0, .function = &f };
+                const IrInterpreterFunction code = { .symbol = 2, .function = &f };
                 const InterpreterBinding binding = { .symbol = 1, .bytes = bytes, .size = sizeof(bytes), .writable = true };
                 const IrInterpreterProgram program = { .functions = &code, .function_count = 1, .bindings = &binding, .binding_count = 1 };
                 const InterpreterValue argument = { .low = (uint64_t)(uintptr_t)bytes };
                 InterpreterOptions options = interpreter_default_options();
                 options.max_frames = 2;
                 options.max_memories = 8;
-                const InterpreterResult before = ir_interpret(&program, 0, &argument, 1, &options, scratch);
+                const InterpreterResult before = ir_interpret(&program, 2, &argument, 1, &options, scratch);
                 memcpy(before_bytes, bytes, sizeof(bytes));
                 if (padding == 0 && kind == IR_COPY_TEST_STACK)
                 {
@@ -200,10 +200,15 @@ static void ir_copy_pair_tests(IrTestTally* tally, Arena* memory, Arena* scratch
                 {
                     memcpy(bytes, &pointer, sizeof(pointer));
                 }
-                const InterpreterResult after = ir_interpret(&program, 0, &argument, 1, &options, scratch);
-                ir_test_expect(tally, before.status == INTERPRETER_OK && after.status == INTERPRETER_OK && before.value.low == after.value.low &&
-                               before.value.high == after.value.high && memcmp(before_bytes, bytes, sizeof(bytes)) == 0,
-                               "COPY pairing preserves interpreted values, stores and untouched bytes");
+                const InterpreterResult after = ir_interpret(&program, 2, &argument, 1, &options, scratch);
+                const bool equal = before.status == INTERPRETER_OK && after.status == INTERPRETER_OK && before.value.low == after.value.low &&
+                                   before.value.high == after.value.high && memcmp(before_bytes, bytes, sizeof(bytes)) == 0;
+                if (!equal && tally->failures < 12)
+                {
+                    fprintf(stderr, "IR: COPY interpretation kind=%u padding=%u before=%u at %u after=%u at %u\n",
+                            kind, padding, (unsigned)before.status, before.entry, (unsigned)after.status, after.entry);
+                }
+                ir_test_expect(tally, equal, "COPY pairing preserves interpreted values, stores and untouched bytes");
                 if (kind == IR_COPY_TEST_OVERLAP)
                 {
                     ir_test_expect(tally, after.value.low == 0, "overlapping separately marked pieces retain their sequential read-after-write");

@@ -114,7 +114,7 @@ static void tier1_pipeline_copy_source(Tier1PipelineTest* test, const char* clan
             char* const compile[] = { "/proc/self/exe", "--tier1", "--tier1-strict", "--verify", "-std=gnu17", (char*)targets[target],
                                       "--lanes", "1", "-S", "-o", assembly, source, 0 };
             const Tier1PipelineProcess compiled = tier1_pipeline_process(compile, 0, 30000);
-            static const char* const symbols[] = { "copy_local_64", "copy_cached_64", "consume_cached_64" };
+            static const char* const symbols[] = { "copy_local_64", "copy_cached_64", "consume_cached_64", "copy_unused_64" };
             for (uint32_t s = 0; ok && s < BUSTER_ARRAY_LENGTH(symbols); s += 1)
             {
                 uint32_t halves = 0;
@@ -124,7 +124,8 @@ static void tier1_pipeline_copy_source(Tier1PipelineTest* test, const char* clan
                 ok = tier1_pipeline_expect(test, shape && halves == expected_halves && cached_calls == 0,
                                           s == 0 ? "the 64-byte local copy has four paired high-half loads at every target" :
                                           s == 1 ? "the cached candidate's own code pairs on an owned copy of its scalar summary" :
-                                                   "the caller expands the unchanged scalar summary and SROA removes unread fields before pairing");
+                                          s == 2 ? "the caller expands the unchanged scalar summary and SROA removes unread fields before pairing" :
+                                                   "paired loads with unused results still emit through the reserved vector scratch");
                 if (!ok)
                 {
                     fprintf(stderr, "copy-halves: %s has %u high-half loads in %s (expected %u), %u cached calls\n",

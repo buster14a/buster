@@ -64,6 +64,16 @@
 
 COPY_SIZES(DEFINE_COPY)
 
+// Final dead-store elimination can leave a paired load whose value is unused. Its accesses still need emission,
+// using the reserved vector scratch register. An opaque call keeps the source's bytes in its frame object.
+__attribute__((noinline)) void copy_unused_64(unsigned long seed)
+{
+    struct Copy64 local;
+    struct Copy64 unused __attribute__((unused));
+    copy_local_64(&local, seed);
+    unused = local;
+}
+
 // An ordinary external definition is an inline candidate whose own code remains emitted from its cached summary.
 // The indirect entry exercises that code; consume_cached_64 expands the same summary into a private destination.
 void copy_cached_64(struct Copy64* output, unsigned long seed)
@@ -162,6 +172,7 @@ int main(void)
     {
         const unsigned long seed = 0x123456789abcdef0ul + round * 0x1111111111111111ul;
         COPY_SIZES(CHECK_COPY)
+        copy_unused_64(seed);
         struct Copy64 cached;
         copy_cached_entry(&cached, seed);
         const unsigned char* cached_bytes = (const unsigned char*)&cached;

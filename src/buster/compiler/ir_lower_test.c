@@ -3066,6 +3066,8 @@ static void ir_lower_test_copy_flags(IrLowerTestTally* tally)
                 .local_count = 1,
                 .local_sizes = local_sizes,
                 .local_alignments = local_alignments,
+                // Validation strips access marks only when the typed producer advertises them.
+                .volatiles = observable != 0,
             };
             IrFunction f = { 0 };
             bool exact = ir_lower_typed(&source, IR_VOID, 2, &output, &scratch, &f).error == IR_OK;

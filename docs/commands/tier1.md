@@ -224,6 +224,8 @@ An inline candidate's emitted body must pair too, while its later caller
 expands the unchanged scalar summary and eliminates unread fields through
 SROA. A single assembly-emission lane puts the candidate before the caller
 to expose accidental mutation of the shared summary.
+An unread aggregate destination also checks that dead-store elimination leaves
+its remaining paired loads emit through the reserved vector scratch register.
 
 ## Vector-only value numbering and LICM (#2781)
 

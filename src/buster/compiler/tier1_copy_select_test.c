@@ -61,7 +61,7 @@ static void tier1_copy_select_records(Tier1SelectTest* test)
                         },
                         .width = 16,
                         .source_width = 8,
-                        .destination = (uint8_t)(16 + reg),
+                        .destination = (uint8_t)(32 + reg),
                         .vex = target_index == 1,
                         .sse = target_index == 0,
                     };
@@ -127,7 +127,7 @@ static void tier1_copy_select_records(Tier1SelectTest* test)
         },
         .width = 16,
         .source_width = 8,
-        .destination = 16,
+        .destination = 32,
         .sse = true,
     };
     const Tier1SelectRecords fits = tier1_select_expand(&edge);
@@ -137,9 +137,22 @@ static void tier1_copy_select_records(Tier1SelectTest* test)
     const Tier1SelectRecords overflowed = tier1_select_expand(&edge);
     tier1_select_test_expect(test, overflowed.overflowed && overflowed.count == 0, "paired-copy displacement overflow is refused before either load");
     edge.memory.displacement = 0;
-    edge.destination = 32;
-    const Tier1SelectRecords invalid = tier1_select_expand(&edge);
-    tier1_select_test_expect(test, invalid.overflowed && invalid.count == 0, "paired-copy rejects a location outside the low vector class");
+    edge.destination = BUSTER_TIER1_SELECT_NO_REGISTER;
+    const Tier1SelectRecords unused = tier1_select_expand(&edge);
+    tier1_select_test_expect(test, !unused.overflowed && unused.count == 2 && unused.records[0].reg == BUSTER_TIER1_SELECT_FLOAT_SCRATCH &&
+                             unused.records[1].reg == BUSTER_TIER1_SELECT_FLOAT_SCRATCH,
+                             "an unused paired-copy load keeps both accesses in the reserved vector scratch");
+    edge.destination = 0;
+    const Tier1SelectRecords physical = tier1_select_expand(&edge);
+    tier1_select_test_expect(test, !physical.overflowed && physical.count == 2 && physical.records[0].reg == 0 && physical.records[1].reg == 0,
+                             "paired-copy expansion also accepts a physical low vector register");
+    static const uint8_t invalid_locations[] = { 16, 31, 48, 63, 64, 254 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid_locations); i += 1)
+    {
+        edge.destination = invalid_locations[i];
+        const Tier1SelectRecords invalid = tier1_select_expand(&edge);
+        tier1_select_test_expect(test, invalid.overflowed && invalid.count == 0, "paired-copy rejects a location outside the low vector class");
+    }
     if (source != MAP_FAILED)
     {
         munmap(source, 3 * bytes);
@@ -197,8 +210,15 @@ static void tier1_copy_select_plans(Tier1SelectTest* test)
                     }
                     else
                     {
-                        tier1_select_test_expect(test, (plan.covered[2] != 0) == (marked != 2) &&
-                                                 plan.patterns[3].rule == (marked != 2 ? TIER1_RULE_LOAD_OPERAND : TIER1_RULE_REGISTER),
+                        // An unfused ADD may use LEA. The volatile contract is that the load stays at its own node.
+                        const bool folded = (plan.covered[2] != 0) == (marked != 2) &&
+                                            (marked != 2 ? plan.patterns[3].rule == TIER1_RULE_LOAD_OPERAND : plan.patterns[2].rule == TIER1_RULE_LOAD);
+                        if (!folded)
+                        {
+                            fprintf(stderr, "tier1-select: copy provenance marked=%u covered=%u load-rule=%u add-rule=%u\n", marked,
+                                    plan.covered[2], plan.patterns[2].rule, plan.patterns[3].rule);
+                        }
+                        tier1_select_test_expect(test, folded,
                                                  "scalar copy provenance preserves the load fold and volatile refusal");
                     }
                 }
