@@ -1,12 +1,12 @@
 buster-fixtures v1 checker-sources
 # ID	FILE	FLAGS	NAME
-initializers	initializers.c	-	transparent late initializers and own slots
-definitions	definitions.c	-	transparent late canonical signatures
-deferred	deferred.c	-	transparent late deferred and unrelated uses
-indirect	indirect.c	-	transparent late indirect calls
-variadic	variadic.c	-	transparent late variadic signature tails
-in-body	in-body.c	-	transparent late whole-body emission point
-aliases	aliases.c	-	transparent late eager alias declarations
-initializer-folded	initializer-folded.c	-	transparent late retained initializer function identities
-overloads	overloads.c	-	transparent late selected overload addresses
-static-chain	static-chain.c	-	transparent late separate static-chain signatures
+initializers	initializers.c	-	transparent-late-initializers-and-own-slots
+definitions	definitions.c	-	transparent-late-canonical-signatures
+deferred	deferred.c	-	transparent-late-deferred-and-unrelated-uses
+indirect	indirect.c	-	transparent-late-indirect-calls
+variadic	variadic.c	-	transparent-late-variadic-signature-tails
+in-body	in-body.c	-	transparent-late-whole-body-emission-point
+aliases	aliases.c	-	transparent-late-eager-alias-declarations
+initializer-folded	initializer-folded.c	-	transparent-late-retained-initializer-function-identities
+overloads	overloads.c	-	transparent-late-selected-overload-addresses
+static-chain	static-chain.c	-	transparent-late-separate-static-chain-signatures

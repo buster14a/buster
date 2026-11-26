@@ -3159,8 +3159,9 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                 {
                     writes += program.controls[i].kind == CHECK_CONTROL_INITIALIZE;
                 }
-                check_test_expect(test, program.reference_count == references && writes == initializations,
-                                  "checked body preserves exact live reference and ordered initializer counts");
+                snprintf(description, sizeof(description), "%s: live references %u/%u, ordered initializers %u/%u", name,
+                         program.reference_count, references, writes, initializations);
+                check_test_expect(test, program.reference_count == references && writes == initializations, description);
                 {
                     const uint64_t output_mark = output.length;
                     const uint64_t scratch_mark = scratch.length;

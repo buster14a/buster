@@ -21037,8 +21037,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // Calls, returns and va_arg belong to function bodies. Object initializers and generated helpers don't read this
     // table, so a unit without a body needs neither its columns nor its classifications (#613). The bodies' bit-field
     // accesses read their units, which the classification's storage bounds (check_lower_bit_units).
-    const uint32_t transparent_rows = program->body_count != 0 ? check_lower_transparent_rows(program) : 0;
-    const uint64_t abi_rows = (uint64_t)types->types.count + transparent_rows;
+    const uint32_t transparent_rows = valid && program->body_count != 0 ? check_lower_transparent_rows(program) : 0;
+    const uint64_t abi_rows = valid ? (uint64_t)types->types.count + transparent_rows : 0;
     valid = valid && abi_rows <= (uint64_t)BUSTER_TYPE_MAX_INDEX + 1 && (program->body_count == 0 ||
                       abi_initialize_types(&shared->table, scratch, types, check_lower_vector_register_bytes(program->target.features), (uint32_t)abi_rows));
     if (valid && program->body_count != 0)

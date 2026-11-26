@@ -88,7 +88,7 @@ static void check_test_program_transparent(CheckTest* test, const char* clang)
         }
     }
     check_test_program_suite(test, "checker/programs/transparent-union-made-between-initializers", clang);
-    // An atomic first member keeps the union's own byval slot while passing uncounted in memory.
+    // An atomic first member passes uncounted in a slot of its own value's bytes.
     check_test_program_boundary_reason(test,
         "typedef union __attribute__((transparent_union,aligned(32))){_Atomic long w;_Atomic long v;}A;int take(A);int tested(int n){return take(n);}",
         "transparent-union-aligned-atomic", true, true, 1, 0, NULL);
@@ -98,7 +98,7 @@ static void check_test_program_transparent(CheckTest* test, const char* clang)
         "union U{struct{float x,y;}p;struct{int a,b;}q;};int printer(union U,const char*,...);"
         "int seed(union U u){return printer(u,\"\");}typedef union U T __attribute__((transparent_union));"
         "int tested(int n){struct E{}e;union U u={.q={n,n+1}};__builtin_dump_struct(&e,printer,u);return n;}",
-        "transparent-union-late-dump-printer", true, false, 2, 1,
+        "transparent-union-late-dump-printer", true, false, 3, 1,
         "__builtin_dump_struct for a printer's late transparent union");
     // These function-type attributes have additional clang ABI-cache metadata. Their late, ABI-changing unions keep
     // a named boundary; an attribute in place before any emission, an ignored attribute, or an unchanged ABI does not.
