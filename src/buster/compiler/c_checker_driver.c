@@ -158,6 +158,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_RETURN: result = "return does not match the function result type"; break;
         case CHECK_INPUT_TARGET: result = "unsupported checker language or target model"; break;
         case CHECK_INPUT_INCOMPLETE_MEMBER: result = "record member has incomplete type"; break;
+        case CHECK_INPUT_BIT_FIELD: result = "invalid bit-field"; break;
+        case CHECK_INPUT_FUNCTION_MEMBER: result = "field declared as a function"; break;
         case CHECK_INPUT_INCOMPLETE_OBJECT: result = "object has incomplete type"; break;
         case CHECK_INPUT_LOOP_HINT: result = "invalid '#pragma clang loop' directive"; break;
         case CHECK_INPUT_LOOP_PLACEMENT: result = "expected a for, while, or do-while loop to follow '#pragma clang loop'"; break;
@@ -458,6 +460,7 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_TLS_MODEL: snprintf(text, capacity, "tls_model must be \"global-dynamic\", \"local-dynamic\", \"initial-exec\" or \"local-exec\""); break;
         case CHECK_ARGUMENT_FORMAT_STRING: snprintf(text, capacity, "format argument not a string type"); break;
         case CHECK_ARGUMENT_FORMAT_RESULT: snprintf(text, capacity, "function does not return string type"); break;
+        case CHECK_ARGUMENT_FORMAT_NONLITERAL: snprintf(text, capacity, "format string is not a string literal"); break;
         case CHECK_ARGUMENT_STRFTIME: snprintf(text, capacity, "strftime format attribute requires 3rd parameter to be 0"); break;
         case CHECK_ARGUMENT_UNKNOWN_TYPE: snprintf(text, capacity, "unknown type name '%.*s'", (int)argument.length, argument.pointer); break;
         case CHECK_ARGUMENT_EXPECTED_TYPE: snprintf(text, capacity, "expected a type"); break;
@@ -6449,7 +6452,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                  kind == CHECK_INPUT_ARRAY_INCOMPLETE || kind == CHECK_INPUT_ARRAY_NEGATIVE || kind == CHECK_INPUT_ARRAY_TOO_LARGE ||
                                  kind == CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT ||
                                  kind == CHECK_INPUT_ARRAY_NON_INTEGER ||
-                                 ((kind == CHECK_INPUT_INCOMPLETE_OBJECT || kind == CHECK_INPUT_INCOMPLETE_TENTATIVE) && input->reports[index].type != 0)))
+                                 ((kind == CHECK_INPUT_INCOMPLETE_OBJECT || kind == CHECK_INPUT_INCOMPLETE_TENTATIVE || kind == CHECK_INPUT_INCOMPLETE_MEMBER) &&
+                                  input->reports[index].type != 0)))
                         {
                             // The element type as clang prints it, its typedef's name first (check_driver_warning_type).
                             const CheckInputReport* report = input->reports + index;
@@ -6531,6 +6535,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                      kind == CHECK_INPUT_FUNCTION_RETURN ? (function_returned ? "function cannot return function type %.*s" :
                                                                                                                 "function cannot return array type %.*s") :
                                                      kind == CHECK_INPUT_ARRAY_INCOMPLETE ? "array has incomplete element type %.*s" :
+                                                     kind == CHECK_INPUT_INCOMPLETE_MEMBER ? "field has incomplete type %.*s" :
                                                      kind == CHECK_INPUT_INCOMPLETE_TENTATIVE ? "tentative definition has type %.*s that is never completed" :
                                                                                                 "variable has incomplete type %.*s";
                                 pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, forward ? 1u : 0u, format, (int)type.length, type.pointer);

@@ -1,0 +1,4 @@
+%d/structure.c:5:1: error: character 'B' cannot be specified by a universal character name
+%d/structure.c:7:1: error: universal character name refers to a control character
+%d/structure.c:6:2: error: unterminated conditional directive
+%d/structure.c:1:2: error: unterminated conditional directive

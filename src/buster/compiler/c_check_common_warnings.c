@@ -10668,14 +10668,19 @@ static TypeId check_common_format_argument_type(const CheckGraph* graph, const C
     return result;
 }
 
+static bool check_common_format_matches_family(const Parser* parser, Preprocessor* pp, const CheckInputAttribute* attribute);
+
 static bool check_common_format_attribute(const Parser* parser, Preprocessor* pp, const CheckInputAttributes* attributes,
-                                          uint32_t* format_index, uint32_t* first_argument)
+                                          uint32_t* format_index, uint32_t* first_argument, const CheckInputAttribute** matches,
+                                          uint32_t selection, bool contracts_only)
 {
     bool found = false;
     for (uint32_t a = 0; attributes != NULL && a < attributes->count && !found; a += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + a;
-        if (attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && attribute->argument_count >= 3 &&
+        const bool contract = attribute->kind == CHECK_ATTRIBUTE_FORMAT_MATCHES;
+        if (attribute->kind == (contracts_only ? CHECK_ATTRIBUTE_FORMAT_MATCHES : CHECK_ATTRIBUTE_FORMAT) &&
+            !attribute->ignored && !attribute->subject_ignored && attribute->argument_count >= 3 &&
             attribute->argument_values != NULL && attribute->argument_values[1] > 0 && attribute->argument_first < parser->tokens.count)
         {
             // The archetype names the checking family: only printf-family semantics belong in this
@@ -10693,13 +10698,21 @@ static bool check_common_format_attribute(const Parser* parser, Preprocessor* pp
             const bool printf_family = (name.length == 6 && memcmp(name.pointer, "printf", 6) == 0) ||
                                        (name.length == 10 && memcmp(name.pointer, "gnu_printf", 10) == 0) ||
                                        (name.length == 9 && memcmp(name.pointer, "ms_printf", 9) == 0);
-            if (printf_family)
+            if (printf_family || (contract && check_common_format_matches_family(parser, pp, attribute)))
             {
-                *format_index = (uint32_t)attribute->argument_values[1] - 1;
-                // A zero first-argument index selects a va_list-taking callee: the literal is still
-                // scanned, but no direct argument can be checked, which UINT32_MAX marks.
-                *first_argument = attribute->argument_values[2] > 0 ? (uint32_t)attribute->argument_values[2] - 1 : UINT32_MAX;
-                found = true;
+                if (selection == 0)
+                {
+                    *format_index = (uint32_t)attribute->argument_values[1] - 1;
+                    // A zero first-argument index selects a va_list-taking callee: the literal is still
+                    // scanned, but no direct argument can be checked, which UINT32_MAX marks.
+                    *first_argument = !contract && attribute->argument_values[2] > 0 ? (uint32_t)attribute->argument_values[2] - 1 : UINT32_MAX;
+                    *matches = contract ? attribute : NULL;
+                    found = true;
+                }
+                else
+                {
+                    selection -= 1;
+                }
             }
         }
     }
@@ -10894,22 +10907,28 @@ static bool check_common_format_position(const uint8_t* bytes, uint64_t length, 
     return result;
 }
 
+#include "c_check_format_matches.c"
+
+static void check_common_format_report_reference(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
+                                                 uint32_t use_token, uint64_t offset, uint32_t* order, uint32_t id, const char* message, Arena* scratch);
+
 // Marks a positional conversion's data argument used, or reports its position as invalid.
 static bool check_common_format_data_position(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
+                                              uint32_t use_token,
                                               uint64_t percent_offset, uint64_t conversion_offset, uint32_t position, uint32_t data_count,
                                               uint8_t* covered, uint32_t* order, Arena* scratch)
 {
     const bool result = position != 0 && position <= data_count;
     if (position == 0)
     {
-        check_common_format_report_offset(parser, pp, input, format_token, percent_offset, order, CHECK_WARNING_ID_FORMAT,
+        check_common_format_report_reference(parser, pp, input, format_token, use_token, percent_offset, order, CHECK_WARNING_ID_FORMAT,
                                           "position arguments in format strings start counting at 1 (not 0)", scratch);
     }
     else if (position > data_count)
     {
         const char* message = check_warning_text(scratch, "data argument position '%u' exceeds the number of data arguments (%u)",
                                                  position, data_count);
-        check_common_format_report_offset(parser, pp, input, format_token, conversion_offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
+        check_common_format_report_reference(parser, pp, input, format_token, use_token, conversion_offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
     }
     if (result && covered != NULL)
     {
@@ -10919,18 +10938,20 @@ static bool check_common_format_data_position(const Parser* parser, Preprocessor
 }
 
 static void check_common_format_missing_width(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
+                                              uint32_t use_token,
                                               uint64_t offset, bool precision, uint32_t* order, Arena* scratch)
 {
     const char* message = precision ? "'.*' specified field precision is missing a matching 'int' argument" :
                                       "'*' specified field width is missing a matching 'int' argument";
-    check_common_format_report_offset(parser, pp, input, format_token, offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
+    check_common_format_report_reference(parser, pp, input, format_token, use_token, offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
 }
 
 static void check_common_format_invalid_position(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
+                                                 uint32_t use_token,
                                                  uint64_t offset, bool precision, uint32_t* order, Arena* scratch)
 {
     const char* message = precision ? "invalid position specified for field precision" : "invalid position specified for field width";
-    check_common_format_report_offset(parser, pp, input, format_token, offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
+    check_common_format_report_reference(parser, pp, input, format_token, use_token, offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
 }
 
 // A format argument's type as clang's lvalue conversion leaves it (#1447): without its top-level qualifiers (an array's
@@ -10952,7 +10973,7 @@ static TypeId check_common_format_value(const Parser* parser, const CheckInput* 
 
 static void check_common_format_report_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, const CheckGraph* graph, uint32_t offset, uint32_t argument,
-                                            uint32_t format_token, const char* expected, bool width, uint32_t* order, Arena* scratch)
+                                            uint32_t format_token, uint32_t reference_offset, const char* expected, bool width, uint32_t* order, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId argument_type = check_common_format_argument_type(graph, stream, types, offset, argument);
@@ -10976,14 +10997,22 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
             // forward so a later conversion's in-string report keeps sorting behind it.
             const uint32_t natural = at_token < parser->tokens.count ? parse_source_index(&parser->tokens, at_token) : *order;
             *order = natural > *order ? natural : *order;
-            check_common_report_published(parser, pp, input, at_token, *order, CHECK_WARNING_ID_FORMAT, false, message, NULL, 0, scratch);
+            if (reference_offset != 0)
+            {
+                check_common_format_matches_emit(parser, pp, input, at_token, 0, CHECK_WARNING_ID_FORMAT, message, order,
+                                                 format_token, reference_offset, "format string is defined here", scratch);
+            }
+            else
+            {
+                check_common_report_published(parser, pp, input, at_token, *order, CHECK_WARNING_ID_FORMAT, false, message, NULL, 0, scratch);
+            }
         }
     }
 }
 
 static void check_common_format_width_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                              TypeTable* types, CheckWarningSpelling* spell, const CheckGraph* graph, uint32_t offset, uint32_t argument,
-                                             uint32_t format_token, uint64_t literal_offset, bool precision, uint32_t* order, Arena* scratch)
+                                             uint32_t format_token, uint32_t use_token, uint64_t literal_offset, bool precision, uint32_t* order, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId argument_type = check_common_format_argument_type(graph, stream, types, offset, argument);
@@ -11002,7 +11031,7 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
             const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
             const uint32_t natural = at_token < parser->tokens.count ? parse_source_index(&parser->tokens, at_token) : *order;
             *order = natural > *order ? natural : *order;
-            check_common_format_report_offset(parser, pp, input, format_token, literal_offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
+            check_common_format_report_reference(parser, pp, input, format_token, use_token, literal_offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
         }
     }
 }
@@ -11059,14 +11088,37 @@ static bool check_common_format_condition(const CheckGraph* graph, const CheckSt
     return constant;
 }
 
+// A body parameter supplies its contract's bytes, but diagnostics belong to the parameter use. The source
+// reference is a note, governed by the use's policy, even when the attribute was declared under another pragma.
+static void check_common_format_report_reference(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
+                                                 uint32_t use_token, uint64_t offset, uint32_t* order, uint32_t id, const char* message, Arena* scratch)
+{
+    if (use_token == BUSTER_CHECK_NONE)
+    {
+        check_common_format_report_offset(parser, pp, input, format_token, offset, order, id, message, scratch);
+    }
+    else
+    {
+        check_common_format_matches_emit(parser, pp, input, use_token, 0, id, message, order,
+                                         format_token, (uint32_t)offset + 1, "format string is defined here", scratch);
+    }
+}
+
 static void check_common_format(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                 TypeTable* types, CheckWarningSpelling* spell, const CheckProgram* program, const CheckCommonCandidates* candidates, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
+    const CheckFormatContracts contracts = check_common_format_matches_declarations(parser, pp, input, scratch);
     CheckCommonScan scan = { 0 };
+    // Attributed units can give a call several independent format obligations. Revisit only that sparse call
+    // candidate, selecting the next visible attribute; ordinary units keep the single-pass call scan.
+    uint32_t repeat = BUSTER_CHECK_NONE;
+    uint32_t selection = 0;
     for (uint32_t node = check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_CALL, &scan); node < graph->count;
-         node = check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_CALL, &scan))
+         node = repeat != BUSTER_CHECK_NONE ? repeat : check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_CALL, &scan))
     {
+        selection = repeat == node ? selection + 1 : 0;
+        repeat = BUSTER_CHECK_NONE;
         const bool intrinsic = graph->ops[node] == CHECK_OP_BUILTIN_X86;
         if ((graph->ops[node] != CHECK_OP_CALL && !intrinsic) || stream->diagnostics[node] != CHECK_DIAG_NONE)
         {
@@ -11103,20 +11155,50 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         const bool function_callee = callee_object == 0 ||
                                      (definition < input->token_count && input->declaration_kinds != NULL &&
                                       input->declaration_kinds[definition] == C_BINDING_FUNCTION);
-        uint32_t format_index = function_callee ? check_common_format_index(name, &pp->options) : UINT32_MAX;
-        uint32_t first_argument = format_index != UINT32_MAX ? format_index + 1 : UINT32_MAX;
-        if (format_index == UINT32_MAX && definition < input->token_count)
+        uint32_t format_index = UINT32_MAX;
+        uint32_t first_argument = UINT32_MAX;
+        const CheckInputAttribute* matches = NULL;
+        const uint32_t canonical = definition < input->token_count && input->declarations != NULL ?
+                                   input->declarations[definition] : BUSTER_CHECK_NONE;
+        const CheckInputAttributes* attributes = definition < input->token_count ? check_input_attributes_at(input, definition) : NULL;
+        bool contract = false;
+        if (contracts.count != 0)
         {
-            const bool found = check_common_format_attribute(parser, pp, check_input_attributes_at(input, definition), &format_index, &first_argument);
-            const uint32_t canonical = input->declarations != NULL ? input->declarations[definition] : BUSTER_CHECK_NONE;
-            if (!found && canonical < input->token_count)
+            contract = check_common_format_attribute(parser, pp, attributes, &format_index, &first_argument, &matches, selection, true);
+            if (!contract && attributes == NULL && canonical < input->token_count)
             {
-                check_common_format_attribute(parser, pp, check_input_attributes_at(input, canonical), &format_index, &first_argument);
+                contract = check_common_format_attribute(parser, pp, check_input_attributes_at(input, canonical), &format_index,
+                                                         &first_argument, &matches, selection, true);
+            }
+        }
+        if (contract)
+        {
+            repeat = node;
+        }
+        else
+        {
+            // Clang compares every format_matches reference before ordinary printf argument checking, even when
+            // the format attribute was written first. After the final contract, run the existing call check once.
+            format_index = function_callee ? check_common_format_index(name, &pp->options) : UINT32_MAX;
+            first_argument = format_index != UINT32_MAX ? format_index + 1 : UINT32_MAX;
+            if (format_index == UINT32_MAX && definition < input->token_count)
+            {
+                const bool found = check_common_format_attribute(parser, pp, attributes, &format_index, &first_argument, &matches, 0, false);
+                if (!found && canonical < input->token_count)
+                {
+                    check_common_format_attribute(parser, pp, check_input_attributes_at(input, canonical), &format_index,
+                                                  &first_argument, &matches, 0, false);
+                }
             }
         }
         const uint32_t offset = graph->argument_offsets[node];
         const uint32_t count = graph->argument_counts[node];
         const bool args_checked = first_argument != UINT32_MAX;
+        const CheckFormatMatch* expected_match = matches != NULL ? check_common_format_matches_find(&contracts, matches->first) : NULL;
+        if (matches != NULL && (expected_match == NULL || !expected_match->valid))
+        {
+            continue;
+        }
         if (format_index != UINT32_MAX && format_index < count && (first_argument == UINT32_MAX || first_argument <= count) &&
             offset <= graph->argument_count && count <= graph->argument_count - offset)
         {
@@ -11176,9 +11258,12 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     }
                     continue;
                 }
-                const uint32_t format_token = graph->tokens[leaf];
+                uint32_t format_token = graph->tokens[leaf];
                 const uint32_t string = format_token < input->token_count ? check_common_sparse_get(input->string_ids, format_token) : BUSTER_CHECK_NONE;
-                if (string == BUSTER_CHECK_NONE || string >= input->string_count || input->strings == NULL)
+                const bool literal = string != BUSTER_CHECK_NONE && string < input->string_count && input->strings != NULL;
+                const CheckFormatMatch* parameter_match = !literal && contracts.count != 0 ?
+                                                          check_common_format_matches_parameter(parser, input, graph, leaf, &contracts) : NULL;
+                if (!literal && parameter_match == NULL)
                 {
                     nonliteral_leaf = true;
                     break;
@@ -11187,8 +11272,33 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                 {
                     memset(covered, 0, data_count);
                 }
-                const uint8_t* bytes = input->strings[string].bytes;
-                uint64_t length = input->strings[string].byte_count;
+                const uint8_t* bytes = literal ? input->strings[string].bytes : (const uint8_t*)parameter_match->text.pointer;
+                uint64_t length = literal ? input->strings[string].byte_count : parameter_match->text.length + 1;
+                const uint32_t format_use = parameter_match != NULL ? format_token : BUSTER_CHECK_NONE;
+                format_token = literal ? format_token : parameter_match->token;
+                if (expected_match != NULL)
+                {
+                    if (expected_match->malformed)
+                    {
+                        // The declaration validates its reference once; a call's comparison parses that reference
+                        // again, retaining diagnostics from an incomplete but still usable contract.
+                        (void)check_common_format_matches_parse(parser, pp, input, expected_match->token, expected_match->text,
+                                                               &order, scratch, expected_match->dialect);
+                    }
+                    CheckFormatMatch actual_match = literal ? check_common_format_matches_parse(parser, pp, input, format_token,
+                                                                                               (String8){ (char*)bytes, length - 1 }, &order, scratch,
+                                                                                               expected_match->dialect) : *parameter_match;
+                    if (length == 1)
+                    {
+                        check_common_report_published(parser, pp, input, format_token, order, CHECK_WARNING_ID_FORMAT_ZERO_LENGTH, false,
+                                                      "format string is empty", NULL, 0, scratch);
+                    }
+                    else if (actual_match.valid)
+                    {
+                        check_common_format_matches_compare(parser, pp, input, &actual_match, expected_match, &order, scratch);
+                    }
+                    continue;
+                }
                 uint32_t argument = first_argument;
                 // Diagnostics publish in the literal's scan order: `order` is the furthest source any
                 // conversion's reports have reached, so an in-string report after an argument's keeps
@@ -11209,7 +11319,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     // the NUL and stop, so trailing conversions and their arguments never register.
                     if (bytes[at] == 0 && at + 1 < length)
                     {
-                        check_common_format_report_offset(parser, pp, input, format_token, at, &order, CHECK_WARNING_ID_FORMAT,
+                        check_common_format_report_reference(parser, pp, input, format_token, format_use, at, &order, CHECK_WARNING_ID_FORMAT,
                                                           "format string contains '\\0' within the string body", scratch);
                         malformed = true;
                         break;
@@ -11222,7 +11332,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     at += 1;
                     if (at >= length)
                     {
-                        check_common_format_report_offset(parser, pp, input, format_token, percent, &order, CHECK_WARNING_ID_FORMAT,
+                        check_common_format_report_reference(parser, pp, input, format_token, format_use, percent, &order, CHECK_WARNING_ID_FORMAT,
                                                           "incomplete format specifier", scratch);
                         malformed = true;
                         break;
@@ -11360,7 +11470,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         // embedded NUL — a zero before the storage terminator — warns at the NUL. Either
                         // way the scan stops, so the trailing argument accounting is skipped.
                         const bool nul = at + 1 < length && bytes[at] == 0;
-                        check_common_format_report_offset(parser, pp, input, format_token, nul ? at : percent, &order, CHECK_WARNING_ID_FORMAT,
+                        check_common_format_report_reference(parser, pp, input, format_token, format_use, nul ? at : percent, &order, CHECK_WARNING_ID_FORMAT,
                                                           nul ? "format string contains '\\0' within the string body" : "incomplete format specifier", scratch);
                         malformed = true;
                         break;
@@ -11396,7 +11506,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         }
                         if (value_positioned && value_position == 0)
                         {
-                            check_common_format_report_offset(parser, pp, input, format_token, percent, &order, CHECK_WARNING_ID_FORMAT,
+                            check_common_format_report_reference(parser, pp, input, format_token, format_use, percent, &order, CHECK_WARNING_ID_FORMAT,
                                                               "position arguments in format strings start counting at 1 (not 0)", scratch);
                             malformed = true;
                             break;
@@ -11417,7 +11527,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                             snprintf(spelling, sizeof(spelling), "\\x%02x", conversion);
                         }
                         const char* message = check_warning_text(scratch, "invalid conversion specifier '%s'", spelling);
-                        check_common_format_report_offset(parser, pp, input, format_token, at, &order, CHECK_WARNING_ID_FORMAT_INVALID_SPECIFIER,
+                        check_common_format_report_reference(parser, pp, input, format_token, format_use, at, &order, CHECK_WARNING_ID_FORMAT_INVALID_SPECIFIER,
                                                           message, scratch);
                         // A va_list callee's data start at index 0 for clang, so the whole call's argument
                         // count bounds the index: every plain `%Q` keeps scanning, and so does a `%N$Q`
@@ -11471,7 +11581,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                                 // `w128` checks an int128_t but still earns the nonstandard-width diagnostic.
                                 const char* message = check_warning_text(scratch, "length modifier '%s' results in undefined behavior or no effect with '%c' conversion specifier",
                                                                          modifier_text, conversion);
-                                check_common_format_report_offset(parser, pp, input, format_token, length_offset, &order, CHECK_WARNING_ID_FORMAT, message, scratch);
+                                check_common_format_report_reference(parser, pp, input, format_token, format_use, length_offset, &order, CHECK_WARNING_ID_FORMAT, message, scratch);
                             }
                         }
                     }
@@ -11499,7 +11609,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         // `%m` and `%` take no argument and tolerate any modifier silently.
                         const char* message = check_warning_text(scratch, "length modifier '%s' results in undefined behavior or no effect with '%c' conversion specifier",
                                                                  modifier_text, conversion);
-                        check_common_format_report_offset(parser, pp, input, format_token, length_offset, &order, CHECK_WARNING_ID_FORMAT, message, scratch);
+                        check_common_format_report_reference(parser, pp, input, format_token, format_use, length_offset, &order, CHECK_WARNING_ID_FORMAT, message, scratch);
                         value_checked = !int_family || conversion == 'C' ||
                                         (length_modifier == 'w' && !w_digits && conversion == 'c') ||
                                         (i_width != 0 && conversion_integer && conversion != 'c' && conversion != 'C');
@@ -11527,13 +11637,13 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         {
                             if (width_position == 0)
                             {
-                                check_common_format_report_offset(parser, pp, input, format_token, width_offset, &order, CHECK_WARNING_ID_FORMAT,
+                                check_common_format_report_reference(parser, pp, input, format_token, format_use, width_offset, &order, CHECK_WARNING_ID_FORMAT,
                                                                   "position arguments in format strings start counting at 1 (not 0)", scratch);
                                 malformed = true;
                             }
                             else if (width_position > data_count)
                             {
-                                check_common_format_missing_width(parser, pp, input, format_token, width_offset, false, &order, scratch);
+                                check_common_format_missing_width(parser, pp, input, format_token, format_use, width_offset, false, &order, scratch);
                                 malformed = true;
                             }
                             else
@@ -11544,14 +11654,14 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         }
                         else if (positional_seen)
                         {
-                            check_common_format_invalid_position(parser, pp, input, format_token, width_offset, false, &order, scratch);
+                            check_common_format_invalid_position(parser, pp, input, format_token, format_use, width_offset, false, &order, scratch);
                             malformed = true;
                         }
                         else if (argument >= count)
                         {
                             // clang's field-width amount starts one past the `*`: the missing-argument
                             // diagnostic points at the conversion, not the star.
-                            check_common_format_missing_width(parser, pp, input, format_token, width_offset + 1, false, &order, scratch);
+                            check_common_format_missing_width(parser, pp, input, format_token, format_use, width_offset + 1, false, &order, scratch);
                             malformed = true;
                         }
                         else
@@ -11566,7 +11676,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         const TypeId width_type = check_common_format_argument_type(graph, stream, types, offset, width_index);
                         if (!check_common_format_width(types, width_type))
                         {
-                            check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, width_index, format_token,
+                            check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, width_index, format_token, format_use,
                                                              width_positioned ? width_offset : width_offset + 1, false, &order, scratch);
                             malformed = true;
                             break;
@@ -11579,13 +11689,13 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         {
                             if (precision_position == 0)
                             {
-                                check_common_format_report_offset(parser, pp, input, format_token, precision_offset + 1, &order, CHECK_WARNING_ID_FORMAT,
+                                check_common_format_report_reference(parser, pp, input, format_token, format_use, precision_offset + 1, &order, CHECK_WARNING_ID_FORMAT,
                                                                   "position arguments in format strings start counting at 1 (not 0)", scratch);
                                 malformed = true;
                             }
                             else if (precision_position > data_count)
                             {
-                                check_common_format_missing_width(parser, pp, input, format_token, precision_offset, true, &order, scratch);
+                                check_common_format_missing_width(parser, pp, input, format_token, format_use, precision_offset, true, &order, scratch);
                                 malformed = true;
                             }
                             else
@@ -11596,14 +11706,14 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         }
                         else if (positional_seen)
                         {
-                            check_common_format_invalid_position(parser, pp, input, format_token, precision_offset + 1, true, &order, scratch);
+                            check_common_format_invalid_position(parser, pp, input, format_token, format_use, precision_offset + 1, true, &order, scratch);
                             malformed = true;
                         }
                         else if (argument >= count)
                         {
                             // The precision amount carries the `.` prefix into its start, so clang's
                             // missing-argument diagnostic lands on the `*` itself.
-                            check_common_format_missing_width(parser, pp, input, format_token, precision_offset + 1, true, &order, scratch);
+                            check_common_format_missing_width(parser, pp, input, format_token, format_use, precision_offset + 1, true, &order, scratch);
                             malformed = true;
                         }
                         else
@@ -11618,7 +11728,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         const TypeId precision_type = check_common_format_argument_type(graph, stream, types, offset, precision_index);
                         if (!check_common_format_width(types, precision_type))
                         {
-                            check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, precision_index, format_token,
+                            check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, precision_index, format_token, format_use,
                                                              precision_positioned ? precision_offset : precision_offset + 1, true, &order, scratch);
                             malformed = true;
                             break;
@@ -11633,13 +11743,13 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                             if (value_position == 0)
                             {
                                 // `0$` is a literal error clang reports even for a va_list callee.
-                                check_common_format_report_offset(parser, pp, input, format_token, percent, &order, CHECK_WARNING_ID_FORMAT,
+                                check_common_format_report_reference(parser, pp, input, format_token, format_use, percent, &order, CHECK_WARNING_ID_FORMAT,
                                                                   "position arguments in format strings start counting at 1 (not 0)", scratch);
                                 value_valid = false;
                             }
                             else if (args_checked)
                             {
-                                value_valid = check_common_format_data_position(parser, pp, input, format_token, percent, at, value_position,
+                                value_valid = check_common_format_data_position(parser, pp, input, format_token, format_use, percent, at, value_position,
                                                                                 data_count, covered, &order, scratch);
                                 if (value_valid)
                                 {
@@ -11666,7 +11776,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     }
                     if (positional_seen && plain_seen)
                     {
-                        check_common_format_report_offset(parser, pp, input, format_token, at, &order, CHECK_WARNING_ID_FORMAT,
+                        check_common_format_report_reference(parser, pp, input, format_token, format_use, at, &order, CHECK_WARNING_ID_FORMAT,
                                                           "cannot mix positional and non-positional arguments in format string", scratch);
                         malformed = true;
                         break;
@@ -11730,7 +11840,8 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         }
                         if (!accepted)
                         {
-                            check_common_format_report_type(parser, pp, input, stream, types, spell, graph, offset, value_index, format_token, expected, false, &order, scratch);
+                            check_common_format_report_type(parser, pp, input, stream, types, spell, graph, offset, value_index, format_token,
+                                                            parameter_match != NULL ? (uint32_t)percent + 1 : 0, expected, false, &order, scratch);
                         }
                         else if (conversion == 'c' && type_unqualified(type_strip_aligned(types, type)) == BUSTER_TYPE_BOOL)
                         {
@@ -11759,9 +11870,19 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         {
                             const uint32_t last_node = count > first_argument ? graph->argument_nodes[offset + count - 1] : BUSTER_CHECK_NONE;
                             const uint32_t order_token = last_node < graph->count ? graph->tokens[last_node] : format_token;
-                            check_common_format_report_offset_ordered(parser, pp, input, format_token, insufficient_offset, order_token,
-                                                                      &order, CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS,
-                                                                      "more '%' conversions than data arguments", scratch);
+                            if (parameter_match != NULL)
+                            {
+                                const uint32_t use_token = graph->tokens[leaf];
+                                check_common_format_matches_emit(parser, pp, input, use_token, 0, CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS,
+                                                                 "more '%' conversions than data arguments", &order,
+                                                                 format_token, (uint32_t)insufficient_offset + 1, "format string is defined here", scratch);
+                            }
+                            else
+                            {
+                                check_common_format_report_offset_ordered(parser, pp, input, format_token, insufficient_offset, order_token,
+                                                                          &order, CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS,
+                                                                          "more '%' conversions than data arguments", scratch);
+                            }
                         }
                         all_covered = true;
                     }
@@ -11804,7 +11925,24 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             }
             // A format argument that never resolves to a string literal warns under -Wformat-security
             // when the call passes no data arguments.
-            if (nonliteral_leaf && count == first_argument)
+            if (nonliteral_leaf && expected_match != NULL)
+            {
+                const CheckValue value = check_stream_value(stream, format_node);
+                const bool null = (value.constant_kind == CHECK_CONSTANT_INTEGER && value.integer == 0) ||
+                                  (value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object == 0 && value.offset == 0);
+                if (!null)
+                {
+                    const uint32_t report_token = graph->argument_tokens[offset + format_index];
+                    const bool suggested = check_common_format_matches_suggest(parser, pp, input, graph, format_node, matches,
+                                                                               graph->tokens[node], &order, scratch);
+                    if (!suggested)
+                    {
+                        check_common_report(parser, pp, input, report_token, CHECK_WARNING_ID_FORMAT_NONLITERAL, false,
+                                            "format string is not a string literal", NULL, 0, scratch);
+                    }
+                }
+            }
+            else if (nonliteral_leaf && count == first_argument)
             {
                 // The warning points where clang points — `Args[format_idx]->getBeginLoc()`, the
                 // argument expression's leading token: the recorded first token of the argument,

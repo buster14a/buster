@@ -860,6 +860,8 @@ static bool pp_directive_test_diagnostics(const char* suite, const char* label, 
                 .diagnostics = stream,
             };
             result = stream != 0 && (fixture->standard == 0 || pp_parse_standard(fixture->standard, &options.language));
+            // Match the command line's default before C23: an ISO mode replaces trigraphs, a GNU mode does not.
+            options.trigraphs = !options.language.gnu && options.language.standard < 2023;
             static InternTable table;
             static Preprocessor pp;
             if (result)

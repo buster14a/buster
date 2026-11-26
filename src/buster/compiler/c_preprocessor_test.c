@@ -4891,8 +4891,9 @@ static bool pp_test_named_lines(const char* text, char* lines, size_t capacity, 
 // exactly Unicode's of a character the token may have is that character, without a diagnostic; where one starts a token
 // (an identifier, or an unknown token), a name not exactly Unicode's is an error at the name, with a note where it is
 // one loosely, and a character below U+00A0 an error at the backslash. In active text, a directive's line, a macro's
-// definition and an unused argument, and not in a skipped group, a literal or a comment; with and without line splices
-// and trigraphs, beside \u, \U and UTF-8 spellings of the same character. Each case's errors and notes must be the ones
+// definition and an unused argument; malformed names stay quiet in skipped groups, and literals and comments have no
+// raw-token diagnostics. With and without line splices and trigraphs, beside \u, \U and UTF-8 spellings of the same character.
+// Each case's errors and notes must be the ones
 // written for it, by both kernels, and with `with_clang` clang's (its -pedantic warnings aside).
 static bool pp_test_named_ucns(const char* directory, bool with_clang)
 {

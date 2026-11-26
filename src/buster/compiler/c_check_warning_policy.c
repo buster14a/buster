@@ -98,6 +98,14 @@ static bool check_warning_option(uint32_t id, String8 option)
     matches |= id == CHECK_WARNING_ID_POINTER_BOOL_CONVERSION &&
                (check_diagnostic_option(option, "-Wconversion") || check_diagnostic_option(option, "-Wnon-gcc"));
     matches |= id == CHECK_WARNING_ID_NONNULL && check_diagnostic_option(option, "-Wformat");
+    // The base format group is in -Wmost/-Wall. The nonliteral group and its attribute suggestion stay
+    // independent of -Wformat; -Wformat=2 selects those optional checks, and signedness has its own switch.
+    const bool format = id == CHECK_WARNING_ID_FORMAT || id == CHECK_WARNING_ID_FORMAT_EXTRA_ARGS ||
+                        id == CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS || id == CHECK_WARNING_ID_FORMAT_INVALID_SPECIFIER ||
+                        id == CHECK_WARNING_ID_FORMAT_ZERO_LENGTH;
+    matches |= format && (check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
+    matches |= (id == CHECK_WARNING_ID_MISSING_FORMAT_ATTRIBUTE || id == CHECK_WARNING_ID_FORMAT_SECURITY) &&
+               check_diagnostic_option(option, "-Wformat=2");
     matches |= id == CHECK_WARNING_ID_SIZEOF_POINTER_MEMACCESS && check_diagnostic_option(option, "-Wsuspicious-memaccess");
     // -Wint-conversion is -Wconversion's, so -Wnon-gcc's; -Wreturn-mismatch -Wreturn-type's, so -Wmost's and -Wall's (#1963).
     matches |= id == CHECK_WARNING_ID_INT_CONVERSION && check_diagnostic_option(option, "-Wnon-gcc");
@@ -141,6 +149,8 @@ struct CheckWarningCommandLine
 // later `-Werror`; `-Werror=NAME` after it wins; `-WNAME` re-enables a disabled diagnostic as a warning (#1080).
 static CheckWarningCommandLine check_warning_command_line(const PPOptions* options, uint32_t id, bool default_ignored, bool default_error)
 {
+    default_ignored |= id == CHECK_WARNING_ID_FORMAT_SIGNEDNESS || id == CHECK_WARNING_ID_FORMAT_NONLITERAL ||
+                       id == CHECK_WARNING_ID_MISSING_FORMAT_ATTRIBUTE;
     CheckWarningSeverity mapped = default_ignored ? CHECK_WARNING_IGNORE :
                                   default_error ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
     bool explicit_mapping = false;

@@ -446,6 +446,43 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
         const uint32_t have = report->detail >> 16;
         result = check_warning_text(scratch, "too %s arguments to function call, expected %u, have %u", have < expected ? "few" : "many", expected, have);
     }
+    else if (report->message == CHECK_INPUT_BIT_FIELD)
+    {
+        const bool named = report->subject != 0 && report->subject - 1 < count;
+        const String8 field = named ? check_semantic_name(parser, pp, report->subject - 1) : (String8){ 0 };
+        const char* subject = named ? check_warning_text(scratch, "bit-field '%.*s'", (int)field.length, field.pointer) : "anonymous bit-field";
+        if (subject == NULL)
+        {
+            result = NULL;
+        }
+        else if (report->detail == CHECK_INPUT_BIT_FIELD_TYPE)
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+            result = type.length == 0 ? NULL : check_warning_text(scratch, "%s has non-integral type %.*s", subject, (int)type.length, type.pointer);
+        }
+        else if (report->detail == CHECK_INPUT_BIT_FIELD_NEGATIVE)
+        {
+            result = check_warning_text(scratch, "%s has negative width (%lld)", subject, (long long)(int64_t)report->value);
+        }
+        else if (report->detail == CHECK_INPUT_BIT_FIELD_TOO_WIDE)
+        {
+            result = check_warning_text(scratch, "%s is too wide (%llu bits)", subject, (unsigned long long)report->value);
+        }
+        else if (report->detail == CHECK_INPUT_BIT_FIELD_WIDE)
+        {
+            const uint64_t width = type_integer_width(types, report->type);
+            result = check_warning_text(scratch, "width of %s (%llu bits) exceeds the width of its type (%llu %s)", subject,
+                                        (unsigned long long)report->value, (unsigned long long)width, width == 1 ? "bit" : "bits");
+        }
+        else
+        {
+            result = check_warning_text(scratch, "named %s has zero width", subject);
+        }
+    }
+    else if (report->message == CHECK_INPUT_FUNCTION_MEMBER)
+    {
+        result = check_warning_text(scratch, "field '%.*s' declared as a function", (int)name.length, name.pointer);
+    }
     else if (report->message == CHECK_INPUT_RETURN)
     {
         const uint32_t function = check_semantic_function(parser, input, token);
@@ -630,12 +667,15 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
             }
         }
     }
-    else if (token < count && (report->message == CHECK_INPUT_INCOMPLETE_OBJECT || report->message == CHECK_INPUT_INCOMPLETE_TENTATIVE))
+    else if (token < count && (report->message == CHECK_INPUT_INCOMPLETE_OBJECT || report->message == CHECK_INPUT_INCOMPLETE_TENTATIVE ||
+                              report->message == CHECK_INPUT_INCOMPLETE_MEMBER))
     {
         // The report's type where it has one: an invalid declaration's own is a stand-in (#1447, check_input_variable_recover).
         const TypeId incomplete = report->type != 0 ? report->type : input->declared_types[token];
         const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, incomplete, 0);
-        result = type.length == 0 ? NULL : report->message == CHECK_INPUT_INCOMPLETE_TENTATIVE ?
+        result = type.length == 0 ? NULL : report->message == CHECK_INPUT_INCOMPLETE_MEMBER ?
+                 check_warning_text(scratch, "field has incomplete type %.*s", (int)type.length, type.pointer) :
+                 report->message == CHECK_INPUT_INCOMPLETE_TENTATIVE ?
                  check_warning_text(scratch, "tentative definition has type %.*s that is never completed", (int)type.length, type.pointer) :
                  check_warning_text(scratch, "variable has incomplete type %.*s", (int)type.length, type.pointer);
     }

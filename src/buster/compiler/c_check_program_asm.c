@@ -149,6 +149,8 @@ struct CheckAsmPlace
     uint8_t kind;
     uint8_t reg;
     uint8_t size;
+    // The original lvalue's segment, carried by accesses around the template; memory constraints remain its offsets.
+    uint8_t segment;
     bool written;
     bool read;
     // A flag output's _Atomic object, which its value is exchanged into (check_asm_helper_code).
@@ -1031,6 +1033,13 @@ static bool check_asm_stores(const CheckAsmPlace* place)
     return place->written && (place->kind == BUSTER_CHECK_ASM_GENERAL || place->kind == BUSTER_CHECK_ASM_VECTOR);
 }
 
+// Every store form selected below has the encoder's FS, GS and SS variants. The operand block and frame remain flat;
+// only the store through the original output's address takes its override.
+static uint16_t check_asm_store_form(const CheckAsmPlace* place, uint32_t form)
+{
+    return (uint16_t)(form + (uint32_t)place->segment * X86_FORM_COUNT);
+}
+
 // Whether the helper loads x87 operand `place` onto the stack before the template (an input's value, a matching input's,
 // a `+` operand's), and whether it stores it after the template (an output, popped through the address its slot holds).
 static bool check_asm_x87_loads(const CheckAsmPlace* place)
@@ -1391,10 +1400,10 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
                                       place->size == 2 ? (place->atomic ? X86_FORM_XCHG_RM16_R16 : X86_FORM_MOV_RM16_R16) :
                                       place->size == 4 ? (place->atomic ? X86_FORM_XCHG_RM32_R32 : X86_FORM_MOV_RM32_R32) :
                                                          (place->atomic ? X86_FORM_XCHG_RM64_R64 : X86_FORM_MOV_RM64_R64);
-                written[at++] = (X86Instruction){ .form = (uint16_t)form, .reg = stores[1], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE };
+                written[at++] = (X86Instruction){ .form = check_asm_store_form(place, form), .reg = stores[1], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE };
                 if (place->size == 16)
                 {
-                    written[at++] = (X86Instruction){ .form = X86_FORM_MOV_RM64_IMM32, .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 };
+                    written[at++] = (X86Instruction){ .form = check_asm_store_form(place, X86_FORM_MOV_RM64_IMM32), .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 };
                 }
                 written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[0], .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
             }
@@ -1414,7 +1423,7 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
                                       place->size == 1 ? X86_FORM_MOV_RM8_R8 : place->size == 2 ? X86_FORM_MOV_RM16_R16 :
                                       place->size == 4 ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64;
                 const uint8_t reg = place->high ? (uint8_t)((4 + place->reg) | BUSTER_X86_REGISTER_HIGH_BYTE) : place->reg;
-                written[at++] = (X86Instruction){ .form = (uint16_t)form, .reg = reg, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+                written[at++] = (X86Instruction){ .form = check_asm_store_form(place, form), .reg = reg, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
             }
         }
         // A's pairs, rax and rdx through their addresses.
@@ -1425,8 +1434,8 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
             {
                 written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE,
                                                   .displacement = (int32_t)place->slot };
-                written[at++] = (X86Instruction){ .form = X86_FORM_MOV_RM64_R64, .reg = X86_REGISTER_RAX, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
-                written[at++] = (X86Instruction){ .form = X86_FORM_MOV_RM64_R64, .reg = X86_REGISTER_RDX, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 };
+                written[at++] = (X86Instruction){ .form = check_asm_store_form(place, X86_FORM_MOV_RM64_R64), .reg = X86_REGISTER_RAX, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+                written[at++] = (X86Instruction){ .form = check_asm_store_form(place, X86_FORM_MOV_RM64_R64), .reg = X86_REGISTER_RDX, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 };
             }
         }
         // The MMX outputs, through their addresses: movq's 8 bytes or movd's 4, and a narrower value's bytes through the
@@ -1445,18 +1454,18 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
                     const uint32_t store = place->size == 1 ? X86_FORM_MOV_RM8_R8 : place->size == 2 ? X86_FORM_MOV_RM16_R16 :
                                            place->size == 4 ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64;
                     written[at++] = (X86Instruction){ .form = (uint16_t)move, .reg = stores[0], .rm = place->reg, .mode = BUSTER_X86_REGISTER_DIRECT };
-                    written[at++] = (X86Instruction){ .form = (uint16_t)store, .reg = stores[0], .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+                    written[at++] = (X86Instruction){ .form = check_asm_store_form(place, store), .reg = stores[0], .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
                     written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[0], .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
                 }
                 else if (place->size == 8 || place->size == 4)
                 {
-                    written[at++] = (X86Instruction){ .form = place->size == 8 ? X86_FORM_MOVQ_M64_MM : X86_FORM_MOVD_RM32_MM, .reg = place->reg, .rm = stores[1],
+                    written[at++] = (X86Instruction){ .form = check_asm_store_form(place, place->size == 8 ? X86_FORM_MOVQ_M64_MM : X86_FORM_MOVD_RM32_MM), .reg = place->reg, .rm = stores[1],
                                                       .mode = BUSTER_X86_MEMORY_BASE };
                 }
                 else
                 {
                     written[at++] = (X86Instruction){ .form = X86_FORM_MOVD_RM32_MM, .reg = place->reg, .rm = stores[0], .mode = BUSTER_X86_REGISTER_DIRECT };
-                    written[at++] = (X86Instruction){ .form = place->size == 1 ? X86_FORM_MOV_RM8_R8 : X86_FORM_MOV_RM16_R16, .reg = stores[0], .rm = stores[1],
+                    written[at++] = (X86Instruction){ .form = check_asm_store_form(place, place->size == 1 ? X86_FORM_MOV_RM8_R8 : X86_FORM_MOV_RM16_R16), .reg = stores[0], .rm = stores[1],
                                                       .mode = BUSTER_X86_MEMORY_BASE };
                     written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[0], .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
                 }
@@ -1484,7 +1493,7 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
                     written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE,
                                                       .displacement = (int32_t)place->slot };
                     const uint32_t form = place->size == 4 ? X86_FORM_FSTP_M32 : place->size == 8 ? X86_FORM_FSTP_M64 : X86_FORM_FSTP_M80;
-                    written[at++] = (X86Instruction){ .form = (uint16_t)form, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+                    written[at++] = (X86Instruction){ .form = check_asm_store_form(place, form), .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
                 }
             }
         }
@@ -1700,10 +1709,10 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
                                       place->size == 2 ? (place->atomic ? X86_FORM_XCHG_RM16_R16 : X86_FORM_MOV_RM16_R16) :
                                       place->size == 4 ? (place->atomic ? X86_FORM_XCHG_RM32_R32 : X86_FORM_MOV_RM32_R32) :
                                                          (place->atomic ? X86_FORM_XCHG_RM64_R64 : X86_FORM_MOV_RM64_R64);
-                written[at++] = (X86Instruction){ .form = (uint16_t)form, .reg = stores[1], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE };
+                written[at++] = (X86Instruction){ .form = check_asm_store_form(place, form), .reg = stores[1], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE };
                 if (place->size == 16)
                 {
-                    written[at++] = (X86Instruction){ .form = X86_FORM_MOV_RM64_IMM32, .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 };
+                    written[at++] = (X86Instruction){ .form = check_asm_store_form(place, X86_FORM_MOV_RM64_IMM32), .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 };
                 }
             }
         }
@@ -1722,7 +1731,7 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
                                       place->size == 1 ? X86_FORM_MOV_RM8_R8 : place->size == 2 ? X86_FORM_MOV_RM16_R16 :
                                       place->size == 4 ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64;
                 const uint8_t reg = place->high ? (uint8_t)((4 + place->reg) | BUSTER_X86_REGISTER_HIGH_BYTE) : place->reg;
-                written[at++] = (X86Instruction){ .form = (uint16_t)form, .reg = reg, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+                written[at++] = (X86Instruction){ .form = check_asm_store_form(place, form), .reg = reg, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
             }
         }
         // A's pairs, rax and rdx through their addresses; then the MMX and opmask outputs (#1846), as the helper stores
@@ -1734,8 +1743,8 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
             {
                 written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = BUSTER_TIER0_ASM_BLOCK, .mode = BUSTER_X86_MEMORY_BASE,
                                                   .displacement = (int32_t)place->slot };
-                written[at++] = (X86Instruction){ .form = X86_FORM_MOV_RM64_R64, .reg = X86_REGISTER_RAX, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
-                written[at++] = (X86Instruction){ .form = X86_FORM_MOV_RM64_R64, .reg = X86_REGISTER_RDX, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 };
+                written[at++] = (X86Instruction){ .form = check_asm_store_form(place, X86_FORM_MOV_RM64_R64), .reg = X86_REGISTER_RAX, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+                written[at++] = (X86Instruction){ .form = check_asm_store_form(place, X86_FORM_MOV_RM64_R64), .reg = X86_REGISTER_RDX, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 };
             }
         }
         for (uint32_t k = 0; k < count; k += 1)
@@ -1751,17 +1760,17 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
                 {
                     const uint32_t move = place->size <= 2 ? X86_FORM_KMOVW_R32_K : place->size == 4 ? X86_FORM_KMOVD_R32_K : X86_FORM_KMOVQ_R64_K;
                     written[at++] = (X86Instruction){ .form = (uint16_t)move, .reg = stores[0], .rm = place->reg, .mode = BUSTER_X86_REGISTER_DIRECT };
-                    written[at++] = (X86Instruction){ .form = (uint16_t)store, .reg = stores[0], .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+                    written[at++] = (X86Instruction){ .form = check_asm_store_form(place, store), .reg = stores[0], .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
                 }
                 else if (place->size == 8 || place->size == 4)
                 {
-                    written[at++] = (X86Instruction){ .form = place->size == 8 ? X86_FORM_MOVQ_M64_MM : X86_FORM_MOVD_RM32_MM, .reg = place->reg, .rm = stores[1],
+                    written[at++] = (X86Instruction){ .form = check_asm_store_form(place, place->size == 8 ? X86_FORM_MOVQ_M64_MM : X86_FORM_MOVD_RM32_MM), .reg = place->reg, .rm = stores[1],
                                                       .mode = BUSTER_X86_MEMORY_BASE };
                 }
                 else
                 {
                     written[at++] = (X86Instruction){ .form = X86_FORM_MOVD_RM32_MM, .reg = place->reg, .rm = stores[0], .mode = BUSTER_X86_REGISTER_DIRECT };
-                    written[at++] = (X86Instruction){ .form = (uint16_t)store, .reg = stores[0], .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+                    written[at++] = (X86Instruction){ .form = check_asm_store_form(place, store), .reg = stores[0], .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
                 }
             }
         }
@@ -1785,7 +1794,7 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
                     written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = BUSTER_TIER0_ASM_BLOCK, .mode = BUSTER_X86_MEMORY_BASE,
                                                       .displacement = (int32_t)place->slot };
                     const uint32_t form = place->size == 4 ? X86_FORM_FSTP_M32 : place->size == 8 ? X86_FORM_FSTP_M64 : X86_FORM_FSTP_M80;
-                    written[at++] = (X86Instruction){ .form = (uint16_t)form, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+                    written[at++] = (X86Instruction){ .form = check_asm_store_form(place, form), .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
                 }
             }
         }
@@ -2575,7 +2584,7 @@ static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAs
             if (placed)
             {
                 candidate.records[candidate.record_count] = (X86Instruction){
-                    .form = (uint16_t)form,
+                    .form = check_asm_store_form(place, form),
                     .reg = sources[k],
                     .rm = (uint8_t)BUSTER_TIER0_ROLE_INTEGER(addresses[k]),
                     .mode = BUSTER_X86_MEMORY_BASE,
@@ -2707,6 +2716,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             .value = BUSTER_CHECK_NONE,
             .tied = output ? BUSTER_CHECK_NONE : constraint->tied,
             .size = registered ? (uint8_t)size : 0,
+            .segment = check_program_lvalue_segment(program, checked->node),
             .written = output,
             .read = !output || (statement->operands[k].flags & CHECK_ASM_READ) != 0,
         };
@@ -2731,6 +2741,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             reason = "bit-fields as inline assembly operands";
         }
+        else if (output && place->segment != 0 && (value->flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && type_conversion_operand(types, type) == BUSTER_TYPE_BOOL)
+        {
+            // A bit has no address for this store plan. It needs a read/insert/write of its containing vector.
+            reason = "inline assembly outputs to bits of boolean vectors in a segment's address space";
+        }
         else if (constraint->flag != 0)
         {
             // A flag output: the whole object written, of a size an integer store covers.
@@ -2745,6 +2760,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             place->tied = BUSTER_CHECK_NONE;
             reason = !alone ? "inline assembly flag outputs with other alternatives" :
                      place->size == 0 || (place->atomic && place->size > 8) ? "inline assembly flag outputs of this size" : NULL;
+        }
+        else if (output && place->segment != 0 && !memory_only && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC)
+        {
+            // Only flag outputs currently generate an atomic store. An ordinary output must not use a plain MOV.
+            reason = "non-flag inline assembly outputs to atomic objects in a segment's address space";
         }
         else if (variable == -2)
         {
@@ -2886,6 +2906,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             place->type = BUSTER_TYPE_ULONG;
             place->m64 = true;
             place->object = output ? checked->node : check_asm_m64_object(program, checked->node);
+            place->segment = check_program_lvalue_segment(program, place->object);
         }
         else if (constraint->masks != 0 && integer && registered)
         {

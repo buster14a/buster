@@ -8505,6 +8505,8 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_label_attribute_driver_test.c"
 #include "c_check_resume_driver_test.c"
 #include "c_check_semantic_recovery_driver_test.c"
+#include "c_check_invalid_record_driver_test.c"
+#include "c_check_format_matches_driver_test.c"
 #include "c_check_statement_recovery_driver_test.c"
 #include "c_check_type_attribute_recovery_driver_test.c"
 #include "c_check_attribute_declaration_driver_test.c"
@@ -9662,6 +9664,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool label_attributes_only = false;
     // --attribute-recovery-only: the label, declaration and call recovery fixtures and their combined source.
     bool attribute_recovery_only = false;
+    bool invalid_records_only = false;
+    bool format_matches_only = false;
     // --malformed-calls-only: type-first balanced malformed calls and their independent later diagnostics (#2406).
     bool malformed_calls_only = false;
     // --operand-diagnostics-only: rejected record and atomic operands, including constant contexts (#2441).
@@ -9777,6 +9781,14 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--attribute-recovery-only") == 0)
         {
             attribute_recovery_only = true;
+        }
+        else if (strcmp(argv[i], "--invalid-records-only") == 0)
+        {
+            invalid_records_only = true;
+        }
+        else if (strcmp(argv[i], "--format-matches-only") == 0)
+        {
+            format_matches_only = true;
         }
         else if (strcmp(argv[i], "--malformed-calls-only") == 0)
         {
@@ -9908,7 +9920,8 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
                              (uint32_t)float_precision_only + (uint32_t)reach_filter_only + (uint32_t)branch_truth_only +
                              (uint32_t)constant_logical_only + (uint32_t)quiet_roots_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only +
-                             (uint32_t)stack_protector_only + (uint32_t)cf_protection_only + (uint32_t)visibility_only + (uint32_t)missing_variable_only;
+                             (uint32_t)stack_protector_only + (uint32_t)cf_protection_only + (uint32_t)visibility_only +
+                             (uint32_t)invalid_records_only + (uint32_t)format_matches_only + (uint32_t)missing_variable_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10539,6 +10552,14 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_gnu_empty_struct(&test, clang, executable, directory);
         check_test_driver_record_extensions(&test, clang, executable, directory);
     }
+    if (temporary && invalid_records_only)
+    {
+        check_test_driver_invalid_records(&test, clang, executable, directory);
+    }
+    if (temporary && format_matches_only)
+    {
+        check_test_driver_format_matches(&test, clang, executable, directory);
+    }
     if (temporary && call_counts_only)
     {
         check_test_driver_call_counts(&test, clang, executable, directory);
@@ -10696,6 +10717,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         // Long sweeps that deal their own fixtures and checks.
         if (!lazy)
         {
+            check_test_driver_invalid_records(&test, clang, executable, directory);
+            check_test_driver_format_matches(&test, clang, executable, directory);
             check_test_driver_semantic_recovery(&test, clang, executable, directory);
             check_test_driver_statement_recovery(&test, clang, executable, directory);
         }

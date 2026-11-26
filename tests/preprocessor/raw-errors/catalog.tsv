@@ -14,3 +14,11 @@ buster-fixtures v1 preprocessor-directives
 0012	gnu17	-	opaque diagnostic
 0013	gnu17	-	opaque query
 0014	gnu17	header	included file
+0015	gnu17	expected	skipped UCN character errors without raw-mode warnings
+0016	gnu17	expected	skipped UCNs interleave with nested conditional diagnostics
+0017	gnu23	expected	skipped directive operands are raw tokens, literals and comments are quiet
+0018	gnu23	header,expected	skipped UCNs in an included file keep its presumed locations
+0019	c17	expected	skipped UCNs across line splices and trigraphs
+0020	gnu17	expected	skipped UCNs precede unterminated conditional errors
+0021	gnu17	expected	skipped UCNs after a re-lexed condition ignore its hidden comment
+0022	gnu17	expected	skipped UCNs at the end of a re-lexed unterminated group

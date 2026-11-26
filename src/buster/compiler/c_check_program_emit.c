@@ -6036,7 +6036,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const CheckProgramHelper* helper = helpers->items + h;
         char spelling[64];
         // An asm statement's helper is named after its statement (c_check_program_asm.c), a builtin's after its builtin.
+        // Atomic segment specializations have distinct names too, so -S can spell every helper's own local label.
         const int length = helper->assembly != 0 ? snprintf(spelling, sizeof(spelling), ".Lbuster_asm_%u", helper->assembly - 1) :
+                           helper->segments != 0 ? snprintf(spelling, sizeof(spelling), ".Lbuster_builtin_%u_%u_s%u", helper->id, helper->bytes, helper->segments) :
                                                    snprintf(spelling, sizeof(spelling), ".Lbuster_builtin_%u_%u", helper->id, helper->bytes);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION,

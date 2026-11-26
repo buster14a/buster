@@ -200,9 +200,13 @@ or `test-preprocessor --tables path...`:
     error with clang's note of a loose match, and a basic or control
     character's an error; in active text, a macro's definition once and an
     unused argument, `#if` and `#elif` lines, after line splices and as a
-    trigraph, beside `\u`, `\U` and UTF-8 spellings; and no error in a skipped
-    group (but a basic or control character's, which clang gives there and
-    buster doesn't, as for `\u`), a literal or a comment;
+    trigraph, beside `\u`, `\U` and UTF-8 spellings; a skipped group keeps
+    an exact name's basic or control character error, and a numeric UCN's
+    basic, control or surrogate character error, with no malformed-name or
+    incomplete-UCN diagnostics or extension warnings. Literals and comments
+    stay quiet. The raw-error
+    fixtures check their source order beside nested conditional diagnostics,
+    included files, presumed line numbers, splices and trigraphs;
   - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
   - `-E`'s output modes (#1380): `-C`'s comments where clang keeps them and the
     semantics they change, `-CC`'s in replacement lists and arguments, `-dD`'s

@@ -40,3 +40,7 @@ segment-atomic-lvalues	segment-atomic-lvalues.c	-	segment-atomic-lvalues
 # through the vector's override (check_lower_transport_bit_read, check_lower_transport_bit_store), of 8 and 64 bits, in
 # %fs and %ss.
 segment-bool-vectors	segment-bool-vectors.c	-	segment-bool-vectors
+# Generic native-width buffer plans, independent expected/result pointers, fallback helper signatures and asm stores.
+segment-atomic-buffers	segment-atomic-buffers.c	-	segment-atomic-buffers
+segment-atomic-helpers	segment-atomic-helpers.c	-	segment-atomic-helpers
+segment-asm-outputs	segment-asm-outputs.c	-	segment-asm-outputs

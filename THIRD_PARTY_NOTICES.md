@@ -26,6 +26,17 @@ the project default terms. Clang 23.1.4 at LLVM revision
 No upstream implementation or test fixture was imported for this continuation;
 the existing Unicode width tables retain their separately recorded terms.
 
+The remaining checker-gap implementations for #1447 (`format_matches`
+contracts, non-VLA invalid-record recovery, segment-address-space atomic/asm
+accesses and hard UCN diagnostics in inactive preprocessor groups), their
+private test helpers and original runtime fixtures use the project default
+terms. LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Sema/SemaDeclAttr.cpp` and `clang/lib/Sema/SemaChecking.cpp` were
+consulted for attribute validation, format compatibility and diagnostic
+behavior. Clang 23.1.4 at that revision is the external diagnostic and
+generated-program oracle. No upstream implementation, fixture or generated
+data is imported by these changes.
+
 The `-Wconstant-logical-operand` warning facts, their constant/type-query and
 checked-graph producers, and the original `constant_logical_*.c` driver fixtures
 (#2900) use the project default terms. Clang 23.1.4, LLVM revision
