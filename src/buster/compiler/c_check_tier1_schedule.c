@@ -20,6 +20,9 @@ typedef struct CheckTier1ScheduleCode CheckTier1ScheduleCode;
 struct CheckTier1ScheduleCode
 {
     X86Instruction* records;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    uint8_t* measure_kinds;
+#endif
     uint32_t count;
     const uint32_t* branches;
     const uint32_t* targets;
@@ -68,6 +71,9 @@ static CheckTier1ScheduleResult check_tier1_schedule_code(Arena* scratch, const 
     Tier1ScheduleGraph* graph = arena_push(scratch, sizeof(Tier1ScheduleGraph), 64);
     uint16_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, BUSTER_TIER1_SCHEDULE_MAX_RECORDS);
     X86Instruction* block = BUSTER_ARENA_PUSH_ARRAY(scratch, X86Instruction, BUSTER_TIER1_SCHEDULE_MAX_RECORDS);
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    uint8_t kind_block[BUSTER_TIER1_SCHEDULE_MAX_RECORDS];
+#endif
     result.ready = cuts != 0 && graph != 0 && order != 0 && block != 0 && (code->reference_count == 0 || places != 0);
     if (result.ready)
     {
@@ -120,6 +126,12 @@ static CheckTier1ScheduleResult check_tier1_schedule_code(Arena* scratch, const 
                 {
                     result.moved += stats.moved;
                     memcpy(block, input.instructions, input.count * sizeof(X86Instruction));
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+                    if (code->measure_kinds != NULL)
+                    {
+                        memcpy(kind_block, code->measure_kinds + start, input.count);
+                    }
+#endif
                     for (uint32_t position = 0; position < input.count; position += 1)
                     {
                         code->records[start + position] = block[order[position]];
@@ -127,6 +139,12 @@ static CheckTier1ScheduleResult check_tier1_schedule_code(Arena* scratch, const 
                         {
                             code->record_order[start + position] = start + order[position];
                         }
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+                        if (code->measure_kinds != NULL)
+                        {
+                            code->measure_kinds[start + position] = kind_block[order[position]];
+                        }
+#endif
                         if (places != 0)
                         {
                             places[start + order[position]] = start + position;

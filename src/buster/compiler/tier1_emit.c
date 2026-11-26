@@ -133,6 +133,10 @@ struct Tier1EmitOptions
     // TIER1_EMIT_CERTIFICATE, the diagnostic's error its Tier1CertEmittedReason plus BUSTER_TIER1_EMIT_CODE_CERTIFICATE.
     // The C driver's --verify sets it.
     bool certify;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    // Private #1189 origin sidecar, opt-in at build time and by BUSTER_TIER1_KINDS at run time.
+    bool measure_kinds;
+#endif
     Tier1EmitDiagnostic* diagnostic;
 };
 
@@ -377,6 +381,10 @@ struct Tier1EmitResult
     // (UINT32_MAX for an edge without a stub) support the CFG certificate, also used to prove debug definitions.
     uint32_t* origins;
     uint32_t* origin_values;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    bool measure_kinds_enabled;
+    uint8_t* measure_kinds;
+#endif
     uint32_t* block_records;
     uint32_t* stub_records;
     // Under certify, block_count contiguous rows of 16 general-register call-save owners (node ids), BUSTER_IR_NONE
@@ -791,10 +799,30 @@ static bool tier1_emit_append(Tier1EmitBuffer* buffer, X86Instruction instructio
     const bool room = buffer->count < buffer->capacity;
     if (room)
     {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+        if (buffer->measure_kinds != NULL)
+        {
+            buffer->measure_kinds[buffer->count] = buffer->measure_kind;
+        }
+#endif
         buffer->records[buffer->count++] = instruction;
     }
     return room;
 }
+
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+// Adapted from the #1189 experiment at buster-performance ab460a6; no thread-local or fixed-size tag storage.
+static bool tier1_emit_append_kind(Tier1EmitBuffer* buffer, X86Instruction instruction, uint8_t kind)
+{
+    const uint8_t saved = buffer->measure_kind;
+    buffer->measure_kind = kind;
+    const bool room = tier1_emit_append(buffer, instruction);
+    buffer->measure_kind = saved;
+    return room;
+}
+#else
+#define tier1_emit_append_kind(buffer, instruction, kind) tier1_emit_append(buffer, instruction)
+#endif
 
 // The flags live between two nodes' records, where fragment transitions and edge moves run: none. Selection keeps each
 // flag's producer and its readers in one node's records (a compare and its setcc, conditional jump or cmov), as its
@@ -822,7 +850,7 @@ static Tier1EmitError tier1_emit_copy(Tier1EmitResult* result, const Tier1Remate
             .addend = copy.addend,
         };
     }
-    error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, copy.instruction) ? error : TIER1_EMIT_MEMORY;
+    error = error != TIER1_EMIT_OK || tier1_emit_append_kind(buffer, copy.instruction, 'r') ? error : TIER1_EMIT_MEMORY;
     result->rematerializations += error == TIER1_EMIT_OK;
     return error;
 }
@@ -883,7 +911,7 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
             {
                 error = TIER1_EMIT_ALLOCATION;
             }
-            else if (!current && !tier1_emit_append(buffer, tier1_emit_spill(prepared, allocation, frame, value, allocation->registers[f - 1], false)))
+            else if (!current && !tier1_emit_append_kind(buffer, tier1_emit_spill(prepared, allocation, frame, value, allocation->registers[f - 1], false), 'S'))
             {
                 error = TIER1_EMIT_MEMORY;
             }
@@ -922,7 +950,7 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
         {
             const bool reload = previous == BUSTER_TIER1_ALLOCATE_SPILL && allocation->spill_ids[value] < frame->count;
             error = reload ? error : TIER1_EMIT_ALLOCATION;
-            if (error == TIER1_EMIT_OK && !tier1_emit_append(buffer, tier1_emit_spill(prepared, allocation, frame, value, reg, true)))
+            if (error == TIER1_EMIT_OK && !tier1_emit_append_kind(buffer, tier1_emit_spill(prepared, allocation, frame, value, reg, true), 'L'))
             {
                 error = TIER1_EMIT_MEMORY;
             }
@@ -977,7 +1005,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
     bool appended = rows && count != 0;
     for (uint32_t reg = 0; appended && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
     {
-        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, false));
+        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append_kind(buffer, tier1_emit_call_save(emitted, reg, false), 'C');
         emitted->call_stores += (saved >> reg) & 1;
     }
     tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, buffer->origin_base + 2 * node + 1), BUSTER_IR_NONE);
@@ -988,7 +1016,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
     tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
     for (uint32_t reg = 0; appended && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
     {
-        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, true));
+        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append_kind(buffer, tier1_emit_call_save(emitted, reg, true), 'R');
         emitted->call_loads += (saved >> reg) & 1;
     }
     tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, buffer->origin_base + 2 * node + 1), BUSTER_IR_NONE);
@@ -1064,7 +1092,7 @@ static Tier1EmitError tier1_emit_repay(Tier1EmitResult* result, Tier1EmitSaves* 
     bool appended = true;
     for (uint32_t left = repaid; appended && left != 0; left &= left - 1)
     {
-        appended = tier1_emit_append(buffer, tier1_emit_call_save(result, (uint32_t)__builtin_ctz(left), true));
+        appended = tier1_emit_append_kind(buffer, tier1_emit_call_save(result, (uint32_t)__builtin_ctz(left), true), 'R');
     }
     tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, use), BUSTER_IR_NONE);
     result->call_loads += (uint32_t)__builtin_popcount(repaid);
@@ -1349,6 +1377,10 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
 {
     const IrFunction* function = plan->function;
     const IrCall* call = &function->calls[function->b[node]];
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const uint8_t saved_kind = buffer->measure_kind;
+    buffer->measure_kind = 'a';
+#endif
     const uint64_t scratch_mark = scratch->length;
     const uint32_t result_type = function->type[node];
     // A long double's (#141) comes in st0, which the CFG consumer's `into` object takes.
@@ -1478,7 +1510,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     {
         if (((saved & ~kept) >> reg) & 1)
         {
-            if (!tier1_emit_append(buffer, tier1_emit_call_save(result, reg, false)))
+            if (!tier1_emit_append_kind(buffer, tier1_emit_call_save(result, reg, false), 'C'))
             {
                 error = TIER1_EMIT_MEMORY;
             }
@@ -1655,6 +1687,9 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     }
     tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
     arena_pop_to(scratch, scratch_mark);
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    buffer->measure_kind = saved_kind;
+#endif
     return error;
 }
 
@@ -1693,6 +1728,11 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         bool ok = true;
         code->records = ir_allocate(output, capacity, sizeof(X86Instruction), &ok);
         code->cost_ids = ir_allocate(output, capacity, 1, &ok);
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+        result->measure_kinds = ok && result->measure_kinds_enabled ? ir_allocate(output, capacity + 1, 1, &ok) : NULL;
+        buffer.measure_kinds = result->measure_kinds;
+        buffer.measure_kind = 'n';
+#endif
         code->node_first = ir_allocate(output, (uint64_t)count + 1, 4, &ok);
         code->branches = ir_allocate(output, branch_capacity, 4, &ok);
         code->targets = ir_allocate(output, branch_capacity, 4, &ok);
@@ -2037,6 +2077,9 @@ static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, cons
     const uint64_t output_mark = arguments ? output->length : 0;
     const uint64_t scratch_mark = arguments ? scratch->length : 0;
     Tier1EmitResult emitted = { .zero_upper = zero_upper };
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    emitted.measure_kinds_enabled = options != NULL && options->measure_kinds;
+#endif
     if (options != NULL && options->diagnostic != NULL)
     {
         *options->diagnostic = (Tier1EmitDiagnostic){ 0 };
@@ -2089,6 +2132,9 @@ static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, cons
         arena_pop_to(output, output_mark);
         arena_pop_to(scratch, scratch_mark);
         emitted = (Tier1EmitResult){ .zero_upper = zero_upper };
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+        emitted.measure_kinds_enabled = options->measure_kinds;
+#endif
         if (options->diagnostic != NULL)
         {
             *options->diagnostic = (Tier1EmitDiagnostic){ 0 };

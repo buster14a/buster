@@ -22,6 +22,8 @@
 // whose code calls a home's entry point runs in two units' copies of the code, so a home's code must share no static
 // variable with its callers' units: main.c's units have one lane context (lane.c), and ./build.sh check-call-graph
 // checks the rest (call_graph.c).
+// Private #2610 measurement build: tag emitted records without changing their instructions.
+#define BUSTER_TIER1_MEASURE_KINDS 1
 #define BUSTER_UNIT_DRIVER 0
 #define BUSTER_UNIT_X86 1
 #define BUSTER_UNIT_FRONTEND 2
