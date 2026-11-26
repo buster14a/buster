@@ -1811,7 +1811,9 @@ is k0.
 ## Asm bodies (#1839)
 
 A body call ([the IR guide](ir.md)'s "Asm bodies") is `TIER1_RULE_ASM`, its
-`immediate` the body's index, of no result: its block argument is the
+`immediate` the body's index. It has no result or one `i32`, `i64` or `ptr`
+result in the physical general register named by `IrAsmBody.result` (one plus
+the register, #2351). Its block argument is the
 `stack_addr` of a frame object, which no register holds (no effective use, so the
 address is computed only where something else reads it), and its register
 operands (#2144, `IrAsmBody.passed`) are its effective uses, each in a register of
@@ -1835,8 +1837,19 @@ phase:
 3. the body's records, each that addresses the operand block
    (`BUSTER_TIER0_ASM_BLOCK`) addressing the block's frame object from the frame's
    base register, its own branches the function's branches to their records (one
-   to the body's end the first restore's), sized with the function's;
-4. the loads back.
+   to the body's end the result copy's or first restore's), sized with the function's;
+4. its result, if any, copied at the IR type's width from the body's register
+   to the definition's allocated register before a restore can overwrite it;
+5. the loads back.
+
+The body's retained labels travel to `Tier1EmitResult.asm_label_records` and
+`asm_label_names`, then the C driver's `EmittedCode`: their offsets name the
+template's exact records, including the next-record boundary of an empty
+body. `asm_ranges` retains each body's emitted record range. Post scheduling
+puts a boundary at every record in those ranges, preserving template order
+while scheduling the surrounding C code. An asm goto's eax result is its exit
+number; the following typed dispatch is ordinary IR control flow, with no
+helper call. Named bodies are not inlined, and the unroller refuses all calls.
 
 The general registers it touches are its fixed registers
 (`tier1_select_node_fixed`), so that the frame gives them call-save rows where a
@@ -1855,9 +1868,19 @@ prologue saves once, rather than a register the body would save and restore
 around itself each time it runs; a phi's web keeps out of every body's registers
 any member crosses. If that allocation fails, the first stands and the saves
 stay. The code's certificate (`--verify`) places and compares the body's records,
-its own branches among them, reads its register operands in their registers, and
-kills the registers it touches ([the certificate guide](tier1-certificate.md)'s "Asm
-bodies").
+its own branches among them, reads its register operands in their registers,
+kills the registers it touches and defines its optional result in the body's
+physical register; the result copy is checked as a move ([the certificate
+guide](tier1-certificate.md)'s "Asm bodies").
+
+A whole assembled unit uses a body's opaque reserved span
+(`IrAsmBody.opaque`). Final emission replaces it with aligned bytes and rebases
+the unit's symbols and fixups into the containing function. Its hidden label
+anchor also prevents duplication. Such a function skips post scheduling and
+reports `opaque-asm` instead of claiming emitted-code certification of the
+placeholder records; the allocation certificate remains enabled. The
+[inline assembly guide](c-inline-assembly.md)'s "Templates that take directives"
+describes the effects gate, final layout and remaining helper boundaries.
 
 Registers outside `touched` hold no value across the node: the allocator gives
 values xmm0 to xmm14 alone (xmm15 is the vector class's scratch within a node,

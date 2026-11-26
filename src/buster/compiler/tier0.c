@@ -495,6 +495,9 @@ struct Tier0AsmBody
     // Whether it moves an input into rsp before its template (#1846: rsp's explicit register variable), as clang's code
     // does: the frame is then the program's to keep, which the frame verifier doesn't read (tier0_asm_stack).
     bool stack;
+    // Some records reserve an opaque assembled byte span. They keep their order and length until emission copies
+    // that span into the caller. The front end checks the matched instructions and the declared clobbers.
+    bool opaque;
 };
 
 // The most a function may have of each (the columns' indices are 32-bit), and of its objects' bytes, each object's

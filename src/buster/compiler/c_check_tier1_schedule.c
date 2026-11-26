@@ -33,6 +33,10 @@ struct CheckTier1ScheduleCode
     // Further boundaries nothing moves across: the source events'.
     const uint32_t* anchors;
     uint32_t anchor_count;
+    // Inline asm's [first, end) record pairs. Every record stays at its position, so the program's instruction order
+    // and the instruction immediately following a retained asm label remain exact (#2351).
+    const uint32_t* fixed_ranges;
+    uint32_t fixed_range_count;
     // Optional output for source/debug metadata: new record index -> old record index, plus the terminal boundary.
     // The caller supplies count + 1 entries. This adds no cuts and changes none of the scheduler's decisions.
     uint32_t* record_order;
@@ -91,6 +95,15 @@ static CheckTier1ScheduleResult check_tier1_schedule_code(Arena* scratch, const 
         for (uint32_t k = 0; k < code->anchor_count; k += 1)
         {
             check_tier1_schedule_cut(cuts, count, code->anchors[k]);
+        }
+        for (uint32_t k = 0; k < code->fixed_range_count; k += 1)
+        {
+            const uint32_t first = code->fixed_ranges[2 * k];
+            const uint32_t end = code->fixed_ranges[2 * k + 1];
+            if (first <= end && end <= count)
+            {
+                memset(cuts + first, 1, (uint64_t)end - first + 1);
+            }
         }
         for (uint32_t i = 0; places != 0 && i <= count; i += 1)
         {

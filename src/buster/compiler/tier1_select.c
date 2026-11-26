@@ -246,7 +246,8 @@ typedef enum Tier1SelectRule
     // An asm body (#1839), an IR body call's (IrCall.body): an asm statement's records, which the CFG consumer writes in
     // the node's place (tier1_emit_cfg_asm) with no call, its operand block's base (BUSTER_TIER0_ASM_BLOCK) the frame's base
     // register and its displacement the block's frame object's past it, the block being the IR_STACK_ADDR the call's one
-    // argument is, which no register holds: the node has no operand and no result. Its own branches are the function's,
+    // argument is, which no register holds; the other arguments are register operands, and an optional result is copied
+    // from the body's general register before the restores. Its own branches are the function's,
     // to its records or its end. The general registers it touches are its fixed registers (tier1_select_node_fixed): the
     // values that live past it there are saved in their call-save rows around it, a callee-saved register's too, as a
     // fixed rule's are, and so are the floating values in the xmm registers it touches, in their rows, as a call's are;

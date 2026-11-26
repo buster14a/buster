@@ -29,7 +29,8 @@ requirements. [Command index](README.md).
   control flow walked: wide vectors, machine rows (their templates placed by the
   emitter's claimed `Tier1RowPlacement`), realigned frames and by-value
   aggregates among them (#1284). Shapes it doesn't decode yet (dynamic frames,
-  variadic definitions, long doubles, indirect jumps to several labels) leave
+  variadic definitions, long doubles, indirect jumps to several labels and
+  opaque assembled asm spans) leave
   the code uncertified, by reason; `--tier1-report` counts `code_certified` and
   `code_uncertified`, and `test-checker-driver --executable`'s Tier 1 fixtures
   check those counts. `test-tier1-pipeline` corrupts certified functions'
@@ -55,8 +56,14 @@ requirements. [Command index](README.md).
   register), and ymm or zmm moves narrowed to xmm; each must be refused. Its
   asm body fixture's code is certified (#1839), and its masks' reloads after
   the body left out and the body's records changed are refused.
-  `test-checker-driver --executable`'s asm body fixtures check `--verify`'s
-  counts: every function with a body certified.
+  #2351's general-register body result is an ORIGINAL definition in its
+  physical register, followed by a checked copy before live-value restores;
+  the result fixture rejects a corrupted copy as well. Whole assembled units
+  are explicitly `opaque-asm`: their reserved records are replaced by bytes
+  after this proof, so emitted-code certification is unsupported while
+  allocation certification still runs. `test-checker-driver --executable`'s
+  asm body fixtures check `--verify`'s record-body counts, including goto exit
+  results and named labels.
   The carried-call-row fixture proves a value in both its
   register and row, then corrupts the owner, predecessor store and supplied
   assertions, with and without a frame pointer and through both emitter paths;

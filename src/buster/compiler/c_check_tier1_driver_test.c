@@ -4217,11 +4217,140 @@ static const char check_test_tier1_asm_source[] =
     "    return 0;\n"
     "}\n";
 
+// #2351: execution alone also passes with helper calls. Require every function to use Tier 1, no asm helper in the
+// object, and each retained label exactly once inside its C function. The latter catches copied labels in inlining
+// and unrolling as well as labels accidentally left in separately emitted helper code.
+static void check_test_driver_tier1_asm_control(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const functions[] = {
+        "tier1_asm_goto",
+        "tier1_asm_back",
+        "tier1_asm_live",
+        "tier1_asm_named",
+        "tier1_asm_empty",
+        "tier1_asm_named_loop",
+        "tier1_asm_private_twice",
+        "tier1_asm_result32",
+        "tier1_asm_result64",
+        "tier1_asm_result_live",
+        "tier1_asm_discarded",
+    };
+    static const char* const labels[] = {
+        "buster2351_named",
+        "buster2351_empty",
+        "buster2351_loop",
+        "buster2351_retained_",
+    };
+    static const char* const owners[] = {
+        "tier1_asm_named",
+        "tier1_asm_empty",
+        "tier1_asm_named_loop",
+        "tier1_asm_retained",
+    };
+    static const char* const options[] = {
+        "--tier1-strict",
+        "--tier1-strict",
+        "--tier1-schedule=post",
+        "--tier1-passes=+unroll",
+    };
+    char source[PATH_MAX];
+    char reference[PATH_MAX];
+    char program[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/driver/tier1_asm_control.c", check_test_fixture_root);
+    snprintf(reference, sizeof(reference), "%s/tier1-asm-control-clang", directory);
+    snprintf(program, sizeof(program), "%s/tier1-asm-control", directory);
+    snprintf(object, sizeof(object), "%s/tier1-asm-control.o", directory);
+    char* arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, source, NULL };
+    char* text = NULL;
+    const bool referenced = check_test_driver_spawn(arguments, &text) == 0;
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "Clang runs the asm goto, result and retained-label fixture");
+    const bool decoder_ready = x86_disassembler_initialize();
+    check_test_expect(test, decoder_ready, "the asm control fixture's object decoder initializes");
+    for (uint32_t mode = 0; ran && mode < BUSTER_ARRAY_LENGTH(options); mode += 1)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, source, "", program, mode != 1, false, false, false, options[mode], &build);
+        char description[256];
+        snprintf(description, sizeof(description), "asm control mode %u: every function compiles with Tier 1 and its code is certified", mode);
+        check_test_expect(test, compiled && build.code_certified != 0 && build.code_uncertified == 0, description);
+        char actual[4096] = { 0 };
+        snprintf(description, sizeof(description), "asm control mode %u: all goto outputs, live values, results and named labels match Clang", mode);
+        check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0, description);
+        const bool object_built = check_test_tier1_build(executable, source, "", object, mode != 1, false, true, false, options[mode], &build);
+        uint64_t length = 0;
+        uint8_t* bytes = object_built ? check_test_driver_read_aligned(object, &length) : NULL;
+        CheckTestElf elf;
+        const bool opened = bytes != NULL && check_test_elf_open(&elf, (String8){ .pointer = (char*)bytes, .length = length });
+        uint32_t helpers = 0;
+        for (uint64_t s = 1; opened && s < elf.symbol_count; s += 1)
+        {
+            const Elf64_Sym* symbol = elf.symbols + s;
+            const char* name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, symbol->st_name);
+            helpers += name != NULL && strncmp(name, ".Lbuster_asm_", strlen(".Lbuster_asm_")) == 0;
+        }
+        snprintf(description, sizeof(description), "asm control mode %u: its object has no asm helper (%u found)", mode, helpers);
+        check_test_expect(test, opened && helpers == 0, description);
+        for (uint32_t l = 0; opened && l < BUSTER_ARRAY_LENGTH(labels); l += 1)
+        {
+            const Elf64_Sym* label = NULL;
+            const Elf64_Sym* owner = NULL;
+            uint32_t count = 0;
+            for (uint64_t s = 1; s < elf.symbol_count; s += 1)
+            {
+                const Elf64_Sym* symbol = elf.symbols + s;
+                const char* name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, symbol->st_name);
+                if (name != NULL && symbol->st_shndx != SHN_UNDEF)
+                {
+                    const bool matched = l + 1 == BUSTER_ARRAY_LENGTH(labels) ? strncmp(name, labels[l], strlen(labels[l])) == 0 : strcmp(name, labels[l]) == 0;
+                    if (matched)
+                    {
+                        label = symbol;
+                        count += 1;
+                    }
+                    if (strcmp(name, owners[l]) == 0)
+                    {
+                        owner = symbol;
+                    }
+                }
+            }
+            const bool placed = count == 1 && owner != NULL && label != NULL && label->st_shndx == owner->st_shndx &&
+                                label->st_value >= owner->st_value && label->st_value - owner->st_value < owner->st_size;
+            snprintf(description, sizeof(description), "asm control mode %u: %s is defined once inside %s", mode, labels[l], owners[l]);
+            check_test_expect(test, placed, description);
+        }
+        free(bytes);
+        for (uint32_t f = 0; object_built && decoder_ready && f < BUSTER_ARRAY_LENGTH(functions); f += 1)
+        {
+            X86Decoded records[512];
+            uint32_t offsets[512];
+            uint32_t types[512];
+            uint32_t relocations = 0;
+            const uint32_t count = check_test_tier1_function(object, functions[f], records, BUSTER_ARRAY_LENGTH(records), offsets, types, &relocations);
+            uint32_t calls = 0;
+            for (uint32_t r = 0; r < count; r += 1)
+            {
+                const uint16_t form = records[r].instruction.form;
+                calls += form == X86_FORM_CALL_REL32 || form == X86_FORM_CALL_RM64;
+            }
+            snprintf(description, sizeof(description), "asm control mode %u: %s has no call (%u records, %u calls)", mode, functions[f], count, calls);
+            check_test_expect(test, count != 0 && calls == 0, description);
+        }
+        unlink(object);
+        unlink(program);
+    }
+    unlink(reference);
+}
+
 // The asm bodies' fixture (#1839) compiled by --tier1 --verify into an executable by each path, with and without
 // rematerialization, with no function refused: it must print what clang -O0's build prints. Its -c object's
 // tier1_cpuid holds its cpuid among its own records, with no call, and pushes rbx in its prologue.
 static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_driver_tier1_asm_control(test, clang, executable, directory);
     char unit[512];
     char reference[512];
     char object[512];

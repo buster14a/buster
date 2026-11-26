@@ -118,6 +118,79 @@ static void ir_test_pair(IrTestTally* tally, const IrFunction* function, Arena* 
     }
 }
 
+// An asm body's result and named-label metadata survive verification (#2351). The malformed forms must fail before
+// a consumer reads absent columns or shifts by an invalid result-register index. These verdicts are outside the
+// original frozen corpus's digest.
+static void ir_test_asm_bodies(IrTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    const uint64_t scratch_mark = scratch->length;
+    const IrSizes sizes = {
+        .instruction_count = 2,
+        .block_count = 1,
+        .call_count = 1,
+        .asm_body_count = 1,
+    };
+    const X86Instruction record = {
+        .form = X86_FORM_MOV_R32_IMM32,
+        .rm = X86_REGISTER_RAX,
+        .immediate = 19,
+    };
+    uint32_t label_records[2] = { 0, 1 };
+    const uint32_t label_names[2] = { 11, 12 };
+    IrFunction function = { 0 };
+    const bool made = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_test_expect(tally, made, "asm body metadata fixture allocates");
+    if (made)
+    {
+        function.result_type = IR_I32;
+        function.block_offsets[1] = 2;
+        ir_test_instruction(&function, 0, IR_CALL, IR_I32, 0, 0, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 1, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function.calls[0] = (IrCall){
+            .result_type = IR_I32,
+            .body = 1,
+        };
+        function.asm_bodies[0] = (IrAsmBody){
+            .records = &record,
+            .count = 1,
+            .touched = 1u << X86_REGISTER_RAX,
+            .result = X86_REGISTER_RAX + 1,
+            .label_records = label_records,
+            .label_names = label_names,
+            .label_count = 2,
+        };
+        ir_test_expect(tally, ir_verify(&function, scratch, NULL).error == IR_OK, "asm result and labels at both record boundaries verify");
+        function.asm_bodies[0].result = 33;
+        ir_test_expect(tally, ir_verify(&function, scratch, NULL).error != IR_OK, "asm result past the register file is refused");
+        function.asm_bodies[0].result = 0;
+        ir_test_expect(tally, ir_verify(&function, scratch, NULL).error != IR_OK, "nonvoid asm call without a result register is refused");
+        function.asm_bodies[0].result = X86_REGISTER_RCX + 1;
+        ir_test_expect(tally, ir_verify(&function, scratch, NULL).error != IR_OK, "asm result in an untouched register is refused");
+        function.asm_bodies[0].result = X86_REGISTER_RAX + 1;
+        function.asm_bodies[0].label_records = NULL;
+        ir_test_expect(tally, ir_verify(&function, scratch, NULL).error != IR_OK, "asm labels without record positions are refused");
+        function.asm_bodies[0].label_records = label_records;
+        function.asm_bodies[0].label_names = NULL;
+        ir_test_expect(tally, ir_verify(&function, scratch, NULL).error != IR_OK, "asm labels without names are refused");
+        function.asm_bodies[0].label_names = label_names;
+        label_records[1] = 2;
+        ir_test_expect(tally, ir_verify(&function, scratch, NULL).error != IR_OK, "asm label past the end is refused");
+        label_records[1] = 0;
+        function.asm_bodies[0].count = 0;
+        function.asm_bodies[0].records = NULL;
+        function.asm_bodies[0].result = 0;
+        function.asm_bodies[0].touched = 0;
+        function.calls[0].result_type = IR_VOID;
+        function.type[0] = IR_VOID;
+        function.result_type = IR_VOID;
+        function.a[1] = BUSTER_IR_NONE;
+        ir_test_expect(tally, ir_verify(&function, scratch, NULL).error == IR_OK, "named labels of an empty asm body verify");
+    }
+    ir_test_expect(tally, scratch->length == scratch_mark, "asm body verification releases scratch");
+    arena_pop_to(memory, mark);
+}
+
 static bool ir_test_simple(Arena* arena, IrFunction* function)
 {
     const IrSizes sizes = {
@@ -2684,6 +2757,7 @@ static int run_ir_tests(int argc, char** argv)
             ir_test_generated(&tally, &memory, &scratch, count);
             ir_test_dominance_generated(&tally, &memory, &scratch, count);
             ir_test_operand_windows(&tally, &memory, &scratch);
+            ir_test_asm_bodies(&tally, &memory, &scratch);
             bool preserved = scratch.length == 19;
             for (uint32_t byte = 0; byte < 19; byte += 1)
             {

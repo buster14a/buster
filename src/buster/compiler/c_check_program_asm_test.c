@@ -17,6 +17,7 @@
 // places; then the plans must be the whole arena's: an asm body each for the first two (#1839), the third refused by name,
 // a helper for the fourth, whose form x86_semantics.c doesn't cover (rorx), and an asm body for the fifth, whose named label
 // the names step adds (#2090: its run without room must leave the helpers as they were), then drops as private (#2351).
+// The final directive template exercises the assembled-byte body's allocations and its rollback after exhaustion.
 static void check_test_program_asm_room(CheckTest* test)
 {
     static const char source[] =
@@ -25,7 +26,8 @@ static void check_test_program_asm_room(CheckTest* test)
         "int flagged(int a, float x){__int128 z;__asm__(\"cmpl $0, %2\" : \"=r\"(z), \"+t\"(x) : \"r\"(a));return (int)z+(int)x;}"
         "int rotated(int n){int r;__asm__(\"rorxl $3, %1, %0\" : \"=r\"(r) : \"r\"(n));return r;}"
         "int counted(int n){__asm__(\".Lcount%=:\\n\\tdecl %0\\n\\tjnz .Lcount%=\" : \"+r\"(n));return n;}"
-        "int jumped(int n){asm goto(\"testl %0, %0\\n\\tjz %l1\" : : \"r\"(n) : : zero);return 1;zero:return 0;}";
+        "int jumped(int n){asm goto(\"testl %0, %0\\n\\tjz %l1\" : : \"r\"(n) : : zero);return 1;zero:return 0;}"
+        "int aligned(int n){__asm__(\".p2align 5\\n\\tincl %0\" : \"+r\"(n));return n;}";
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
@@ -54,7 +56,7 @@ static void check_test_program_asm_room(CheckTest* test)
                      check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
                      check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
         const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0, .predefines = &predefines };
-        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 6;
+        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 7;
         char description[256];
         snprintf(description, sizeof(description), "asm room, %s: the program is ready", path == 0 ? "program by the checker's scalar path" : "program by its vector path");
         check_test_expect(test, ready, description);
@@ -84,7 +86,9 @@ static void check_test_program_asm_room(CheckTest* test)
                                  strcmp(planned.plans[2].reason, "inline assembly operands of this type in their constraint's registers") == 0 && planned.plans[3].reason == NULL &&
                                  !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && planned.plans[4].reason == NULL &&
                                  planned.plans[4].inlined && planned.plans[4].helper == BUSTER_CHECK_NONE && planned.plans[4].label_count == 0 && planned.plans[5].reason == NULL &&
-                                 planned.plans[5].inlined && planned.plans[5].helper == BUSTER_CHECK_NONE && planned.plans[5].inline_branch_count == 2 && helpers.count == 1;
+                                 planned.plans[5].inlined && planned.plans[5].helper == BUSTER_CHECK_NONE && planned.plans[5].inline_branch_count == 2 &&
+                                 planned.plans[6].reason == NULL && planned.plans[6].inlined && planned.plans[6].inline_unit &&
+                                 planned.plans[6].helper == BUSTER_CHECK_NONE && helpers.count == 1;
         snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper, the private label's and the asm goto's statements are asm bodies",
                  path == 0 ? "program by the checker's scalar path" : "program by its vector path");
         check_test_expect(test, plans_right, description);
@@ -348,6 +352,91 @@ static void check_test_program_asm_placement(CheckTest* test)
     intern_release(&identifiers);
 }
 
+// The native directive fixture must be planned as inline units, not merely execute correctly through whole helpers.
+// The same plans serve Tier 0 and Tier 1. Each unit owns one record anchor after the real name indices; the emitter
+// uses that anchor to splice its aligned bytes and relocate its entry atom into the containing function (#2351).
+static void check_test_program_asm_unit_placement(CheckTest* test)
+{
+    enum
+    {
+        STATEMENTS = 17,
+        UNITS = 14,
+    };
+    CheckTestFixtures fixtures;
+    const bool loaded = check_test_fixtures_load(&fixtures, "checker/programs/asm-directive-placement") && fixtures.count == 1;
+    check_test_expect(test, loaded, "asm unit placement: its runtime fixture is loaded");
+    const char* source = loaded ? fixtures.cases[0].source : NULL;
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const PredefinesOptions predefines = check_test_program_predefines();
+    const bool preprocessed = loaded && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                              pp_run_source(&pp, "asm-unit-placement", (const uint8_t*)source, (uint32_t)strlen(source));
+    check_test_expect(test, preprocessed, "asm unit placement: source preprocessing");
+    for (uint32_t tier = 0; preprocessed && tier < 2; tier += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena input_arena = arena_reserve(UINT64_C(1) << 26);
+        Arena output = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        const ParseOptions parsing = { 0 };
+        const CheckOptions checking = { 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        CheckInitializers plans = { 0 };
+        CheckAsms asms = { 0 };
+        CheckProgram program = { 0 };
+        bool ready = input_arena.base != NULL && output.base != NULL && scratch.base != NULL && check_test_types_open(&types) &&
+                     parse_initialize(&parser, &parsing, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0 &&
+                     check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch) &&
+                     check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &checking, &stream) && stream.report_count == 0 &&
+                     check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
+                     check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
+        const CheckProgramOptions options = {
+            .initializers = &plans,
+            .asms = &asms,
+            .identifiers = &identifiers,
+            .predefines = &predefines,
+            .asm_bodies = tier != 0,
+        };
+        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == STATEMENTS;
+        CheckProgramAsms planned = { 0 };
+        CheckProgramHelpers helpers = { 0 };
+        ready = ready && check_program_asm_plan(&planned, &helpers, &program, &output, &scratch) && planned.plans != NULL;
+        char description[256];
+        snprintf(description, sizeof(description), "asm unit placement, Tier %u: all %u statements are planned without a helper (%u)", tier, STATEMENTS, helpers.count);
+        check_test_expect(test, ready && helpers.count == 0, description);
+        uint32_t units = 0;
+        for (uint32_t s = 0; ready && s < STATEMENTS; s += 1)
+        {
+            const CheckProgramAsm* plan = planned.plans + s;
+            bool placed = plan->planned && plan->reason == NULL && plan->inlined && plan->helper == BUSTER_CHECK_NONE && plan->row == NULL;
+            if (placed && plan->inline_unit)
+            {
+                const uint32_t atom = plan->unit.entry_atom;
+                placed = plan->unit_assembled && atom != 0 && atom < plan->unit.link.atoms.count &&
+                         plan->unit.link.atoms.size[atom] <= plan->inline_unit_size && plan->inline_label_records != NULL && plan->inline_label_names != NULL &&
+                         plan->inline_label_records[0] <= plan->inline_count && plan->inline_label_names[0] == planned.name_count + s;
+            }
+            units += plan->inline_unit;
+            snprintf(description, sizeof(description), "asm unit placement, Tier %u: statement %u is an inline %s with its emission anchor", tier, s,
+                     plan->inline_unit ? "assembled unit" : "record body");
+            check_test_expect(test, placed, description);
+        }
+        snprintf(description, sizeof(description), "asm unit placement, Tier %u: %u assembled units, including trailing and directive-only alignment", tier, units);
+        check_test_expect(test, ready && units == UNITS, description);
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&input_arena);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+    arena_release(&fixtures.storage);
+}
+
 // Flag outputs (#147): every condition clang takes, after compares of values around each one's edges, into objects of
 // every size an integer store covers (bool, char, short, int, long, __int128, a float's bits and a struct of 4 bytes),
 // a `+` one, several beside register outputs and an x87 one, and one of a template of no instructions, whose condition
@@ -403,10 +492,13 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     check_test_program_asm_room(test);
     check_test_program_asm_kinds(test);
     check_test_program_asm_placement(test);
+    check_test_program_asm_unit_placement(test);
     // Statements placed in their caller (#1059), each run against clang's build: values live across them in Tier 0's
     // depth registers and register homes, in a loop and under an expression 18 values deep (past the depth registers,
     // in the deep slots), a + register and a memory operand on the stack below them.
     check_test_program_suite(test, "checker/programs/asm-placed-live-values", clang);
+    // #2351's assembled templates: their alignment, bytes and symbol/branch fixups must remain valid at each inline site.
+    check_test_program_suite(test, "checker/programs/asm-directive-placement", clang);
     // XGETBV is executable only with XSAVE and OSXSAVE, even on an x86-64 host.
     unsigned int eax, ebx, ecx, edx;
     if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) && (ecx & (3u << 26)) == (3u << 26))
@@ -652,7 +744,7 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     // (sp's movw keeps rsp's other bits), the template naming it %rsp, and an input beside an rsp output sharing it. Each
     // input is the value rsp has, as a program's must be; a template that keeps a helper refuses it by name.
     check_test_program_suite(test, "checker/programs/asm-register-variable-rsp", clang);
-    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\".p2align 4\\n\\tmovq %0, %%rax\" : : \"r\"(r) : \"rax\");return n;}",
+    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\".p2align 4\\n\\tpushq %%rax\\n\\tmovq %0, %%rax\\n\\tpopq %%rax\" : : \"r\"(r) : \"rax\");return n;}",
                                        "asm-register-variable-rsp-directives", true, false, 0, 0, "explicit register variables in rsp in templates that take directives");
     // Explicit register variables the lowering doesn't place: in an XMM register past XMM15 without AVX-512F; an input of a
     // memory constraint, which clang's code refuses too; and an integer in an XMM register.
@@ -712,12 +804,12 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     }
     // Under SSE alone, a 16-byte vector by movups, in xmm0 up and in an explicit register variable's XMM register.
     check_test_program_suite(test, "checker/programs/asm-vector-operands-sse", clang);
-    // Where clang can't place them: a register variable of another size than its register's (clang's "does not match
-    // required type"), and a template that takes directives. An x or v operand of 32 bytes without AVX, or 64 without
+    // A register variable of another size than its register's (clang's "does not match required type"), and a directive
+    // template whose stack mutations keep it out of the caller. An x or v operand of 32 bytes without AVX, or 64 without
     // AVX-512F, is clang's Sema error now (#2231, test-checker-driver's asm operand sizes), before the lowering.
     check_test_program_boundary_reason(test, "typedef float v4sf __attribute__((vector_size(16)));int tested(int n){register v4sf a __asm__(\"ymm3\")={(float)n};__asm__(\"nop\" : \"+x\"(a));return (int)a[0];}",
                                        "asm-vector-register-size", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
-    check_test_program_boundary_reason(test, "typedef float v4sf __attribute__((vector_size(16)));int tested(int n){v4sf a={(float)n};__asm__(\".p2align 4\\n\\taddps %0, %0\" : \"+x\"(a));return (int)a[0];}",
+    check_test_program_boundary_reason(test, "typedef float v4sf __attribute__((vector_size(16)));int tested(int n){v4sf a={(float)n};__asm__(\".p2align 4\\n\\tpushq %%rax\\n\\taddps %0, %0\\n\\tpopq %%rax\" : \"+x\"(a));return (int)a[0];}",
                                        "asm-vector-directives", true, false, 0, 1, "inline assembly vector operands in templates that take directives");
 }
 

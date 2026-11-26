@@ -233,6 +233,12 @@ struct AsmResult
     uint32_t location;
     uint32_t rounds;
     uint32_t instructions;
+    // The matched instructions, retained in the result's arena. Inline-assembly placement uses their effects even
+    // when directives, prefixes or fixed branches require the whole assembler's byte layout.
+    const AsmInstruction* template_instructions;
+    const AsmFragment* template_fragments;
+    // Procedures whose CFI cannot be spliced into the caller's frame, including .debug_frame-only descriptions.
+    uint32_t cfi_procedures;
     // The source's absolute (`.set`) symbols with names, as GNU as and clang keep them locally: another template of the
     // same C unit doesn't see them (the checker refuses such a reference by name), and -c's object has none.
     AsmAbsolute* absolutes;
@@ -5527,6 +5533,9 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
     parser.result.emit_ns = emitted - laid_out;
     parser.result.cfi_ns = cfi_emitted - laid_out;
     parser.result.instructions = parser.instruction_count;
+    parser.result.template_instructions = parser.result.error == NULL ? parser.instructions : NULL;
+    parser.result.template_fragments = parser.result.error == NULL ? parser.fragments : NULL;
+    parser.result.cfi_procedures = parser.result.error == NULL ? parser.procedure_count : 0;
     if (parser.result.error != 0)
     {
         arena->length = saved;

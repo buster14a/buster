@@ -722,7 +722,12 @@ static bool ir_inline_shape(const IrFunction* function, bool control_flow, Arena
     {
         slots = slots && (function->slots[slot].flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0;
     }
-    const bool admitted = function->label_count == 0 && !function->variadic && slots && (function->parameter_passed == 0 || function->result_abi.kind != BUSTER_ABI_RESULT_MEMORY);
+    bool named = function->label_count != 0;
+    for (uint32_t k = 0; !named && k < function->asm_body_count; k += 1)
+    {
+        named = function->asm_bodies[k].label_count != 0;
+    }
+    const bool admitted = !named && !function->variadic && slots && (function->parameter_passed == 0 || function->result_abi.kind != BUSTER_ABI_RESULT_MEMORY);
     IrInlineBody body = {
         .cost = UINT32_MAX,
         .supported = ir_inline_chain(function) && admitted,
