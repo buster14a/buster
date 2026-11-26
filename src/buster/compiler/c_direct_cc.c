@@ -11322,6 +11322,8 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         fast_cc_bail(cc, "redefinition of global variable");
                         break;
                     }
+                    // #3577: an extern object's initializer is the full pipeline's -Wextern-initializer.
+                    if (ds.is_extern) { fast_cc_bail(cc, "an extern object's initializer"); break; }
                     if (ds.is_unsupported_type || ftype_is_unsupported(dr.type)) { fast_cc_bail(cc, "unsupported global init type"); break; }
                     cc->pos += 1u; // '='
                     const bool is_ro = ftype_is_object_const(cc, dr.type);

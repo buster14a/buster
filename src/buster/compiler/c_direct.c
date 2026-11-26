@@ -4494,6 +4494,9 @@ static int c_direct_unit_tests(void)
         // A floating constant an integer type can't hold, whose conversion is undefined, in the fold as in the program.
         "int f(void) { return (int)1e20; }\n",
         "unsigned f(void) { return (unsigned)-1.5; }\n",
+        // -Wextern-initializer: an extern object's initializer at file scope, the first declarator's or a later one's.
+        "extern int x = 1;\nint f(void) { return x; }\n",
+        "extern int x, y = 2;\nint f(void) { return x + y; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
