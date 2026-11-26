@@ -1437,9 +1437,23 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
             PPOffsetNote notes[BUSTER_UNICODE_NAME_NOTES];
             for (uint32_t n = 0; n < unicode.note_count; n += 1)
             {
-                notes[n] = (PPOffsetNote){ name + unicode.notes[n].offset, unicode.notes[n].message };
+                const bool correction = unicode.notes[n].replacement[0] != 0;
+                notes[n] = (PPOffsetNote)
+                {
+                    .offset = name + unicode.notes[n].offset,
+                    .message = unicode.notes[n].message,
+                    .length = correction ? close - name : 0,
+                    .replacement = correction ? unicode.notes[n].replacement : NULL,
+                };
             }
+            const uint32_t saved_ranges = pp->diagnostic_range_count;
+            const bool saved_spans = pp->diagnostic_spans;
+            pp->diagnostic_arguments = false;
+            pp->diagnostic_spans = true;
+            pp_diagnostic_range_offsets(pp, source, name, close - name);
             pp_diagnose_output_offset_notes(pp, PP_SEVERITY_ERROR, source, name, publication, notes, unicode.note_count, "%s", unicode.error);
+            pp->diagnostic_range_count = saved_ranges;
+            pp->diagnostic_spans = saved_spans;
             break;
         }
         case CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC:

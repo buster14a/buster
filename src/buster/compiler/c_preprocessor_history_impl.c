@@ -265,7 +265,7 @@ static uint32_t pp_history_generated(Preprocessor* pp, PPGeneratedKind kind, uin
                 .expansion = pp->history_current,
                 .location = location,
                 .anchor = anchor,
-                .end = kind != PP_GENERATED_PRAGMA ? pp_history_paste_end(pp, kind == PP_GENERATED_PASTE ? pp->history_anchor : anchor, anchor) : anchor,
+                .end = kind == PP_GENERATED_PASTE || kind == PP_GENERATED_STRING ? pp_history_paste_end(pp, kind == PP_GENERATED_PASTE ? pp->history_anchor : anchor, anchor) : anchor,
                 .first = pp->history_source_count,
                 .count = count,
                 .kind = kind,
@@ -2077,11 +2077,13 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
         else
         {
             pp_diagnostic_resolve_ranges(pp, false);
+            pp->render_spans = pp->diagnostic_spans;
             pp->render_ranges = pp->diagnostic_ranges;
             pp->render_range_count = pp->diagnostic_range_count;
             pp->render_fixits = pp->diagnostic_fixits;
             pp->render_fixit_count = pp->diagnostic_fixit_count;
             pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, note, format, arguments);
+            pp->render_spans = false;
             pp->render_ranges = NULL;
             pp->render_range_count = 0;
             pp->render_fixits = NULL;
@@ -2306,6 +2308,25 @@ static uint32_t pp_spelling_offset_location(Preprocessor* pp, uint32_t location,
     return location;
 }
 
+// A character range within a token's spelling. An edit may follow argument substitutions back to their caller;
+// a macro body or generated spelling keeps its origin, so the ordinary fix-it resolver rejects that edit.
+static PPDiagnosticRange pp_diagnostic_offset_range(Preprocessor* pp, uint32_t base, uint32_t origin, uint32_t offset, uint32_t length, bool edit)
+{
+    PPRangePlace place = { base, origin };
+    for (uint32_t depth = 0; edit && pp_range_argument(place) && depth < BUSTER_PP_RANGE_DEPTH; depth += 1)
+    {
+        place = pp_range_spelling(pp, place);
+    }
+    return (PPDiagnosticRange)
+    {
+        .begin = base != 0 ? pp_spelling_offset_location(pp, base, offset) : 0,
+        .begin_origin = place.origin,
+        .end = base != 0 ? pp_spelling_offset_location(pp, base, offset + (length != 0 ? length - 1 : 0)) : 0,
+        .end_origin = place.origin,
+        .end_length = length != 0 ? 1 : 0,
+    };
+}
+
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_offset_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
                                                                                                            uint32_t position, const char* format, ...)
 {
@@ -2332,6 +2353,20 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 8, 9))) void pp_
     for (uint32_t i = 0; i < count; i += 1)
     {
         placed[i] = (PPDiagnosticSourceNote){ base != 0 ? pp_spelling_offset_location(pp, base, notes[i].offset) : 0, origin, notes[i].message };
+        if (notes[i].length != 0)
+        {
+            placed[i].ranges[0] = pp_diagnostic_offset_range(pp, base, origin, notes[i].offset, notes[i].length, false);
+            placed[i].range_count = 1;
+        }
+        if (notes[i].replacement != NULL)
+        {
+            placed[i].fixits[0] = (PPDiagnosticFixIt)
+            {
+                .range = pp_diagnostic_offset_range(pp, base, origin, notes[i].offset, notes[i].length, true),
+                .text = notes[i].replacement,
+            };
+            placed[i].fixit_count = 1;
+        }
     }
     va_list arguments;
     va_start(arguments, format);
@@ -2365,11 +2400,13 @@ static __attribute__((format(printf, 6, 7))) void pp_diagnose_notes(Preprocessor
         else
         {
             pp_diagnostic_resolve_ranges(pp, false);
+            pp->render_spans = pp->diagnostic_spans;
             pp->render_ranges = pp->diagnostic_ranges;
             pp->render_range_count = pp->diagnostic_range_count;
             pp->render_fixits = pp->diagnostic_fixits;
             pp->render_fixit_count = pp->diagnostic_fixit_count;
             pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, NULL, format, arguments);
+            pp->render_spans = false;
             pp->render_ranges = NULL;
             pp->render_range_count = 0;
             pp->render_fixits = NULL;
