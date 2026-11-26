@@ -1774,6 +1774,8 @@ _Static_assert(sizeof(FastVal) == 32u, "expression stack entry size");
 #define BUSTER_FVAL_LASTING_STRING     0x02u
 // A member below its type's alignment, or one of its members (`.`), whose address is -Waddress-of-packed-member.
 #define BUSTER_FVAL_LASTING_UNALIGNED  0x04u
+// sizeof's value of a pointer expression, which the memcpy family's size checks (-Wsizeof-pointer-memaccess).
+#define BUSTER_FVAL_LASTING_SIZEOF_POINTER 0x08u
 
 // A value's marks (#3577), lost where an operator makes a new value: a register variable, whose address is an error; a
 // function whose call's null constant arguments are -Wnonnull; the result of a call whose discarding is -Wunused-result;
@@ -1968,14 +1970,15 @@ static __attribute__((cold, noinline)) uint8_t fast_cc_library_pure_query(FastCC
 {
     const FastIdentEntry* e = cc->pp->idents.entries + sym->ident_id;
     const bool external = sym->storage != 1u && sym->storage != 4u;
+    const uint8_t* name = (const uint8_t*)(cc->pp->idents.strings + e->str_offset);
     const bool pure = external && cc->pp->feature_query != NULL &&
-                      cc->pp->feature_query(cc->pp->feature_context, C_DIRECT_QUERY_PURE_LIBRARY_FUNCTION,
-                                            (const uint8_t*)(cc->pp->idents.strings + e->str_offset), e->length) != 0;
-    sym->push_marks = pure ? (uint8_t)BUSTER_FSYM_PUSH_PURE : 0u;
+                      cc->pp->feature_query(cc->pp->feature_context, C_DIRECT_QUERY_PURE_LIBRARY_FUNCTION, name, e->length) != 0;
+    const bool checked = external && e->pp_kw >= FPP_KW_MEMACCESS_FUNCTION && e->pp_kw <= FPP_KW_FABS_FUNCTION;
+    sym->push_marks = (uint8_t)((pure ? BUSTER_FSYM_PUSH_PURE : 0u) | (checked ? BUSTER_FSYM_PUSH_CHECKED : 0u));
     return sym->push_marks;
 }
-_Static_assert(BUSTER_FSYM_PUSH_PURE == BUSTER_FVAL_MARK_PURE && BUSTER_FSYM_PUSH_NONLITERAL == BUSTER_FVAL_MARK_NONLITERAL,
-               "a symbol's push marks are its value's");
+_Static_assert(BUSTER_FSYM_PUSH_PURE == BUSTER_FVAL_MARK_PURE && BUSTER_FSYM_PUSH_NONLITERAL == BUSTER_FVAL_MARK_NONLITERAL &&
+               BUSTER_FSYM_PUSH_CHECKED == BUSTER_FVAL_MARK_NONNULL, "a symbol's push marks are its value's");
 
 // Scratch register allocation order (RAX, R10, R11 first so ABI arg regs stay free longer!)
 static const uint8_t fast_gp_pool[9] = {
@@ -5402,6 +5405,116 @@ static __attribute__((cold, noinline)) bool fast_cc_nonnull_arguments_clean(cons
     return nulls == 0;
 }
 
+// #3577: whether tokens [A, A_END) and [B, B_END) are one expression's, but for parentheses around either.
+static bool fast_cc_same_tokens(const FastCCState* cc, uint32_t a, uint32_t a_end, uint32_t b, uint32_t b_end)
+{
+    while (a < a_end && cc->tk[a] == FTOK_LPAREN && fast_cc_group_end(cc, a) == a_end) { a += 1u; a_end -= 1u; }
+    while (b < b_end && cc->tk[b] == FTOK_LPAREN && fast_cc_group_end(cc, b) == b_end) { b += 1u; b_end -= 1u; }
+    bool same = a < a_end && a_end - a == b_end - b;
+    for (uint32_t i = 0; same && a + i < a_end; i += 1u)
+    {
+        same = cc->tk[a + i] == cc->tk[b + i] && cc->td[a + i] == cc->td[b + i];
+    }
+    return same;
+}
+
+// #3577: whether a call of a library function checked by its name (KIND, its identifier's FPP_KW_*_FUNCTION) is quiet in
+// the full pipeline: the memcpy family's size argument `sizeof(E)` with E another argument's expression, a pointer to an
+// object (-Wsizeof-pointer-memaccess; any argument against any other, a superset of its positions and names), read from
+// the call's tokens only where an argument is sizeof's of a pointer (BUSTER_FVAL_LASTING_SIZEOF_POINTER); an absolute value
+// function's argument unsigned (_Bool and an unsigned enum too), floating for an integer one or integral for a floating
+// one, or wider than its parameter (-Wabsolute-value). cc->pos is past the call's `)`. Arguments ARGS, their types before
+// conversion.
+static __attribute__((cold, noinline)) bool fast_cc_library_call_clean(const FastCCState* cc, uint32_t kind, const FastComplexType* fn, const FastVal* args,
+                                                                       uint32_t argc)
+{
+    bool clean = true;
+    uint32_t sized = 0;
+    for (uint32_t i = 0; i < argc; i += 1u)
+    {
+        sized |= args[i].lasting & BUSTER_FVAL_LASTING_SIZEOF_POINTER;
+    }
+    uint32_t open = 0;
+    if (kind == FPP_KW_MEMACCESS_FUNCTION && sized != 0 && cc->pos >= 2u && cc->tk[cc->pos - 1u] == FTOK_RPAREN)
+    {
+        uint32_t depth = 0;
+        uint32_t q = cc->pos;
+        while (q > 0)
+        {
+            q -= 1u;
+            const uint8_t u = cc->tk[q];
+            depth += (uint32_t)(u == FTOK_RPAREN) | (uint32_t)(u == FTOK_RBRACKET) | (uint32_t)(u == FTOK_RBRACE);
+            depth -= (uint32_t)(u == FTOK_LPAREN) | (uint32_t)(u == FTOK_LBRACKET) | (uint32_t)(u == FTOK_LBRACE);
+            if (depth == 0) { break; }
+        }
+        open = q;
+    }
+    if (open != 0 && argc <= 8u)
+    {
+        // The arguments' token ranges, split at the commas outside brackets.
+        uint32_t starts[8];
+        uint32_t ends[8];
+        uint32_t count = 0;
+        uint32_t p = open + 1u;
+        uint32_t from = p;
+        const uint32_t close = cc->pos - 1u;
+        while (p < close && count < 8u)
+        {
+            const uint8_t t = cc->tk[p];
+            if (t == FTOK_LPAREN || t == FTOK_LBRACKET || t == FTOK_LBRACE)
+            {
+                p = fast_cc_group_end(cc, p);
+            }
+            else
+            {
+                if (t == FTOK_COMMA)
+                {
+                    starts[count] = from;
+                    ends[count] = p;
+                    count += 1u;
+                    from = p + 1u;
+                }
+                p += 1u;
+            }
+        }
+        if (count < 8u)
+        {
+            starts[count] = from;
+            ends[count] = close;
+            count += 1u;
+        }
+        for (uint32_t i = 0; clean && i < count && count == argc; i += 1u)
+        {
+            // `sizeof(E)` or `sizeof E`, in parentheses or not.
+            uint32_t s0 = starts[i];
+            uint32_t s1 = ends[i];
+            while (s0 < s1 && cc->tk[s0] == FTOK_LPAREN && fast_cc_group_end(cc, s0) == s1) { s0 += 1u; s1 -= 1u; }
+            if (s0 + 1u < s1 && cc->tk[s0] == FTOK_KW_SIZEOF)
+            {
+                for (uint32_t j = 0; clean && j < count; j += 1u)
+                {
+                    const FastType t = args[j].type;
+                    const bool object_pointer = j != i && ftype_is_ptr(t) && !ftype_is_void(ftype_deref(cc, t));
+                    clean = !(object_pointer && fast_cc_same_tokens(cc, s0 + 1u, s1, starts[j], ends[j]));
+                }
+            }
+        }
+        clean = clean && count == argc;
+    }
+    else if ((kind == FPP_KW_ABS_FUNCTION || kind == FPP_KW_FABS_FUNCTION) && argc == 1u && fn->count >= 1u)
+    {
+        const FastType arg = args[0].type;
+        const FastType under = ftype_is_complex(arg) && cc->ctypes[arg & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_ENUM ? cc->ctypes[arg & BUSTER_FTYPE_CIDX_MASK].inner : arg;
+        const FastType param = ftype_unqual(cc->param_types[fn->start]);
+        const bool integral = ftype_is_int(under);
+        const bool floating = ftype_is_float(under);
+        clean = (integral || floating) && !(integral && !ftype_is_signed(cc, under)) && !(kind == FPP_KW_ABS_FUNCTION && floating) &&
+                !(kind == FPP_KW_FABS_FUNCTION && integral) &&
+                ftype_size(cc, under) <= ftype_size(cc, param);
+    }
+    return clean;
+}
+
 static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc, uint32_t outer_arg_sp, FastVal* out)
 {
     FastCCState* cc = ex->cc;
@@ -5474,6 +5587,17 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     {
         fast_cc_bail(cc, "null constant argument to a nonnull function");
         return;
+    }
+    // #3577: a library function checked by its name (its nonnull mark brings it here, BUSTER_FSYM_PUSH_CHECKED; the name,
+    // its identifier's kind, rides in the callee's seq_ident).
+    if ((callee_marks & BUSTER_FVAL_MARK_NONNULL) != 0)
+    {
+        const uint32_t library = callee->seq_ident != 0 ? cc->pp->idents.entries[callee->seq_ident].pp_kw : 0u;
+        if (library >= FPP_KW_MEMACCESS_FUNCTION && library <= FPP_KW_FABS_FUNCTION && !fast_cc_library_call_clean(cc, library, fn, args, argc))
+        {
+            fast_cc_bail(cc, "a library call the full pipeline questions by its name");
+            return;
+        }
     }
     // #3577: the argument count, in an unevaluated call (sizeof's) too; arguments to a function without a prototype are
     // the full pipeline's -Wdeprecated-non-prototype.
@@ -6290,9 +6414,10 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         if (op == FEOP_SIZEOF_UNARY || op == FEOP_ALIGNOF_UNARY)
         {
             const uint64_t val = op == FEOP_SIZEOF_UNARY ? ftype_size(cc, v->type) : ftype_align(cc, v->type);
+            const uint8_t pointer = (uint8_t)(BUSTER_FVAL_LASTING_SIZEOF_POINTER * (uint32_t)((op == FEOP_SIZEOF_UNARY) & ftype_is_ptr(v->type)));
             if (ex->eval_only > 0) { ex->eval_only -= 1u; }
             if (ex->unevaluated > 0) { ex->unevaluated -= 1u; }
-            *v = (FastVal){ .type = FTYPE_U64, .kind = FVAL_IMM, .imm = (int64_t)val, .marks = BUSTER_FVAL_MARK_NONLITERAL };
+            *v = (FastVal){ .type = FTYPE_U64, .kind = FVAL_IMM, .imm = (int64_t)val, .marks = BUSTER_FVAL_MARK_NONLITERAL, .lasting = pointer };
             return;
         }
         if (op == FEOP_CAST)
@@ -7042,13 +7167,17 @@ static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCSt
         else if (ex->unevaluated == 0) { fast_cc_reference_dead(sym); }
         const uint32_t osym = ex->eval_only > 0 ? 0u : fast_cc_ensure_obj_sym(cc, si);
         const uint32_t called = (uint32_t)(next == FTOK_LPAREN);
+        // #3577: a library function checked by its name (BUSTER_FSYM_PUSH_CHECKED) whatever its attributes made it.
+        uint8_t push_marks = sym->push_marks;
+        if ((push_marks & BUSTER_FSYM_PUSH_UNASKED) != 0) { push_marks = fast_cc_library_pure_query(cc, sym); }
         const uint8_t marks = (uint8_t)(called * ((BUSTER_FVAL_MARK_NONNULL * (uint32_t)((flags & BUSTER_FSYM_NONNULL) != 0)) |
+                                                  (push_marks & BUSTER_FSYM_PUSH_CHECKED) |
                                                   (BUSTER_FVAL_MARK_UNUSED_RESULT * (uint32_t)((flags & BUSTER_FSYM_UNUSED_RESULT) != 0)) |
                                                   (BUSTER_FVAL_MARK_PURE * (uint32_t)((flags & BUSTER_FSYM_PURE) != 0))));
         if (ex->vsp < 128u)
         {
             ex->vstack[ex->vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_GLOBAL, .sym_idx = osym, .imm = 0, .is_func_sym = 1u,
-                                               .marks = marks };
+                                               .marks = marks, .seq_ident = sym->ident_id };
         }
         pushed = true;
     }

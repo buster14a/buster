@@ -147,6 +147,9 @@ typedef enum FastSymKind
 // branch: an enumerator's is a nonliteral, a library function the driver calls const or pure is pure; and until a
 // function's purity is asked (fast_cc_library_pure_query, at its first use), UNASKED, a mark no use by name carries.
 #define BUSTER_FSYM_PUSH_UNASKED    0x01u
+// A library function whose calls the full pipeline checks by its name (#3577: -Wsizeof-pointer-memaccess's memcpy family,
+// -Wabsolute-value's abs family), marked as a nonnull one is, so that its calls take the call's cold argument check.
+#define BUSTER_FSYM_PUSH_CHECKED    0x02u
 #define BUSTER_FSYM_PUSH_PURE       0x10u
 #define BUSTER_FSYM_PUSH_NONLITERAL 0x20u
 // A parameter's name in cc->param_names, whose high bit marks one declared an array, and the next one declared register

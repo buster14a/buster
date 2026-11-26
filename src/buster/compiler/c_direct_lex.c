@@ -389,7 +389,13 @@ typedef enum FastPPKw
     FPP_KW_ONCE,
     FPP_KW_ELIFDEF,
     FPP_KW_ELIFNDEF,
-    FPP_KW_FORMAT_FUNCTION  // printf, fprintf, sprintf, snprintf: the full pipeline checks their formats (#3577)
+    FPP_KW_FORMAT_FUNCTION, // printf, fprintf, sprintf, snprintf: the full pipeline checks their formats (#3577)
+    // #3577: library functions whose calls the full pipeline checks by name: the memcpy family's sizes
+    // (-Wsizeof-pointer-memaccess, a superset of its names), and the integer and floating absolute values' arguments
+    // (-Wabsolute-value).
+    FPP_KW_MEMACCESS_FUNCTION,
+    FPP_KW_ABS_FUNCTION,
+    FPP_KW_FABS_FUNCTION
 } FastPPKw;
 
 // The full pipeline's builtin macros (#3577), __LINE__ to __is_target_variant_environment: each is defined (defined(),
@@ -827,6 +833,28 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
             { "fprintf", 0, FPP_KW_FORMAT_FUNCTION },
             { "sprintf", 0, FPP_KW_FORMAT_FUNCTION },
             { "snprintf", 0, FPP_KW_FORMAT_FUNCTION },
+            { "memcpy", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "memmove", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "memset", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "memcmp", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "bcmp", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "bcopy", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "bzero", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "mempcpy", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "memccpy", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "strncpy", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "strncat", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "strncmp", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "strncasecmp", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "strndup", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "stpncpy", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "abs", 0, FPP_KW_ABS_FUNCTION },
+            { "labs", 0, FPP_KW_ABS_FUNCTION },
+            { "llabs", 0, FPP_KW_ABS_FUNCTION },
+            { "imaxabs", 0, FPP_KW_ABS_FUNCTION },
+            { "fabs", 0, FPP_KW_FABS_FUNCTION },
+            { "fabsf", 0, FPP_KW_FABS_FUNCTION },
+            { "fabsl", 0, FPP_KW_FABS_FUNCTION },
         };
         for (uint32_t i = 0; i < (uint32_t)(sizeof(seeds) / sizeof(seeds[0])); i += 1)
         {

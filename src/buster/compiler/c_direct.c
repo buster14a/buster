@@ -4500,6 +4500,15 @@ static int c_direct_unit_tests(void)
         "int r3(int* q) { int a[2] = { 0, 1 }; return q[&a[1] - a]; }\nint r4(int* q) { int x = 0; return q == &x; }\n"
         "int* r5(void) { int x = 0; return p = &x; }\nint* r6(void) { static int s[2]; return s; }\n"
         "int* r7(struct T* t) { return t->b; }\nint* r8(int a[2]) { return a; }\nint* r9(struct T* t) { return &t->n; }\n",
+        // 16. Library calls the full pipeline leaves alone: memcpy's and memset's object sizes, another pointer's, `&p`'s
+        // pointer, a multiple, a pointer to void; abs of a short and an int, labs of a long long, fabs of a float.
+        "void* memcpy(void*, const void*, unsigned long);\nvoid* memset(void*, int, unsigned long);\n"
+        "int abs(int);\nlong labs(long);\ndouble fabs(double);\nstruct S { int a, b; };\n"
+        "long sized(int* p, int* q, char* r, void* v, void* w, int n, short h, long long ll, float fl) {\n"
+        "    struct S s; int a[4]; memset(&s, 0, sizeof(s)); memset(a, 0, sizeof(a)); memcpy(p, q, sizeof(*p));\n"
+        "    memcpy(p, q, sizeof(r)); memcpy(&p, &q, sizeof(p)); memcpy(p, q, n * sizeof(p)); memcpy(v, w, sizeof(v));\n"
+        "    return abs(h) + abs(n) + labs(ll) + (long)fabs(fl) + s.a + a[0];\n"
+        "}\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4632,6 +4641,18 @@ static int c_direct_unit_tests(void)
         "char* f(void) { char s[] = \"abc\"; return s; }\n",
         "int* f(int i) { int a[2][3] = { { 0 } }; return a[i]; }\n",
         "int* f(void) { return (int[2]){ 1, 2 }; }\n",
+        // -Wsizeof-pointer-memaccess: memcpy's size the pointer its destination or source is, memset's, a member's, in a
+        // dead branch; -Wabsolute-value: abs of a long, an unsigned, a _Bool, a double, fabs of an int.
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(int* p, int* q) { memcpy(p, q, sizeof(p)); }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(int* p, int* q) { memcpy(p, q, (sizeof q)); }\n",
+        "void* memset(void*, int, unsigned long);\nvoid f(int* p) { memset(p, 0, sizeof(p)); }\n",
+        "struct S { char* buf; };\nvoid* memcpy(void*, const void*, unsigned long);\nvoid f(struct S* s, const char* c) { memcpy(s->buf, c, sizeof(s->buf)); }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(int* p, int* q) { if (0) { memcpy(p, q, sizeof(p)); } }\n",
+        "int abs(int);\nlong f(long x) { return abs(x); }\n",
+        "int abs(int);\nint f(unsigned x) { return abs(x); }\n",
+        "int abs(int);\nint f(_Bool b) { return abs(b); }\n",
+        "int abs(int);\nint f(double d) { return abs(d); }\n",
+        "double fabs(double);\ndouble f(int x) { return fabs(x); }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
