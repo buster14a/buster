@@ -2144,6 +2144,60 @@ static FastLexed fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t* end,
     return (FastLexed){ .p = p, .tok = tok };
 }
 
+// The first byte at or after `p` that isn't part of a line splice: each backslash followed by blanks and a newline ("\r\n"
+// and "\n\r" one newline) is passed, as the full pipeline's lexer reads them (c_lexer.c's escaped_newline_size).
+static const uint8_t* fast_skip_splices(const uint8_t* p, const uint8_t* end)
+{
+    const uint8_t* at = p;
+    bool spliced = true;
+    while (spliced && at < end && *at == '\\')
+    {
+        const uint8_t* q = at + 1;
+        while (q < end && (*q == ' ' || *q == '\t' || *q == '\f' || *q == '\v'))
+        {
+            q += 1;
+        }
+        spliced = q < end && (*q == '\n' || *q == '\r');
+        if (spliced)
+        {
+            const uint8_t newline = *q;
+            q += 1;
+            q += q < end && (*q == '\n' || *q == '\r') && *q != newline ? 1 : 0;
+            at = q;
+        }
+    }
+    return at;
+}
+
+// Whether the backslash at `p` starts a universal character name: a 'u', 'U' or 'N' after it, past any line splices.
+// The full pipeline's lexer reports a basic, control or surrogate character's in active text, a directive's line, a
+// macro's definition, an unused argument and (#3655) a skipped group; the direct path leaves at every one (#3577).
+static inline bool fast_backslash_starts_ucn(const uint8_t* p, const uint8_t* end)
+{
+    const uint8_t* const letter = fast_skip_splices(p + 1, end);
+    return letter < end && (*letter == 'u' || *letter == 'U' || *letter == 'N');
+}
+
+// A stray backslash at `p` (not a splice's) that starts a UCN leaves the direct path for `reason`. Out of line and cold:
+// such a backslash is rare, and its walk inline made the lexer's hot paths longer.
+static __attribute__((noinline, cold)) void fast_pp_stray_backslash(FastPP* pp, const uint8_t* p, const uint8_t* end, const char* reason)
+{
+    if (fast_backslash_starts_ucn(p, end))
+    {
+        fast_pp_bail(pp, reason);
+    }
+}
+
+// Whether the quote at `s`, past the file's first byte, may be C23's digit separator, which opens no literal: after a
+// name's or a number's character, a '.', or an exponent's sign (`1'000`, `1.'5`, `1e+'5`; a prefix's quote too, `L'x'`).
+// Out of line and cold, as the skip of an inactive group asks it only where a literal hides an event.
+static __attribute__((noinline, cold)) bool fast_quote_may_separate(const uint8_t* base, const uint8_t* s)
+{
+    const uint8_t before = s[-1];
+    const bool sign = (before == '+' || before == '-') && s - 1 > base && ((s[-2] | 0x20) == 'e' || (s[-2] | 0x20) == 'p');
+    return (fast_char_class[before] & 1u) != 0 || before == '.' || sign;
+}
+
 // Lex ONE raw preprocessing token from [p, end), updating *line_count and *at_bol.
 // Returns pointer past the lexed token (or end if FTOK_EOF).
 // If stop_at_eol is true, returns FTOK_EOF upon reaching '\n' without consuming '\n'.
@@ -2381,6 +2435,11 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
                 else { tok_kind = FTOK_HASH; p += 1; }
                 break;
             default:
+                // #3577: a stray backslash that starts a UCN, in text, a definition or an argument nothing uses.
+                if (__builtin_expect(c == '\\', 0))
+                {
+                    fast_pp_stray_backslash(pp, p, end, "universal character name");
+                }
                 tok_kind = FTOK_PP_OTHER;
                 tok_data = c;
                 p += 1;
@@ -2403,31 +2462,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The first byte at or after `p` that isn't part of a line splice: each backslash followed by blanks and a newline ("\r\n"
-// and "\n\r" one newline) is passed, as the full pipeline's lexer reads them (c_lexer.c's escaped_newline_size).
-static const uint8_t* fast_skip_splices(const uint8_t* p, const uint8_t* end)
-{
-    const uint8_t* at = p;
-    bool spliced = true;
-    while (spliced && at < end && *at == '\\')
-    {
-        const uint8_t* q = at + 1;
-        while (q < end && (*q == ' ' || *q == '\t' || *q == '\f' || *q == '\v'))
-        {
-            q += 1;
-        }
-        spliced = q < end && (*q == '\n' || *q == '\r');
-        if (spliced)
-        {
-            const uint8_t newline = *q;
-            q += 1;
-            q += q < end && (*q == '\n' || *q == '\r') && *q != newline ? 1 : 0;
-            at = q;
-        }
-    }
-    return at;
-}
-
 // The text of a conditional group that is not taken: nothing in it is lexed. fast_pp_skip_inactive looks for the
 // directive that ends the group, 64 bytes at a time, and leaves the loop only at a '#' that is the first character of
 // its line and at the start of a comment.
@@ -2592,11 +2626,11 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                     done = true;
                     decided = true;
                 }
-                else if (pp->c23 && s < stop && *s == '\'' && s > f->base && (fast_char_class[s[-1]] & 1u) != 0)
+                else if (pp->c23 && s < stop && *s == '\'' && s > f->base && fast_quote_may_separate(f->base, s))
                 {
-                    // #3577: C23's digit separator (`1'000`) opens no literal, so what this one would hide (a comment's
-                    // start, a UCN the full pipeline reports) isn't hidden; a quote after a name's or a number's character
-                    // (a prefix's too, `L'x'`) leaves.
+                    // #3577: C23's digit separator (`1'000`, `1.'5`, `1e+'5`) opens no literal, so what this one would hide
+                    // (a comment's start, a UCN the full pipeline reports) isn't hidden; a quote after a name's or a
+                    // number's character, a '.', or an exponent's sign (a prefix's too, `L'x'`) leaves.
                     fast_pp_bail(pp, "quote after a name or number in a skipped group");
                     next = end;
                     done = true;
@@ -4881,6 +4915,12 @@ static __attribute__((noinline)) void fast_pp_skip_rest_of_line(FastPP* pp, Fast
             p += p[1] == '\r' ? 3 : 2;
             line += 1u;
             continue;
+        }
+        // #3577: what this passes unread (an #elif's operands after a taken group, a pragma nothing acts on) the full
+        // pipeline's lexer reads: a UCN's start leaves.
+        if (*p == '\\')
+        {
+            fast_pp_stray_backslash(pp, p, end, "universal character name in a directive's line");
         }
         if (*p == '/' && p + 1 < end && p[1] == '*')
         {

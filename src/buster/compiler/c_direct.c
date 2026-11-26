@@ -4051,6 +4051,12 @@ static bool c_direct_test_skipped_ucns(const char* obj_path)
         "#if 0\n\"x\" '\\'' \\u0041\n#endif\nint f(void) { return 0; }\n",
         "#if 0\n\\\\  \r\nu0041\n#endif\nint f(void) { return 0; }\n",
         "#if 0\n#if 1\n#define F \\u0045\n#endif\n#endif\nint f(void) { return 0; }\n",
+        // Lines this path passes unread, or reads into tokens nothing uses: an #elif's operands after a taken group, a
+        // pragma nothing acts on, a definition, an unused argument; all the full pipeline's lexer reads.
+        "#if 1\nint x;\n#elif 1 \\u0041\n#endif\nint f(void) { return 0; }\n",
+        "#pragma foo \\u0041\nint f(void) { return 0; }\n",
+        "#define F \\\\\nu0041\nint f(void) { return 0; }\n",
+        "#define G(x) 1\nint y = G(\\N{LATIN CAPITAL LETTER A});\nint f(void) { return 0; }\n",
         "extern int fn __asm__(\"f.n\");\nint f(void) { static int n = 5; return n++ + fn; }\n",
         "int f(void) { static int n = 5; return n++; }\nint fn __asm__(\"f.\" \"n\") = 9;\n",
     };
@@ -4067,9 +4073,12 @@ static bool c_direct_test_skipped_ucns(const char* obj_path)
     const CDirectTestMode c23 = { .c23 = true };
     static const char separated_ucn[] = "#if 0\nint x = 1'000; \\u0041\n#endif\nint f(void) { return 0; }\n";
     static const char separated_comment[] = "#if 0\nint x = 1'000; /*\n#else\nint y;\n#endif\n*/\n#endif\nint f(void) { return 0; }\n";
+    static const char separated_point[] = "#if 0\nint x = 1.'5; \\u0041\n#endif\nint f(void) { return 0; }\n";
+    static const char separated_sign[] = "#if 0\nint x = 0x1p-'5; \\u0041\n#endif\nint f(void) { return 0; }\n";
     static const char prefixed[] = "#if 0\nint x = L'a'; /* */\n#endif\nint f(void) { return 0; }\n";
-    static const char quoted[] = "#if 0\nint x = 'a' + 1; /* */\n#endif\nint f(void) { return 0; }\n";
+    static const char quoted[] = "#if 0\nint x = c - '0' + 'a'; /* */\n#endif\nint f(void) { return 0; }\n";
     ok = ok && c_direct_test_compile_mode(separated_ucn, obj_path, 1, NULL, NULL, c23) && c_direct_test_compile_mode(separated_comment, obj_path, 1, NULL, NULL, c23) &&
+         c_direct_test_compile_mode(separated_point, obj_path, 1, NULL, NULL, c23) && c_direct_test_compile_mode(separated_sign, obj_path, 1, NULL, NULL, c23) &&
          c_direct_test_compile_mode(prefixed, obj_path, 1, NULL, NULL, c23) && c_direct_test_compile_mode(quoted, obj_path, 0, NULL, NULL, c23) &&
          c_direct_test_compile_source(prefixed, obj_path, 0, NULL, NULL) && c_direct_test_compile_source(separated_ucn, obj_path, 0, NULL, NULL);
     return ok;
