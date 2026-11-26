@@ -2539,6 +2539,39 @@ static const void* c_direct_test_code(const char* path, const char* name, void**
 }
 #endif
 
+typedef long (*CDirectTestPointers3)(void*, void*, void*);
+
+// Parenthesized pointer parameters (#3577), run: `int (*p)` a pointer and `int (*q)[3]` a pointer to three ints, where
+// main's direct path made them an int and an int * (sizeof(p) 4, sizeof(*q) 4, q + 1 four bytes on, and q[1][2] its
+// error); and a pointer to a two-dimensional array.
+static bool c_direct_test_pointer_parameters(const char* obj_path)
+{
+    static const char source[] =
+        "long t_sizes(int (*p), int (*q)[3], char (*r)[2][5]) { return (long)(sizeof(p) * 10000 + sizeof(*q) * 100 + sizeof(*r)); }\n"
+        "long t_step(int (*q)[3]) { return (long)((char*)(q + 1) - (char*)q); }\n"
+        "long t_read(int (*q)[3]) { return q[1][2]; }\n";
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+#if !__has_feature(memory_sanitizer)
+    void* mappings[3] = { NULL, NULL, NULL };
+    size_t mapped[3] = { 0, 0, 0 };
+    const CDirectTestPointers3 sizes = (CDirectTestPointers3)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_sizes", mappings + 0, mapped + 0) : NULL);
+    const CDirectTestAsmPointer step = (CDirectTestAsmPointer)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_step", mappings + 1, mapped + 1) : NULL);
+    const CDirectTestAsmPointer read = (CDirectTestAsmPointer)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_read", mappings + 2, mapped + 2) : NULL);
+    int rows[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };
+    ok = ok && sizes != NULL && step != NULL && read != NULL;
+    ok = ok && sizes(NULL, NULL, NULL) == 81210L && step(rows) == 12L && read(rows) == 6L;
+    for (uint32_t i = 0; i < 3u; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+    return ok;
+}
+
 // musl's shapes, run: syscall with no argument (getpid, whose number is an int), with two (munmap of a page and
 // clock_gettime, given a pointer), and with six of which three are local register variables (mmap of the page), and
 // the thread pointer against pthread_self's. Every other shape, operand,
@@ -4693,6 +4726,16 @@ static int c_direct_unit_tests(void)
     else
     {
         fprintf(stderr, "test-direct: FAIL raw string literals and a directive's literals\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_pointer_parameters(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL parenthesized pointer parameters\n");
         failed += 1u;
     }
 

@@ -2785,6 +2785,63 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                                 if (fast_cc_peek(cc) == FTOK_RBRACKET) { cc->pos += 1u; }
                             }
                             if (fast_cc_peek(cc) == FTOK_RPAREN) { cc->pos += 1u; }
+                            // #3577: a pointer to an array, `(*p)[2][3]`, whose brackets are all the array's under the
+                            // pointer, and a pointer in parentheses, `(*p)`: main's direct path built only a function's
+                            // pointer here, and made the first an int * (the brackets read as the parameter's own) and the
+                            // second an int. The element is a complete object type, an inner dimension a known one.
+                            if (fast_cc_peek(cc) == FTOK_LBRACKET)
+                            {
+                                uint32_t adims[8];
+                                uint32_t andim = 0;
+                                while (fast_cc_peek(cc) == FTOK_LBRACKET && !cc->bailout)
+                                {
+                                    cc->pos += 1u;
+                                    uint32_t dc = UINT32_MAX;
+                                    if (fast_cc_peek(cc) != FTOK_RBRACKET)
+                                    {
+                                        const int64_t dv = fast_cc_const_int_expr(cc, false);
+                                        dc = (dv < 0 || dv > (int64_t)UINT32_MAX - 1) ? UINT32_MAX - 1u : (uint32_t)dv;
+                                    }
+                                    if (((uint32_t)(andim >= 8u) | (uint32_t)(dc == UINT32_MAX - 1u) | ((uint32_t)(dc == UINT32_MAX) & (uint32_t)(andim != 0)) |
+                                         (uint32_t)(fast_cc_peek(cc) != FTOK_RBRACKET)) != 0)
+                                    {
+                                        fast_cc_bail(cc, "a pointer to an array parameter's dimension");
+                                        break;
+                                    }
+                                    cc->pos += 1u;
+                                    adims[andim++] = dc;
+                                }
+                                for (int32_t di = (int32_t)andim - 1; di >= 0 && !cc->bailout; di -= 1)
+                                {
+                                    const uint32_t esz = ftype_size(cc, pt);
+                                    const uint32_t eal = ftype_align(cc, pt);
+                                    const uint64_t total_sz = adims[di] == UINT32_MAX ? 0u : (uint64_t)adims[di] * (uint64_t)esz;
+                                    if ((BUSTER_FAST_TYPE_INCOMPLETE(cc, pt) | (uint32_t)ftype_is_void(pt) | (uint32_t)ftype_is_func(pt) |
+                                         (uint32_t)(total_sz > (uint64_t)INT32_MAX) | (uint32_t)(eal == 0 || esz % eal != 0)) != 0)
+                                    {
+                                        fast_cc_bail(cc, "a pointer to an array parameter's element");
+                                        break;
+                                    }
+                                    const uint32_t ac = fast_cc_alloc_ctype(cc, FCTYPE_ARRAY);
+                                    if (ac != 0)
+                                    {
+                                        cc->ctypes[ac].inner = pt;
+                                        cc->ctypes[ac].count = adims[di];
+                                        cc->ctypes[ac].size = (uint32_t)total_sz;
+                                        cc->ctypes[ac].align = eal;
+                                        cc->ctypes[ac].complete = adims[di] != UINT32_MAX ? 1u : 0u;
+                                        pt = ftype_from_index(cc, ac);
+                                    }
+                                }
+                                if (cc->bailout) { break; }
+                                if (fast_cc_peek(cc) == FTOK_LPAREN) { fast_cc_bail(cc, "an array of functions as a parameter"); break; }
+                            }
+                            if (fast_cc_peek(cc) != FTOK_LPAREN)
+                            {
+                                for (uint32_t ep = 0; ep < extra_ptrs; ep += 1) { pt = ftype_make_ptr(cc, pt); }
+                                if (fp_const) { pt = ftype_with_const(pt); }
+                                if (fp_volatile) { pt = ftype_with_volatile(pt); }
+                            }
                             // Parse inner function-pointer parameter list (simple balanced skip + build generic FCTYPE_FUNC!)
                             if (fast_cc_peek(cc) == FTOK_LPAREN)
                             {
