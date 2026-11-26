@@ -1568,14 +1568,13 @@ lowering already writes for scalars or ordinary vectors.
   element, converted to the element's type first (a `bool` vector's elements all
   its truth). A constant the checker folds is an integer's bits (a cast of an
   integer constant), stored into the object.
-- **Element-wise conversions, shuffles and reductions**: `__builtin_convertvector`
-  and the implicit conversion of an extended integer vector to a `bool` vector
-  of as many elements (clang's `icmp ne 0`, which the checker now accepts as
-  clang does; an explicit cast stays an error) convert element by element as C
-  converts a scalar (`check_lower_transport_convert`), and
-  `__builtin_shufflevector` gathers elements by its constant indices, either way
-  from or into an ordinary vector through a temporary, and into a `bool` vector a
-  byte of bits at a time (`check_lower_transport_gather`). The integer
+- **Element-wise conversions, shuffles and reductions.** `check_lower_transport_convert` uses
+  the wider element to choose how many lanes fit in a register on both sides of `__builtin_convertvector`.
+  Each complete piece with a supported `check_vector_convert_shape_row` runs as one row. The tail and
+  unsupported shapes use scalar conversions. Implicit conversion of an extended integer vector to a
+  packed `bool` vector gathers each element's truth a byte of bits at a time, as in clang's `icmp ne 0`.
+  Clang rejects an explicit cast. `__builtin_shufflevector` gathers elements by its constant indices
+  (`check_lower_transport_gather`). For either builtin an ordinary vector goes through a temporary. The integer
   reductions (`add`, `mul`, `and`, `or`, `xor`, `max`, `min`) fold the elements
   first to last in their promoted type, a maximum or minimum by a mask without a
   branch; a `bool` vector's sum is an exclusive or and its product a
@@ -1636,10 +1635,7 @@ pieces into one by the operation's row first (`check_lower_transport_reduce`;
 an integer's fold doesn't depend on the elements' order) and then that piece's
 elements and those past the pieces. The rest run element by element, as clang's
 code does for the C library's calls, in-order sums, deposits and shuffles, and
-where no row takes the operation; a conversion between transport vectors still
-converts element by element, as an element-sized scalar conversion each, where
-clang's code converts pieces (a piece's conversion row is a type's, which a
-piece's shape would need: #2815). A shuffle's indices are read as its elements are
+where no row takes the operation. A shuffle's indices are read as its elements are
 gathered (`check_lower_transport_index`), so no array of them bounds the
 elements.
 

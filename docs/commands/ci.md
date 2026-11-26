@@ -635,6 +635,14 @@ cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/costs.c -o b
 build/costs --self-test --root .
 ```
 
+The five active tables were recollected on 26 November 2026 from all 60 suite
+logs of passing merge candidates 45779319802, 45779273785 and 45778920528
+(#2658). The [reproduction record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ci-work-reuse-2658-2026-11-26)
+contains the exact logs, checksums, old and new schedules and held-out runs.
+Every current heading has three measured samples in each active row. The
+schedule comparisons predict shorter longest shards; they do not measure a
+whole-candidate speedup or include vector shard one's extra compilation.
+
 - **What a cost is.** A command's time times the CPUs it held (its heading's
   `[N CPUs]`, at most the runner's 4), in seconds: `parallel`'s unit. A
   measured cost is the 90th percentile (nearest rank) of the command's samples

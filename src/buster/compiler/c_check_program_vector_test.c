@@ -271,9 +271,9 @@ static const char check_test_transport_conversions[] =
 
 // A separately emitted conversion makes the native code bound cover the conversion rather than the surrounding setup.
 static const char check_test_transport_conversion_size[] =
-    "typedef int I __attribute__((ext_vector_type(73)));typedef float F __attribute__((ext_vector_type(73)));"
+    "typedef int I __attribute__((ext_vector_type(161)));typedef float F __attribute__((ext_vector_type(161)));"
     "void convert(I *a,F *b){*b=__builtin_convertvector(*a,F);}"
-    "int tested(int n){I a;F b;for(int i=0;i<73;i++)a[i]=n+i;convert(&a,&b);return (int)b[0]+(int)b[72];}\n";
+    "int tested(int n){I a;F b;for(int i=0;i<161;i++)a[i]=n+i;convert(&a,&b);return (int)b[0]+(int)b[160];}\n";
 
 static const char check_test_wide_elements[] =
     BUSTER_CHECK_TEST_WIDE_LANES
@@ -1540,7 +1540,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         if (parsed && level == 0)
         {
             // A nonzero entry limit also enables the harness's 2,048-byte native code bound; this generous typed-entry
-            // limit leaves the bound to distinguish one-row-per-piece lowering from 73 scalar conversions.
+            // limit leaves the bound to catch both scalar conversions and private slot copies around every row.
             check_test_program_source_native_limits(test, check_test_transport_conversion_size, "baseline-transport-conversion-size", clang, false, -1, 10000,
                                                      &target, (native.features & target.features) == target.features);
         }

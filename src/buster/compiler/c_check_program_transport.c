@@ -1634,7 +1634,7 @@ static __attribute__((noinline)) void check_lower_transport_shuffle(CheckLowerWr
     }
 }
 
-// __builtin_convertvector of a transport vector, or into one (#137): element by element (check_lower_transport_convert).
+// __builtin_convertvector of a transport vector, or into one (#137), uses the pieces selected by check_lower_transport_convert.
 static __attribute__((noinline)) void check_lower_transport_convertvector(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
