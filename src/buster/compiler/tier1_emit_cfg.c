@@ -440,7 +440,7 @@ static uint16_t tier1_emit_cfg_inverse(uint16_t form)
 //   pointers being 64-bit integers, has its operand's bits (TIER1_RULE_COPY);
 // - a symbol's or a frame object's address plus a constant (a member's, or a constant index's: TIER1_RULE_ADDRESS without
 //   an index), one lea at that displacement, a symbol's its reference's addend; a GOT slot's address takes no constant.
-//   Selection's lea from rip of a direct symbol it folded (#2573, TIER1_RULE_ADDRESS with `rip`) is one too.
+//   Selection's lea of a folded frame object (#3644), or from rip of a direct symbol (#2573), is one too.
 // A frame object's displacement is the frame's layout's: until tier1_emit_cfg_frame fills it, the recipe's value is the
 // object's slot, and its addend the constant added to it.
 static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, uint8_t* operations, uint8_t* flags, uint64_t* values, int64_t* addends)
@@ -470,9 +470,12 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
         const uint8_t rule = plan->covered[root] || mask ? TIER1_RULE_NONE : pattern->rule;
         // A folded symbol's lea (#2573): the symbol, at its own displacement past the chain's.
         const bool folded = rule == TIER1_RULE_ADDRESS && pattern->rip && pattern->stack_object != BUSTER_IR_NONE && pattern->values[1] == BUSTER_IR_NONE;
+        const bool frame = rule == TIER1_RULE_ADDRESS && !pattern->rip && pattern->values[0] == BUSTER_IR_NONE && pattern->values[1] == BUSTER_IR_NONE &&
+                           tier1_select_stack_object(plan->function, pattern->stack_object);
         const uint32_t symbol = folded ? pattern->stack_object : (uint32_t)pattern->immediate;
+        const uint32_t object = frame ? pattern->stack_object : (uint32_t)pattern->immediate;
         const uint8_t access = (rule == TIER1_RULE_SYMBOL_ADDRESS || folded) && symbol < emitted->symbol_access_count ? emitted->symbol_access[symbol] : BUSTER_TIER1_ACCESS_DIRECT;
-        displacement += folded ? pattern->displacement : 0;
+        displacement += folded || frame ? pattern->displacement : 0;
         const bool displaced = displacement != 0;
         const bool fits = displacement >= INT32_MIN && displacement <= INT32_MAX;
         uint64_t past = 0;
@@ -488,10 +491,10 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
             addends[node] = displacement;
             flags[node] = BUSTER_TIER1_REMAT_STABLE | (access == BUSTER_TIER1_ACCESS_GOT ? BUSTER_TIER1_REMAT_GOT : 0);
         }
-        else if (rule == TIER1_RULE_STACK_ADDRESS && fits && !tier1_emit_cfg_incoming_object(plan->function, (uint32_t)pattern->immediate, &past))
+        else if ((rule == TIER1_RULE_STACK_ADDRESS || frame) && fits && !tier1_emit_cfg_incoming_object(plan->function, object, &past))
         {
             operations[node] = BUSTER_TIER1_REMAT_STACK;
-            values[node] = pattern->immediate;
+            values[node] = object;
             addends[node] = displacement;
             flags[node] = BUSTER_TIER1_REMAT_STABLE;
         }

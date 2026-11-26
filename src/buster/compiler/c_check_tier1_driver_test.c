@@ -1857,6 +1857,54 @@ static bool check_test_tier1_frame_copies(const char* object, const char* name, 
     return count != 0;
 }
 
+// #3644: an external C helper checks every initialized byte, changes the returned byte and counts the scopes visited.
+// Clang's compact loop and the two strict Tier 1 builds of 1,536 separate scopes must all satisfy its independent
+// arithmetic model, including early returns on both sides of byte, liveness-group and scope-count boundaries.
+static void check_test_driver_tier1_frame_scopes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[PATH_MAX];
+    char main_source[PATH_MAX];
+    char main_object[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/driver/tier1_frame_scopes.c", check_test_fixture_root);
+    snprintf(main_source, sizeof(main_source), "%s/driver/tier1_frame_scopes_main.c", check_test_fixture_root);
+    snprintf(main_object, sizeof(main_object), "%s/tier1-frame-scopes-main.o", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-frame-scopes-clang", directory);
+    char* main_arguments[] = { (char*)clang, "-std=c17", "-O2", "-Wall", "-Wextra", "-Werror", "-c", main_source, "-o", main_object, NULL };
+    char* text = NULL;
+    const bool main_built = check_test_driver_spawn(main_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    char* reference_arguments[] = { (char*)clang, "-std=c17", "-O2", "-DBUSTER_FRAME_REFERENCE", source, main_object, "-o", reference, NULL };
+    const bool referenced = main_built && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's compact frame-scope oracle checks every byte, mutation and early return");
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        char object[512];
+        char program[512];
+        snprintf(object, sizeof(object), "%s/tier1-frame-scopes-%u.o", directory, rematerialize);
+        snprintf(program, sizeof(program), "%s/tier1-frame-scopes-%u", directory, rematerialize);
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, source, "", object, rematerialize != 0, false, true, false, "--tier1-strict", &build);
+        check_test_expect(test, compiled && build.code_certified == 1 && build.code_uncertified == 0,
+                          "1,536 initialized buffer scopes compile strictly at Tier 1 and certify with either rematerialization policy");
+        char* link_arguments[] = { (char*)clang, object, main_object, "-o", program, NULL };
+        text = NULL;
+        const bool linked = compiled && check_test_driver_spawn(link_arguments, &text) == 0;
+        free(text);
+        char actual[256] = { 0 };
+        check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                          "strict Tier 1's 1,536 buffer scopes preserve the external callee's complete observations and writes");
+        unlink(object);
+        unlink(program);
+    }
+    unlink(main_object);
+    unlink(reference);
+}
+
 // #3149's fixture (check_test_tier1_frame_source), compiled by --tier1 --verify with and without rematerialization, into
 // an executable and into an object that cc links: each prints clang's build's output, and every function's code is
 // certified. With rematerialization each function under test recomputes its array's address at rsp by rsp's register
@@ -1940,6 +1988,7 @@ static void check_test_driver_tier1_frame(CheckTest* test, const char* clang, co
     }
     unlink(source);
     unlink(reference);
+    check_test_driver_tier1_frame_scopes(test, clang, executable, directory);
 }
 
 // #1395: the same target must produce the same object regardless of the compiler host's kernel path. The address
