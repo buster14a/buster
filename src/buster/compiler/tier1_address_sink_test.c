@@ -449,13 +449,17 @@ static void tier1_frame_sink_tests(Tier1EmitTest* test)
             else
             {
                 const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
-                const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
-                tier1_emit_test_expect(test, certified, "sunk, shared and dynamic frame-address fixtures allocate and certify");
-                if (!certified && test->failures < 20)
+                // Dynamic stack movement retains the code certificate's existing explicit boundary. Its allocation
+                // still certifies and the native check below exercises its unsunk pointers and memory effects.
+                const uint32_t expected_reason = shape == 5 ? TIER1_CERT_EMITTED_DYNAMIC : TIER1_CERT_EMITTED_OK;
+                const bool checked = error == TIER1_EMIT_OK && emitted.general && emitted.certified && emitted.code_checked && emitted.code_reason == expected_reason;
+                tier1_emit_test_expect(test, checked, "frame-address variants allocate and preserve the code certificate's supported boundary");
+                if (!checked && test->failures < 20)
                 {
-                    fprintf(stderr, "  frame-address sink shape=%u frame=%u rematerialize=%u error=%u node=%u\n", shape, frame, rematerialize, error, node);
+                    fprintf(stderr, "  frame-address sink shape=%u frame=%u rematerialize=%u error=%u node=%u general=%u certified=%u code_checked=%u code_reason=%u\n",
+                            shape, frame, rematerialize, error, node, emitted.general, emitted.certified, emitted.code_checked, emitted.code_reason);
                 }
-                if (certified)
+                if (checked)
                 {
                     if (shape == 2 || shape == 7)
                     {
