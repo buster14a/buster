@@ -1117,11 +1117,6 @@ struct CheckProgramLanes
     CheckHelperReport helper_report;
     // --helper-forms' families (CheckProgramOptions.helper_forms): each one's operations take their helpers.
     uint32_t helper_forms;
-    // How many of the lanes' arenas, from lane 0's, an emission may have reserved (check_program_lanes_use): the ones
-    // check_program_lanes_release releases. Reading the others' would touch every page of the 98 KB they take, which a
-    // driver keeps in .bss so that a compile touches only those it uses (#652).
-    uint32_t arenas_used;
-    CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
     // --deferred-lowering (a test option, #2536's step 2.2c.3): a lowering that reads none of the controls' totals
     // (CheckLowerShared.deferred), on one lane, without --tier1: the objects are the same. A test's first room for its
     // writer's calls and arguments, which each part's fit grows (CheckLowerShared.deferred_call_room): 0 for the bound.
@@ -1133,10 +1128,18 @@ struct CheckProgramLanes
     // A caller's bodies' loop (#2536's step 2.2c.4, part 2): run by each part's lowering on one lane, before it lowers, and
     // whole before the lanes or a lowering that reads the controls' totals. None (no `run`) without --windowed-loop.
     CheckEmitLoop loop;
+    // How many of the lanes' arenas, from lane 0's, an emission may have reserved (check_program_lanes_use): the ones
+    // check_program_lanes_release releases. Keep their large array after every control field (#2886), so the driver
+    // needs only the first page until an emission uses an arena. Reading unused arenas would touch their pages, which
+    // the driver keeps in .bss so a compile touches only those it uses (#652).
+    uint32_t arenas_used;
+    CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
 };
 
+_Static_assert(offsetof(CheckProgramLanes, arenas) <= BUSTER_ARENA_PAGE_BYTES, "the driver's lane controls fit in its first page");
+
 // Whether --tier1's tables are built (check_program_emit_timed), once per process.
-static bool check_tier1_ready = false;
+static BUSTER_START_DATA bool check_tier1_ready = false;
 
 // Defined in c_check_tier1.c, after Tier 1's modules: a body's code by Tier 1's pipeline on `lane`'s arenas, from its
 // typed stream `function` whose result has the typed class `result_class` (check_program_result_class), its records,
