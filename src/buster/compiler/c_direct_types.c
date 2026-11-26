@@ -1526,6 +1526,13 @@ static void fast_cc_parse_asm_label(FastCCState* cc, FastAttrInfo* attr)
         {
             fast_cc_bail(cc, "asm label's operand");
         }
+        else if (memchr(label, '.', length) != NULL)
+        {
+            // #3577: a label can name a block-scope static's symbol (`f.n`, the full pipeline's name for f's static n),
+            // which the full pipeline refuses (#2439's c_check_program_emit.c); this path names its statics apart (`n.0`).
+            // A label with a '.' leaves, whatever it names.
+            fast_cc_bail(cc, "asm label with a '.'");
+        }
         else
         {
             if (attr != NULL)

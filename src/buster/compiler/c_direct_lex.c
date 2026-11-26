@@ -2403,6 +2403,31 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The first byte at or after `p` that isn't part of a line splice: each backslash followed by blanks and a newline ("\r\n"
+// and "\n\r" one newline) is passed, as the full pipeline's lexer reads them (c_lexer.c's escaped_newline_size).
+static const uint8_t* fast_skip_splices(const uint8_t* p, const uint8_t* end)
+{
+    const uint8_t* at = p;
+    bool spliced = true;
+    while (spliced && at < end && *at == '\\')
+    {
+        const uint8_t* q = at + 1;
+        while (q < end && (*q == ' ' || *q == '\t' || *q == '\f' || *q == '\v'))
+        {
+            q += 1;
+        }
+        spliced = q < end && (*q == '\n' || *q == '\r');
+        if (spliced)
+        {
+            const uint8_t newline = *q;
+            q += 1;
+            q += q < end && (*q == '\n' || *q == '\r') && *q != newline ? 1 : 0;
+            at = q;
+        }
+    }
+    return at;
+}
+
 // The text of a conditional group that is not taken: nothing in it is lexed. fast_pp_skip_inactive looks for the
 // directive that ends the group, 64 bytes at a time, and leaves the loop only at a '#' that is the first character of
 // its line and at the start of a comment.
@@ -2422,6 +2447,10 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
 //   end (the rare block with an R before a '"' tests each, so "ERROR" makes none): decided the same way, one literal
 //   of its line at a time, until it is inside one or opens one. A literal that a raw prefix opens leaves the direct
 //   path. Without raw string literals the blocks don't look for them.
+// - a universal character name's start, seen at the byte after a backslash: a 'u', 'U' or 'N', or another backslash,
+//   which a line splice between the backslash and its letter starts. The full pipeline's raw lexer still reports a
+//   basic, control or surrogate character's UCN that starts a token in a skipped group (#3655, `pp_read_skipped_ucns`),
+//   not one in a literal or a comment; a UCN's start outside them leaves the direct path (#3577), whatever it names.
 // Everything else (a '#' inside a line, a lone '/', quotes with nothing after them to hide) is passed in bulk.
 // f->at_bol is false after a directive; where the file ends first the compile fails and nothing reads it.
 static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(FastPP* pp, FastIncludeFile* f, const bool raw_on)
@@ -2457,6 +2486,9 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
     const __m512i v_tab = _mm512_set1_epi8('\t');
     const __m512i v_four = _mm512_set1_epi8(4);
     const __m512i v_upper_r = _mm512_set1_epi8('R');
+    const __m512i v_case = _mm512_set1_epi8(0x20);
+    const __m512i v_lower_u = _mm512_set1_epi8('u');
+    const __m512i v_upper_n = _mm512_set1_epi8('N');
 
     while (p < end && !done)
     {
@@ -2487,6 +2519,13 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
         const __mmask64 tainted = passes & ~taint_sum;
 
         const __mmask64 directives = hash & first;
+        // A UCN's letters are looked for only in a block with a byte after a backslash, which most blocks have none of.
+        const __mmask64 escaped = (backslash << 1) | backslash_in;
+        __mmask64 ucns = 0;
+        if (__builtin_expect(escaped != 0, 0))
+        {
+            ucns = (_mm512_cmpeq_epi8_mask(_mm512_or_si512(v, v_case), v_lower_u) | _mm512_cmpeq_epi8_mask(v, v_upper_n) | backslash) & escaped;
+        }
         __mmask64 raws = 0;
         uint64_t r_out = 0;
         if (raw_on)
@@ -2501,7 +2540,7 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                 raws |= fast_raw_string_before(f->base, p + at, pp->raw_strings) ? UINT64_C(1) << at : 0u;
             }
         }
-        const __mmask64 events = (directives | opens | raws) & valid;
+        const __mmask64 events = (directives | opens | raws | ucns) & valid;
         if (__builtin_expect(events == 0, 1))
         {
             line += (uint32_t)__builtin_popcountll(nl);
@@ -2519,7 +2558,8 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
             const uint32_t pos = (uint32_t)__builtin_ctzll(events);
             const bool directive = ((directives >> pos) & 1u) != 0;
             const bool raw = ((raws >> pos) & 1u) != 0;
-            // A comment's event is at its second character.
+            const bool ucn = ((ucns >> pos) & 1u) != 0;
+            // A comment's event is at its second character, and a UCN's at the byte after its backslash.
             const uint32_t slash_pos = pos - 1u;
             const uint8_t* const at = directive || raw ? p + pos : p + pos - 1;
             const bool at_first = directive || (pos != 0 ? ((first >> slash_pos) & 1u) != 0 : slash_first != 0);
@@ -2548,6 +2588,16 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                 if (raw_on && s < stop && *s == '"' && fast_raw_string_before(f->base, s, pp->raw_strings))
                 {
                     fast_pp_bail(pp, "raw string literal in a skipped group");
+                    next = end;
+                    done = true;
+                    decided = true;
+                }
+                else if (pp->c23 && s < stop && *s == '\'' && s > f->base && (fast_char_class[s[-1]] & 1u) != 0)
+                {
+                    // #3577: C23's digit separator (`1'000`) opens no literal, so what this one would hide (a comment's
+                    // start, a UCN the full pipeline reports) isn't hidden; a quote after a name's or a number's character
+                    // (a prefix's too, `L'x'`) leaves.
+                    fast_pp_bail(pp, "quote after a name or number in a skipped group");
                     next = end;
                     done = true;
                     decided = true;
@@ -2619,6 +2669,22 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                         skipped_bad |= (uint32_t)((nested_else & level) != 0);
                         nested_else |= level & (UINT64_C(0) - (uint64_t)(kw == FPP_KW_ELSE));
                     }
+                }
+            }
+            else if (!decided && ucn)
+            {
+                // The backslash and, past any line splices, its letter: a UCN's start leaves (#3577); a backslash before a
+                // backslash that starts none is passed, and the text goes on from that one.
+                const uint8_t* const letter = fast_skip_splices(at + 1, end);
+                if (letter < end && (*letter == 'u' || *letter == 'U' || *letter == 'N'))
+                {
+                    fast_pp_bail(pp, "universal character name in a skipped group");
+                    next = end;
+                    done = true;
+                }
+                else
+                {
+                    next = at + 1;
                 }
             }
             else if (!decided)

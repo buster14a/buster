@@ -4020,6 +4020,61 @@ static bool c_direct_test_dead_arms(const char* obj_path)
     return ok;
 }
 
+// #3577: what the full pipeline's raw lexer still reports in a skipped group (#3655): a UCN that starts a token, a basic,
+// control or surrogate character's, leaves the direct path wherever its backslash falls in the skip's blocks (a pad of
+// blanks puts it at every offset of the first two, and so the letter after a block's last byte), also after a line splice
+// between the backslash and its letter, and after a literal that closes before it. A backslash before another that starts
+// none, and UCNs in literals and comments, compile. In C23 a quote after a number's character is a digit separator, which
+// opens no literal: where it would hide an event, the unit leaves. An asm label with a '.' leaves (the full pipeline
+// refuses one that names a block-scope static's symbol, `f.n`).
+static bool c_direct_test_skipped_ucns(const char* obj_path)
+{
+    bool ok = true;
+    for (uint32_t pad = 0; ok && pad < 140u; pad += 1)
+    {
+        char source[512];
+        snprintf(source, sizeof(source), "#if 0\n%*s\\u0041\n#endif\nint f(void) { return 0; }\n", (int)pad, "");
+        ok = c_direct_test_compile_source(source, obj_path, 1, NULL, NULL);
+        snprintf(source, sizeof(source), "#if 0\n%*s\\\\\nN{LATIN CAPITAL LETTER A}\n#endif\nint f(void) { return 0; }\n", (int)pad, "");
+        ok = ok && c_direct_test_compile_source(source, obj_path, 1, NULL, NULL);
+        snprintf(source, sizeof(source), "#if 0\n%*s\\\\n \\\nu0041 \"\\u0041\" '\\U00000041' /* \\u0041 */ // \\N{NULL}\n#endif\nint f(void) { return 0; }\n",
+                 (int)pad, "");
+        ok = ok && c_direct_test_compile_source(source, obj_path, 0, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: a skipped group's UCN after %u blanks\n", pad);
+        }
+    }
+    static const char* const leaves[] = {
+        "#if 1\nint f(void) { return 0; }\n#else\n#error \\U00000001\n#endif\n",
+        "#if 0\n\\uD800\n#endif\nint f(void) { return 0; }\n",
+        "#if 0\n\"x\" '\\'' \\u0041\n#endif\nint f(void) { return 0; }\n",
+        "#if 0\n\\\\  \r\nu0041\n#endif\nint f(void) { return 0; }\n",
+        "#if 0\n#if 1\n#define F \\u0045\n#endif\n#endif\nint f(void) { return 0; }\n",
+        "extern int fn __asm__(\"f.n\");\nint f(void) { static int n = 5; return n++ + fn; }\n",
+        "int f(void) { static int n = 5; return n++; }\nint fn __asm__(\"f.\" \"n\") = 9;\n",
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: compiled where the full pipeline reports or refuses: %s", leaves[i]);
+        }
+    }
+    // C23's digit separator before a UCN, and before a comment that holds the group's end; a prefix's quote before a
+    // comment's start leaves too. Without C23 each quote opens a literal, as the full pipeline reads it.
+    const CDirectTestMode c23 = { .c23 = true };
+    static const char separated_ucn[] = "#if 0\nint x = 1'000; \\u0041\n#endif\nint f(void) { return 0; }\n";
+    static const char separated_comment[] = "#if 0\nint x = 1'000; /*\n#else\nint y;\n#endif\n*/\n#endif\nint f(void) { return 0; }\n";
+    static const char prefixed[] = "#if 0\nint x = L'a'; /* */\n#endif\nint f(void) { return 0; }\n";
+    static const char quoted[] = "#if 0\nint x = 'a' + 1; /* */\n#endif\nint f(void) { return 0; }\n";
+    ok = ok && c_direct_test_compile_mode(separated_ucn, obj_path, 1, NULL, NULL, c23) && c_direct_test_compile_mode(separated_comment, obj_path, 1, NULL, NULL, c23) &&
+         c_direct_test_compile_mode(prefixed, obj_path, 1, NULL, NULL, c23) && c_direct_test_compile_mode(quoted, obj_path, 0, NULL, NULL, c23) &&
+         c_direct_test_compile_source(prefixed, obj_path, 0, NULL, NULL) && c_direct_test_compile_source(separated_ucn, obj_path, 0, NULL, NULL);
+    return ok;
+}
+
 // What the dependency test expects of the records (#3592): the paths after the test's directory, in order, and the flags.
 typedef struct CDirectTestDependency CDirectTestDependency;
 struct CDirectTestDependency
@@ -5593,6 +5648,16 @@ static int c_direct_unit_tests(void)
     else
     {
         fprintf(stderr, "test-direct: FAIL dead arms of constant conditions\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_skipped_ucns(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL skipped groups' UCNs, digit separators and dotted asm labels\n");
         failed += 1u;
     }
 
