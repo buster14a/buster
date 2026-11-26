@@ -2435,7 +2435,9 @@ static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sin
     const bool marked = (value & BUSTER_TYPED_ACCESS_VOLATILE) != 0;
     const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-    ir_typed_copy_pointers(sink, destination, source, value & ~BUSTER_TYPED_ACCESS_VOLATILE, wide && !marked, marked ? BUSTER_IR_VOLATILE : 0);
+    const uint64_t bytes = value & ~BUSTER_TYPED_ACCESS_VOLATILE;
+    const uint8_t flags = marked ? BUSTER_IR_VOLATILE : !wide && bytes > BUSTER_TIER0_COPY_NARROW_BYTES ? BUSTER_IR_COPY_PIECE : 0;
+    ir_typed_copy_pointers(sink, destination, source, bytes, wide && !marked, flags);
 }
 
 // Whether the function takes or returns an aggregate by value (an object parameter, a result in registers from its bytes

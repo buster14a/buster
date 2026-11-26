@@ -679,7 +679,13 @@ static void ir_lower_test_fold_function(uint64_t* digest, const IrFunction* f)
     const uint64_t count = f->instruction_count;
     ir_lower_test_fold_bytes(digest, f->op, count);
     ir_lower_test_fold_bytes(digest, f->type, count);
-    ir_lower_test_fold_bytes(digest, f->flags, count);
+    // #2818 adds a nonsemantic copy-selection hint. Keep the frozen baseline's semantic flags byte for byte; the
+    // dedicated copy-piece fixture below checks the new hint on every access and every size independently.
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t flags = (f->op[i] == IR_LOAD || f->op[i] == IR_STORE) ? (uint8_t)(f->flags[i] & ~BUSTER_IR_COPY_PIECE) : f->flags[i];
+        ir_lower_test_fold_bytes(digest, &flags, 1);
+    }
     ir_lower_test_fold_bytes(digest, f->alignment_log2, count);
     ir_lower_test_fold_bytes(digest, f->a, count * 4);
     ir_lower_test_fold_bytes(digest, f->b, count * 4);
@@ -3034,6 +3040,57 @@ static void ir_lower_test_objects(IrLowerTestTally* tally)
 // one load and one store per piece: up to BUSTER_TIER0_COPY_NARROW_BYTES, of the widest integer that fits what remains;
 // past it, since a global isn't a local (#2693), of 16 bytes, the last ending at the end.
 #define BUSTER_IR_LOWER_TEST_COPY_SPAN (BUSTER_TIER0_MAX_COPY_BYTES + 8)
+
+static void ir_lower_test_copy_flags(IrLowerTestTally* tally)
+{
+    const uint8_t kinds[] = { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_COPY, BUSTER_TYPED_RETURN };
+    const uint8_t classes[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID };
+    const uint8_t local_classes[] = { BUSTER_TYPED_CLASS_VOID };
+    const uint8_t local_flags[] = { BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
+    const uint32_t local_sizes[] = { BUSTER_TIER0_MAX_COPY_BYTES };
+    const uint8_t local_alignments[] = { 3 };
+    Arena output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    for (uint32_t observable = 0; observable < 2; observable += 1)
+    {
+        for (uint32_t size = 1; size <= BUSTER_TIER0_MAX_COPY_BYTES; size += 1)
+        {
+            const uint64_t values[] = { 1, 0, size | (observable ? BUSTER_TYPED_ACCESS_VOLATILE : 0), 0 };
+            const Tier0Function source = {
+                .kinds = kinds,
+                .classes = classes,
+                .values = values,
+                .count = 4,
+                .local_classes = local_classes,
+                .local_flags = local_flags,
+                .local_count = 1,
+                .local_sizes = local_sizes,
+                .local_alignments = local_alignments,
+                // Validation strips access marks only when the typed producer advertises them.
+                .volatiles = observable != 0,
+            };
+            IrFunction f = { 0 };
+            bool exact = ir_lower_typed(&source, IR_VOID, 2, &output, &scratch, &f).error == IR_OK;
+            uint32_t loads = 0;
+            uint32_t stores = 0;
+            const uint32_t expected = size / 8 + (uint32_t)__builtin_popcount(size % 8);
+            const uint8_t flags = observable ? BUSTER_IR_VOLATILE : size > BUSTER_TIER0_COPY_NARROW_BYTES ? BUSTER_IR_COPY_PIECE : 0;
+            for (uint32_t i = 0; exact && i < f.instruction_count; i += 1)
+            {
+                const bool load = f.op[i] == IR_LOAD;
+                const bool store = f.op[i] == IR_STORE;
+                loads += load;
+                stores += store;
+                exact = (!load && !store) || (f.flags[i] == flags && !ir_vector_type(load ? f.type[i] : f.type[f.b[i]]));
+            }
+            ir_lower_test_expect(tally, exact && loads == expected && stores == expected,
+                                 "only nonvolatile local copies larger than 32 bytes mark their scalar pieces", size, observable);
+            arena_pop_to(&output, 0);
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+}
 
 static void ir_lower_test_copies(IrLowerTestTally* tally)
 {
@@ -5399,6 +5456,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_empty_stack(&tally);
         ir_lower_test_narrow(&tally);
         ir_lower_test_objects(&tally);
+        ir_lower_test_copy_flags(&tally);
         ir_lower_test_copies(&tally);
         ir_lower_test_stack(&tally);
         ir_lower_test_indirect_jump(&tally);

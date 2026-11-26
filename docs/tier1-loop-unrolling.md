@@ -198,7 +198,7 @@ summary's size, which the expansion decisions read, is the loop's own. A
 candidate whose own code comes from its summary takes the unroller there
 instead, on the summary's optimized function (which it doesn't change), and
 then the sink and the optimizer again where a loop unrolled
-(`check_tier1_unroll_own`). The first version compiled such candidates by their
+(`check_tier1_finish_own`, which also applies late local-copy pairing). The first version compiled such candidates by their
 whole pipeline again, which made `-c` of `sqlite3.c` about 23% slower locally;
 this way the unroller's share is the cost below.
 
