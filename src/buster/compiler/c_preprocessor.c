@@ -1015,6 +1015,18 @@ struct PPOutputEvent
     bool angled;
 };
 
+// Changes to the two macro names clang uses for an uninitialized variable's suggested initializer, newest first.
+// A change precedes output token `token`. Only runs recording expansion history keep these cold records, in the
+// unit's arena; prepending never edits a prelude record retained by a reusable root image.
+typedef struct PPDiagnosticMacroEvent PPDiagnosticMacroEvent;
+struct PPDiagnosticMacroEvent
+{
+    const PPDiagnosticMacroEvent* previous;
+    uint32_t token;
+    IdentId name;
+    bool defined;
+};
+
 // A line note, from a #line or a #pragma GCC system_header: from `location` on in its range, lines are `delta` more
 // than the physical ones, the file is `name` if it isn't null, and it is a `system` one (BUSTER_PP_USER_FILE, ...).
 typedef struct PPLineDirective PPLineDirective;
@@ -1532,6 +1544,8 @@ struct PPGenerated
     uint32_t expansion;
     uint32_t location;
     uint32_t anchor;
+    // A paste's last operand or a stringification's parameter in its replacement list; its first is anchor.
+    uint32_t end;
     uint32_t first;
     uint32_t count;
     PPGeneratedKind kind;
@@ -1577,12 +1591,6 @@ struct PPNested
 
 typedef struct PPDiagnosticRecord PPDiagnosticRecord;
 typedef struct PPDiagnosticSourceNote PPDiagnosticSourceNote;
-struct PPDiagnosticSourceNote
-{
-    uint32_t location;
-    uint32_t origin;
-    const char* message;
-};
 
 // A diagnostic's highlighted range (#2376), clang's token range: its first token's place and history, and its last
 // token's, which it ends `end_length` bytes after (that token's spelling's bytes in the source). A range of characters
@@ -1595,6 +1603,8 @@ typedef enum PPRangePending
     PP_RANGE_PLACES,
     PP_RANGE_TOKENS,
     PP_RANGE_OFFSETS,
+    PP_RANGE_INSERT_BEFORE,
+    PP_RANGE_INSERT_AFTER,
 } PPRangePending;
 
 typedef struct PPDiagnosticRange PPDiagnosticRange;
@@ -1610,6 +1620,27 @@ struct PPDiagnosticRange
 
 // The highlighted ranges a diagnostic keeps at most (clang's diagnostics give one to three).
 #define BUSTER_PP_DIAGNOSTIC_RANGES 4
+#define BUSTER_PP_DIAGNOSTIC_FIXITS 4
+
+// A replacement's removed character range and replacement text; an empty range inserts, empty text removes.
+// Pending token coordinates are resolved only on the accepted diagnostic path, just as highlighted ranges are.
+typedef struct PPDiagnosticFixIt PPDiagnosticFixIt;
+struct PPDiagnosticFixIt
+{
+    PPDiagnosticRange range;
+    const char* text;
+};
+
+struct PPDiagnosticSourceNote
+{
+    uint32_t location;
+    uint32_t origin;
+    const char* message;
+    PPDiagnosticRange ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
+    uint32_t range_count;
+    PPDiagnosticFixIt fixits[BUSTER_PP_DIAGNOSTIC_FIXITS];
+    uint32_t fixit_count;
+};
 
 struct PPDiagnosticRecord
 {
@@ -1643,6 +1674,12 @@ struct PPDiagnosticRecord
     // Its highlighted ranges (Preprocessor.diagnostic_ranges).
     PPDiagnosticRange ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
     uint32_t range_count;
+    PPDiagnosticFixIt fixits[BUSTER_PP_DIAGNOSTIC_FIXITS];
+    uint32_t fixit_count;
+    PPDiagnosticRange note_ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
+    uint32_t note_range_count;
+    PPDiagnosticFixIt note_fixits[BUSTER_PP_DIAGNOSTIC_FIXITS];
+    uint32_t note_fixit_count;
 };
 
 struct Preprocessor
@@ -1798,6 +1835,10 @@ struct Preprocessor
     uint32_t diagnostic_range_count;
     const PPDiagnosticRange* render_ranges;
     uint32_t render_range_count;
+    PPDiagnosticFixIt diagnostic_fixits[BUSTER_PP_DIAGNOSTIC_FIXITS];
+    uint32_t diagnostic_fixit_count;
+    const PPDiagnosticFixIt* render_fixits;
+    uint32_t render_fixit_count;
     uint32_t origin_peak[3];
     // The invocations in pp_finish_simple's invocation's arguments that it expands in place, as pp_argument_in_place
     // planned them, in the order pp_expand_argument_in_place takes them (nested_taken).
@@ -1828,6 +1869,8 @@ struct Preprocessor
     uint32_t template_count;
     // Changed by every change of a name's macro (pp_set_macro): the macros' table a template's names were found in.
     uint32_t macro_epoch;
+    // NULL and false's definition state by output position, for diagnostic initializer hints (#2376).
+    const PPDiagnosticMacroEvent* diagnostic_macro_events;
     // #pragma push_macro: a name and the macro it had, in order.
     IdentId* pushed_names;
     PPMacroId* pushed_macros;
@@ -2148,6 +2191,11 @@ struct PPOutputDiagnosticNote
 {
     uint32_t token;
     const char* message;
+    PPDiagnosticRange ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
+    uint32_t range_count;
+    PPDiagnosticFixIt fixits[BUSTER_PP_DIAGNOSTIC_FIXITS];
+    uint32_t fixit_count;
+    bool after_token;
 };
 
 // A note at a byte of a token's spelling (pp_diagnose_output_offset_notes).
@@ -2164,6 +2212,10 @@ struct PPDiagnosticNote
     uint32_t location;
     const char* message;
     IdentId macro;
+    PPDiagnosticRange ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
+    uint32_t range_count;
+    PPDiagnosticFixIt fixits[BUSTER_PP_DIAGNOSTIC_FIXITS];
+    uint32_t fixit_count;
 };
 
 static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location);
@@ -2183,6 +2235,9 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_summary(con
 BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, PPSeverity severity, uint32_t location, const char* format, ...);
 
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
+// Whether NULL or false was defined at output token `publication_token`, recording deferred history if necessary.
+// An explicitly history-free run cannot suggest a historical macro name and returns false.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_diagnostic_macro_defined(Preprocessor* pp, const char* name, uint32_t publication_token);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_release_file_columns(Preprocessor* pp, bool poison);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_release_output(Preprocessor* pp, bool poison);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_output_ensure(Preprocessor* pp);
@@ -2192,6 +2247,10 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_range_token
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_range_characters(Preprocessor* pp, uint32_t location, uint32_t length);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_range_offsets(Preprocessor* pp, uint32_t token, uint32_t offset, uint32_t length);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_ranges_clear(Preprocessor* pp);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_fixit_tokens(Preprocessor* pp, uint32_t first, uint32_t last, const char* text);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_fixit_insert(Preprocessor* pp, uint32_t token, bool after, const char* text);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_fixit_characters(Preprocessor* pp, uint32_t location, uint32_t length, const char* text);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_fixits_clear(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_empty_unit(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source);
