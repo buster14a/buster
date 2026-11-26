@@ -36,7 +36,7 @@ static void tier1_select_upper_native(Tier1SelectTest* test, const uint8_t* allo
                         .scale = operation == 0 ? BUSTER_TIER1_VECTOR_COPY : operation == 3 ? BUSTER_TIER1_VECTOR_NOT :
                                  operation == 4 ? BUSTER_TIER1_VECTOR_TERNLOG : BUSTER_TIER1_VECTOR_BINARY,
                         .width = (uint8_t)width,
-                        .source_width = IR_SIMD_LANE_I32,
+                        .source_width = operation < 5 ? IR_SIMD_LANE_I32 : IR_SIMD_LANE_F32,
                         .destination = (uint8_t)(32 + destination),
                         .left = (uint8_t)(32 + operands[0]),
                         .right = (uint8_t)(32 + operands[1]),

@@ -89,7 +89,8 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
         }
         if (moves)
         {
-            // Packed fma and the i32/f32 conversions (#2806). The bits are the float lane's.
+            // Packed fma and same-width integer/float conversions (#2806). The bits are the float lane's; the
+            // exact forms keep unsigned dword and every qword conversion behind their AVX-512 feature gates.
             const uint16_t fma32 = tier1_select_packed_fma_form(IR_SIMD_LANE_F32, width, encoding);
             const uint16_t fma64 = tier1_select_packed_fma_form(IR_SIMD_LANE_F64, width, encoding);
             target->binary[IR_FMA][IR_SIMD_LANE_F32] |= ir_vectorize_target_allows(allowed, fma32) ? bit : 0;
@@ -97,8 +98,11 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
             const uint32_t conversions[] = { IR_SITOFP, IR_UITOFP, IR_FPTOSI, IR_FPTOUI };
             for (uint32_t k = 0; k < 4; k += 1)
             {
-                const uint16_t form = tier1_select_packed_convert_form(conversions[k], width, encoding);
-                target->binary[conversions[k]][IR_SIMD_LANE_F32] |= ir_vectorize_target_allows(allowed, form) ? bit : 0;
+                for (uint32_t lane = IR_SIMD_LANE_F32; lane <= IR_SIMD_LANE_F64; lane += 1)
+                {
+                    const uint16_t form = tier1_select_packed_convert_form(conversions[k], lane, width, encoding);
+                    target->binary[conversions[k]][lane] |= ir_vectorize_target_allows(allowed, form) ? bit : 0;
+                }
             }
         }
         for (uint32_t from = 0; moves && from < 4; from += 1)

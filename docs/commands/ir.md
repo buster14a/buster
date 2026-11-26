@@ -58,6 +58,13 @@ error, or none, that an independent dominance oracle gives (four per count,
 mutation cases. A default run folds every verdict and every use list into two
 digests, which must equal the frozen ones (#2924).
 
+The floating vector fixtures (#2806) check same-width signed and unsigned
+32- and 64-bit conversions, invalid lanes' transactional failure and FMA's
+NaN order and single rounding. `test-ir-interpreter` checks those conversions
+against the existing scalar interpreter: unsigned fractions between -1 and
+0 truncate to zero, and nonfinite or out-of-range lanes report
+`INTERPRETER_ARITHMETIC` before a following store.
+
 The asm-result fixtures (#2144) separately check every GPR/XMM primary and
 secondary scalar width, the result/touched masks, and rejection of duplicate,
 mistyped, cross-block or invalid-parent `IR_ASM_RESULT` projections. Both the

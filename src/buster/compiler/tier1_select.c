@@ -1328,12 +1328,44 @@ static uint16_t tier1_select_packed_fma_form(uint32_t lane, uint32_t width, uint
     return form;
 }
 
-// Packed cvtdq2ps, cvtudq2ps, cvttps2dq and cvttps2udq (#2806), i32 and f32. Unsigned forms are AVX-512's.
-static uint16_t tier1_select_packed_convert_form(uint32_t op, uint32_t width, uint32_t encoding)
+// Same-width integer/float lane conversions (#2806). Signed i32/f32 forms have SSE and VEX encodings; unsigned dwords
+// and all i64/f64 forms are EVEX's. The target's exact-form allow-list also requires AVX512DQ for the qwords, and
+// AVX512VL for the 16- and 32-byte EVEX forms. Keep the lane kind through selection: vector storage width alone cannot
+// distinguish the dword instruction from the qword instruction.
+static uint16_t tier1_select_packed_convert_form(uint32_t op, uint32_t lane, uint32_t width, uint32_t encoding)
 {
     const bool evex = encoding == BUSTER_TIER1_ENCODING_EVEX || width >= 64;
     uint16_t form = X86_FORM_NONE;
-    if (op == IR_SITOFP)
+    if (lane == IR_SIMD_LANE_F64 && evex)
+    {
+        static const uint16_t forms[4][3] =
+        {
+            {
+                X86_FORM_VCVTQQ2PD_X_XM128,
+                X86_FORM_VCVTQQ2PD_Y_YM256,
+                X86_FORM_VCVTQQ2PD_Z_ZM512,
+            },
+            {
+                X86_FORM_VCVTUQQ2PD_X_XM128,
+                X86_FORM_VCVTUQQ2PD_Y_YM256,
+                X86_FORM_VCVTUQQ2PD_Z_ZM512,
+            },
+            {
+                X86_FORM_VCVTTPD2QQ_X_XM128,
+                X86_FORM_VCVTTPD2QQ_Y_YM256,
+                X86_FORM_VCVTTPD2QQ_Z_ZM512,
+            },
+            {
+                X86_FORM_VCVTTPD2UQQ_X_XM128,
+                X86_FORM_VCVTTPD2UQQ_Y_YM256,
+                X86_FORM_VCVTTPD2UQQ_Z_ZM512,
+            },
+        };
+        const uint32_t operation = op == IR_SITOFP ? 0 : op == IR_UITOFP ? 1 : op == IR_FPTOSI ? 2 : op == IR_FPTOUI ? 3 : 4;
+        const uint32_t index = width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3;
+        form = operation < 4 && index < 3 ? forms[operation][index] : X86_FORM_NONE;
+    }
+    else if (lane == IR_SIMD_LANE_F32 && op == IR_SITOFP)
     {
         form = width >= 64 ? X86_FORM_VCVTDQ2PS_Z_ZM512 :
                evex && width == 32 ? X86_FORM_VCVTDQ2PS_Y_YM256_EVEX :
@@ -1342,11 +1374,11 @@ static uint16_t tier1_select_packed_convert_form(uint32_t op, uint32_t width, ui
                encoding == BUSTER_TIER1_ENCODING_VEX ? X86_FORM_VCVTDQ2PS_X_XM128 :
                width == 16 ? X86_FORM_CVTDQ2PS_X_XM128 : X86_FORM_NONE;
     }
-    else if (op == IR_UITOFP && (evex || width >= 64))
+    else if (lane == IR_SIMD_LANE_F32 && op == IR_UITOFP && evex)
     {
         form = width >= 64 ? X86_FORM_VCVTUDQ2PS_Z_ZM512 : width == 32 ? X86_FORM_VCVTUDQ2PS_Y_YM256 : X86_FORM_VCVTUDQ2PS_X_XM128;
     }
-    else if (op == IR_FPTOSI)
+    else if (lane == IR_SIMD_LANE_F32 && op == IR_FPTOSI)
     {
         form = width >= 64 ? X86_FORM_VCVTTPS2DQ_Z_ZM512 :
                evex && width == 32 ? X86_FORM_VCVTTPS2DQ_Y_YM256_EVEX :
@@ -1355,7 +1387,7 @@ static uint16_t tier1_select_packed_convert_form(uint32_t op, uint32_t width, ui
                encoding == BUSTER_TIER1_ENCODING_VEX ? X86_FORM_VCVTTPS2DQ_X_XM128 :
                width == 16 ? X86_FORM_CVTTPS2DQ_X_XM128 : X86_FORM_NONE;
     }
-    else if (op == IR_FPTOUI && (evex || width >= 64))
+    else if (lane == IR_SIMD_LANE_F32 && op == IR_FPTOUI && evex)
     {
         form = width >= 64 ? X86_FORM_VCVTTPS2UDQ_Z_ZM512 : width == 32 ? X86_FORM_VCVTTPS2UDQ_Y_YM256 : X86_FORM_VCVTTPS2UDQ_X_XM128;
     }
@@ -3221,7 +3253,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         const uint32_t encoding = tier1_select_holes_encoding(holes);
         tier1_select_append(&result, (X86Instruction){
-            .form = tier1_select_packed_convert_form(holes->operation, width, encoding),
+            .form = tier1_select_packed_convert_form(holes->operation, holes->source_width, width, encoding),
             .reg = tier1_select_vector_register(destination),
             .rm = tier1_select_vector_register(holes->left),
             .mode = BUSTER_X86_REGISTER_DIRECT,
@@ -6547,15 +6579,16 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         }
         else if (vector_width != 0 && (op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI))
         {
-            const bool formed = tier1_select_packed_convert_form(op, vector_width, BUSTER_TIER1_ENCODING_EVEX) != X86_FORM_NONE ||
-                                tier1_select_packed_convert_form(op, vector_width, BUSTER_TIER1_ENCODING_VEX) != X86_FORM_NONE ||
-                                tier1_select_packed_convert_form(op, vector_width, BUSTER_TIER1_ENCODING_SSE) != X86_FORM_NONE;
+            const uint32_t lane = function->flags[node];
+            const bool formed = tier1_select_packed_convert_form(op, lane, vector_width, BUSTER_TIER1_ENCODING_EVEX) != X86_FORM_NONE ||
+                                tier1_select_packed_convert_form(op, lane, vector_width, BUSTER_TIER1_ENCODING_VEX) != X86_FORM_NONE ||
+                                tier1_select_packed_convert_form(op, lane, vector_width, BUSTER_TIER1_ENCODING_SSE) != X86_FORM_NONE;
             if (formed)
             {
                 base.rule = TIER1_RULE_VECTOR_CONVERT;
                 base.width = (uint8_t)vector_width;
                 base.operation = (uint8_t)op;
-                base.source_width = function->flags[node];
+                base.source_width = (uint8_t)lane;
                 base.values[0] = a;
                 base.intrinsic_cost = 1;
                 tier1_select_add_candidate(forest, node, &candidates, base);

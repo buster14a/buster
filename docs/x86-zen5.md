@@ -108,8 +108,12 @@ registers 0 to 11 are written and 13 to 15 are constants, opmasks 1 to 5 and 6
 and 7. A masked case's target runs under k7, every other element selected:
 merging, or zeroing for a load into a vector register. A floating-point case's registers start at 1.0 of its element and its
 constant sources are 1.0, or 0.0 for an addition, subtraction or fused
-multiply-add, so that every chain keeps the value 1.0 and never reaches a
-denormal, infinity or NaN; integers are 3. Divisions divide a 57-bit dividend
+multiply-add, keeping those arithmetic chains at 1.0 or 0.0; integers are 3.
+Packed integer/float conversions start their vector registers and sources at
+zero: their result bits feed the next conversion exactly, without producing a
+subnormal or rounding. `test-x86-zen5` checks every packed FMA and conversion
+fixture with clear MXCSR status at all four rounding modes, both FTZ settings
+and both DAZ settings. Divisions divide a 57-bit dividend
 (`0x0123456789abcdef`) by 3 with RDX zero: their latency is that operand
 range's, not a small quotient's.
 
@@ -338,6 +342,11 @@ The register transfers used by #1387 have one macro-op each. On the 9700X,
 the independent fixture issued one `FST ST(0)` every 2.00 cycles and one
 `FXCH ST(i)` every 0.50 cycles, exchanging occupied stack registers.
 [Measurement record](https://github.com/buster14a/buster-performance/blob/53e3d8d61b7edd0efcf8a033da10d6dcff7c8703/docs/measurements/x87-register-transfers-1387-2026-11-24/register-costs.txt).
+
+[#2806](https://github.com/buster14a/buster/issues/2806) adds 40 measured register rows. The ten packed FMA forms have
+4 cycles of latency and the 30 signed and unsigned conversions have 3 cycles. All issued at 0.5 cycles per instruction
+on the Ryzen 7 9700X. The [measurement record](https://github.com/buster14a/buster-performance/tree/9799f023d1467831095141b0fb5ab3ed4f8d199d/docs/measurements/packed-numeric-costs-2806-2026-11-26)
+contains the exact forms, values and qualification.
 
 What the rows say, a few families (cycles; derived values in italics):
 

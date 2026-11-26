@@ -558,6 +558,10 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
         }
         // These cases postdate the frozen digest from #2924. Check their admission and execution at each width.
         static const IrVectorizeTestFixture minmax[] = {
+            { .name = "fma-f64", .roles = "ppkn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
+            { .name = "sitofp-i64", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
+            { .name = "uitofp-i32", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
+            { .name = "uitofp-i64", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
             { .name = "minmax-select", .roles = "pnk", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
             { .name = "refuse-minmax-clobber", .roles = "pnk", .refusal = IR_VECTORIZE_REFUSE_SHAPE },
             { .name = "refuse-minmax-partial", .roles = "ppnk", .refusal = IR_VECTORIZE_REFUSE_USE },
