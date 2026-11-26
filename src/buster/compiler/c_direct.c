@@ -4541,6 +4541,21 @@ static int c_direct_unit_tests(void)
         "    if (IS1(x)) { return 1; } if (ALWAYS(x == 2)) { return 2; } if ((3 == x)) { return 3; } if ((x != 4)) { return 4; }\n"
         "    if (!(x == 5)) { return 5; } return w->a + w->b + fit[0];\n"
         "}\n",
+        // 21. Formats the full pipeline's -Wformat family leaves alone: each class's conversion of its own arguments
+        // (char, short and _Bool to %d, long to %ld, long long to %lld, an unsigned long to %zu, an enum to %u, strings
+        // and arrays of the three char types, pointers, float and double, `*` widths of an int and a char), `%%`,
+        // `%m`, a joined and a parenthesized literal, and a non-literal format with arguments; fprintf's, sprintf's and
+        // snprintf's.
+        "int printf(const char*, ...);\nint fprintf(void*, const char*, ...);\nint sprintf(char*, const char*, ...);\n"
+        "int snprintf(char*, unsigned long, const char*, ...);\nenum Pf { PF0 };\n"
+        "int formatted(void* o, char c, short h, _Bool b, int i, long l, long long ll, unsigned long z, enum Pf e, const char* s,\n"
+        "              unsigned char* us, signed char* ss, void* p, float f, double d, const char* fmt) {\n"
+        "    char a[16];\n"
+        "    int n = printf(\"%d %hd %hhd %d %ld %lld %zu %u %s %s %s %s %p %p %f %g %e %*d %.*s %% %m\\n\",\n"
+        "                   c, h, c, b, l, ll, z, e, s, us, ss, a, p, a, f, d, d, i, i, c, s);\n"
+        "    n += fprintf(o, \"%-5d \" \"%+.2f\\n\", i, d) + sprintf(a, (\"%lx\"), z) + snprintf(a, sizeof a, \"%lu\", z);\n"
+        "    return n + printf(fmt, i);\n"
+        "}\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4739,6 +4754,21 @@ static int c_direct_unit_tests(void)
         "int f(int x) { while ((x == 1)) { x += 1; } return x; }\n",
         "struct S { int a; };\nint f(struct S* s, int* p) { if ((s->a == 1)) { return 1; } return *p; }\n",
         "int f(int* p) { do { p += 1; } while (((*p == 1))); return 0; }\n",
+        // -Wformat and its family: printf's int conversion of a long, a string of an int (in a dead branch and in
+        // sizeof too, as the full pipeline checks every call's), one conversion short and one over, an invalid
+        // specifier, a non-literal format without arguments (-Wformat-security); fprintf's and snprintf's formats,
+        // `%ld` of a long long, `%c` of a _Bool, a `*` width of a long.
+        "int printf(const char*, ...);\nint f(long l) { return printf(\"%d\\n\", l); }\n",
+        "int printf(const char*, ...);\nint f(void) { if (0) { return printf(\"%s\", 1); } return 0; }\n",
+        "int printf(const char*, ...);\nunsigned long f(void) { return sizeof(printf(\"%s\", 1)); }\n",
+        "int printf(const char*, ...);\nint f(int i) { return printf(\"%d %d\\n\", i); }\n",
+        "int printf(const char*, ...);\nint f(int i) { return printf(\"x\\n\", i); }\n",
+        "int printf(const char*, ...);\nint f(int i) { return printf(\"%y\\n\", i); }\n",
+        "int printf(const char*, ...);\nint f(const char* s) { return printf(s); }\n",
+        "int fprintf(void*, const char*, ...);\nint f(void* o, char* s) { return fprintf(o, \"%d\\n\", s); }\n",
+        "int snprintf(char*, unsigned long, const char*, ...);\nint f(char* b, long long ll) { return snprintf(b, 8, \"%ld\", ll); }\n",
+        "int printf(const char*, ...);\nint f(_Bool b) { return printf(\"%c\", b); }\n",
+        "int printf(const char*, ...);\nint f(long w, int i) { return printf(\"%*d\", w, i); }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

@@ -5856,6 +5856,230 @@ static uint32_t fast_cc_call_arguments(const FastCCState* cc, uint32_t open, uin
     return count;
 }
 
+// #3577: byte INDEX of the string literal tokens [S, E) joined (their bytes without the null), 0 past them.
+static uint8_t fast_cc_format_at(const FastCCState* cc, uint32_t s, uint32_t e, uint32_t index)
+{
+    uint8_t byte = 0;
+    uint32_t left = index;
+    bool found = false;
+    for (uint32_t p = s; !found && p < e; p += 1u)
+    {
+        const FastLitSlice slice = cc->pp->lit_slices[cc->td[p]];
+        found = left < slice.length;
+        byte = found ? (uint8_t)cc->pp->lit_bytes[slice.offset + left] : 0u;
+        left -= found ? 0u : slice.length;
+    }
+    return byte;
+}
+
+// #3577: an argument type's integer width as the full pipeline's format checks read it (check_action_integer_type): an
+// integer's bits (an enum's underlying type's; _Bool's 1), with *LONG_CLASS 1 for long and unsigned long, 2 for long long
+// and unsigned long long, 0 otherwise; 0 bits for any other type.
+static uint32_t fast_cc_format_integer_bits(const FastCCState* cc, FastType t, uint32_t* long_class)
+{
+    static const uint8_t widths[16] = {
+        [FTYPE_BOOL] = 1u,
+        [FTYPE_I8] = 8u,
+        [FTYPE_U8] = 8u,
+        [FTYPE_I16] = 16u,
+        [FTYPE_U16] = 16u,
+        [FTYPE_I32] = 32u,
+        [FTYPE_U32] = 32u,
+        [FTYPE_I64] = 64u,
+        [FTYPE_U64] = 64u,
+        [FTYPE_I128] = 128u,
+        [FTYPE_U128] = 128u,
+    };
+    FastType base = ftype_unqual(t);
+    const FastComplexType* complex = ftype_is_complex(base) ? cc->ctypes + (base & BUSTER_FTYPE_CIDX_MASK) : NULL;
+    if (complex != NULL && complex->kind == FCTYPE_ENUM && complex->complete != 0)
+    {
+        base = ftype_unqual(complex->inner);
+    }
+    const bool scalar = !ftype_is_complex(base) && (base & BUSTER_FTYPE_PTR_MASK) == 0;
+    const uint32_t bits = scalar ? widths[base & 15u] : 0u;
+    *long_class = bits == 64u ? ((base & BUSTER_FTYPE_SCALAR_LONG) != 0 ? 1u : 2u) : 0u;
+    return bits;
+}
+
+// #3577: whether a call of printf (FORMAT_AT 0), fprintf or sprintf (1) or snprintf (2), its arguments ARGS before
+// conversion at the tokens fast_cc_call_arguments splits from OPEN, is quiet in the full pipeline's format checks
+// (check_common_format: -Wformat, -Wformat-security, -Wformat-extra-args, -Wformat-insufficient-args,
+// -Wformat-invalid-specifier). A format that is a string literal (in parentheses or not) is read as it reads one: each
+// conversion's flags, width and precision (a `*` takes an argument of an int's width or less), length and specifier,
+// then the next data argument of the class they name: an integer of a width the length allows (long and long long by
+// name), a pointer to an 8-bit integer, a pointer, a double; with none left over and none missing. What it reads past
+// that (positions, `%n`, wide and binary forms, C23's widths, `%Lf`, an embedded null, `%c` of a _Bool, a function's
+// `%p`) isn't quiet here. A format that isn't a literal is quiet with data arguments (-Wformat-nonliteral is off) and is
+// -Wformat-security's without; one with a literal among its tokens (a conditional's arms) isn't quiet here.
+static __attribute__((cold, noinline)) bool fast_cc_format_quiet(const FastCCState* cc, uint32_t format_at, const FastVal* args, uint32_t argc,
+                                                                 uint32_t open)
+{
+    uint32_t starts[8];
+    uint32_t ends[8];
+    const uint32_t count = argc > format_at ? fast_cc_call_arguments(cc, open, format_at + 1u, starts, ends) : 0u;
+    bool quiet = count == format_at + 1u;
+    const uint32_t first = quiet ? starts[format_at] : 0u;
+    const uint32_t last = quiet ? ends[format_at] : 0u;
+    uint32_t s = first;
+    uint32_t e = last;
+    while (s + 2u < e && cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e && !fast_cc_is_type_start(cc, s + 1u))
+    {
+        s += 1u;
+        e -= 1u;
+    }
+    bool any_literal = false;
+    for (uint32_t p = first; p < last; p += 1u)
+    {
+        any_literal = any_literal || cc->tk[p] == FTOK_STR_LIT;
+    }
+    bool literal = quiet && s < e;
+    for (uint32_t p = s; literal && p < e; p += 1u)
+    {
+        literal = cc->tk[p] == FTOK_STR_LIT;
+    }
+    const FastVal* format = args + (quiet ? format_at : 0u);
+    literal = literal && (format->lasting & BUSTER_FVAL_LASTING_STRING) != 0 && ftype_is_array(format->type) &&
+              (cc->ctypes[format->type & BUSTER_FTYPE_CIDX_MASK].inner & BUSTER_FTYPE_SCALAR_CHAR) != 0;
+    uint32_t argument = format_at + 1u;
+    if (quiet && !literal)
+    {
+        // Not a literal: quiet where the call passes data arguments and no literal hides in its tokens.
+        quiet = !any_literal && argc > format_at + 1u;
+        argument = argc;
+    }
+    uint32_t remaining = 0;
+    for (uint32_t p = s; quiet && literal && p < e; p += 1u)
+    {
+        remaining += cc->pp->lit_slices[cc->td[p]].length;
+    }
+    uint32_t index = 0;
+    while (quiet && literal && index < remaining)
+    {
+        const uint8_t byte = fast_cc_format_at(cc, s, e, index);
+        index += 1u;
+        // A null inside the body is the full pipeline's "format string contains '\0'".
+        quiet = byte != 0;
+        uint8_t c = byte == '%' && index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+        if (byte != '%' || !quiet)
+        {
+            continue;
+        }
+        if (c == '%')
+        {
+            index += 1u;
+            continue;
+        }
+        // A position (digits, then `$`) isn't read here.
+        uint32_t d = index;
+        while (d < remaining && fast_cc_format_at(cc, s, e, d) >= '0' && fast_cc_format_at(cc, s, e, d) <= '9')
+        {
+            d += 1u;
+        }
+        const bool positioned = d > index && d < remaining && fast_cc_format_at(cc, s, e, d) == '$';
+        while (index < remaining && (c == '-' || c == '+' || c == ' ' || c == '#' || c == '0' || c == '\''))
+        {
+            index += 1u;
+            c = index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+        }
+        // The width, then the precision after a `.`: digits, or a `*` that takes an argument.
+        uint32_t stars = 0;
+        for (uint32_t part = 0; part < 2u; part += 1u)
+        {
+            const bool precision = part == 1u && c == '.';
+            index += (uint32_t)precision;
+            c = precision && index < remaining ? fast_cc_format_at(cc, s, e, index) : c;
+            if ((part == 0u || precision) && c == '*')
+            {
+                stars += 1u;
+                index += 1u;
+            }
+            else if (part == 0u || precision)
+            {
+                while (index < remaining && c >= '0' && c <= '9')
+                {
+                    index += 1u;
+                    c = index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+                }
+            }
+            c = index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+        }
+        // The length, as the full pipeline names them: hh 'H', ll 'L'.
+        uint8_t length = 0;
+        bool doubled = false;
+        if (c == 'h' || c == 'l' || c == 'j' || c == 'z' || c == 't' || c == 'L')
+        {
+            length = c;
+            index += 1u;
+            const uint8_t again = index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+            doubled = again == c && (c == 'h' || c == 'l');
+            length = doubled ? (c == 'h' ? (uint8_t)'H' : (uint8_t)'L') : length;
+            index += (uint32_t)doubled;
+        }
+        const uint8_t conversion = index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+        index += 1u;
+        const bool integer = conversion == 'd' || conversion == 'i' || conversion == 'u' || conversion == 'o' ||
+                             conversion == 'x' || conversion == 'X';
+        const bool character = conversion == 'c';
+        const bool string = conversion == 's';
+        const bool pointer = conversion == 'p';
+        const bool floating = conversion == 'f' || conversion == 'F' || conversion == 'e' || conversion == 'E' ||
+                              conversion == 'g' || conversion == 'G' || conversion == 'a' || conversion == 'A';
+        // Each length's conversions as the full pipeline's modifier check owns them: h, hh, j, z and t the integers'; l
+        // the integers' and the floats' (a no-op); ll the integers'; L the integers' (as ll) and the floats'.
+        const bool length_valid = length == 0 ? (integer || character || string || pointer || floating) :
+                                  (length == 'h' || length == 'H' || length == 'j' || length == 'z' || length == 't') ? integer :
+                                  length == 'l' ? (integer || floating) :
+                                  doubled ? integer : (integer || floating);
+        // `%m` takes no argument.
+        const bool errno_text = conversion == 'm' && length == 0 && stars == 0;
+        quiet = !positioned && ((length_valid && (integer || character || string || pointer || floating)) || errno_text);
+        for (uint32_t k = 0; quiet && k < stars; k += 1u)
+        {
+            uint32_t long_class = 0;
+            const uint32_t bits = argument < argc ? fast_cc_format_integer_bits(cc, args[argument].type, &long_class) : 0u;
+            quiet = bits != 0 && bits <= 32u;
+            argument += 1u;
+        }
+        if (quiet && !errno_text)
+        {
+            quiet = argument < argc;
+            const FastType t = quiet ? ftype_unqual(args[argument].type) : (FastType)FTYPE_VOID;
+            argument += 1u;
+            uint32_t long_class = 0;
+            const uint32_t bits = fast_cc_format_integer_bits(cc, t, &long_class);
+            const FastType decayed = ftype_is_func(t) ? t : ftype_decay((FastCCState*)cc, t);
+            if (quiet && (integer || character))
+            {
+                // check_common_format_integer_class without a pointer (a character's length none); `%c` of a _Bool is
+                // its "argument has boolean value".
+                const uint8_t l = character ? 0u : length;
+                quiet = bits != 0 && ((l == 0 || l == 'h') ? bits <= 32u :
+                                      l == 'H' ? (bits <= 32u && bits != 16u) :
+                                      l == 'L' ? long_class == 2u : long_class == 1u);
+                quiet = quiet && !(character && ftype_is_bool(t));
+            }
+            else if (quiet && string)
+            {
+                // A pointer to (or an array of) an 8-bit integer; a _Bool's is no string.
+                const FastType element = ftype_is_ptr(decayed) ? ftype_unqual(ftype_deref((FastCCState*)cc, decayed)) : (FastType)FTYPE_VOID;
+                uint32_t element_class = 0;
+                quiet = fast_cc_format_integer_bits(cc, element, &element_class) == 8u;
+            }
+            else if (quiet && pointer)
+            {
+                quiet = ftype_is_ptr(decayed) && !ftype_is_func(t);
+            }
+            else if (quiet && floating)
+            {
+                quiet = length != 'L' && ftype_is_float(t);
+            }
+        }
+    }
+    // Data arguments left over are -Wformat-extra-args.
+    return quiet && argument == argc;
+}
+
 // #3577: whether a call of a library function checked by its name (KIND, its identifier's FPP_KW_*_FUNCTION) is quiet in
 // the full pipeline: the memcpy family's size argument `sizeof(E)` with E another argument's expression, a pointer to an
 // object (-Wsizeof-pointer-memaccess; any argument against any other, a superset of its positions and names), read from
@@ -6025,6 +6249,14 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
             !fast_cc_library_call_clean(cc, library, fn, args, argc, ex->eval_only == 0, ex->call_open))
         {
             fast_cc_bail(cc, "a library call the full pipeline questions by its name");
+            return;
+        }
+        // printf's format the first argument, fprintf's and sprintf's the second, snprintf's the third (by their names'
+        // lengths: 6, 7 and 8), in a dead branch's call too, as the full pipeline checks every call's.
+        if (library == FPP_KW_FORMAT_FUNCTION &&
+            !fast_cc_format_quiet(cc, cc->pp->idents.entries[callee->seq_ident].length - 6u, args, argc, ex->call_open))
+        {
+            fast_cc_bail(cc, "a format the full pipeline questions");
             return;
         }
     }
@@ -7583,6 +7815,10 @@ static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCSt
 {
     const uint8_t flags = sym->use_flags;
     const uint8_t next = fast_cc_peek(cc);
+    // #3577: printf, fprintf, sprintf and snprintf, whose formats the full pipeline checks by their names: a call's is
+    // checked where it is made (fast_cc_format_quiet, behind the nonnull mark); another function with a format
+    // attribute leaves.
+    const uint32_t named_format = (uint32_t)(cc->pp->idents.entries[sym->ident_id].pp_kw == FPP_KW_FORMAT_FUNCTION);
     bool pushed = false;
     if ((flags & BUSTER_FSYM_UNSUPPORTED) != 0)
     {
@@ -7604,7 +7840,7 @@ static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCSt
         pushed = true;
     }
     else if (((uint32_t)(sym->kind != FSYM_FUNC) | (uint32_t)(next == FTOK_RPAREN) |
-              ((uint32_t)(next == FTOK_LPAREN) & (uint32_t)((flags & BUSTER_FSYM_FORMAT) != 0))) != 0)
+              ((uint32_t)(next == FTOK_LPAREN) & (uint32_t)((flags & BUSTER_FSYM_FORMAT) != 0) & (named_format ^ 1u))) != 0)
     {
         fast_cc_bail(cc, "use of a checked symbol");
     }
@@ -7617,7 +7853,7 @@ static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCSt
         // #3577: a library function checked by its name (BUSTER_FSYM_PUSH_CHECKED) whatever its attributes made it.
         uint8_t push_marks = sym->push_marks;
         if ((push_marks & BUSTER_FSYM_PUSH_UNASKED) != 0) { push_marks = fast_cc_library_pure_query(cc, sym); }
-        const uint8_t marks = (uint8_t)(called * ((BUSTER_FVAL_MARK_NONNULL * (uint32_t)((flags & BUSTER_FSYM_NONNULL) != 0)) |
+        const uint8_t marks = (uint8_t)(called * ((BUSTER_FVAL_MARK_NONNULL * ((uint32_t)((flags & BUSTER_FSYM_NONNULL) != 0) | named_format)) |
                                                   (push_marks & BUSTER_FSYM_PUSH_CHECKED) |
                                                   (BUSTER_FVAL_MARK_UNUSED_RESULT * (uint32_t)((flags & BUSTER_FSYM_UNUSED_RESULT) != 0)) |
                                                   (BUSTER_FVAL_MARK_PURE * (uint32_t)((flags & BUSTER_FSYM_PURE) != 0))));

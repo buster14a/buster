@@ -333,7 +333,16 @@ argument (`ID((x == 1))`) leaves although the full pipeline is quiet.
 `returns_twice` (a function's), `format_arg(N)` (a prototyped function's whose
 parameter N and value point to a character type) and `may_alias` (anything's)
 are taken as the full pipeline takes them, where musl's `<setjmp.h>`,
-`<libintl.h>` and its word types put them. One
+`<libintl.h>` and its word types put them.
+printf, fprintf, sprintf and snprintf, whose formats the full pipeline checks
+by their names, no longer leave at every call: `fast_cc_format_quiet` reads a
+literal format as `check_common_format` does (flags, a width and a precision
+that may take an int's argument, a length, the conversion, the next argument
+of the class they name, none left over or missing), in a dead branch's or
+sizeof's call too, and leaves at anything past that (positions, `%n`, the wide
+and binary forms, `%Lf`); a non-literal format is quiet with arguments and
+`-Wformat-security`'s without. A function with a `format` attribute of its own
+still leaves at a call. One
 gap is left: a loop's empty body (`for (...);`) is `-Wempty-body` only where the
 next statement is a block or is indented past the loop, as clang decides, and
 the direct path's tokens keep no columns, so it compiles such loops quietly as
