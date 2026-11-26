@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+# Temporary validation only. Add this file as .github/workflows/2658-hosted-validation.yml
+# in a single child commit of the candidate on codex/2658-hosted-validation.
+# Keep this commit off the implementation branch and main.
+name: Temporary hosted validation for issue 2658
+run-name: Hosted validation of ${{ github.sha }} for issue 2658
+
+on:
+  push:
+    branches: [codex/2658-hosted-validation]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buster-2658-hosted-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    name: Record the unchanged candidate source
+    if: github.repository_id == '1421805693' && github.ref == 'refs/heads/codex/2658-hosted-validation'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the validation commit and its source parent
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Require this commit to add only the temporary workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          revision=$(git rev-parse HEAD)
+          source=$(git rev-parse HEAD^1)
+          test "$revision" = "$GITHUB_SHA"
+          changed=$(git diff --name-only "$source" "$revision")
+          test "$changed" = .github/workflows/2658-hosted-validation.yml
+          {
+              printf '## Temporary hosted validation\n\n'
+              printf 'Candidate source: `%s`\n\nValidation commit: `%s`\n\n' "$source" "$revision"
+              printf 'The validation commit changes only this workflow. The compiler, tests, inventory, costs, build settings and reused workflows are the candidate source.\n\n'
+              printf 'The unchanged vector workflow runs plain, ASan/UBSan/LSan, TSan and MSan at O3, four shards each. Its products and feedback artifacts record the exact revision, flags, toolchain, CPU and results.\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  prepare-hosted-tools:
+    needs: source
+    uses: ./.github/workflows/prepare-hosted-tools.yml
+
+  vector:
+    name: Tests on Ubuntu 26.04 (vector, none address thread memory, O3)
+    needs: prepare-hosted-tools
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/hosted-correctness.yml
+    with:
+      host_arch: vector
+      sanitizer: none address thread memory
+      optimization: 3
+      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
