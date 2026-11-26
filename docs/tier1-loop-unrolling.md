@@ -1,6 +1,10 @@
 # Tier 1 loop unrolling (#2755)
 
 Status: implemented as an option, `--tier1-passes=+unroll`, off by default.
+The pass accepts the loop vectorizer's main loops as well as scalar loops.
+The historical measurements below cover the original scalar unroller; the
+post-vectorization extension still needs its own hardware qualification before
+any default change.
 `src/buster/compiler/ir_optimize_unroll.c` is the pass; `test-ir-unroll`
 ([the IR optimization guide](commands/ir-optimization.md)) is its test. The
 measurements are the 9700X's, recorded in buster-performance (MEASUREMENTS
@@ -38,7 +42,7 @@ is and counted under its first failing rule, which `--tier1-report` prints
 | --- | --- |
 | It contains no other loop. | `outer` |
 | It is reducible. | `irreducible` |
-| Its header has one reachable predecessor outside it, which ends in `br` to the header (its preheader). | `preheader` |
+| Its header has one reachable predecessor outside it, which ends in `br` to the header or has exactly one `cbr` edge to it. A conditional edge is split without changing its condition or bypass edge. | `preheader` |
 | Its header has one predecessor inside it (its latch). | `latch` |
 | It has no call (of any kind: a row call or an asm body is one too). | `call` |
 | It has no switch, indirect branch or labeled block. | `control` |
@@ -134,6 +138,15 @@ Within the main loop:
   is associative and commutative and each update is either `op x` or the
   identity, so the result is exact. Floating values, and integers the loop reads
   elsewhere, are carried through the copies as they are.
+- **Vector integer reductions.** Direct `add`, `sub`, `mul`, `and`, `or` and
+  `xor` updates split under the same single-use rule, as do the integer lane
+  minimum/maximum intrinsics. The update supplies the lane width: a vector
+  phi's type only describes its byte width. MP makes a scalar identity and
+  splats it at that width; MX's combining operation keeps the update's lane
+  flags. Subtraction combines with addition. Only the four integer min/max
+  intrinsic forms split; saturating arithmetic, floating reductions and
+  recurrences through a vector select remain ordered. In particular, masking
+  byte sublanes of an addition of wider lanes does not establish associativity.
 
 The pass returns the input itself when it admits nothing. Original blocks keep
 their identities and the new blocks follow them, so labels and debug regions
@@ -157,6 +170,11 @@ none.
   of them, and a copy's own temporaries take two. Before this rule, `count_eq_u8`'s four
   accumulators spilled the bound and two of them and ran 0.72 times as fast
   locally as without unrolling.
+  Vector reductions have a separate budget of 14 live vector values, counting
+  vector/float phis, their extra accumulators and outside vector/float values.
+  This reserves two temporaries from the smallest target's 16-register vector
+  bank; it is a conservative policy, not a measured optimum. Vector constants
+  are free for the cost estimate and need no invariant register charge.
 - **Growth.** At most 4,096 instructions added to a function; a loop that
   would pass it is refused (`growth`). Each admitted loop adds about `f` times
   its instructions, its main and exit phis, the preheader's one or two and
@@ -184,20 +202,28 @@ then the sink and the optimizer again where a loop unrolled
 whole pipeline again, which made `-c` of `sqlite3.c` about 23% slower locally;
 this way the unroller's share is the cost below.
 
-The loop vectorizer (#2743, [its design](tier1-loop-vectorization.md),
-`--tier1-passes=+vectorize`) runs before this pass: it writes `steps[10]` and
-this pass `steps[11]`. With both on, #2743's kernels at znver5 show how they
-meet: the vectorizer takes 12 of the 27 loops, and this pass refuses all 24
-loops it made (the 12 vector loops and their 12 scalar remainders) by its
-preheader rule, which wants one block entering the loop by an unconditional
-branch; the vectorizer's loops have none. The pass unrolls 12 of the loops the
-vectorizer refused, as it does alone, and every kernel's digest is the default
-build's. So the remainders, which run fewer than `w` iterations and would only
-grow, are never unrolled. Unrolling a vector main loop (more vector
-accumulators) is the next step: it needs the preheader rule to take the
-vectorizer's entry and a vector reduction split (the reduction rules take
-integer scalars), each with its own tests, and the remainders refused by a mark
-rather than by their shape.
+The loop vectorizer (#2743, [its design](tier1-loop-vectorization.md)) runs
+before this pass: it writes `steps[10]` and this pass `steps[11]`. Its main
+loop has one conditional entry, from the alias/trip guard or the masked-tail
+picker. The unroller redirects only that entry edge through a new guard block.
+The producer's condition and bypass edge remain intact, and the main header's
+incoming phi predecessor follows the new edge. Two loops sharing a conditional
+predecessor get separate guard blocks.
+
+The vector induction already advances by the lane count. Its latch tests
+`i + lanes < end`, so an unrolled chunk of `f` vector iterations requires
+`end - i > f * lanes`. This deliberately leaves at least one original vector
+iteration after the final chunk: the original body still supplies all values
+to the existing vector exit and masked tail. Exactly `f` vectors use the
+original vector loop; `f + 1` can run a chunk and one original iteration.
+No scalar iteration or partial vector is speculated by the unroller.
+
+At this immediate producer/consumer handoff, the scalar fallback/remainder
+still has two outside predecessors, the vectorizer's guard and its vector
+exit, and is refused by the existing preheader rule. Its bodies and the masked
+tail stay intact. There is no persistent remainder marker: optimized inline
+summaries can fold known guards and expose a single-entry residual loop,
+which is then considered under the ordinary legality and growth rules.
 
 ## Data-parallel parts
 
@@ -255,6 +281,13 @@ vectorized parts are the ones that run over every instruction of a function
 - **`test-checker-driver`'s passes fixture** builds with `+unroll`,
   `--verify`, and prints clang's output; `+all` unrolls too and the default
   doesn't.
+- **After vectorization.** `test-ir-unroll` composes the real vectorizer,
+  unroller and optimizer at 16-, 32- and 64-byte widths, with masked and scalar
+  tails and factors 2, 4 and 8. The independent interpreter compares results
+  and every store against the scalar input around vector and unrolled-chunk
+  boundaries, including zero with null pointers and overlapping arrays that
+  must take the original alias fallback. Conditional-entry fixtures retain
+  both branch senses and their bypass phi values.
 - **Programs.** `test-c-testsuite --tier1` with `+unroll` (through
   `--compiler`, a wrapper that adds it) passes all 220 programs, Tier 1
   compiling their 430 functions; `measure-tier1-programs --variant
@@ -265,6 +298,11 @@ vectorized parts are the ones that run over every instruction of a function
   also compiles the kernels and `sqlite3.c` with `+unroll` without a report.
 
 ## Measurements
+
+These are the original scalar unroller's measurements, not measurements of
+the post-vectorization extension. New per-kernel timings and counters at all
+four placements, control-program results, code growth and compiler/sqlite
+compile throughput are still required for that extension. It remains opt-in.
 
 The record is buster-performance's
 [`tier1-unroll-2755-2026-11-15`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-unroll-2755-2026-11-15):
@@ -415,7 +453,8 @@ invalidation tracked across if-conversion and LICM.
   callee-saved register; giving a busy leaf loop those registers is the
   allocator's change ([#2819](https://github.com/buster14a/buster/issues/2819)),
   and would let more accumulators pay.
-- **The vectorizer's main loops**, as above.
+- **Post-vectorization qualification**, as above; the implementation and
+  correctness tests do not establish a runtime or compiler-throughput gain.
 - **The back end's floating-point code**: folded loads
   ([#2829](https://github.com/buster14a/buster/issues/2829)), which would let
   `i32_to_f32` and `saxpy_f32` gain as clang's unrolled loops do, and VEX forms

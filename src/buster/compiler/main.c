@@ -942,9 +942,6 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #endif
 // #2755: Tier 1's loop unroller, --tier1-passes=+unroll.
 #include "buster/compiler/ir_optimize_unroll.c"
-#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
-#include "buster/compiler/ir_optimize_unroll_test.c"
-#endif
 // #3309: loop store motion, before promotion.
 #include "buster/compiler/ir_store_motion.c"
 #include "buster/compiler/ir_optimize_sroa.c"
@@ -963,6 +960,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_vectorize_loops.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_vectorize_loops_test.c"
+#include "buster/compiler/ir_optimize_unroll_test.c"
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_store_motion_test.c"
