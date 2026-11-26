@@ -82,6 +82,9 @@ each, the longest first, 32.3 s and 233 s; with the homes, 25.3 s and 200 s
 (#270). Under `cores`, that is the grant. A build reports the units it
 compiled, its time and the three longest compiles, from Ninja's log.
 
+For per-step build timings and verbose Clang traces of units and IR partitions,
+see [measuring build latency](profiling.md#build-latency-and-clang-passes).
+
 ## Configurations
 
 One tree holds **Release**, **Debug** and **Develop**, in `CONFIG/`

@@ -206,8 +206,18 @@ if(buster_debug STREQUAL "-gline-tables-only")
     set(buster_release_line_tables ${BUSTER_LINE_TABLES_CODEGEN})
 endif()
 buster_shell_group(release_debug_group ${buster_debug} ${buster_release_line_tables})
+# Optional Clang diagnostics for the edit loop. Apply them to the custom IR
+# compiles as well as CMake's normal C compiles, including Develop's parts.
+set(BUSTER_CLANG_TIMING off CACHE STRING "Clang timing diagnostics: off, trace, report or both")
+set(clang_timing_flags "")
+if(BUSTER_CLANG_TIMING MATCHES "^(trace|both)$")
+    list(APPEND clang_timing_flags -ftime-trace -ftime-trace-verbose)
+endif()
+if(BUSTER_CLANG_TIMING MATCHES "^(report|both)$")
+    list(APPEND clang_timing_flags -ftime-report)
+endif()
 function(buster_unit_options target definitions profile)
-    target_compile_options(${target} PRIVATE
+    target_compile_options(${target} PRIVATE ${clang_timing_flags}
         "$<$<CONFIG:Release>:${release_debug_group}>"
         "$<$<CONFIG:Debug>:${BUSTER_DEBUG_CONFIGURATION_DEBUG}>"
         "$<$<CONFIG:Develop>:${develop_debug_group}>"
@@ -489,7 +499,7 @@ if(buster_pgo)
         # instrumented link takes too.
         set(object "${pgo}/objects/${name}.c.o")
         add_custom_command(OUTPUT "${object}"
-            COMMAND "${CMAKE_C_COMPILER}" -c "${CMAKE_SOURCE_DIR}/${source}" -o "${object}" ${flags} -fprofile-instr-generate
+            COMMAND "${CMAKE_C_COMPILER}" -c "${CMAKE_SOURCE_DIR}/${source}" -o "${object}" ${flags} ${clang_timing_flags} -fprofile-instr-generate
                 ${buster_optimization} ${buster_defines} "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}/=" -MD -MF "${object}.d"
             DEPFILE "${object}.d"
             COMMENT "Building ${source} with -fprofile-instr-generate"
