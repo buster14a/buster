@@ -1833,6 +1833,18 @@ struct FastVal
 // The expression value with #3577's eight bytes (marks, op, lasting, seq_start, seq_ident) past the 24 of #3594.
 _Static_assert(sizeof(FastVal) == 32u, "expression stack entry size");
 
+// A value's first and last eight bytes as words (little-endian), for a hot push that writes an entry whole: the first
+// is its type, kind, reg (0), is_lvalue and the union's byte; the last its marks, op, lasting and seq_start (0) and
+// seq_ident. The second word is imm, the third sym_idx with the bit-field bytes (0).
+#define BUSTER_FVAL_WORD_HEAD(type, kind, lvalue, union_byte) \
+    ((uint64_t)(uint32_t)(type) | ((uint64_t)(uint8_t)(kind) << 32) | ((uint64_t)(uint8_t)(lvalue) << 48) | ((uint64_t)(uint8_t)(union_byte) << 56))
+#define BUSTER_FVAL_WORD_TAIL(marks, seq_ident) ((uint64_t)(uint8_t)(marks) | ((uint64_t)(uint32_t)(seq_ident) << 32))
+_Static_assert(offsetof(FastVal, kind) == 4u && offsetof(FastVal, reg) == 5u && offsetof(FastVal, is_lvalue) == 6u &&
+               offsetof(FastVal, is_func_sym) == 7u && offsetof(FastVal, imm) == 8u && offsetof(FastVal, sym_idx) == 16u &&
+               offsetof(FastVal, bf_off) == 20u && offsetof(FastVal, marks) == 24u && offsetof(FastVal, op) == 25u &&
+               offsetof(FastVal, seq_start) == 27u && offsetof(FastVal, seq_ident) == 28u,
+               "BUSTER_FVAL_WORD_*'s layout");
+
 // A value's lasting marks (#3577), kept in parentheses: a cast of a float to a wider floating type (-Wliteral-range),
 // and a string literal, in casts too (-Wstring-compare, whose literal the full pipeline finds through them).
 #define BUSTER_FVAL_LASTING_FLOAT_CAST 0x01u
@@ -7078,6 +7090,25 @@ struct FastExprOp
     uint8_t constant;      // BUSTER_FCONSTANT_* (TERNARY_Q, TERNARY_C), or 1 where a constant left operand decided (&&, ||)
 };
 
+// An operator stack entry written whole, as three 8-byte words and its last four bytes (#3577): a compound literal of
+// the 28 bytes took a 2-byte store of op and an unaligned 8-byte one right after it, and the reduction's load of op
+// and extra (4 bytes) spans both, which no store forwards: it waited for them to retire.
+static inline __attribute__((always_inline)) void fast_expr_op_write(FastExprOp* entry, FastExprOp value)
+{
+    const uint64_t words[3] = {
+        (uint64_t)value.op | ((uint64_t)value.extra << 16) | ((uint64_t)value.lbl0 << 32),
+        (uint64_t)value.lbl1 | ((uint64_t)value.lbl2 << 32),
+        (uint64_t)value.type | ((uint64_t)(uint32_t)value.slot << 32),
+    };
+    const uint32_t tail = (uint32_t)value.seq_lo | ((uint32_t)value.seq_mid << 8) | ((uint32_t)value.seq_mid2 << 16) | ((uint32_t)value.constant << 24);
+    memcpy(entry, words, sizeof(words));
+    memcpy((uint8_t*)entry + sizeof(words), &tail, sizeof(tail));
+}
+_Static_assert(sizeof(FastExprOp) == 28u && offsetof(FastExprOp, extra) == 2u && offsetof(FastExprOp, lbl0) == 4u &&
+               offsetof(FastExprOp, lbl1) == 8u && offsetof(FastExprOp, lbl2) == 12u && offsetof(FastExprOp, type) == 16u &&
+               offsetof(FastExprOp, slot) == 20u && offsetof(FastExprOp, seq_lo) == 24u && offsetof(FastExprOp, constant) == 27u,
+               "fast_expr_op_write's layout");
+
 // #3577: whether compound literal CL stores its element of type ELEMENT at its position (extra: a member's index or an
 // element's) as the full pipeline does, quietly: within CL's type (a scalar's one element, an array's count, a record's
 // members; past them, -Wexcess-initializers), into a scalar or a record of the element's own type (an array or another
@@ -8415,8 +8446,13 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                     // an object and a function follow each other as the program has them, and the branch that told
                     // them apart was mispredicted 13 K times a compile of sqlite3.c (#2850). What stays is the first
                     // reference of an object or a function, which makes its ELF symbol.
-                    static const uint8_t value_kinds[8] = { [FSYM_ENUM_CONST] = FVAL_IMM, [FSYM_LOCAL] = FVAL_LOCAL, [FSYM_GLOBAL] = FVAL_GLOBAL, [FSYM_FUNC] = FVAL_GLOBAL };
-                    static const uint8_t value_lvalues[8] = { [FSYM_LOCAL] = 1u, [FSYM_GLOBAL] = 1u };
+                    // (The entry's first word but its type, by the kind: the value's kind, is_lvalue, is_func_sym.)
+                    static const uint64_t value_heads[8] = {
+                        [FSYM_ENUM_CONST] = BUSTER_FVAL_WORD_HEAD(0u, FVAL_IMM, 0u, 0u),
+                        [FSYM_LOCAL] = BUSTER_FVAL_WORD_HEAD(0u, FVAL_LOCAL, 1u, 0u),
+                        [FSYM_GLOBAL] = BUSTER_FVAL_WORD_HEAD(0u, FVAL_GLOBAL, 1u, 0u),
+                        [FSYM_FUNC] = BUSTER_FVAL_WORD_HEAD(0u, FVAL_GLOBAL, 0u, 1u),
+                    };
                     FastSym* sym = cc->syms + si;
                     // #3577: a symbol whose use needs a closer look (BUSTER_FSYM_*: an unsupported type's, a deprecated one,
                     // a format or nonnull function's, a register variable) takes a cold path of its own; the common use
@@ -8447,7 +8483,6 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                     // #3577: the symbol's marks (an enumerator's nonliteral, a library function's purity, asked of the driver
                     // at its first use: a call without an effect); an enumerator carries its enum (sec_off) in sym_idx, for
                     // -Wimplicit-enum-enum-cast; a variable's use is logged for -Wunsequenced. Masks, as the kind above.
-                    const uint32_t function = (uint32_t)(symbol_kind == FSYM_FUNC);
                     uint8_t push_marks = sym->push_marks;
                     if (__builtin_expect((push_marks & BUSTER_FSYM_PUSH_UNASKED) != 0, 0)) { push_marks = fast_cc_library_pure_query(cc, sym); }
                     const uint32_t enumerator = (uint32_t)(symbol_kind == FSYM_ENUM_CONST);
@@ -8456,17 +8491,19 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                     const uint32_t pushed = (uint32_t)(ex.vsp < 128u);
                     if (pushed != 0)
                     {
-                        ex.vstack[ex.vsp++] = (FastVal){
-                            .type = sym->type,
-                            .kind = value_kinds[symbol_kind],
-                            .imm = (sym->const_val & (0 - (int64_t)(symbol_kind == FSYM_ENUM_CONST))) |
-                                   (uint32_t)(sym->stack_off & (0 - (int32_t)(symbol_kind == FSYM_LOCAL))),
-                            .sym_idx = osym | (sym->sec_off & (UINT32_C(0) - enumerator)),
-                            .is_func_sym = (uint8_t)function,
-                            .is_lvalue = value_lvalues[symbol_kind],
-                            .marks = push_marks,
-                            .seq_ident = id,
+                        // The entry in four whole words (BUSTER_FVAL_WORD_*): written field by field, its zero bytes (reg,
+                        // op, lasting, seq_start) took one byte-masked 32-byte store, from which no later load of the
+                        // entry can take its bytes: fval_to_gp_full's waited for it to retire, 0.49 M cycles a compile
+                        // of sqlite3.c on the 9700X.
+                        const uint64_t words[4] = {
+                            (uint64_t)sym->type | value_heads[symbol_kind],
+                            (uint64_t)((sym->const_val & (0 - (int64_t)(symbol_kind == FSYM_ENUM_CONST))) |
+                                       (uint32_t)(sym->stack_off & (0 - (int32_t)(symbol_kind == FSYM_LOCAL)))),
+                            (uint64_t)(osym | (sym->sec_off & (UINT32_C(0) - enumerator))),
+                            BUSTER_FVAL_WORD_TAIL(push_marks, id),
                         };
+                        memcpy(ex.vstack + ex.vsp, words, sizeof(words));
+                        ex.vsp += 1u;
                     }
                     // The log's entry where it is kept (a compile again, #3577): the value's seq_start is its place + 1.
                     if (logging)
@@ -8563,7 +8600,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                             continue;
                         }
                         if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                        ops[osp++] = (FastExprOp){ .op = FEOP_COMPOUND_LIT, .extra = 0u, .type = clt, .slot = slot, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+                        fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_COMPOUND_LIT, .extra = 0u, .type = clt, .slot = slot, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                         // Handle optional designator `.field =` or `[idx] =` right before first element!
                         if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(clt))
                         {
@@ -8581,24 +8618,24 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                         continue;
                     }
                     if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                    ops[osp++] = (FastExprOp){ .op = FEOP_CAST, .type = ct };
+                    fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_CAST, .type = ct }); osp += 1u;
                     continue;
                 }
                 if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                ops[osp++] = (FastExprOp){ .op = FEOP_LPAREN, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_LPAREN, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                 cc->pos += 1u;
                 continue;
             }
 
             // Prefix unary operators
-            if (k == FTOK_PLUS)  { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_UNARY_PLUS }; } cc->pos += 1u; continue; }
-            if (k == FTOK_MINUS) { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_UNARY_MINUS }; } cc->pos += 1u; continue; }
-            if (k == FTOK_TILDE) { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_UNARY_TILDE }; } cc->pos += 1u; continue; }
-            if (k == FTOK_BANG)  { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_UNARY_BANG }; } cc->pos += 1u; continue; }
-            if (k == FTOK_STAR)  { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_DEREF }; } cc->pos += 1u; continue; }
-            if (k == FTOK_AMP)   { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_ADDR, .lbl0 = cc->pos }; } cc->pos += 1u; continue; }
-            if (k == FTOK_INC)   { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_PRE_INC }; } cc->pos += 1u; continue; }
-            if (k == FTOK_DEC)   { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_PRE_DEC }; } cc->pos += 1u; continue; }
+            if (k == FTOK_PLUS)  { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_UNARY_PLUS }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_MINUS) { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_UNARY_MINUS }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_TILDE) { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_UNARY_TILDE }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_BANG)  { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_UNARY_BANG }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_STAR)  { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_DEREF }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_AMP)   { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_ADDR, .lbl0 = cc->pos }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_INC)   { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_PRE_INC }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_DEC)   { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_PRE_DEC }); osp += 1u; } cc->pos += 1u; continue; }
 
             // `sizeof` / `_Alignof`
             if (k == FTOK_KW_SIZEOF || k == FTOK_KW_ALIGNOF)
@@ -8633,7 +8670,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                     fast_cc_bail(cc, "sizeof of an operator over an array");
                     break;
                 }
-                ops[osp++] = (FastExprOp){ .op = is_al ? FEOP_ALIGNOF_UNARY : FEOP_SIZEOF_UNARY };
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = is_al ? FEOP_ALIGNOF_UNARY : FEOP_SIZEOF_UNARY }); osp += 1u;
                 ex.eval_only += 1u;
                 ex.unevaluated += 1u;
                 continue;
@@ -8663,7 +8700,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "bad _Generic"); break; }
                 cc->pos += 1u;
                 if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                ops[osp++] = (FastExprOp){ .op = FEOP_GENERIC_CTRL, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_GENERIC_CTRL, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                 ex.eval_only += 1u;
                 ex.unevaluated += 1u;
                 continue;
@@ -8680,7 +8717,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 const uint16_t vop = k == FTOK_KW_BUILTIN_VA_START ? FEOP_VA_START :
                                      k == FTOK_KW_BUILTIN_VA_ARG ? FEOP_VA_ARG :
                                      k == FTOK_KW_BUILTIN_VA_END ? FEOP_VA_END : FEOP_VA_COPY;
-                ops[osp++] = (FastExprOp){ .op = vop, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = vop, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                 continue;
             }
 
@@ -8880,7 +8917,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
         if (k == FTOK_LBRACKET)
         {
             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-            ops[osp++] = (FastExprOp){ .op = FEOP_SUBSCRIPT, .lbl0 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_SUBSCRIPT, .lbl0 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -8890,7 +8927,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
         if (k == FTOK_LPAREN)
         {
             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-            ops[osp++] = (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.arg_sp, .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.arg_sp, .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -9112,13 +9149,13 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 const FastArm then_arm = fast_cc_arm(cc, &then_v);
                 ex.vsp -= (uint32_t)(constant == BUSTER_FCONSTANT_FALSE);
                 ex.eval_only = (uint8_t)(ex.eval_only + (constant == BUSTER_FCONSTANT_TRUE) - (constant == BUSTER_FCONSTANT_FALSE));
-                ops[osp - 1u] = (FastExprOp){
+                fast_expr_op_write(ops + osp - 1u, (FastExprOp){
                     .op = FEOP_TERNARY_C, .extra = (uint16_t)(then_v.marks | ((uint32_t)then_arm.kind << 8) | ((uint32_t)then_arm.not_null_literal << 12)),
                     .lbl0 = (uint32_t)(uint64_t)then_arm.value, .type = arm_t,
                     .slot = ftype_is_record(arm_t) ? 0 : (int32_t)(uint32_t)((uint64_t)then_arm.value >> 32),
                     .seq_lo = ops[osp - 1u].seq_lo, .seq_mid = ops[osp - 1u].seq_mid, .seq_mid2 = BUSTER_FSEQ_MARK_IF(&ex, logging),
                     .constant = (uint8_t)constant,
-                };
+                });
                 cc->pos += 1u;
                 expect_val = true;
                 continue;
@@ -9161,12 +9198,12 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             // The then arm's constants (fast_cc_arm), for the completion's: its value in lbl0 (low half) and in slot (high
             // half) where no record needs that, its kind and null flag above its marks in extra.
             const FastArm then_arm = fast_cc_arm(cc, &then_v);
-            ops[osp - 1u] = (FastExprOp){
+            fast_expr_op_write(ops + osp - 1u, (FastExprOp){
                 .op = FEOP_TERNARY_C, .extra = (uint16_t)(then_v.marks | ((uint32_t)then_arm.kind << 8) | ((uint32_t)then_arm.not_null_literal << 12)),
                 .lbl0 = (uint32_t)(uint64_t)then_arm.value, .lbl1 = then_tail_lbl, .lbl2 = end_lbl, .type = then_t,
                 .slot = ftype_is_record(then_t) ? tern_slot : (int32_t)(uint32_t)((uint64_t)then_arm.value >> 32),
                 .seq_lo = ops[osp - 1u].seq_lo, .seq_mid = ops[osp - 1u].seq_mid, .seq_mid2 = BUSTER_FSEQ_MARK_IF(&ex, logging),
-            };
+            });
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -9188,7 +9225,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 if (osp < 128u)
                 {
                     const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
-                    ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA), .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+                    fast_expr_op_write(ops + osp, (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA), .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                 }
                 cc->pos += 1u;
                 expect_val = true;
@@ -9306,7 +9343,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 }
                 const uint32_t win = match_pos != UINT32_MAX ? match_pos : def_pos;
                 if (win == UINT32_MAX || end_pos == UINT32_MAX) { fast_cc_bail(cc, "_Generic no match"); break; }
-                ops[osp++] = (FastExprOp){ .op = FEOP_GENERIC_SEL, .lbl0 = end_pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_GENERIC_SEL, .lbl0 = end_pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                 cc->pos = win;
                 expect_val = true;
                 continue;
@@ -9384,7 +9421,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             if (osp < 128u)
             {
                 const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
-                ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA), .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA), .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
             }
             cc->pos += 1u;
             expect_val = true;
@@ -9427,8 +9464,8 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 ex.xmm_used = 0;
             }
             const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
-            ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .lbl0 = sc_lbl, .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging),
-                                       .constant = (uint8_t)decided };
+            fast_expr_op_write(ops + osp, (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .lbl0 = sc_lbl, .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging),
+                                       .constant = (uint8_t)decided }); osp += 1u;
         }
         else if (k == FTOK_QUESTION)
         {
@@ -9450,8 +9487,8 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 ex.xmm_used = 0;
             }
             const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
-            ops[osp++] = (FastExprOp){ .op = FEOP_TERNARY_Q, .lbl0 = else_lbl, .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging),
-                                       .constant = (uint8_t)constant };
+            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_TERNARY_Q, .lbl0 = else_lbl, .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging),
+                                       .constant = (uint8_t)constant }); osp += 1u;
         }
         else
         {
@@ -9476,7 +9513,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                     break;
                 }
             }
-            if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }; }
+            if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u; }
         }
         cc->pos += 1u;
         expect_val = true;
