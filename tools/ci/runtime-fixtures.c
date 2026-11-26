@@ -640,7 +640,17 @@ static void fixture_ir_controls(FixtureTest* test)
         {
             fixture_write(test, added, source_bytes, source_length);
             fixture_append(test, canonical_catalog, canonical_bytes, canonical_length, "runtime-added\truntime-added.ir\truntime fixture addition\n");
-            fixture_run(test, "IR data-only canonical addition executes", command, 0, "41 canonical fixtures");
+            // Count the added row and the current catalog's data rows. The first line is the version header.
+            size_t rows = 1;
+            const char* const end = canonical_bytes + canonical_length;
+            for (const char* row = memchr(canonical_bytes, '\n', canonical_length); row != NULL && ++row < end;
+                 row = memchr(row, '\n', (size_t)(end - row)))
+            {
+                rows += *row != '#' && *row != '\n';
+            }
+            char expected[64];
+            snprintf(expected, sizeof(expected), "IR parser: %zu canonical fixtures", rows);
+            fixture_run(test, "IR data-only canonical addition executes", command, 0, expected);
             fixture_write(test, canonical_catalog, canonical_bytes, canonical_length);
             fixture_remove(test, added);
         }
