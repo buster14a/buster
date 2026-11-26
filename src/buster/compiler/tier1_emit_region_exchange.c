@@ -76,19 +76,19 @@ static uint8_t tier1_emit_region_uniform(const Tier1CfgAllocation* cfg, uint32_t
     return uniform ? reg : UINT8_MAX;
 }
 
-static Tier1EmitError tier1_emit_cfg_region_exchange(const Tier1CfgInput* input, const Tier1CfgAllocation* original,
-                                            uint32_t interval, uint8_t target, uint32_t callee_used,
+static Tier1EmitError tier1_emit_cfg_region_exchange_range(const Tier1CfgInput* input, const Tier1CfgAllocation* original,
+                                            uint32_t interval, uint32_t interval_past, uint8_t target, uint32_t callee_used,
                                             Arena* output, Arena* scratch, Tier1CfgInput* candidate_input, Tier1CfgAllocation* candidate, Tier1EmitRegionExchangeStats* stats)
 {
     const uint64_t output_mark = output != 0 ? output->length : 0;
     const uint64_t scratch_mark = scratch != 0 ? scratch->length : 0;
     bool valid = input != 0 && original != 0 && output != 0 && scratch != 0 && output != scratch && candidate != 0 && candidate != original &&
                  candidate_input != 0 && candidate_input != input;
-    valid = valid && interval < original->intervals.count && original->split_count == 0 && target < 16;
+    valid = valid && interval < interval_past && interval_past <= original->intervals.count && original->split_count == 0 && target < 16;
     const uint32_t value = valid ? original->intervals.values[interval] : 0;
     const uint32_t first = valid ? original->allocation.fragment_offsets[interval] : 0;
     const uint32_t start = valid ? original->intervals.starts[interval] : 0;
-    const uint32_t end = valid ? original->intervals.ends[interval] : 0;
+    const uint32_t end = valid ? original->intervals.ends[interval_past - 1] : 0;
     const uint8_t source = valid ? original->allocation.registers[first] : UINT8_MAX;
     const uint32_t source_bit = source < 16 ? 1u << source : 0;
     const uint32_t target_bit = target < 16 ? 1u << target : 0;
@@ -97,12 +97,25 @@ static Tier1EmitError tier1_emit_cfg_region_exchange(const Tier1CfgInput* input,
             input->definition_registers != 0 && input->definition_registers[value] == source_bit && start > input->definitions[value] &&
             (input->rematerializable == 0 || input->rematerializable[value] == 0) &&
             original->allocation.fragment_offsets[interval + 1] - first == 1 && original->allocation.kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER &&
-            original->allocation.starts[first] == start && original->allocation.ends[first] == end && source < 16 && source != target &&
+            original->allocation.starts[first] == start && original->allocation.ends[first] == original->intervals.ends[interval] && source < 16 && source != target &&
             ((BUSTER_TIER1_EMIT_CFG_CALLEE >> source) & 1) == 0;
     if (valid)
     {
         reason = TIER1_REGION_EXCHANGE_TARGET;
         valid = (target_bit & BUSTER_TIER1_EMIT_CFG_CALLEE & callee_used & input->allowed_registers[value] & original->intervals.allowed_registers[interval]) != 0;
+    }
+    // A batch is a contiguous run of the same parameter's complete, unchanged register intervals. The one-interval
+    // wrapper below retains its original contract; no fragment boundary, entry binding, or non-register kind moves.
+    for (uint32_t i = interval; valid && i < interval_past; i += 1)
+    {
+        const uint32_t f = original->allocation.fragment_offsets[i];
+        const uint32_t boundary = original->intervals.starts[i];
+        valid = original->intervals.values[i] == value && original->allocation.fragment_offsets[i + 1] == f + 1 &&
+                original->allocation.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && original->allocation.registers[f] == source &&
+                original->allocation.starts[f] == original->intervals.starts[i] && original->allocation.ends[f] == original->intervals.ends[i] &&
+                (original->intervals.allowed_registers[i] & target_bit) != 0 &&
+                (i == interval || (original->intervals.ends[i - 1] == boundary && (boundary & 1) == 0 &&
+                                  input->block_starts[tier1_cfg_block_at(input, original, boundary)] == boundary));
     }
     const uint32_t exchanged = source_bit | target_bit;
     if (valid)
@@ -238,7 +251,7 @@ static Tier1EmitError tier1_emit_cfg_region_exchange(const Tier1CfgInput* input,
                 // Prepared whole intervals share each block's merge decision. Check the entry convention as well
                 // for other validated producers: a continuing interval can enter in its register at entry - 1
                 // before a REGISTER -> SPILL transition at entry, even though ordinary half-open occupancy is free.
-                if (pass == 0 && i != interval && displaced_intervals[i] == 0 && input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR && input->block_starts[b] == start)
+                if (pass == 0 && (i < interval || i >= interval_past) && displaced_intervals[i] == 0 && input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR && input->block_starts[b] == start)
                 {
                     uint32_t location = BUSTER_TIER1_CFG_NONE;
                     uint8_t kind = UINT8_MAX;
@@ -299,7 +312,10 @@ static Tier1EmitError tier1_emit_cfg_region_exchange(const Tier1CfgInput* input,
             built.intervals.allowed_registers = interval_masks;
             memcpy(built.allocation.registers, original->allocation.registers, original->allocation.fragment_count);
             memcpy(built.allocation.value_registers, original->allocation.value_registers, values);
-            built.allocation.registers[first] = target;
+            for (uint32_t i = interval; i < interval_past; i += 1)
+            {
+                built.allocation.registers[original->allocation.fragment_offsets[i]] = target;
+            }
             for (uint32_t i = 0; i < original->intervals.count; i += 1)
             {
                 if (displaced_intervals[i] != 0)
@@ -459,4 +475,12 @@ static Tier1EmitError tier1_emit_cfg_region_exchange(const Tier1CfgInput* input,
         *stats = measured;
     }
     return error;
+}
+
+static Tier1EmitError tier1_emit_cfg_region_exchange(const Tier1CfgInput* input, const Tier1CfgAllocation* original,
+                                            uint32_t interval, uint8_t target, uint32_t callee_used,
+                                            Arena* output, Arena* scratch, Tier1CfgInput* candidate_input, Tier1CfgAllocation* candidate, Tier1EmitRegionExchangeStats* stats)
+{
+    return tier1_emit_cfg_region_exchange_range(input, original, interval, interval + 1, target, callee_used,
+                                                 output, scratch, candidate_input, candidate, stats);
 }

@@ -131,11 +131,12 @@
 // register pairs after allocation, with the existing fragments and CFG move topology retained. Neither compiler time
 // nor this switch is benchmarked. Bit 256 uses actual lazy save/restore epochs and uniform CFG flow costs.
 // Bit 512 recolors only frozen parameter intervals into free, already-preserved registers. Bit 1024 exchanges
-// contained regional owners, with cached exact epochs and independent transport/total path-cost checks.
+// contained regional owners, with cached exact epochs and independent transport/total path-cost checks. Bit 2048
+// closes batches over complete target owners and boundary edges before applying those same exact cost checks.
 static __attribute__((unused)) uint32_t tier1_measure_experiment(void)
 {
     const char* const value = getenv("BUSTER_TIER1_EXPERIMENT");
-    return value != 0 ? (uint32_t)strtoul(value, 0, 0) & 2047u : 0;
+    return value != 0 ? (uint32_t)strtoul(value, 0, 0) & 4095u : 0;
 }
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))

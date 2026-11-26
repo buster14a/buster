@@ -5215,6 +5215,7 @@ static uint32_t tier1_emit_cfg_callee_used(const Tier1CfgAllocation* cfg, uint32
 #include "tier1_emit_region_score.c"
 #include "tier1_emit_region_path_gain.c"
 #include "tier1_emit_region_policy.c"
+#include "tier1_emit_batch_policy.c"
 
 // An allocation's outcome as the function's: a constraint the allocator met is TIER1_EMIT_ALLOCATION; and without fixed
 // ranges there are no splits, each class's temporary slot a frame row of its own, so an allocation with either is too.
@@ -5499,6 +5500,15 @@ static void tier1_emit_cfg_dump(const Tier1SelectPlan* plan, const Tier1EmitResu
             }
             fprintf(out, "\n");
         }
+        for (uint32_t node = 0; node < function->instruction_count; node += 1)
+        {
+            if (!plan->covered[node] && tier1_select_function_call(function, node))
+            {
+                const uint32_t position = 2 * (in->block_count - function->block_count) + 2 * node;
+                fprintf(out, "CALL node=%u position=%u block=%u first=%u past=%u\n", node, position,
+                        tier1_cfg_block_of(in, position), emitted->code.node_first[node], emitted->code.node_first[node + 1]);
+            }
+        }
         for (uint32_t b = 0; b < in->block_count; b += 1)
         {
             for (uint32_t e = in->successor_offsets[b]; e < in->successor_offsets[b + 1]; e += 1)
@@ -5557,6 +5567,10 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 1024u) != 0)
     {
         error = tier1_emit_cfg_cached_regions(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
+    }
+    if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 2048u) != 0)
+    {
+        error = tier1_emit_cfg_batch_regions(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
     }
     // A leaf whose values took its callee-saved registers (tier1_emit_cfg_leaf) saves them as a function that calls does.
     emitted->callee_registers |= error == TIER1_EMIT_OK && emitted->cfg_input.avoided_general != 0 ? emitted->leaf_registers : 0;
