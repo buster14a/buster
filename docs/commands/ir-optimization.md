@@ -191,6 +191,15 @@ short output arena are covered. `test-ir-optimize` runs its text pair
 on c-testsuite's subset, the frozen `sqlite3.c` and musl, where each unrolled
 function must verify with dominance.
 
+The same command feeds the loop vectorizer's real output through unrolling and
+the optimizer, at 16-, 32- and 64-byte vector widths, with masked and scalar
+tails and factors 2, 4 and 8. Interpreter comparisons cover vector/chunk
+boundaries, zero-length null-pointer inputs and overlapping arrays. Conditional
+entry edges retain the producer's guard and bypass phi values. Integer vector
+reductions use lane-width identities and combining operations; floating,
+saturating and vector-select recurrences stay ordered. The pass remains opt-in;
+the historical scalar performance record does not qualify the extension.
+
 ## Loop store motion (#3309, #3346)
 
 `ir_store_motion.c` is the pass `--tier1-passes=+storemotion` runs on the

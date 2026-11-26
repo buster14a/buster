@@ -6980,6 +6980,119 @@ static void check_test_driver_tier1_vectorize(CheckTest* test, const char* clang
     unlink(unit);
 }
 
+// #2755: every loop in the subject object vectorizes, and +unroll must take exactly that many main loops. Clang alone
+// compiles the harness, so a scalar harness loop cannot satisfy the pass counts. Its protected pages and overlap
+// trials check both the unrolled vector body and the vectorizer's masked/scalar tails and guarded scalar fallback.
+static void check_test_driver_tier1_unroll_vector(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const targets[] = {
+        "x86-64",
+        "x86-64-v3",
+        "x86-64-v4",
+    };
+    const char* unit = "tests/driver/tier1-unroll-vector.c";
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(targets); t += 1)
+    {
+        const bool reductions = t == 2;
+        const uint64_t kernels = reductions ? 9 : 2;
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(targets[t], strlen(targets[t]), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        char march[64];
+        char harness[512];
+        char reference_object[512];
+        char reference[512];
+        char object[512];
+        char program[512];
+        snprintf(march, sizeof(march), "-march=%s", targets[t]);
+        snprintf(harness, sizeof(harness), "%s/tier1-unroll-vector-harness-%u.o", directory, t);
+        snprintf(reference_object, sizeof(reference_object), "%s/tier1-unroll-vector-clang-%u.o", directory, t);
+        snprintf(reference, sizeof(reference), "%s/tier1-unroll-vector-clang-%u", directory, t);
+        snprintf(object, sizeof(object), "%s/tier1-unroll-vector-%u.o", directory, t);
+        snprintf(program, sizeof(program), "%s/tier1-unroll-vector-%u", directory, t);
+        bool referenced = true;
+        for (uint32_t part = 0; referenced && part < 2; part += 1)
+        {
+            char* arguments[12] = { (char*)clang, "-O0", "-march=x86-64", "-fno-strict-aliasing", "-c", "-o", part == 0 ? harness : reference_object, (char*)unit };
+            uint32_t count = 8;
+            if (part != 0)
+            {
+                arguments[count++] = "-DBUSTER_UNROLL_VECTOR_KERNELS";
+            }
+            if (reductions)
+            {
+                arguments[count++] = "-DBUSTER_UNROLL_VECTOR_REDUCTIONS";
+            }
+            arguments[count] = NULL;
+            char* text = NULL;
+            referenced = check_test_driver_spawn(arguments, &text) == 0;
+            free(text);
+        }
+        char* reference_arguments[] = { (char*)clang, "-o", reference, harness, reference_object, NULL };
+        char* text = NULL;
+        referenced = referenced && check_test_driver_spawn(reference_arguments, &text) == 0;
+        free(text);
+        char expected[256] = { 0 };
+        const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+        check_test_expect(test, ran, "clang's guarded vector-unroll kernels and harness run");
+        for (uint32_t enabled = 0; ran && enabled < 2; enabled += 1)
+        {
+            char* arguments[16] = {
+                (char*)executable,
+                "--tier1",
+                enabled != 0 ? "--tier1-passes=+vectorize,+unroll" : "--tier1-passes=+vectorize,-unroll",
+                "--tier1-strict",
+                "--tier1-report",
+                "--verify",
+                march,
+                "-DBUSTER_UNROLL_VECTOR_KERNELS",
+                "-c",
+                "-o",
+                object,
+                (char*)unit,
+            };
+            uint32_t count = 12;
+            if (reductions)
+            {
+                arguments[count++] = "-DBUSTER_UNROLL_VECTOR_REDUCTIONS";
+            }
+            arguments[count] = NULL;
+            text = NULL;
+            const bool built = check_test_driver_spawn(arguments, &text) == 0;
+            uint64_t internal = UINT64_MAX;
+            uint64_t fallbacks = UINT64_MAX;
+            uint64_t vectorized = UINT64_MAX;
+            const uint64_t unrolled = check_test_tier1_unroll_field(text, "unrolled");
+            const uint64_t split = check_test_tier1_unroll_field(text, "reductions");
+            const bool clean = built && check_test_tier1_field(text, "internal_failures", &internal) && internal == 0 &&
+                               check_test_tier1_field(text, "fallbacks", &fallbacks) && fallbacks == 0 &&
+                               check_test_tier1_vectorize_field(text, "vectorized", &vectorized) && vectorized == kernels;
+            const bool counts = unrolled == (enabled != 0 ? kernels : 0) && split == (enabled != 0 && reductions ? 7 : 0);
+            char message[256];
+            snprintf(message, sizeof(message), "the %s kernels all vectorize and %s unroll their vector main loops: vectorized=%llu unrolled=%llu reductions=%llu", targets[t],
+                     enabled != 0 ? "do" : "do not", (unsigned long long)vectorized, (unsigned long long)unrolled, (unsigned long long)split);
+            check_test_expect(test, clean && counts, message);
+            if ((!clean || !counts) && text != NULL)
+            {
+                fprintf(stderr, "vector-unroll report (%s, unroll %u):\n%s\n", targets[t], enabled, text);
+            }
+            free(text);
+            char* link[] = { (char*)clang, "-o", program, harness, object, NULL };
+            text = NULL;
+            const bool linked = built && check_test_driver_spawn(link, &text) == 0;
+            free(text);
+            char actual[256] = { 0 };
+            snprintf(message, sizeof(message), "the %s vector-unroll kernels match clang at protected page edges and overlapping arrays (unroll %u)", targets[t], enabled);
+            check_test_expect(test, linked && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
+            unlink(program);
+            unlink(object);
+        }
+        unlink(reference);
+        unlink(reference_object);
+        unlink(harness);
+    }
+}
+
 // #1282's inlining: the unit's always_inline functions of internal linkage expanded into their callers by --tier1, the
 // x86 intrinsics' wrappers above all, whose vectors pass and return by value: their byte-wise copies into fresh slots,
 // split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
@@ -7145,6 +7258,7 @@ static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, c
     unlink(unit);
     check_test_driver_tier1_vector_copies(test, clang, executable, directory);
     check_test_driver_tier1_vectorize(test, clang, executable, directory);
+    check_test_driver_tier1_unroll_vector(test, clang, executable, directory);
 }
 
 // #2541 step 2's classes and dead functions: an external definition (expanded at its calls, its code kept), a weak one
