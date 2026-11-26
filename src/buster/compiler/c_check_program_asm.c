@@ -2083,7 +2083,8 @@ static void check_asm_unit_goto(Arena* output, uint32_t statement, uint32_t labe
 // MMX, opmask, pair and x87 outputs' stores, the x87 pops, the exit into eax, and the epilogue. Its code is its default
 // text section's atom, at AsmResult.entry_atom. A failure keeps nothing.
 static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t count, const uint8_t stores[2], bool block, uint32_t saved, uint32_t pops, uint32_t statement,
-                                       uint32_t labels, uint8_t exit, String8 text, const X86MatchIndex* index, AssemblyInline* presentation, Arena* output, Arena* scratch)
+                                       uint32_t labels, uint8_t exit, String8 text, const X86MatchIndex* index, AssemblyInline* presentation, bool keep_records,
+                                       Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
     const uint64_t scratch_mark = scratch->length;
@@ -2134,7 +2135,7 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
     check_asm_unit_records(output, valid ? code.records + first + exits : 0, valid ? code.count - first - exits : 0, &valid);
     const uint64_t length = output->length - mark;
     AsmResult result = valid ? asm_assemble((String8){ .pointer = (char*)output->base + mark, .length = length }, index,
-                                            (AsmOptions){ .integrated = true }, output) :
+                                            (AsmOptions){ .integrated = true, .keep_records = keep_records }, output) :
                                (AsmResult){ .error = "arena exhausted placing inline assembly's unit" };
     if (result.error != 0)
     {
@@ -3250,7 +3251,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 }
             }
             AsmResult body = body_valid ? asm_assemble((String8){ .pointer = body_source, .length = text.length }, index,
-                                                       (AsmOptions){ .integrated = true }, output) :
+                                                       (AsmOptions){ .integrated = true, .keep_records = program->assembly_text }, output) :
                                           (AsmResult){ .error = "arena exhausted placing inline assembly's unit" };
             valid = body_valid;
             // A template of directives alone has no code to call, but with x87 operands or flag outputs, whose helper
@@ -3292,7 +3293,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 }
                 arena_pop_to(output, body_mark);
                 unit = reason == NULL ? check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, p, labels, exit, text, index,
-                                                              plan->presentation, output, scratch) :
+                                                              plan->presentation, program->assembly_text, output, scratch) :
                                         (AsmResult){ .error = reason };
                 unit_assembled = unit.error == NULL;
                 reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
@@ -3370,7 +3371,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         code = (AsmCode){ 0 };
         goto_count = 0;
         unit = check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, p, statement->label_count, exit, text, index,
-                                     NULL, output, scratch);
+                                     NULL, program->assembly_text, output, scratch);
         unit_assembled = unit.error == NULL;
         reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
         valid = unit.error == NULL || reason != NULL;
@@ -3982,7 +3983,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
                 memcpy(wrapped + sizeof(start) - 1 + at, finish, sizeof(finish) - 1);
             }
             const String8 text = wrapped != NULL ? (String8){ .pointer = wrapped, .length = at + sizeof(start) + sizeof(finish) - 2 } : (String8){ .pointer = source, .length = at };
-            unit = valid ? asm_assemble(text, index, (AsmOptions){ .integrated = true }, output) : unit;
+            unit = valid ? asm_assemble(text, index, (AsmOptions){ .integrated = true, .keep_records = program->assembly_text }, output) : unit;
             unit_assembled = valid && unit.error == NULL;
             reason = valid && unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
             valid = valid && (unit.error == NULL || reason != NULL);
@@ -4326,7 +4327,8 @@ static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckPro
             at += 1;
         }
     }
-    const AsmResult assembled = source != 0 ? asm_assemble((String8){ .pointer = source, .length = length }, index, (AsmOptions){ .integrated = true }, output) :
+    const AsmResult assembled = source != 0 ? asm_assemble((String8){ .pointer = source, .length = length }, index,
+                                                          (AsmOptions){ .integrated = true, .keep_records = program->assembly_text }, output) :
                                               (AsmResult){ 0 };
     const char* refused = source == 0 ? NULL : assembled.error != 0 ? "file-scope assembly the assembler doesn't take" : NULL;
     // Every section is published as the assembler made it: notes, the arrays of constructors and destructors in their

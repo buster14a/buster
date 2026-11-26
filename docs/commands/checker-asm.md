@@ -86,3 +86,16 @@ substitution. A raw `->` marker uses a zero-width asm body anchored at its
 emitted record. A standalone `.ascii` marker retains the byte range that the
 assembler gives its directive in the helper. The [driver guide](driver.md#-s-1362)
 describes the supported operands and output.
+
+Other supported inline assembly uses the same constraint checks and placement
+as `-c`. Placed statements, record helpers and naked functions retain their
+sized instruction records for the assembly writer. Templates with directives
+and file-scope assembly retain the full assembler's matched records at their
+final byte offsets, together with the existing symbolic atoms and fixups.
+The writer interleaves those instructions with data, alignment bytes, labels,
+relocations and CFI. It preserves the selected layout when a directive puts
+data inside a code section. These presentation records are requested only for
+`-S`; ordinary object emission does not allocate them. The output uses
+canonical AT&T syntax, while the extraction markers above keep their literal
+substituted spelling. Existing constraint and integrated-assembler refusals
+remain the same as for object emission.

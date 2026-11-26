@@ -10453,19 +10453,11 @@ static SymbolId check_driver_atom_symbol(const Link* link, AtomId atom)
 // (check_driver_object_build: the link, checked, its `sections` and its temporaries), pushed on `text`, named after
 // `source_path` and written to `output_path` ("-" for standard output), as -c writes its object. A unit with what the
 // sink doesn't print yet is an error that names it, and writes nothing.
-static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgram* program, ObjectAtomSection* sections, const ObjectDebug* debug,
+static bool check_driver_assembly_text(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug,
                                        const char* source_path, const char* output_path, Arena* text, Arena* scratch, FILE* errors)
 {
-    const CheckProgramAsms* asms = &code->lowered.asms;
-    bool inline_assembly = asms->naked != NULL || asms->file_assembled;
-    for (uint32_t p = 0; !inline_assembly && p < asms->plan_count; p += 1)
-    {
-        inline_assembly = asms->plans[p].planned && asms->plans[p].presentation == NULL;
-    }
-    const bool multiversioned = program->cpu_group_count != 0 || program->target_group_count != 0;
-    const char* refusal = inline_assembly ? "inline assembly" : multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
     uint8_t* temporary = 0;
-    const bool linked = refusal == 0 && link_check(&code->link) == LINK_ERROR_NONE && check_driver_temporaries(code, scratch, &temporary);
+    const bool linked = link_check(&code->link) == LINK_ERROR_NONE && check_driver_temporaries(code, scratch, &temporary);
     AssemblyResult printed = { .error = ASSEMBLY_FULL };
     if (linked)
     {
@@ -10474,6 +10466,7 @@ static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgra
             .debug = debug,
             .code = code->assembly_code,
             .code_count = code->assembly_code_count,
+            .cfi_atom = code->assembly_cfi_atom,
             .sections = sections,
             .section_count = sections != 0 ? code->link.atoms.count : 0,
             .temporary = temporary,
@@ -10485,11 +10478,7 @@ static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgra
         printed = assembly_print(&view, text, scratch);
     }
     bool valid = printed.error == ASSEMBLY_OK;
-    if (refusal != 0)
-    {
-        fprintf(errors, "%s: error: -S doesn't print %s yet\n", source_path, refusal);
-    }
-    else if (printed.error == ASSEMBLY_UNSUPPORTED || printed.error == ASSEMBLY_INVALID)
+    if (printed.error == ASSEMBLY_UNSUPPORTED || printed.error == ASSEMBLY_INVALID)
     {
         // The sink's reason, with the function or object it stopped at.
         const SymbolId symbol = printed.symbol != 0 ? printed.symbol : check_driver_atom_symbol(&code->link, printed.atom);
@@ -11295,7 +11284,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     else if (valid && lanes != NULL && lanes->assembly)
     {
         // -S (#1362): the unit's assembly where -c writes its object, its text on the emission's output arena.
-        valid = check_driver_assembly_text(&code, program, sections, debug ? &dwarf.object : NULL, source_path, output_path, &state->output, scratch, errors);
+        valid = check_driver_assembly_text(&code, sections, debug ? &dwarf.object : NULL, source_path, output_path, &state->output, scratch, errors);
         check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_WRITE);
     }
     else if (valid)
