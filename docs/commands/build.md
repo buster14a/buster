@@ -386,18 +386,33 @@ time (clang 18, locally).
 
 ### Unity test dependencies
 
-**Regression programs are runtime data** (#2053): a suite's ordinary inputs,
+**Regression programs are runtime data** (#2053, #3629): a suite's ordinary inputs,
 expected outputs and case list live under `tests/`, which the tests read when
 they run, so that editing a case or adding one compiles, links and bakes
 nothing. A new ordinary regression program goes there, not into a C string.
 The checker's suites are its shared source fixtures, `tests/checker/sources/`,
 and thirteen test files' own tables beside them ([the checker
 guide](checker.md#runtime-fixtures)); Tier 1's mask IR is `tests/tier1/masks/`
-and the IR parser's fixtures `tests/ir/catalog.tsv`'s. The warning driver reads
-its case inventories and source bytes under `tests/driver/warnings/`.
+and the IR parser's canonical, invalid, overflow, reachability and diagnostic
+fixtures live under `tests/ir/`. The warning driver reads its case inventories
+and source bytes under `tests/driver/warnings/`; specialized driver programs
+and their frozen expectations live under `tests/driver/programs/`. Named-UCN
+preprocessor cases and their diagnostic goldens are under
+`tests/preprocessor/named-ucns/`.
 C keeps what isn't data: independent oracles, generated inputs, guarded
 memory and the checks themselves. Nothing under `tests/` is a build input:
 no generated C array, `#include` or `#embed` brings it back.
+
+The checker, checker driver, preprocessor, IR parser and mask commands accept
+`--fixtures DIR`. The selected root supplies inputs, catalogs and recorded
+expectations, including the checker and preprocessor digest tables. An absolute
+root works from another working directory. Catalogs reject malformed metadata,
+duplicate identities, missing inputs, orphan files and empty inventories.
+Special structural checks require their named cases; they do not freeze a
+catalog's total. `tools/ci/runtime-fixtures.c`, run by the correctness inventory,
+tests these contracts against an already built compiler using private copies
+of the data. A fixture edit or added ordinary case must leave Ninja with no
+compile, link or table-bake work; editing a runner still rebuilds its owner.
 
 The eleven `main.c` units share the compiler interfaces and the fixtures
 used across test families. Production bodies are limited to their consumers,

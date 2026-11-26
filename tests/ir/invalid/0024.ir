@@ -1,0 +1,6 @@
+function () -> void {
+b0:
+%0 = undef.i64
+%1 = icmp.i1 %0, %0 strange
+%2 = ret.void
+}

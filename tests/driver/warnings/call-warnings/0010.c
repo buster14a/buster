@@ -1,0 +1,2 @@
+typedef __SIZE_TYPE__ size_t;void*memcpy(void*,const void*,size_t);void*memset(void*,int,size_t);char*strcpy(char*,const char*);char*strncpy(char*,const char*,size_t);
+void f(void){char b[4];char c[8];memcpy(b,"123456789",9);strcpy(c,"123456789");strncpy(b,"x",9);__builtin_memcpy(b,"123456789",9);__builtin_strcpy(c,"123456789");memset(b+1,0,4);memcpy(b,"123",4);if(0)memcpy(b,"123456789",9);(void)sizeof(memcpy(b,"123456789",9));}

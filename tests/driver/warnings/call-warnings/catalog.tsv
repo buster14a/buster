@@ -1,0 +1,22 @@
+buster-fixtures v2 checker-warnings
+0001	0001.c	7	0	0	-	-	nonnull index lists, all pointers, inherited unions and evaluated calls
+0002	0002.c	1	0	0	-	-	nonnull visible predecessor and bare redeclaration
+0003	0003.c	1	0	0	-	-fno-builtin	nonnull explicit contracts remain without builtins
+0004	0004.c	1	0	0	-	-	nonnull source and command policy
+0005	0005.c	0	0	0	-	-Wno-nonnull	nonnull command suppression
+0006	0006.c	5	0	5	-	-	sizeof pointer memory access, source identity and evaluated context
+0007	0007.c	1	0	1	-	-fno-builtin	sizeof pointer memory access survives no-builtin
+0008	0008.c	1	0	1	-	-ffreestanding	sizeof pointer memory access survives freestanding
+0009	0009.c	0	0	0	-	-Wno-sizeof-pointer-memaccess	sizeof pointer memory access explicit suppression
+0010	0010.c	6	0	0	-	-	fortify object extents, string lengths, offsets and explicit builtin receipts
+0011	0011.c	2	0	0	-	-fno-builtin	fortify builtin policy leaves explicit spellings enabled
+0012	0012.c	1	0	0	-	-ffreestanding	fortify freestanding explicit spellings
+0013	0013.c	2	0	0	-	-	fortify uses the actual extent beyond each end of an array
+0014	0014.c	0	0	0	-	-Wno-incompatible-library-redeclaration	incompatible declaration does not acquire the builtin fortify contract
+0015	0015.c	0	0	0	-	-Wno-fortify-source	fortify command suppression
+0016	0016.c	8	0	8	-	-	absolute value category, truncation, unsigned and original builtin arguments
+0017	0017.c	1	0	1	-	-fno-builtin	absolute value no-builtin policy preserves explicit builtins
+0018	0018.c	1	0	1	-	-ffreestanding	absolute value freestanding policy preserves explicit builtins
+0019	0019.c	0	0	0	-	-Wno-absolute-value	absolute value command suppression
+0020	0020.c	1	0	0	-	-	GNU required result remains checked with call warnings
+0021	0021.c	1	0	0	c23	-	C23 nodiscard remains checked with call warnings

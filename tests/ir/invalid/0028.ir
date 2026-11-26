@@ -1,0 +1,6 @@
+function () -> void {
+b0:
+%0 = undef.i16
+%1 = intrinsic.i16 %0, %0 pdep
+%2 = ret.void
+}

@@ -3596,11 +3596,11 @@ static void check_test_tier1_lifetime_references(CheckTest* test, const char* ex
 {
     char source[PATH_MAX];
     char object[PATH_MAX];
-    snprintf(source, sizeof(source), "%s/checker/lifetime-reference-roots.c", check_test_fixture_root);
+    const bool located = check_test_fixture_path(source, sizeof(source), "checker/lifetime-reference-roots.c");
     snprintf(object, sizeof(object), "%s/lifetime-reference-roots.o", directory);
     char* arguments[] = { (char*)executable, "--tier1", "-c", source, "-o", object, NULL };
     char* text = NULL;
-    const int status = check_test_driver_spawn(arguments, &text);
+    const int status = located ? check_test_driver_spawn(arguments, &text) : -1;
     uint64_t length = 0;
     uint8_t* bytes = status == 0 ? check_test_driver_read_aligned(object, &length) : NULL;
     CheckTestElf elf;

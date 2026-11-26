@@ -17,7 +17,7 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
     } files[] =
     {
         {
-            .path = "tests/driver/assert_requirement_selection.c",
+            .path = "driver/assert_requirement_selection.c",
             .fixture =
             {
                 .name = "selected literal and conjunction requirements",
@@ -26,7 +26,7 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
             },
         },
         {
-            .path = "tests/driver/assert_requirement_types.c",
+            .path = "driver/assert_requirement_types.c",
             .fixture =
             {
                 .name = "canonical attributed type requirements",
@@ -34,7 +34,7 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
             },
         },
         {
-            .path = "tests/driver/assert_requirement_ignored.c",
+            .path = "driver/assert_requirement_ignored.c",
             .fixture =
             {
                 .name = "ignored attributes disappear from requirements",
@@ -44,14 +44,14 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
             },
         },
         {
-            .path = "tests/driver/assert_requirement_controls.c",
+            .path = "driver/assert_requirement_controls.c",
             .fixture =
             {
                 .name = "passing selected and attributed assertions",
             },
         },
         {
-            .path = "tests/driver/assert_member_extension.c",
+            .path = "driver/assert_member_extension.c",
             .fixture =
             {
                 .name = "extension-prefixed member assertion recovery",
@@ -59,7 +59,7 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
             },
         },
         {
-            .path = "tests/driver/assert_member_extension.c",
+            .path = "driver/assert_member_extension.c",
             .fixture =
             {
                 .name = "member assertion recovery under the error limit",
@@ -68,7 +68,7 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
             },
         },
         {
-            .path = "tests/driver/assert_member_extension.c",
+            .path = "driver/assert_member_extension.c",
             .fixture =
             {
                 .name = "member assertion recovery under fatal errors",
@@ -77,7 +77,7 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
             },
         },
         {
-            .path = "tests/driver/assert_member_extension_macro.c",
+            .path = "driver/assert_member_extension_macro.c",
             .fixture =
             {
                 .name = "member assertion recovery retains macro notes",
@@ -86,7 +86,7 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
             },
         },
         {
-            .path = "tests/driver/assert_member_extension_arguments.c",
+            .path = "driver/assert_member_extension_arguments.c",
             .fixture =
             {
                 .name = "member assertion recovery retains argument origins",
@@ -95,7 +95,7 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
             },
         },
         {
-            .path = "tests/driver/assert_member_extension_after.c",
+            .path = "driver/assert_member_extension_after.c",
             .fixture =
             {
                 .name = "member assertion recovery continues after the rejected record",
@@ -103,7 +103,7 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
             },
         },
         {
-            .path = "tests/driver/assert_member_extension_controls.c",
+            .path = "driver/assert_member_extension_controls.c",
             .fixture =
             {
                 .name = "accepted member and extension assertion controls",
@@ -112,10 +112,11 @@ static void check_test_driver_assert_const(CheckTest* test, const char* clang, c
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
-        const int file = open(files[f].path, O_RDONLY | O_CLOEXEC);
+        char path[PATH_MAX];
+        const int file = check_test_fixture_path(path, sizeof(path), files[f].path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
         char* source = NULL;
         const bool read = file >= 0 && check_test_driver_read_file(file, &source);
-        check_test_expect(test, read, "assertion diagnostic runtime fixture is read (run from the repository root)");
+        check_test_expect(test, read, "assertion diagnostic runtime fixture is read");
         for (uint32_t language = 0; read && language < 2; language += 1)
         {
             CheckDriverDefaultWarningFixture fixture = files[f].fixture;

@@ -265,7 +265,9 @@ static void check_test_driver_availability(CheckTest* test, const char* clang, c
 // integer error.
 static void check_test_driver_counted_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    const char* const source = "tests/driver/counted_by_diagnostics.c";
+    char source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/counted_by_diagnostics.c");
+    check_test_expect(test, located, "counted-by diagnostics: fixture path fits");
     static const struct
     {
         const char* name;
@@ -293,8 +295,8 @@ static void check_test_driver_counted_diagnostics(CheckTest* test, const char* c
     static const char sentinel[] = "previous counted object\n";
     char object[PATH_MAX];
     snprintf(object, sizeof(object), "%s/counted-diagnostics.o", directory);
-    const bool available = access(source, R_OK) == 0;
-    check_test_expect(test, available, "counted diagnostics external fixture is available (run from the repository root)");
+    const bool available = located && access(source, R_OK) == 0;
+    check_test_expect(test, available, "counted diagnostics external fixture is available");
     for (uint32_t c = 0; available && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
         char define[64];

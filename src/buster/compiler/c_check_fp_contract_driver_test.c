@@ -31,7 +31,9 @@ static void check_test_driver_fp_contract_difference(const char* expected, const
 static void check_test_driver_fp_contract(CheckTest* test, const char* clang, const char* driver, const char* directory)
 {
     const char* const executable = driver != NULL ? driver : "/proc/self/exe";
-    const char* const source = "tests/driver/fp_contract.c";
+    char source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/fp_contract.c");
+    check_test_expect(test, located, "floating-point contraction: fixture path fits");
     const uint64_t fma_features = BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(FMA);
     const uint64_t znver5_features = fma_features | BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
     const X86Target native = x86_target_native();
@@ -58,8 +60,8 @@ static void check_test_driver_fp_contract(CheckTest* test, const char* clang, co
         // Scalar EVEX FMA requires AVX512F alone; copying its arguments must not accidentally require AVX512VL.
         { "AVX512F without VL", "-march=x86-64-v3", "-mavx512f", "-mno-avx512vl", fma_features | BUSTER_X86_FEATURE(AVX512F), true },
     };
-    const bool available = access(source, R_OK) == 0;
-    check_test_expect(test, available, "FP contraction external fixture is available (run from the repository root)");
+    const bool available = located && access(source, R_OK) == 0;
+    check_test_expect(test, available, "FP contraction external fixture is available");
     char object[512];
     char unfused[512];
     char binary[512];

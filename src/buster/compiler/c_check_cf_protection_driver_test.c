@@ -17,81 +17,6 @@
 // under =return, whose shadow stack fix the leaves don't have, and multiversioned functions under =branch, whose
 // resolvers have no endbr64. Without an option, or with -fcf-protection=none last, the objects are the default's bytes.
 
-static const char check_test_cf_protection_rules_source[] =
-    "#include <setjmp.h>\n"
-    "static int s_called(int x) { return x + 1; }\n"
-    "static int s_designated(int x) { return x + 2; }\n"
-    "static int s_stored(int x) { return x + 3; }\n"
-    "static int s_compared(int x) { return x + 4; }\n"
-    "static int s_aliased(int x) { return x + 5; }\n"
-    "static int s_resolved(int x) { return x + 6; }\n"
-    "static void* s_resolver(void) { return (void*)s_resolved; }\n"
-    "static void s_constructor(void) __attribute__((constructor));\n"
-    "static void s_constructor(void) {}\n"
-    "static void s_destructor(void) __attribute__((destructor));\n"
-    "static void s_destructor(void) {}\n"
-    "static void s_used(void) __attribute__((used));\n"
-    "static void s_used(void) {}\n"
-    "static void s_cleanup(int* p) { (void)p; }\n"
-    "int (*stored)(int) = s_stored;\n"
-    "int f_alias(int) __attribute__((alias(\"s_aliased\")));\n"
-    "int f_ifunc(int) __attribute__((ifunc(\"s_resolver\")));\n"
-    "int f_external(int x) { return s_called(x) + (&s_designated)(x) + (*s_designated)(x); }\n"
-    "int f_compare(void* p) { return p == (void*)s_compared; }\n"
-    "int f_cleanup(void) { int v __attribute__((cleanup(s_cleanup))) = 0; return v; }\n"
-    "__attribute__((weak)) int f_weak(int x) { return x; }\n"
-    "jmp_buf buffer;\n"
-    "int f_setjmp(void) { if (setjmp(buffer)) return 1; return 0; }\n"
-    "int f_sigsetjmp(sigjmp_buf b) { return sigsetjmp(b, 1); }\n"
-    "__attribute__((returns_twice)) int twice(void);\n"
-    "int f_twice(void) { return twice() + 1; }\n"
-    "#ifndef NO_BUILTIN_SETJMP\n"
-    "void* builtin_buffer[5];\n"
-    "int f_builtin_setjmp(void) { if (__builtin_setjmp(builtin_buffer)) return 1; return 0; }\n"
-    "#endif\n"
-    "int f_switch(int x) { switch (x) { case 0: return 5; case 1: return 7; case 2: return 9; case 3: return 11; case 4: return 13; case 5: return 2; } return 0; }\n"
-    "int f_goto(int x) { static void* t[] = { &&a, &&b }; goto *t[x & 1]; a: return 1; b: return 2; }\n"
-    "int f_indirect(int (*p)(int)) { return p(3); }\n"
-    "__attribute__((naked)) void f_naked(void) { __asm__(\"ret\"); }\n"
-    "struct frame;\n"
-    "__attribute__((interrupt)) void f_interrupt(struct frame* f) { (void)f; }\n"
-    "__attribute__((patchable_function_entry(2, 1))) int f_patched(int x) { return x; }\n";
-
-// A program whose indirect branches each reach their marks: two function pointers, setjmp's and __builtin_setjmp's
-// second returns (the latter's not under =return or =full, which refuse it), a jump table and a computed goto.
-static const char check_test_cf_protection_program_source[] =
-    "#include <setjmp.h>\n"
-    "#include <stdio.h>\n"
-    "static jmp_buf jump_buffer;\n"
-    "static void* builtin_buffer[5];\n"
-    "static int doubled(int x) { return 2 * x; }\n"
-    "static int tripled(int x) { return 3 * x; }\n"
-    "int (*volatile table[2])(int) = { doubled, tripled };\n"
-    "static int pick(int x) { switch (x & 7) { case 0: return 10; case 1: return 11; case 2: return 12; case 3: return 13; case 4: return 14; case 5: return 15; case 6: return 16; } return 17; }\n"
-    "static int jump(int x) { static void* labels[] = { &&even, &&odd }; goto *labels[x & 1]; even: return x / 2; odd: return 3 * x + 1; }\n"
-    "#ifndef NO_BUILTIN_SETJMP\n"
-    "__attribute__((noinline)) static void leave(void) { __builtin_longjmp(builtin_buffer, 1); }\n"
-    "__attribute__((noinline)) static int again(void) { if (__builtin_setjmp(builtin_buffer)) return 7; leave(); return 0; }\n"
-    "#else\n"
-    "static int again(void) { return (int)sizeof(builtin_buffer) - 33; }\n"
-    "#endif\n"
-    "int main(void)\n"
-    "{\n"
-    "    volatile int n = 0;\n"
-    "    int total = 0;\n"
-    "    if (setjmp(jump_buffer) == 0)\n"
-    "    {\n"
-    "        n = table[0](21) + table[1](1);\n"
-    "        longjmp(jump_buffer, 1);\n"
-    "    }\n"
-    "    for (int i = 0; i < 8; i += 1)\n"
-    "    {\n"
-    "        total += pick(i) + jump(i);\n"
-    "    }\n"
-    "    printf(\"%d %d %d\\n\", n, total, again());\n"
-    "    return 0;\n"
-    "}\n";
-
 #define BUSTER_CHECK_TEST_CF_PROTECTION_FUNCTIONS 64u
 
 // A function's marks (check_test_cf_protection_marks): its name, whether its code starts with an endbr64, and how many
@@ -207,7 +132,36 @@ static bool check_test_cf_protection_says(const char* executable, const char* so
     return says;
 }
 
-static void check_test_driver_cf_protection(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_cf_protection_policy(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                                   const CheckDriverProgramInput* inputs)
+{
+    (void)clang;
+    char* policy[4];
+    uint32_t status = 0;
+    bool valid = check_test_driver_input_fields(test, inputs + 1, policy, BUSTER_ARRAY_LENGTH(policy)) &&
+                 check_test_driver_input_count(policy[1], &status) && status <= 1;
+    if (valid)
+    {
+        valid = strcmp(policy[0], "-fcf-protection") == 0 || strcmp(policy[0], "-fcf-protection=full") == 0 ||
+                strcmp(policy[0], "-fcf-protection=branch") == 0 || strcmp(policy[0], "-fcf-protection=return") == 0 ||
+                strcmp(policy[0], "-fcf-protection=none") == 0;
+    }
+    check_test_expect(test, valid, "CET's policy specifies a supported option and exit status");
+    if (valid)
+    {
+        char source[512];
+        char object[512];
+        snprintf(source, sizeof(source), "%s/cf-protection-refused.c", directory);
+        snprintf(object, sizeof(object), "%s/cf-protection.o", directory);
+        const bool written = parse_test_write(source, inputs[0].bytes, inputs[0].length);
+        const char* const options[] = { policy[0], NULL };
+        const char* message = strcmp(policy[2], "-") == 0 ? NULL : policy[2];
+        check_test_expect(test, written && check_test_cf_protection_says(executable, source, object, options, (int)status, message), policy[3]);
+    }
+}
+
+static void check_test_driver_cf_protection_inputs(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                                   const CheckDriverProgramInput* inputs)
 {
     char rules[512];
     char program[512];
@@ -223,8 +177,7 @@ static void check_test_driver_cf_protection(CheckTest* test, const char* clang, 
     snprintf(other, sizeof(other), "%s/cf-protection-other.o", directory);
     snprintf(binary, sizeof(binary), "%s/cf-protection", directory);
     snprintf(reference, sizeof(reference), "%s/cf-protection-clang", directory);
-    const bool written = parse_test_write(rules, check_test_cf_protection_rules_source, sizeof(check_test_cf_protection_rules_source) - 1) &&
-                         parse_test_write(program, check_test_cf_protection_program_source, sizeof(check_test_cf_protection_program_source) - 1);
+    const bool written = parse_test_write(rules, inputs[0].bytes, inputs[0].length) && parse_test_write(program, inputs[1].bytes, inputs[1].length);
     check_test_expect(test, written, "CET's fixtures are written");
     // Each spelling's marks and note: clang -O0's, by Tier 0 and by --tier1. (=return's and =full's rules leave
     // __builtin_setjmp out, whose leaves are refused there: below.)
@@ -280,30 +233,9 @@ static void check_test_driver_cf_protection(CheckTest* test, const char* clang, 
         check_test_expect(test, built && check_test_driver_capture(binary, line, sizeof(line)) && strcmp(line, expected_line) == 0, label);
     }
     // The refusals, each by name, and nocf_check's warning where the protection is the returns' alone.
-    static const struct
+    if (written)
     {
-        const char* source;
-        const char* option;
-        int status;
-        const char* message;
-        const char* label;
-    } cases[] = {
-        { "__attribute__((nocf_check)) void f(void) {}\n", "-fcf-protection", 1, "not yet supported", "nocf_check is refused under -fcf-protection" },
-        { "__attribute__((nocf_check)) void f(void) {}\n", "-fcf-protection=branch", 1, "not yet supported", "nocf_check is refused under =branch" },
-        { "__attribute__((nocf_check)) void f(void) {}\n", "-fcf-protection=return", 0, "'nocf_check' attribute ignored", "nocf_check is ignored under =return, as clang's" },
-        { "void* b[5];\nint f(void) { return __builtin_setjmp(b); }\n", "-fcf-protection=return", 1, "the shadow stack's fix",
-          "__builtin_setjmp is refused under =return" },
-        { "void* b[5];\nvoid f(void) { __builtin_longjmp(b, 1); }\n", "-fcf-protection", 1, "the shadow stack's fix", "__builtin_longjmp is refused under =full" },
-        { "__attribute__((target_clones(\"avx2\", \"default\"))) int f(int x) { return x; }\nint g(int x) { return f(x); }\n", "-fcf-protection=branch", 1,
-          "multiversioned functions", "multiversioned functions are refused under =branch" },
-        { "__attribute__((target_clones(\"avx2\", \"default\"))) int f(int x) { return x; }\nint g(int x) { return f(x); }\n", "-fcf-protection=return", 0, NULL,
-          "multiversioned functions compile under =return" },
-    };
-    for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
-    {
-        const bool saved = parse_test_write(refused, cases[c].source, strlen(cases[c].source));
-        const char* const options[] = { cases[c].option, NULL };
-        check_test_expect(test, saved && check_test_cf_protection_says(executable, refused, object, options, cases[c].status, cases[c].message), cases[c].label);
+        check_test_driver_programs(test, clang, executable, directory, "cf-protection-policy", "program.c\tpolicy.expected", check_test_driver_cf_protection_policy);
     }
     // Without an option, or with -fcf-protection=none last, the objects are the default's bytes, without a note.
     static const char* const off[2][3] = {
@@ -325,4 +257,9 @@ static void check_test_driver_cf_protection(CheckTest* test, const char* clang, 
     unlink(other);
     unlink(binary);
     unlink(reference);
+}
+
+static void check_test_driver_cf_protection(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_programs(test, clang, executable, directory, "cf-protection", "rules.c\tprogram.c", check_test_driver_cf_protection_inputs);
 }

@@ -337,8 +337,26 @@ struct TestDigests
     bool unrecorded;
 };
 
+// A new fixture root or another in-process command must not retain a previous run's expectations.
+static void test_digests_reset(TestDigests* table)
+{
+    const char* path = table->path;
+    const char* record = table->record;
+    const bool unrecorded = table->unrecorded;
+    free(table->text);
+    free(table->keys);
+    free(table->digests);
+    free(table->any);
+    *table = (TestDigests){
+        .path = path,
+        .record = record,
+        .unrecorded = unrecorded,
+    };
+}
+
 static void test_digests_load(TestDigests* table)
 {
+    test_digests_reset(table);
     table->loaded = true;
     FILE* file = fopen(table->path, "rb");
     long size = -1;
@@ -1734,6 +1752,7 @@ static const PPTestFile pp_test_files_raw_query[] = {
 // or path, an unknown flag or tree, a file in either directory that no line names, or no case fails the run: no case is
 // skipped.
 static const char* pp_test_fixture_root = "tests";
+static char pp_test_digest_path[PATH_MAX];
 static const PPTestCase* pp_test_cases;
 static uint32_t pp_test_case_count;
 
@@ -2334,14 +2353,17 @@ static void pp_test_remove_case(const PPTestCase* test, const char* directory)
 #define BUSTER_PP_TEST_MAX_ARGUMENTS 32
 
 // A case's arguments, for pp_parse_options and clang: -std= and its options with %d replaced by the directory, written
-// into `text`, then `path` after them (which clang's don't take). Returns how many come before `path`.
+// into `text`, then `path` after them (which clang's don't take). Returns how many come before `path`, or -1 when
+// the complete argument list does not fit. A catalog's options must never silently lose their final arguments.
 static int pp_test_arguments(const PPTestCase* test, const char* directory, const char* path, char* text, uint32_t capacity, char** arguments)
 {
-    uint32_t used = (uint32_t)snprintf(text, capacity, "-std=%s", test->standard) + 1;
+    const int standard = snprintf(text, capacity, "-std=%s", test->standard);
+    bool valid = standard >= 0 && (uint32_t)standard < capacity;
+    uint32_t used = valid ? (uint32_t)standard + 1 : 0;
     int count = 1;
     arguments[0] = text;
     const char* options = test->options != 0 ? test->options : "";
-    while (*options != 0 && count + 1 < BUSTER_PP_TEST_MAX_ARGUMENTS && used < capacity)
+    while (valid && *options != 0)
     {
         while (*options == ' ')
         {
@@ -2349,28 +2371,48 @@ static int pp_test_arguments(const PPTestCase* test, const char* directory, cons
         }
         if (*options != 0)
         {
-            arguments[count] = text + used;
-            count += 1;
-            while (*options != 0 && *options != ' ' && used + 4096 < capacity)
+            valid = count + 1 < BUSTER_PP_TEST_MAX_ARGUMENTS && used < capacity;
+            if (valid)
+            {
+                arguments[count++] = text + used;
+            }
+            while (valid && *options != 0 && *options != ' ')
             {
                 if (options[0] == '%' && options[1] == 'd')
                 {
-                    used += (uint32_t)snprintf(text + used, capacity - used, "%s", directory);
-                    options += 2;
+                    const size_t length = strlen(directory);
+                    valid = length < capacity - used;
+                    if (valid)
+                    {
+                        memcpy(text + used, directory, length);
+                        used += (uint32_t)length;
+                        options += 2;
+                    }
                 }
                 else
                 {
-                    text[used] = *options;
-                    used += 1;
-                    options += 1;
+                    valid = used + 1 < capacity;
+                    if (valid)
+                    {
+                        text[used++] = *options++;
+                    }
                 }
             }
-            text[used] = 0;
-            used += 1;
+            if (valid)
+            {
+                text[used++] = 0;
+            }
         }
     }
-    arguments[count] = (char*)path;
-    return count;
+    if (valid)
+    {
+        arguments[count] = (char*)path;
+    }
+    else
+    {
+        fprintf(stderr, "test-preprocessor: %s: fixture arguments exceed their bound\n", test->name);
+    }
+    return valid ? count : -1;
 }
 
 // A case's text with line markers (PPTestCase.markers, %d for its directory) against the vectorized printer's, byte for
@@ -2543,11 +2585,11 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
     const int argument_count = pp_test_arguments(test, directory, path, text, sizeof(text), arguments);
     Arena arena = arena_reserve(1ull << 20);
-    PPOptions options;
+    PPOptions options = { 0 };
     const char* input;
     const char* output;
     bool markers;
-    result = result && pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
+    result = result && argument_count >= 0 && pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
     // The cases are compared with clang: the feature queries answer as clang's.
     options.clang_features = true;
     static InternTable tables[2];
@@ -4694,11 +4736,11 @@ static bool pp_test_raw_query_views(const char* directory)
     char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
     const int count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
     Arena arena = arena_reserve(1ull << 20);
-    PPOptions options;
+    PPOptions options = { 0 };
     const char* input;
     const char* output;
     bool markers;
-    result = result && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
+    result = result && count >= 0 && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
     options.timing = true;
     static InternTable table;
     static Preprocessor run;
@@ -4894,191 +4936,36 @@ static bool pp_test_named_lines(const char* text, char* lines, size_t capacity, 
 // definition and an unused argument, and not in a skipped group, a literal or a comment; with and without line splices
 // and trigraphs, beside \u, \U and UTF-8 spellings of the same character. Each case's errors and notes must be the ones
 // written for it, by both kernels, and with `with_clang` clang's (its -pedantic warnings aside).
+static bool pp_test_named_ucn_row(PPTestFixtures* table, const char* directory, char** fields, uint32_t line)
+{
+    (void)line;
+    PPNamedUcnCase* row = pp_test_fixture_row(table, fields[0]);
+    CLanguage language = { 0 };
+    bool valid = row != NULL && pp_parse_standard(fields[1], &language) && (strcmp(fields[2], "-") == 0 || strcmp(fields[2], "warnings") == 0);
+    if (valid)
+    {
+        row->name = fields[4];
+        row->standard = fields[1];
+        row->options = strcmp(fields[3], "-") == 0 ? NULL : fields[3];
+        row->warnings = strcmp(fields[2], "warnings") == 0;
+        valid = pp_test_fixture_text(table, directory, fields[0], ".c", &row->source) && pp_test_fixture_text(table, directory, fields[0], ".expected", &row->expected);
+    }
+    return valid;
+}
+
 static bool pp_test_named_ucns(const char* directory, bool with_clang)
 {
-    static const PPNamedUcnCase cases[] = {
-        {
-            .name = "a named UCN beside the character's other spellings",
-            .source = "int \\N{LATIN SMALL LETTER E WITH ACUTE} = 1;\nint f(void) { return \xC3\xA9; }\nint g(void) { return \\u00e9 + \\U000000E9 + \\u{e9}; }\n",
-            .standard = "gnu17",
-            .expected = "",
-        },
-        {
-            .name = "named UCNs in tokens, directives and macros",
-            .source = "x\\N{GREEK SMALL LETTER ALPHA}y\n"
-                      "1\\N{DIGIT ONE}\n"
-                      "\\N{GREEK SMALL LETTER ALPHA}\n"
-                      "x\\\\\nN{GREEK SMALL LETTER ALPHA}\n"
-                      "z\\N{GREEK SMALL\\\n LETTER ALPHA}\n"
-                      "#define A \\N{LATIN CAPITAL LETTER A}\n"
-                      "A A\n"
-                      "#define DROP(x) kept\n"
-                      "DROP(\\N{LINE FEED})\n"
-                      "#if \\N{GREEK SMALL LETTER ALPHA}\n"
-                      "#elif \\N{LATIN SMALL LETTER NOT A THING}\n"
-                      "#endif\n"
-                      "#if 0\n"
-                      "\\N{GREEK SMALL LETTER ALPHA} \\N{NOT A NAME}\n"
-                      "#endif\n"
-                      "\"\\N{GREEK SMALL LETTER ALPHA}\" '\\N{DIGIT ZERO}' /* \\N{GREEK SMALL LETTER ALPHA} */ // \\N{DIGIT ZERO}\n",
-            .standard = "gnu17",
-            .expected = "2:2: error: character '1' cannot be specified by a universal character name\n"
-                        "8:11: error: character 'A' cannot be specified by a universal character name\n"
-                        "11:6: error: universal character name refers to a control character\n"
-                        "13:10: error: 'LATIN SMALL LETTER NOT A THING' is not a valid Unicode character name\n"
-                        "13:7: error: invalid token at start of a preprocessor expression\n",
-        },
-        {
-            .name = "named UCNs whose backslashes are trigraphs",
-            .source = "x?" "?/N{GREEK SMALL LETTER ALPHA} ?" "?/N{DIGIT ZERO} ?" "?/N{greek small letter alpha}\n",
-            .standard = "c17",
-            .expected = "1:33: error: character '0' cannot be specified by a universal character name\n"
-                        "1:55: error: 'greek small letter alpha' is not a valid Unicode character name\n"
-                        "1:55: note: character names in Unicode escape sequences are sensitive to case and whitespaces\n",
-        },
-        {
-            .name = "names Unicode doesn't have, and basic and control characters",
-            .source = "\\N{LATIN SMALL LETTER NOT A THING}\na\\N{latin small letter a}\nb\\N{latin small letter e with acute}c \\N{LATIN SMALL LETTER E WITH ACUTE}\n"
-                      "\\N{SPACE}\\N{NULL}\n",
-            .standard = "gnu17",
-            .expected = "1:4: error: 'LATIN SMALL LETTER NOT A THING' is not a valid Unicode character name\n"
-                        "2:5: error: 'latin small letter a' is not a valid Unicode character name\n"
-                        "2:5: note: character names in Unicode escape sequences are sensitive to case and whitespaces\n"
-                        "2:2: error: character 'a' cannot be specified by a universal character name\n"
-                        "3:5: error: 'latin small letter e with acute' is not a valid Unicode character name\n"
-                        "3:5: note: character names in Unicode escape sequences are sensitive to case and whitespaces\n"
-                        "4:1: error: character ' ' cannot be specified by a universal character name\n"
-                        "4:10: error: universal character name refers to a control character\n",
-        },
-        {
-            // -Wunicode's warnings (#1447): a `\N` clang reads as no UCN, where a token starts or an identifier goes on, its
-            // backslash read as itself; a macro's definition's once, and none in a skipped group.
-            .name = "a \\N clang reads as no universal character name",
-            .source = "f\\N\n\\Nj\ng\\N{}\nh\\N{FOO\n#define X \\N\nX X\n#if 0\nk\\N\n#endif\n",
-            .standard = "gnu17",
-            .expected = "1:2: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
-                        "2:1: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
-                        "3:2: warning: empty delimited universal character name; treating as '\\' 'N' '{' '}'\n"
-                        "4:2: warning: incomplete delimited universal character name; treating as '\\' 'N' '{' identifier\n"
-                        "5:11: warning: incomplete universal character name; treating as '\\' followed by identifier\n",
-            .warnings = true,
-        },
-        {
-            // The same of a `\u` or `\U` clang reads as no universal character name (#1447): no hex digit after it, too few, or
-            // a delimited one's empty braces or missing brace, each naming its letter; at the line splice before it, and none
-            // in a skipped group.
-            .name = "a \\u or \\U clang reads as no universal character name",
-            .source = "f\\u\n\\Uj\ng\\u{}\nh\\u{12\ni\\u12\nj\\U0000004\nk\\u{zz}\n#if 0\nl\\u\n#endif\nm\\\n\\u\n",
-            .standard = "gnu17",
-            .expected = "1:2: warning: \\u used with no following hex digits; treating as '\\' followed by identifier\n"
-                        "2:1: warning: \\U used with no following hex digits; treating as '\\' followed by identifier\n"
-                        "3:2: warning: empty delimited universal character name; treating as '\\' 'u' '{' '}'\n"
-                        "4:2: warning: incomplete delimited universal character name; treating as '\\' 'u' '{' identifier\n"
-                        "5:2: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
-                        "6:2: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
-                        "7:2: warning: incomplete delimited universal character name; treating as '\\' 'u' '{' identifier\n"
-                        "11:2: warning: \\u used with no following hex digits; treating as '\\' followed by identifier\n",
-            .warnings = true,
-        },
-        {
-            // A `\u` or `\U` clang reads whole that starts a token, of a character below U+00A0 or a surrogate (#1447): its
-            // error at the backslash, whatever its digits' form; none of one past U+00A0 or past U+10FFFF.
-            .name = "a \\u or \\U of a basic or control character, or a surrogate",
-            .source = "\\u0041x g\\uD800 \\u0024a \\u0001b \\u{41}d e\\u0041 \\u{D800}h \\u007Fi \\u00e9j \\U00110000\n",
-            .standard = "gnu17",
-            .expected = "1:1: error: character 'A' cannot be specified by a universal character name\n"
-                        "1:10: error: invalid universal character\n"
-                        "1:17: error: character '$' cannot be specified by a universal character name\n"
-                        "1:25: error: universal character name refers to a control character\n"
-                        "1:33: error: character 'A' cannot be specified by a universal character name\n"
-                        "1:42: error: character 'A' cannot be specified by a universal character name\n"
-                        "1:49: error: invalid universal character\n"
-                        "1:59: error: universal character name refers to a control character\n",
-        },
-        {
-            // -pedantic's warning that a named UCN is clang's extension (#1447): one that starts a token, its name exactly
-            // Unicode's, at its backslash and before its character's error; none within an identifier, of a name that isn't
-            // Unicode's, in a skipped group, or in a macro's expansion (its definition's once).
-            .name = "named UCNs under -pedantic",
-            .source = "\\N{GREEK SMALL LETTER ALPHA}x a\\N{GREEK SMALL LETTER ALPHA} \\N{LATIN CAPITAL LETTER A} \\N{FOO}\n"
-                      "#define Y \\N{GREEK SMALL LETTER ALPHA}\nY Y\n#if 0\n\\N{GREEK SMALL LETTER ALPHA}\n#endif\n\\N{greek small letter alpha}\n",
-            .standard = "gnu17",
-            .expected = "1:1: warning: named escape sequences are a Clang extension\n"
-                        "1:61: warning: named escape sequences are a Clang extension\n"
-                        "1:61: error: character 'A' cannot be specified by a universal character name\n"
-                        "1:91: error: 'FOO' is not a valid Unicode character name\n"
-                        "2:11: warning: named escape sequences are a Clang extension\n"
-                        "7:4: error: 'greek small letter alpha' is not a valid Unicode character name\n"
-                        "7:4: note: character names in Unicode escape sequences are sensitive to case and whitespaces\n",
-            .options = "-pedantic",
-            .warnings = true,
-        },
-        {
-            .name = "named UCNs under -pedantic-errors",
-            .source = "\\N{GREEK SMALL LETTER ALPHA}x\n",
-            .standard = "gnu17",
-            .expected = "1:1: error: named escape sequences are a Clang extension\n",
-            .options = "-pedantic-errors",
-            .warnings = true,
-        },
-        {
-            .name = "named UCNs under -pedantic without the extension's warning",
-            .source = "\\N{GREEK SMALL LETTER ALPHA}x\n",
-            .standard = "gnu17",
-            .expected = "",
-            .options = "-pedantic -Wno-delimited-escape-sequence-extension",
-            .warnings = true,
-        },
-        {
-            // -Wunicode's options, -w and pragmas (#1934): off, promoted, silenced, and mapped from the pragma on.
-            .name = "-Wno-unicode",
-            .source = "f\\N\n",
-            .standard = "gnu17",
-            .expected = "",
-            .options = "-Wno-unicode",
-            .warnings = true,
-        },
-        {
-            .name = "-Werror=unicode",
-            .source = "f\\N\n",
-            .standard = "gnu17",
-            .expected = "1:2: error: incomplete universal character name; treating as '\\' followed by identifier\n",
-            .options = "-Werror=unicode",
-            .warnings = true,
-        },
-        {
-            .name = "-w over -Werror",
-            .source = "f\\N\n",
-            .standard = "gnu17",
-            .expected = "",
-            .options = "-w -Werror",
-            .warnings = true,
-        },
-        {
-            .name = "-Wunicode's pragmas",
-            .source = "#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wunicode\"\nf\\N\n#pragma clang diagnostic pop\ng\\N\n"
-                      "#pragma clang diagnostic error \"-Wunicode\"\nh\\N\n",
-            .standard = "gnu17",
-            .expected = "5:2: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
-                        "7:2: error: incomplete universal character name; treating as '\\' followed by identifier\n",
-            .warnings = true,
-        },
-        {
-            .name = "-pedantic's warning under a pragma",
-            .source = "#pragma clang diagnostic ignored \"-Wpedantic\"\n\\N{GREEK SMALL LETTER ALPHA}x\n",
-            .standard = "gnu17",
-            .expected = "",
-            .options = "-pedantic",
-            .warnings = true,
-        },
-    };
-    uint32_t failures = 0;
+    PPTestFixtures catalog;
+    const bool loaded = pp_test_fixture_table(&catalog, "named-ucns", "buster-fixtures v1 preprocessor-named-ucns", 5, sizeof(PPNamedUcnCase), pp_test_named_ucn_row, NULL);
+    const PPNamedUcnCase* cases = (const PPNamedUcnCase*)catalog.rows;
+    const uint32_t count = catalog.count;
+    uint32_t failures = !loaded;
     enum
     {
         LINES = 4096,
     };
     char lines[LINES];
-    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    for (uint32_t c = 0; c < count; c += 1)
     {
         const PPTestCase test = { .name = cases[c].name, .source = cases[c].source, .standard = cases[c].standard, .expected = "", .options = cases[c].options };
         char path[4096];
@@ -5086,10 +4973,11 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
         char text[16384];
         char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
         const int argument_count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
+        result = result && argument_count >= 0;
         for (uint32_t k = 0; result && k < 2; k += 1)
         {
             Arena arena = arena_reserve(1ull << 20);
-            PPOptions options;
+            PPOptions options = { 0 };
             const char* input;
             const char* output;
             bool markers;
@@ -5132,7 +5020,8 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
         failures += !result;
         pp_test_remove_case(&test, directory);
     }
-    printf("named UCNs: %u of %lu cases fail%s\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(cases), with_clang ? " (Clang oracle)" : "");
+    printf("named UCNs: %u of %u cases fail%s\n", failures, count, with_clang ? " (Clang oracle)" : "");
+    arena_release(&catalog.storage);
     return failures == 0;
 }
 
@@ -5925,11 +5814,11 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
         char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
         const int argument_count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
         Arena arena = arena_reserve(1ull << 20);
-        PPOptions options;
+        PPOptions options = { 0 };
         const char* input;
         const char* output;
         bool markers;
-        result = pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
+        result = argument_count >= 0 && pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
         options.clang_features = true;
         static InternTable tables[2];
         static Preprocessor preprocessors[2];
@@ -8948,8 +8837,11 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
 
 static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
 {
+    pp_test_fixture_root = "tests";
+    test_digests_reset(&pp_kernel_digests);
     bool with_clang = false;
     bool keep = false;
+    bool named_ucns_only = false;
     // The fuzz batch (c_preprocessor_fuzz.c), which runs with the cases: --fuzz cases per mode, --seed, --std for one
     // mode, --jobs workers.
     PPFuzzOptions fuzz = {
@@ -9023,6 +8915,10 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         else if (strcmp(argument, "--keep") == 0)
         {
             keep = true;
+        }
+        else if (strcmp(argument, "--named-ucns-only") == 0)
+        {
+            named_ucns_only = true;
         }
         else if (strcmp(argument, "--fuzz") == 0 || strcmp(argument, "--seed") == 0 || strcmp(argument, "--jobs") == 0 || strcmp(argument, "--first") == 0)
         {
@@ -9110,9 +9006,22 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     fuzz.with_clang = with_clang;
     // --part deals the checks without files alone.
     valid = valid && (!parted || (file_count == 0 && !tables && !generate_targets && !print_case));
+    valid = valid && (!named_ucns_only || (!parted && file_count == 0 && !tables && !generate_targets && !print_case));
+    if (valid)
+    {
+        valid = test_fixture_path(pp_test_digest_path, sizeof(pp_test_digest_path), pp_test_fixture_root, "preprocessor-kernels/digests.tsv");
+        if (valid)
+        {
+            pp_kernel_digests.path = pp_test_digest_path;
+        }
+        else
+        {
+            fprintf(stderr, "test-preprocessor: fixture root is too long\n");
+        }
+    }
     if (!valid || fuzz.jobs == 0 || fuzz.jobs > BUSTER_PP_FUZZ_MAX_JOBS)
     {
-        fprintf(stderr, "usage: test-preprocessor [--clang] [--clang-server PATH [--differential]] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--part K/N] [--print-case N] [--fixtures DIRECTORY] [options] [file...]\n");
+        fprintf(stderr, "usage: test-preprocessor [--clang] [--clang-server PATH [--differential]] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--part K/N] [--print-case N] [--named-ucns-only] [--fixtures DIRECTORY] [options] [file...]\n");
     }
     if (valid && clang_server != 0)
     {
@@ -9131,6 +9040,10 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     {
         // c_predefines.c's generated tables, from clang (c_predefines_test.c).
         passed_all = predefines_test_print_tables(directory);
+    }
+    else if (passed_all && named_ucns_only)
+    {
+        passed_all = pp_test_named_ucns(directory, with_clang);
     }
     else if (passed_all && file_count == 0 && !pp_test_cases_load())
     {
@@ -9208,6 +9121,11 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     free(passed);
     free(clang_passed);
     free(files);
+    arena_release(&pp_test_fixtures.storage);
+    pp_test_fixtures = (PPTestFixtures){ 0 };
+    pp_test_cases = NULL;
+    pp_test_case_count = 0;
+    test_digests_reset(&pp_kernel_digests);
     return passed_all ? 0 : 1;
 }
 

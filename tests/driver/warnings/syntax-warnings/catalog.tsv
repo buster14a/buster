@@ -1,0 +1,14 @@
+buster-fixtures v2 checker-warnings
+0001	0001.c	5	0	10	-	-	grouped equality in each truth condition
+0002	0002.c	0	0	0	-	-	equality grouping requires an assignable left side and a truth condition
+0003	0003.c	0	0	0	-	-	macro supplied equality grouping is intentional
+0004	0004.c	4	0	8	-	-	logical not before comparison and bitwise and
+0005	0005.c	0	0	0	-	-	logical not respects parentheses and boolean operands
+0006	0006.c	9	0	0	-	-	boolean switch expressions before integer promotion
+0007	0007.c	0	0	0	-	-	ordinary switch values and explicit integer casts
+0008	0008.c	0	0	0	-	-Wno-parentheses -Wno-switch-bool	syntax families obey parent group and individual disabling
+0009	0009.c	3	0	4	-	-	syntax warning source policy restores after pop
+0010	0010.c	3	0	3	-	-Wno-deprecated-non-prototype	sizeof of adjusted array parameters retains the original declarators
+0011	0011.c	3	0	0	-	-Wall	plain char subscript under Wall
+0012	0012.c	0	0	0	-	-Wno-sizeof-array-argument	plain char subscript at default and individual suppression of sizeof on a parameter
+0013	0013.c	1	0	0	c23	-	C23 boolean switch value

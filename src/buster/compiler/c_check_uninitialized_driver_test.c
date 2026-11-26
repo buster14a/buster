@@ -210,9 +210,11 @@ static void check_test_driver_uninitialized(CheckTest* test, const char* clang, 
         {
             continue;
         }
+        char relative[256];
         char path[PATH_MAX];
-        snprintf(path, sizeof(path), "tests/driver/uninitialized-for/%s.c", cases[c].name);
-        const int file = open(path, O_RDONLY | O_CLOEXEC);
+        const int size = snprintf(relative, sizeof(relative), "driver/uninitialized-for/%s.c", cases[c].name);
+        const bool located = size >= 0 && (size_t)size < sizeof(relative) && check_test_fixture_path(path, sizeof(path), relative);
+        const int file = located ? open(path, O_RDONLY | O_CLOEXEC) : -1;
         char* fixture = NULL;
         const bool read = file >= 0 && check_test_driver_read_file(file, &fixture);
         if (file >= 0)

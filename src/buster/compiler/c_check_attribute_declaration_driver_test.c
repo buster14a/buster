@@ -18,8 +18,10 @@ static void check_test_driver_prefix_meanings(CheckTest* test)
     const ParseOptions parse_options = { .scalar = true };
     Arena output = arena_reserve(UINT64_C(1) << 20);
     Arena scratch = arena_reserve(UINT64_C(1) << 20);
-    const bool ready = output.base != NULL && scratch.base != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
-                       pp_run(&pp, "tests/driver/prefix_meanings.c") && parse_initialize(&parser, &parse_options, options.language);
+    char source[PATH_MAX];
+    const bool ready = check_test_fixture_path(source, sizeof(source), "driver/prefix_meanings.c") &&
+                       output.base != NULL && scratch.base != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                       pp_run(&pp, source) && parse_initialize(&parser, &parse_options, options.language);
     check_test_expect(test, ready, "prefix reparse fixture initializes");
     if (ready)
     {
@@ -68,7 +70,9 @@ static void check_test_attribute_declaration_boundaries(CheckTest* test, uint32_
     snprintf(define, sizeof(define), "DBUSTER_CASE=%u", c);
     const char* macros[] = { define };
     const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .macros = macros, .macro_count = 1 };
-    const bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && pp_run(&pp, "tests/driver/attribute_declarations.c");
+    char source[PATH_MAX];
+    const bool ready = check_test_fixture_path(source, sizeof(source), "driver/attribute_declarations.c") &&
+                       intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && pp_run(&pp, source);
     check_test_expect(test, ready, "mixed-delimiter attributed declaration fixture initializes");
     if (ready)
     {
@@ -116,11 +120,12 @@ static bool check_test_attribute_declaration_output(const char* path, const char
 static void check_test_driver_attribute_declarations(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_prefix_meanings(test);
-    const char* source = "tests/driver/attribute_declarations.c";
-    const bool available = access(source, R_OK) == 0;
-    check_test_expect(test, available, "attributed declaration fixture is available (run from the repository root)");
+    char source[PATH_MAX];
+    const bool available = check_test_fixture_path(source, sizeof(source), "driver/attribute_declarations.c") && access(source, R_OK) == 0;
+    check_test_expect(test, available, "attributed declaration fixture is available");
     // Runtime rows hold the case, expected status and checks (bit 0: Clang comparison, bit 1: parser boundary).
-    FILE* catalog = fopen("tests/driver/attribute_declarations.cases", "r");
+    char catalog_path[PATH_MAX];
+    FILE* catalog = check_test_fixture_path(catalog_path, sizeof(catalog_path), "driver/attribute_declarations.cases") ? fopen(catalog_path, "r") : NULL;
     check_test_expect(test, catalog != NULL, "attributed declaration runtime catalogue is available");
     static const char* const standards[] = { "-std=gnu99", "-std=gnu17", "-std=gnu23", "-std=gnu89" };
     static const char* const options[] = { NULL, "-Wall", "-w", "-Werror", "-Werror=ignored-attributes", "-Wno-ignored-attributes", "-ferror-limit=2" };

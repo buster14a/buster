@@ -12,6 +12,11 @@ bash tools/ci/feedback.sh smoke
 # work/byte records, real excessive-work mutations and a check that production builds cannot enable the counters.
 # The standalone harnesses inherit this row's host and sanitizer flags; no elapsed time or RSS decides their verdict.
 bash tests/work-contracts/run.sh
+== Test runtime fixture roots and catalog contracts [1 CPU]
+# #3629: the same executable consumes private data trees outside the checkout. Mutations must fail, restorations
+# and added cases must pass, and catalogs must preserve required structural coverage without compiled case totals.
+cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/runtime-fixtures.c -o build/runtime-fixtures
+build/runtime-fixtures "$BUSTER_COMPILER" "$(command -v clang)" "$PWD"
 == Check unity fixture ownership without rebuilding
 # The existing compiler's dependency graph keeps private fixtures, arbitrary nested includes and test headers in
 # one main unit. Exact shared exceptions and shared-root structure may not grow silently; stale/incomplete records

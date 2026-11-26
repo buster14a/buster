@@ -1,0 +1,8 @@
+function () -> void {
+b0:
+%0 = undef.i64
+%1 = br.void b1
+b1:
+%2 = phi.i64 [%0, b0], [%0, b0]
+%3 = ret.void
+}

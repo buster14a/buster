@@ -795,13 +795,16 @@ static void check_test_interrupt_probe_report(FILE* output, const CheckInterrupt
 // control independently of the host's interrupt support or Clang version. Its trace proves later stages did not run.
 static void check_test_interrupt_probe_failures(CheckTest* test, const char* clang, const char* directory)
 {
+    char source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/interrupt_probe_control.c");
+    check_test_expect(test, located, "interrupt control: fixture path fits");
     char fixture[512];
     char trace[512];
     snprintf(fixture, sizeof(fixture), "%s/interrupt-probe-control", directory);
     snprintf(trace, sizeof(trace), "%s/interrupt-probe-trace", directory);
-    char* build[] = { (char*)clang, "-std=gnu17", "tests/driver/interrupt_probe_control.c", "-o", fixture, NULL };
+    char* build[] = { (char*)clang, "-std=gnu17", source, "-o", fixture, NULL };
     char* diagnostic = NULL;
-    const int built = check_test_driver_spawn(build, &diagnostic);
+    const int built = located ? check_test_driver_spawn(build, &diagnostic) : -1;
     check_test_expect(test, built == 0, "interrupt control: failure fixture builds");
     if (built != 0 && diagnostic != NULL)
     {

@@ -1,0 +1,81 @@
+enum E { A, B, C = 5 };
+struct S { int m; int a[4]; _Bool b; struct S* p; };
+int g(void);
+extern int table[4];
+int f(int x, int y, unsigned u, _Bool b, double d, struct S s, struct S* p, int* q)
+{
+    int r = 0;
+    if (x) r += 1;
+    if (p->m == 0) r += 1;
+    if (x != 3 && y) r += 1;
+    if ((x & 8) == 0) r += 1;
+    if (x & 8) r += 1;
+    if (!(x & 8)) r += 1;
+    if ((x & 8) && y) r += 1;
+    r += (x & 16) ? 1 : 2;
+    if (x == 1 && y == 2) r += 1;
+    if (x == 1 || p->m == 2) r += 1;
+    if (!x && y) r += 1;
+    if (!x || p->m) r += 1;
+    if (q) r += 1;
+    if (s.m) r += 1;
+    if (x == y) r += 1;
+    if (1) r += 1;
+    if (0 && x) r += 1;
+    if (x || 1) r += 1;
+    if (!0) r += 1;
+    if ((_Bool)1) r += 1;
+    if (__builtin_constant_p(x)) r += 1;
+    if (table) r += 1;
+    if (g) r += 1;
+    if ("s") r += 1;
+    if (&x) r += 1;
+    if (x * 0) r += 1;
+    if (0 * x) r += 1;
+    if (x & 0) r += 1;
+    if ((x & 0) && y) r += 1;
+    r += (x & 0) ? 1 : 2;
+    if (x | 1) r += 1;
+    if (1 | x) r += 1;
+    if ((x & 8) == 4) r += 1;
+    if (4 == (x & 8)) r += 1;
+    if ((x | 8) == 0) r += 1;
+    if ((x | 8) != -1) r += 1;
+    if ((x & 8) == ~0) r += 1;
+    if ((x < y) == 10) r += 1;
+    if (b == 2) r += 1;
+    if (10 > b) r += 1;
+    if (!x >= 2) r += 1;
+    if (x == 1 && x == 2) r += 1;
+    if (1 < x || 5 > x) r += 1;
+    if (p->m == A && p->m == B) r += 1;
+    if (s.a[1] < 2 && s.a[1] > 3) r += 1;
+    if (d < 1.5 && d > 2.5) r += 1;
+    if (x || !x) r += 1;
+    if (!x && x) r += 1;
+    if (p->m && !p->m) r += 1;
+    if (s.a[1] || !s.a[1]) r += 1;
+    if ((x == 1 && x == 2) || y) r += 1;
+    do { r += 1; } while (x * 0);
+    while (y && (x | 1)) { r += 1; break; }
+    r += (x & 8) == 4 ? 1 : 2;
+    r += x ?: 2;
+    if (*(int (*)[4])4096) r += 1;
+    if (0 * (x + y)) r += 1;
+    if (x * (char)0) r += 1;
+    r += x * (char)0;
+    if (1 | (x + y)) r += 1;
+    if (x && (char)0) r += 1;
+    if (!(x && (char)0)) r += 1;
+    if ((_Bool)(x && (char)0)) r += 1;
+    if ((x && (char)0) || y) r += 1;
+    if (y && (x && (char)0)) r += 1;
+    if (x == -1 && x == -2) r += 1;
+    if (x != -2 || x != -1) r += 1;
+    if (y && x * (char)0) r += 1;
+    return r;
+}
+_Bool h(int x)
+{
+    return x && (char)0;
+}

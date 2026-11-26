@@ -1,0 +1,1 @@
+1	unsupported: an asm label naming a block-scope static's symbol, which clang joins to the static by its emission order	an asm label naming a block-scope static's symbol, shape 0, is refused by name	an asm label naming a block-scope static's symbol, shape 0, is refused by name, scalar

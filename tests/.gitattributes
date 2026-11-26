@@ -1,0 +1,4 @@
+# These exact-byte regressions intentionally retain whitespace from their original C literals (#3629).
+/driver/programs/stack-protector/default.expected -text whitespace=-blank-at-eol
+/driver/programs/stack-protector/strong.expected -text whitespace=-blank-at-eol
+/ir/invalid/0002.ir -text whitespace=-blank-at-eol,-space-before-tab

@@ -329,7 +329,7 @@ static bool check_test_driver_warning_option(const char* option)
     return valid;
 }
 
-static bool check_test_driver_warning_policy(CheckDriverDefaultWarningFixture* fixture, char* flags, char* options)
+static bool check_test_driver_warning_policy(CheckDriverDefaultWarningFixture* fixture, char* flags, char* options, const char* suite_path, bool companions)
 {
     bool valid = true;
     if (strcmp(flags, "-") != 0)
@@ -367,10 +367,23 @@ static bool check_test_driver_warning_policy(CheckDriverDefaultWarningFixture* f
         while (valid && options != NULL)
         {
             const char* option = strsep(&options, " ");
-            valid = count < BUSTER_ARRAY_LENGTH(fixture->options) && check_test_driver_warning_option(option);
-            if (valid)
+            if (companions && strcmp(option, "-isystem") == 0)
             {
-                fixture->options[count++] = option;
+                const char* directory = strsep(&options, " ");
+                valid = count + 2 <= BUSTER_ARRAY_LENGTH(fixture->options) && directory != NULL && strcmp(directory, "@suite") == 0;
+                if (valid)
+                {
+                    fixture->options[count++] = option;
+                    fixture->options[count++] = suite_path;
+                }
+            }
+            else
+            {
+                valid = count < BUSTER_ARRAY_LENGTH(fixture->options) && check_test_driver_warning_option(option);
+                if (valid)
+                {
+                    fixture->options[count++] = option;
+                }
             }
         }
     }
@@ -379,38 +392,35 @@ static bool check_test_driver_warning_policy(CheckDriverDefaultWarningFixture* f
 
 static bool check_test_driver_warning_count(const char* text, uint32_t* count)
 {
-    char* end = NULL;
-    const unsigned long value = strtoul(text, &end, 10);
-    const bool valid = *text >= '0' && *text <= '9' && *end == 0 && value <= UINT32_MAX;
-    if (valid)
-    {
-        *count = (uint32_t)value;
-    }
-    return valid;
+    return check_test_fixture_u32(text, count);
 }
 
 // The v1 suites use their filename as ID and their caller's dialect. A v2 row has its own ID,
-// allowing several option or expectation variants to share a source. Load the whole inventory
-// before dealing the sweep so every part validates it, including the files its peers will run.
+// allowing several option or expectation variants to share a source. V3 adds up to four named companion headers
+// before NAME and permits -isystem @suite for those inputs. Load the whole inventory before dealing the sweep so
+// every part validates it, including the files its peers will run.
 static void check_test_driver_warning_catalog_run(CheckTest* test, const char* clang, const char* executable, const char* directory,
                                                   const char* suite, bool deal, bool c23)
 {
     CheckTestFixtures storage = { .storage = arena_reserve(UINT64_C(1) << 27) };
     char suite_path[PATH_MAX];
-    const int path_length = snprintf(suite_path, sizeof(suite_path), "%s/%s", check_test_fixture_root, suite);
+    const bool path_ready = check_test_fixture_path(suite_path, sizeof(suite_path), suite);
     char path[PATH_MAX + 132];
     snprintf(path, sizeof(path), "%s/catalog.tsv", suite_path);
     uint64_t length = 0;
-    char* catalog = check_test_fixture_read(&storage, path, &length);
+    char* catalog = path_ready ? check_test_fixture_read(&storage, path, &length) : NULL;
     CheckDriverDefaultWarningFixture* cases = arena_push(&storage.storage, sizeof(*cases) * CHECK_TEST_FIXTURE_CASES, 8);
     const char** ids = arena_push(&storage.storage, sizeof(*ids) * CHECK_TEST_FIXTURE_CASES, 8);
-    storage.files = arena_push(&storage.storage, sizeof(*storage.files) * CHECK_TEST_FIXTURE_CASES, 8);
-    bool valid = path_length >= 0 && (size_t)path_length < sizeof(suite_path) && cases != NULL && ids != NULL && storage.files != NULL &&
+    const char** sources = arena_push(&storage.storage, sizeof(*sources) * CHECK_TEST_FIXTURE_CASES, 8);
+    storage.files = arena_push(&storage.storage, sizeof(*storage.files) * CHECK_TEST_FIXTURE_CASES * 5, 8);
+    bool valid = path_ready && cases != NULL && ids != NULL && sources != NULL && storage.files != NULL &&
                  catalog != NULL && length != 0 && catalog[length - 1] == '\n';
     uint32_t line = 1;
+    uint32_t count = 0;
     const char* header = valid ? strsep(&catalog, "\n") : "";
     const bool v2 = strcmp(header, "buster-fixtures v2 checker-warnings") == 0;
-    valid = valid && (v2 || strcmp(header, "buster-fixtures v1 checker-warnings") == 0);
+    const bool v3 = strcmp(header, "buster-fixtures v3 checker-warnings") == 0;
+    valid = valid && (v2 || v3 || strcmp(header, "buster-fixtures v1 checker-warnings") == 0);
     while (valid && *catalog != 0)
     {
         char* row = strsep(&catalog, "\n");
@@ -419,31 +429,35 @@ static void check_test_driver_warning_catalog_run(CheckTest* test, const char* c
         {
             continue;
         }
-        char* id = strsep(&row, "\t");
-        char* file = v2 ? strsep(&row, "\t") : id;
-        char* warnings = strsep(&row, "\t");
-        char* errors = strsep(&row, "\t");
-        char* notes = strsep(&row, "\t");
-        char* flags = v2 ? strsep(&row, "\t") : NULL;
-        char* options = v2 ? strsep(&row, "\t") : NULL;
-        const uint32_t index = storage.count;
-        valid = row != NULL && *row != 0 && strchr(row, '\t') == NULL && index < CHECK_TEST_FIXTURE_CASES &&
-                check_test_fixture_word(id, v2 ? 64 : 128) && check_test_fixture_word(file, 128) &&
+        char* fields[9] = { 0 };
+        const uint32_t columns = v3 ? 9 : v2 ? 8 : 5;
+        valid = check_test_fixture_columns(row, fields, columns) && count < CHECK_TEST_FIXTURE_CASES;
+        char* id = fields[0];
+        char* file = v2 || v3 ? fields[1] : id;
+        char* warnings = fields[v2 || v3 ? 2 : 1];
+        char* errors = fields[v2 || v3 ? 3 : 2];
+        char* notes = fields[v2 || v3 ? 4 : 3];
+        char* flags = v2 || v3 ? fields[5] : NULL;
+        char* options = v2 || v3 ? fields[6] : NULL;
+        char* companions = v3 ? fields[7] : NULL;
+        valid = valid && check_test_fixture_word(id, v2 || v3 ? 64 : 128) && check_test_fixture_word(file, 128) &&
                 strlen(file) > 2 && strcmp(file + strlen(file) - 2, ".c") == 0;
         if (valid)
         {
-            CheckDriverDefaultWarningFixture* fixture = &cases[index];
-            *fixture = (CheckDriverDefaultWarningFixture){ .name = row, .c23 = !v2 && c23 };
+            CheckDriverDefaultWarningFixture* fixture = &cases[count];
+            *fixture = (CheckDriverDefaultWarningFixture){ .name = fields[columns - 1], .c23 = !v2 && !v3 && c23 };
+            const bool headers = companions != NULL && strcmp(companions, "-") != 0;
             valid = check_test_driver_warning_count(warnings, &fixture->warnings) && check_test_driver_warning_count(errors, &fixture->errors) &&
-                    check_test_driver_warning_count(notes, &fixture->notes) && (!v2 || check_test_driver_warning_policy(fixture, flags, options));
-            for (uint32_t i = 0; valid && i < index; i += 1)
+                    check_test_driver_warning_count(notes, &fixture->notes) &&
+                    ((!v2 && !v3) || check_test_driver_warning_policy(fixture, flags, options, suite_path, headers));
+            for (uint32_t i = 0; valid && i < count; i += 1)
             {
                 valid = strcmp(id, ids[i]) != 0;
                 if (!valid)
                 {
                     snprintf(storage.problem, sizeof(storage.problem), "duplicate case ID '%s'", id);
                 }
-                if (strcmp(file, storage.files[i]) == 0)
+                if (strcmp(file, sources[i]) == 0)
                 {
                     fixture->source = cases[i].source;
                     fixture->source_length = cases[i].source_length;
@@ -455,12 +469,42 @@ static void check_test_driver_warning_catalog_run(CheckTest* test, const char* c
                 fixture->source = check_test_fixture_read_bytes(&storage, path, true, &fixture->source_length);
                 valid = fixture->source != NULL;
             }
-            ids[index] = id;
-            storage.files[index] = file;
-            storage.count += 1;
+            const uint32_t first_header = storage.count;
+            uint32_t header_count = 0;
+            while (valid && headers && companions != NULL)
+            {
+                const char* companion = strsep(&companions, ",");
+                const size_t bytes = strlen(companion);
+                valid = header_count < 4 && check_test_fixture_word(companion, 128) && bytes > 2 && strcmp(companion + bytes - 2, ".h") == 0;
+                bool seen = false;
+                for (uint32_t i = 0; valid && i < storage.count; i += 1)
+                {
+                    const bool same = strcmp(companion, storage.files[i]) == 0;
+                    valid = !same || i < first_header;
+                    seen = seen || same;
+                }
+                if (valid && !seen)
+                {
+                    snprintf(path, sizeof(path), "%s/%s", suite_path, companion);
+                    uint64_t companion_length = 0;
+                    valid = check_test_fixture_read_bytes(&storage, path, true, &companion_length) != NULL;
+                }
+                if (valid)
+                {
+                    storage.files[storage.count++] = companion;
+                    header_count += 1;
+                }
+            }
+            if (valid)
+            {
+                ids[count] = id;
+                sources[count] = file;
+                storage.files[storage.count++] = file;
+                count += 1;
+            }
         }
     }
-    valid = valid && storage.count != 0 && check_test_fixture_orphans(&storage, suite_path);
+    valid = valid && count != 0 && check_test_fixture_orphans(&storage, suite_path);
     if (!valid)
     {
         fprintf(stderr, "%s/catalog.tsv line %u: %s\n", suite_path, line, storage.problem[0] ? storage.problem : "invalid warning catalog");
@@ -468,7 +512,7 @@ static void check_test_driver_warning_catalog_run(CheckTest* test, const char* c
     check_test_expect(test, valid, "runtime warning catalog is complete and well formed");
     if (valid)
     {
-        check_test_driver_warning_fixtures_dealt(test, clang, executable, directory, cases, storage.count, deal);
+        check_test_driver_warning_fixtures_dealt(test, clang, executable, directory, cases, count, deal);
     }
     arena_release(&storage.storage);
 }

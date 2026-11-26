@@ -1,0 +1,12 @@
+function (i1) -> i64 {
+b0:
+%0 = param.i1 0
+%1 = cbr.void %0, b1, b2
+b1:
+%2 = const.i64 0x7
+%3 = br.void b3
+b2:
+%4 = br.void b3
+b3:
+%5 = ret.void %2
+}

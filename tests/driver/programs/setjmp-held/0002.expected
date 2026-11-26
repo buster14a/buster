@@ -1,0 +1,1 @@
+0	-	a long double held across __builtin_setjmp compiles	the same, scalar

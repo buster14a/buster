@@ -203,10 +203,12 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         uint64_t length = bytes != NULL ? strlen(bytes) : 0;
         if (every[i].file != NULL)
         {
+            char folder[PATH_MAX];
             char path[PATH_MAX];
             fixture.storage = arena_reserve(CHECK_TEST_FIXTURE_BYTES + 1);
-            snprintf(path, sizeof(path), "%s/checker/auto-type/%s", check_test_fixture_root, every[i].file);
-            bytes = check_test_fixture_read(&fixture, path, &length);
+            const bool located = check_test_fixture_path(folder, sizeof(folder), "checker/auto-type") &&
+                                 test_fixture_path(path, sizeof(path), folder, every[i].file);
+            bytes = located ? check_test_fixture_read(&fixture, path, &length) : NULL;
         }
         const bool written = bytes != NULL && parse_test_write(source, bytes, length);
         arena_release(&fixture.storage);

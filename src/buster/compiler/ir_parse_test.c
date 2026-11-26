@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "buster/compiler/test_paths.h"
 
 #define BUSTER_IR_PARSE_TEST_BYTES (16ull << 20)
 #define BUSTER_IR_PARSE_TEST_REPORTS 20
@@ -22,9 +23,10 @@ struct IrParseTest
     uint64_t checks;
     uint64_t failures;
     uint64_t functions;
-    // The inline cases' diagnostics and published columns, in order: frozen in #2924 while the line scan's scalar twin
-    // agreed. Opcodes and types fold as their spellings, so renumbering either keeps it. The catalog's fixtures stay out
-    // (`catalog`): a new or edited fixture is its file alone (#2053), checked by reprint and coverage instead.
+    // Contract cases' diagnostics and published columns, in order: frozen in #2924 while the line scan's scalar twin
+    // agreed. Their expectation is runtime data, ir/parser-digest.expected, so a new contract case can update its
+    // golden without rebuilding. Opcodes and types fold as spellings. Canonical round-trip fixtures stay out
+    // (`catalog`): their bytes and opcode/type coverage are their independent expectation.
     uint64_t digest;
     bool catalog;
     bool operations[IR_OP_COUNT];
@@ -60,8 +62,6 @@ static bool ir_parse_test_print(const IrFunction* function, String8 expected, Ar
     }
     return equal;
 }
-
-#define BUSTER_IR_PARSE_TEST_DIGEST UINT64_C(0x4aa02a17eaaa7b67)
 
 static void ir_parse_test_fold_bytes(uint64_t* digest, const void* bytes, uint64_t count)
 {
@@ -262,17 +262,17 @@ static bool ir_parse_test_orphans(const char* directory, char* const* files, uin
 static void ir_parse_test_catalog(IrParseTest* test, Arena* source_arena, Arena* output, Arena* scratch)
 {
     const uint64_t source_mark = source_arena->length;
-    char directory[PATH_MAX];
-    char path[PATH_MAX + 256];
+    char directory[PATH_MAX] = { 0 };
+    char path[PATH_MAX + 256] = { 0 };
     char problem[PATH_MAX + 512];
     problem[0] = 0;
-    snprintf(directory, sizeof(directory), "%s/ir", ir_parse_test_fixture_root);
-    snprintf(path, sizeof(path), "%s/catalog.tsv", directory);
+    const bool paths = test_fixture_path(directory, sizeof(directory), ir_parse_test_fixture_root, "ir") &&
+                       test_fixture_path(path, sizeof(path), directory, "catalog.tsv");
     String8 catalog = { 0 };
-    bool valid = ir_parse_test_read(path, source_arena, &catalog);
+    bool valid = paths && ir_parse_test_read(path, source_arena, &catalog);
     if (!valid)
     {
-        snprintf(problem, sizeof(problem), "can't read %s", path);
+        snprintf(problem, sizeof(problem), paths ? "can't read %s" : "fixture root is too long: %s", paths ? path : ir_parse_test_fixture_root);
     }
     else if (catalog.length == 0 || catalog.pointer[catalog.length - 1] != '\n')
     {
@@ -327,9 +327,9 @@ static void ir_parse_test_catalog(IrParseTest* test, Arena* source_arena, Arena*
                 }
             }
             struct stat status;
-            char case_path[PATH_MAX + 256];
-            snprintf(case_path, sizeof(case_path), "%s/%s", directory, valid ? fields[1] : "");
-            if (valid && (stat(case_path, &status) != 0 || !S_ISREG(status.st_mode)))
+            char case_path[PATH_MAX + 256] = { 0 };
+            const bool case_path_valid = valid && test_fixture_path(case_path, sizeof(case_path), directory, fields[1]);
+            if (valid && (!case_path_valid || stat(case_path, &status) != 0 || !S_ISREG(status.st_mode)))
             {
                 snprintf(problem, sizeof(problem), "can't read %s", case_path);
                 valid = false;
@@ -354,8 +354,15 @@ static void ir_parse_test_catalog(IrParseTest* test, Arena* source_arena, Arena*
     ir_parse_test_expect(test, valid, description);
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
-        snprintf(path, sizeof(path), "%s/%s", directory, files[i]);
-        ir_parse_test_fixture(test, path, source_arena, output, scratch);
+        valid = test_fixture_path(path, sizeof(path), directory, files[i]);
+        if (valid)
+        {
+            ir_parse_test_fixture(test, path, source_arena, output, scratch);
+        }
+        else
+        {
+            ir_parse_test_expect(test, false, "canonical fixture path is too long");
+        }
     }
     fprintf(stderr, "IR parser: %u canonical fixtures from %s (#2053)\n", valid ? count : 0, directory);
     arena_pop_to(source_arena, source_mark);
@@ -364,82 +371,211 @@ static void ir_parse_test_catalog(IrParseTest* test, Arena* source_arena, Arena*
 typedef struct IrParseTestCase IrParseTestCase;
 struct IrParseTestCase
 {
-    const char* text;
+    String8 source;
+    const char* identifier;
     IrParseError error;
+    bool limit_or_syntax;
+    uint64_t offset;
+    uint32_t line;
+    uint32_t column;
 };
 
-static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* scratch)
+// Ordinary parser contracts are raw .ir files and six-field catalogs: ID, FILE, ERROR, REJECTED, LINE and COLUMN.
+// A named diagnostic records the first REJECTED token's byte offset as well as its independently specified place.
+// Other suites use '-' and zero coordinates. Every row and file stays in `source` until its original loop finishes.
+static bool ir_parse_test_decimal(const char* text, uint32_t* value)
 {
-    static const IrParseTestCase cases[] = {
-        { "", IR_PARSE_END },
-        { " \t\r\n; only a comment", IR_PARSE_END },
-        { "function", IR_PARSE_SYNTAX },
-        { "function () -> void", IR_PARSE_SYNTAX },
-        { "function () -> nope {\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb1:\n%0 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%1 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = mystery.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = ret.void extra\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = const.i64 0x\n%1 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = const.i64 0x1g\n%1 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = vconst.v4i32 0x\n%1 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = vconst.v4i32 0x100000000000000000000000000000000\n%1 = ret.void\n}\n", IR_PARSE_LIMIT },
-        { "function () -> void {\nb0:\n%0 = vconst.v4i32 0x1g\n%1 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = vconst.v4i32 0x1\n%1 = vcmp.m16 %0, %0 eq\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = const.m8 0x100\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = const.v8i32 0x1\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = vconst.m64 0x1\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = const.m64 0x1\n%1 = bitcast.f64 %0\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = add.i64 %0 %0\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = ret.void\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = call.void @1() fixed=() variadic=2\n%1 = ret.void\n}\n", IR_PARSE_LIMIT },
-        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = icmp.i1 %0, %0 strange\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        // An intrinsic's operation (#141): a name of its own, of its type (mulhu an I64's alone), of operands of its type.
-        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = intrinsic.i64 %0, %0 strange\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = intrinsic.i64 %0, %0\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = undef.i32\n%1 = intrinsic.i32 %0, %0 mulhu\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = undef.i16\n%1 = intrinsic.i16 %0, %0 pdep\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = undef.i32\n%2 = intrinsic.i64 %0, %1 bzhi\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nslot $1 size=8 align=8 type=i64 flags=0x00\nb0:\n%0 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function () -> void {\nb0:\n%0 = undef.i64\n}\n", IR_PARSE_VERIFY },
-        { "function () -> i64 {\nb0:\n%0 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = copy.i64 %0\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = copy.i64 %1\n%1 = undef.i64\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = copy.i64 %99\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = const.i8 0x100\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = br.void b9\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = ret.void\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function (void) -> void {\nb0:\n%0 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nslot $0 size=1 align=3 type=i64 flags=0x00\nb0:\n%0 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = symbol_addr.ptr @0\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = call.void @1() fixed=(i64) variadic=0\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = cbr.void %0, b1, b1\nb1:\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = switch.void %0, default b1, [0x1, b1], [0x1, b1]\nb1:\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = br.void b1\nb1:\n%2 = phi.i64 [%0, b0], [%0, b0]\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
-        { "function (i1) -> i64 {\nb0:\n%0 = param.i1 0\n%1 = cbr.void %0, b1, b2\nb1:\n%2 = const.i64 0x7\n%3 = br.void b3\nb2:\n%4 = br.void b3\nb3:\n%5 = ret.void %2\n}\n", IR_PARSE_VERIFY },
-        // An atomic access aligned below its size (#1059): x86 makes only a naturally aligned one single-copy atomic.
-        { "function (ptr) -> i64 {\nb0:\n%0 = param.ptr 0\n%1 = load.i64 %0 align=1 atomic seq_cst\n%2 = ret.void %1\n}\n", IR_PARSE_VERIFY },
-        { "function (ptr, i32) -> void {\nb0:\n%0 = param.ptr 0\n%1 = param.i32 1\n%2 = store.void %0, %1 align=2 atomic release\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
-        // A segment override (#1447) is a load's or a store's alone.
-        { "function (ptr) -> void {\nb0:\n%0 = param.ptr 0\n%1 = load.i32 %0 align=4 fs gs\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
-        { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1 align=1 add seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
-        // A compare-exchange without its desired value, an exchange with one, and a desired value of another type.
-        { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1 align=2 cas seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
-        { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1, %1 align=2 xchg seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
-        { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1, %0 align=2 cas seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
-    };
-    for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
+    uint64_t number = 0;
+    bool valid = text[0] != 0;
+    for (const char* at = text; valid && *at != 0; at += 1)
     {
-        const String8 source = {
-            .pointer = (char*)cases[i].text,
-            .length = strlen(cases[i].text),
-        };
+        valid = *at >= '0' && *at <= '9';
+        if (valid)
+        {
+            number = number * 10 + (uint32_t)(*at - '0');
+            valid = number <= UINT32_MAX;
+        }
+    }
+    *value = valid ? (uint32_t)number : 0;
+    return valid;
+}
+
+static IrParseTestCase* ir_parse_test_cases_load(IrParseTest* test, const char* suite, Arena* source, uint32_t* count)
+{
+    *count = 0;
+    char relative[128];
+    snprintf(relative, sizeof(relative), "ir/%s", suite);
+    char directory[PATH_MAX] = { 0 };
+    char path[PATH_MAX] = { 0 };
+    char problem[PATH_MAX + 512] = { 0 };
+    IrParseTestCase* cases = arena_push(source, sizeof(*cases) * BUSTER_IR_PARSE_TEST_CASES, 8);
+    char* files[BUSTER_IR_PARSE_TEST_CASES];
+    String8 catalog = { 0 };
+    bool valid = cases != NULL && test_fixture_path(directory, sizeof(directory), ir_parse_test_fixture_root, relative) &&
+                 test_fixture_path(path, sizeof(path), directory, "catalog.tsv") && ir_parse_test_read(path, source, &catalog);
+    if (!valid)
+    {
+        snprintf(problem, sizeof(problem), "can't load %s's parser cases", suite);
+    }
+    else if (catalog.length == 0 || catalog.pointer[catalog.length - 1] != '\n')
+    {
+        snprintf(problem, sizeof(problem), "%s doesn't end with a newline", path);
+        valid = false;
+    }
+    const bool diagnostics = strcmp(suite, "diagnostics") == 0;
+    const bool overflow = strcmp(suite, "overflow") == 0;
+    const bool reachable = strcmp(suite, "reachable") == 0;
+    char* cursor = catalog.pointer;
+    uint32_t line = 0;
+    while (valid && cursor < catalog.pointer + catalog.length)
+    {
+        char* end = memchr(cursor, '\n', (size_t)(catalog.pointer + catalog.length - cursor));
+        *end = 0;
+        line += 1;
+        const bool nul = memchr(cursor, 0, (size_t)(end - cursor)) != NULL;
+        if (line == 1)
+        {
+            valid = !nul && strcmp(cursor, "buster-fixtures v1 ir-parser-cases") == 0;
+        }
+        else if (nul || cursor[0] != '#')
+        {
+            char* fields[6] = { cursor, NULL, NULL, NULL, NULL, NULL };
+            uint32_t fields_count = 1;
+            for (char* tab = nul ? NULL : strchr(cursor, '\t'); tab != NULL && fields_count <= 6; tab = strchr(tab + 1, '\t'))
+            {
+                *tab = 0;
+                if (fields_count < 6)
+                {
+                    fields[fields_count] = tab + 1;
+                }
+                fields_count += 1;
+            }
+            const size_t file_length = fields_count == 6 ? strlen(fields[1]) : 0;
+            valid = !nul && fields_count == 6 && ir_parse_test_word(fields[0]) && ir_parse_test_word(fields[1]) && file_length > 3 &&
+                    strcmp(fields[1] + file_length - 3, ".ir") == 0 && *count < BUSTER_IR_PARSE_TEST_CASES;
+            for (uint32_t i = 0; valid && i < *count; i += 1)
+            {
+                valid = strcmp(cases[i].identifier, fields[0]) != 0 && strcmp(files[i], fields[1]) != 0;
+            }
+            IrParseTestCase* row = valid ? &cases[*count] : NULL;
+            if (valid)
+            {
+                *row = (IrParseTestCase){ .identifier = fields[0] };
+                static const char* const errors[] = { "ok", "end", "syntax", "limit", "memory", "verify" };
+                uint32_t error = 0;
+                while (error < BUSTER_ARRAY_LENGTH(errors) && strcmp(fields[2], errors[error]) != 0)
+                {
+                    error += 1;
+                }
+                row->limit_or_syntax = strcmp(fields[2], "limit-or-syntax") == 0;
+                row->error = error < BUSTER_ARRAY_LENGTH(errors) ? (IrParseError)error : IR_PARSE_LIMIT;
+                valid = (error < BUSTER_ARRAY_LENGTH(errors) || row->limit_or_syntax) && ir_parse_test_decimal(fields[4], &row->line) &&
+                        ir_parse_test_decimal(fields[5], &row->column);
+                if (valid)
+                {
+                    valid = diagnostics ? row->error == IR_PARSE_SYNTAX && !row->limit_or_syntax && fields[3][0] != 0 && strcmp(fields[3], "-") != 0 && row->line != 0 && row->column != 0 :
+                                          strcmp(fields[3], "-") == 0 && row->line == 0 && row->column == 0;
+                }
+                if (valid && !diagnostics)
+                {
+                    valid = overflow ? row->limit_or_syntax : !row->limit_or_syntax && (reachable ? row->error == IR_PARSE_OK || row->error == IR_PARSE_VERIFY :
+                                                                                               row->error != IR_PARSE_OK && row->error != IR_PARSE_MEMORY);
+                }
+            }
+            if (valid)
+            {
+                valid = test_fixture_path(path, sizeof(path), directory, fields[1]) && ir_parse_test_read(path, source, &row->source);
+            }
+            if (valid && diagnostics)
+            {
+                const char* rejected = memmem(row->source.pointer, row->source.length, fields[3], strlen(fields[3]));
+                valid = rejected != NULL;
+                row->offset = valid ? (uint64_t)(rejected - row->source.pointer) : 0;
+            }
+            if (valid)
+            {
+                files[*count] = fields[1];
+                *count += 1;
+            }
+        }
+        if (!valid)
+        {
+            snprintf(problem, sizeof(problem), "%s/catalog.tsv line %u: malformed metadata, duplicate ID/file or unreadable case", directory, line);
+        }
+        cursor = end + 1;
+    }
+    if (valid && *count == 0)
+    {
+        snprintf(problem, sizeof(problem), "%s/catalog.tsv names no case", directory);
+        valid = false;
+    }
+    // Unlike the top-level canonical directory, a contract suite contains only its catalog and named input files.
+    DIR* listing = valid ? opendir(directory) : NULL;
+    if (valid && listing == NULL)
+    {
+        snprintf(problem, sizeof(problem), "can't list %s", directory);
+        valid = false;
+    }
+    for (struct dirent* entry = valid ? readdir(listing) : NULL; valid && entry != NULL; entry = readdir(listing))
+    {
+        const char* name = entry->d_name;
+        bool named = strcmp(name, ".") == 0 || strcmp(name, "..") == 0 || strcmp(name, "catalog.tsv") == 0;
+        for (uint32_t i = 0; !named && i < *count; i += 1)
+        {
+            named = strcmp(files[i], name) == 0;
+        }
+        if (!named)
+        {
+            snprintf(problem, sizeof(problem), "%s/%s is in no catalog line", directory, name);
+            valid = false;
+        }
+    }
+    if (listing != NULL)
+    {
+        closedir(listing);
+    }
+    ir_parse_test_expect(test, valid, problem);
+    *count = valid ? *count : 0;
+    fprintf(stderr, "IR parser: %u %s fixtures from %s\n", *count, suite, directory);
+    return valid ? cases : NULL;
+}
+
+static void ir_parse_test_digest_expected(IrParseTest* test, Arena* source)
+{
+    const uint64_t source_mark = source->length;
+    char path[PATH_MAX] = { 0 };
+    String8 text = { 0 };
+    bool valid = test_fixture_path(path, sizeof(path), ir_parse_test_fixture_root, "ir/parser-digest.expected") && ir_parse_test_read(path, source, &text);
+    valid = valid && text.length == 17 && text.pointer[16] == '\n';
+    uint64_t expected = 0;
+    for (uint32_t i = 0; valid && i < 16; i += 1)
+    {
+        const uint8_t byte = (uint8_t)text.pointer[i];
+        const uint32_t digit = byte >= '0' && byte <= '9' ? byte - '0' : byte >= 'a' && byte <= 'f' ? byte - 'a' + 10 : 16;
+        valid = digit < 16;
+        expected = expected * 16 + digit;
+    }
+    ir_parse_test_expect(test, valid, "ir/parser-digest.expected must contain sixteen lowercase hexadecimal digits and a newline");
+    ir_parse_test_expect(test, valid && test->digest == expected, "the parses' results have their frozen digest");
+    if (!valid || test->digest != expected)
+    {
+        fprintf(stderr, "IR parser: digest %#018" PRIx64 " (%s)\n", test->digest, path);
+    }
+    arena_pop_to(source, source_mark);
+}
+
+static void ir_parse_test_invalid(IrParseTest* test, Arena* source_arena, Arena* output, Arena* scratch)
+{
+    const uint64_t source_mark = source_arena->length;
+    uint32_t count = 0;
+    const IrParseTestCase* cases = ir_parse_test_cases_load(test, "invalid", source_arena, &count);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
         IrFunction function;
-        const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
+        const IrParseResult parsed = ir_parse_test_one(test, cases[i].source, output, scratch, &function);
         if (parsed.error != cases[i].error && test->failures < BUSTER_IR_PARSE_TEST_REPORTS)
         {
-            fprintf(stderr, "IR parser: case %u expected %u, got %u at %" PRIu64 "\n", i, (unsigned)cases[i].error, (unsigned)parsed.error, (uint64_t)parsed.offset);
+            fprintf(stderr, "IR parser: case %s expected %u, got %u at %" PRIu64 "\\n", cases[i].identifier, (unsigned)cases[i].error, (unsigned)parsed.error, (uint64_t)parsed.offset);
         }
         ir_parse_test_expect(test, parsed.error == cases[i].error, "invalid fixture returned the wrong error category");
         if (parsed.error == IR_PARSE_VERIFY)
@@ -447,54 +583,27 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* scrat
             ir_parse_test_expect(test, parsed.check.error != IR_OK, "verifier rejection lost its IR diagnostic");
         }
     }
-    static const char* const overflows[] = {
-        "function () -> void {\nb0:\n%4294967296 = ret.void\n}\n",
-        "function () -> void {\nb0:\n%0 = const.i128 0x100000000000000000000000000000000\n%1 = ret.void\n}\n",
-        "function () -> void {\nslot $0 size=18446744073709551616 align=1 type=void flags=0x00\nb0:\n%0 = ret.void\n}\n",
-        "function () -> void {\nb0:\n%0 = undef.ptr\n%1 = address.ptr %0 offset=-9223372036854775809\n%2 = ret.void\n}\n",
-        "function () -> void {\nb0:\n%0 = undef.ptr\n%1 = address.ptr %0 offset=9223372036854775808\n%2 = ret.void\n}\n",
-    };
-    for (uint32_t i = 0; i < sizeof(overflows) / sizeof(overflows[0]); i += 1)
+    arena_pop_to(source_arena, source_mark);
+    cases = ir_parse_test_cases_load(test, "overflow", source_arena, &count);
+    for (uint32_t i = 0; i < count; i += 1)
     {
-        const String8 source = {
-            .pointer = (char*)overflows[i],
-            .length = strlen(overflows[i]),
-        };
         IrFunction function;
-        const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
+        const IrParseResult parsed = ir_parse_test_one(test, cases[i].source, output, scratch, &function);
         ir_parse_test_expect(test, parsed.error == IR_PARSE_LIMIT || parsed.error == IR_PARSE_SYNTAX, "numeric overflow was accepted or escaped lexical validation");
     }
+    arena_pop_to(source_arena, source_mark);
 }
 
-static void ir_parse_test_reachable(IrParseTest* test, Arena* output, Arena* scratch)
+static void ir_parse_test_reachable(IrParseTest* test, Arena* source_arena, Arena* output, Arena* scratch)
 {
-    static const IrParseTestCase cases[] = {
-        {
-            "function () -> i64 {\nslot $0 size=8 align=8 type=i64 flags=0x00\nb0:\n%0 = stack_addr.ptr $0\n%1 = const.i64 0x1\n%2 = ret.void %1\nb1:\n%3 = load.i64 %0 align=8\n%4 = ret.void %3\n}\n",
-            IR_PARSE_OK,
-        },
-        {
-            "function (i1) -> i64 {\nb0:\n%0 = param.i1 0\n%1 = cbr.void %0, b1, b2\nb1:\n%2 = const.i64 0x7\n%3 = br.void b3\nb2:\n%4 = br.void b3\nb3:\n%5 = ret.void %2\n}\n",
-            IR_PARSE_VERIFY,
-        },
-        {
-            "function () -> i64 {\nb0:\n%0 = br.void b2\nb1:\n%1 = const.i64 0x7\n%2 = br.void b2\nb2:\n%3 = ret.void %1\n}\n",
-            IR_PARSE_VERIFY,
-        },
-        {
-            "function () -> i64 {\nb0:\n%0 = const.i64 0x1\n%1 = br.void b2\nb1:\n%2 = const.i64 0x2\n%3 = br.void b2\nb2:\n%4 = phi.i64 [%0, b0], [%2, b1]\n%5 = ret.void %4\n}\n",
-            IR_PARSE_OK,
-        },
-    };
-    for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
+    const uint64_t source_mark = source_arena->length;
+    uint32_t count = 0;
+    const IrParseTestCase* cases = ir_parse_test_cases_load(test, "reachable", source_arena, &count);
+    for (uint32_t i = 0; i < count; i += 1)
     {
         const uint64_t output_mark = output->length;
-        const String8 source = {
-            .pointer = (char*)cases[i].text,
-            .length = strlen(cases[i].text),
-        };
         IrFunction function;
-        const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
+        const IrParseResult parsed = ir_parse_test_one(test, cases[i].source, output, scratch, &function);
         ir_parse_test_expect(test, parsed.error == cases[i].error, "reachable-use dominance policy returned the wrong outcome");
         if (cases[i].error == IR_PARSE_VERIFY)
         {
@@ -502,6 +611,7 @@ static void ir_parse_test_reachable(IrParseTest* test, Arena* output, Arena* scr
         }
         arena_pop_to(output, output_mark);
     }
+    arena_pop_to(source_arena, source_mark);
 }
 
 static void ir_parse_test_guards(IrParseTest* test, Arena* output, Arena* scratch)
@@ -703,7 +813,7 @@ static void ir_parse_test_spelling_table(IrParseTest* test, const char* const* n
     }
 }
 
-static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* scratch)
+static void ir_parse_test_locations(IrParseTest* test, Arena* source_arena, Arena* output, Arena* scratch)
 {
     static const char syntax[] = "function () -> void {\nb0:\n  %0 ret.void\n}\n";
     static const char verify[] = "function () -> void {\nb0:\n  %0 = copy.i64 %0\n  %1 = ret.void\n}\n";
@@ -724,28 +834,16 @@ static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* scr
                          verify_result.offset == (uint64_t)(strstr(verify, "%0") - verify) && verify_result.check.instruction == 0,
                          "verification diagnostic lost the offending instruction location");
     // The error points to the beginning of the complete name, including an empty name.
-    static const struct
+    const uint64_t source_mark = source_arena->length;
+    uint32_t count = 0;
+    const IrParseTestCase* names = ir_parse_test_cases_load(test, "diagnostics", source_arena, &count);
+    for (uint32_t i = 0; i < count; i += 1)
     {
-        const char* text;
-        const char* rejected;
-        uint32_t line;
-        uint32_t column;
-    } names[] = {
-        { "function (i12) -> void {\n", "i12", 1, 11 },
-        { "function () ->   {\n", "{", 1, 18 },
-        { "function () -> void {\nb0:\n  %0 = .i32\n", ".", 3, 8 },
-        { "function () -> void {\nb0:\n  %0 = call_indirec.void\n", "call_indirec", 3, 8 },
-        { "function () -> void {\nb0:\n  %0 = call_indirectx.void\n", "call_indirectx", 3, 8 },
-        { "function () -> void {\nb0:\n  %0 = fence.void acq_relaxed\n", "acq_relaxed", 3, 19 },
-    };
-    for (uint32_t i = 0; i < sizeof(names) / sizeof(names[0]); i += 1)
-    {
-        const String8 source = { (char*)names[i].text, strlen(names[i].text) };
-        const IrParseResult result = ir_parse_test_one(test, source, output, scratch, &function);
-        const uint64_t offset = (uint64_t)(strstr(names[i].text, names[i].rejected) - names[i].text);
-        ir_parse_test_expect(test, result.error == IR_PARSE_SYNTAX && result.consumed == 0 && result.offset == offset &&
+        const IrParseResult result = ir_parse_test_one(test, names[i].source, output, scratch, &function);
+        ir_parse_test_expect(test, result.error == IR_PARSE_SYNTAX && result.consumed == 0 && result.offset == names[i].offset &&
                              result.line == names[i].line && result.column == names[i].column, "named token lost its syntax diagnostic");
     }
+    arena_pop_to(source_arena, source_mark);
     const uint64_t output_mark = output->length;
     memset(&function, 0x5a, sizeof(function));
     uint8_t saved[sizeof(function)];
@@ -884,6 +982,7 @@ static void ir_parse_test_normalization(IrParseTest* test, Arena* output, Arena*
 
 static int run_ir_parse_tests(int argc, char** argv)
 {
+    ir_parse_test_fixture_root = "tests";
     int result = 1;
     if (argc == 2 && strcmp(argv[0], "--fixtures") == 0 && argv[1][0] != 0)
     {
@@ -920,11 +1019,11 @@ static int run_ir_parse_tests(int argc, char** argv)
             ir_parse_test_spelling_table(&test, ir_op_names, ir_op_name_lengths, IR_OP_COUNT);
             ir_parse_test_spelling_table(&test, ir_type_names, ir_type_name_lengths, IR_TYPE_COUNT);
             ir_parse_test_spelling_table(&test, ir_intrinsic_names, ir_intrinsic_name_lengths, BUSTER_IR_INTRINSIC_COUNT);
-            ir_parse_test_invalid(&test, &output, &scratch);
-            ir_parse_test_reachable(&test, &output, &scratch);
+            ir_parse_test_invalid(&test, &source, &output, &scratch);
+            ir_parse_test_reachable(&test, &source, &output, &scratch);
             ir_parse_test_comments(&test, &output, &scratch);
             ir_parse_test_newline_runs(&test, &output, &scratch);
-            ir_parse_test_locations(&test, &output, &scratch);
+            ir_parse_test_locations(&test, &source, &output, &scratch);
             ir_parse_test_normalization(&test, &output, &scratch);
             ir_parse_test_guards(&test, &output, &scratch);
             ir_parse_test_capacity(&test, &output, &scratch);
@@ -934,11 +1033,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 preserved = preserved && output_prefix[byte] == 0xa5 && scratch_prefix[byte] == 0xa5;
             }
             ir_parse_test_expect(&test, preserved, "parser tests changed the caller's arena prefixes");
-            ir_parse_test_expect(&test, test.digest == BUSTER_IR_PARSE_TEST_DIGEST, "the parses' results have their frozen digest");
-            if (test.digest != BUSTER_IR_PARSE_TEST_DIGEST)
-            {
-                fprintf(stderr, "IR parser: digest %#018" PRIx64 "\n", test.digest);
-            }
+            ir_parse_test_digest_expected(&test, &source);
         }
         fprintf(stderr, "IR parser: %" PRIu64 " checks, %" PRIu64 " functions, %" PRIu64 " failures\n", test.checks, test.functions, test.failures);
         result = test.failures != 0;

@@ -1,0 +1,58 @@
+buster-fixtures v1 ir-parser-cases
+0001	0001.ir	end	-	0	0
+0002	0002.ir	end	-	0	0
+0003	0003.ir	syntax	-	0	0
+0004	0004.ir	syntax	-	0	0
+0005	0005.ir	syntax	-	0	0
+0006	0006.ir	syntax	-	0	0
+0007	0007.ir	syntax	-	0	0
+0008	0008.ir	syntax	-	0	0
+0009	0009.ir	syntax	-	0	0
+0010	0010.ir	syntax	-	0	0
+0011	0011.ir	syntax	-	0	0
+0012	0012.ir	syntax	-	0	0
+0013	0013.ir	syntax	-	0	0
+0014	0014.ir	limit	-	0	0
+0015	0015.ir	syntax	-	0	0
+0016	0016.ir	verify	-	0	0
+0017	0017.ir	verify	-	0	0
+0018	0018.ir	verify	-	0	0
+0019	0019.ir	verify	-	0	0
+0020	0020.ir	verify	-	0	0
+0021	0021.ir	syntax	-	0	0
+0022	0022.ir	syntax	-	0	0
+0023	0023.ir	limit	-	0	0
+0024	0024.ir	syntax	-	0	0
+# An intrinsic operation has its own name, result type and operand types.
+0025	0025.ir	syntax	-	0	0
+0026	0026.ir	syntax	-	0	0
+0027	0027.ir	verify	-	0	0
+0028	0028.ir	verify	-	0	0
+0029	0029.ir	verify	-	0	0
+0030	0030.ir	syntax	-	0	0
+0031	0031.ir	verify	-	0	0
+0032	0032.ir	verify	-	0	0
+0033	0033.ir	verify	-	0	0
+0034	0034.ir	verify	-	0	0
+0035	0035.ir	verify	-	0	0
+0036	0036.ir	verify	-	0	0
+0037	0037.ir	verify	-	0	0
+0038	0038.ir	verify	-	0	0
+0039	0039.ir	verify	-	0	0
+0040	0040.ir	verify	-	0	0
+0041	0041.ir	verify	-	0	0
+0042	0042.ir	verify	-	0	0
+0043	0043.ir	verify	-	0	0
+0044	0044.ir	verify	-	0	0
+0045	0045.ir	verify	-	0	0
+0046	0046.ir	verify	-	0	0
+# Atomic accesses need natural alignment for x86 single-copy atomicity.
+0047	0047.ir	verify	-	0	0
+0048	0048.ir	verify	-	0	0
+# A segment override belongs to a load or store alone.
+0049	0049.ir	syntax	-	0	0
+0050	0050.ir	verify	-	0	0
+# Compare-exchange needs a desired value of the right type; exchange has none.
+0051	0051.ir	verify	-	0	0
+0052	0052.ir	verify	-	0	0
+0053	0053.ir	verify	-	0	0

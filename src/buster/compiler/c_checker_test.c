@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include "test_paths.h"
 
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #define BUSTER_CHECK_TEST_BATCH 257u
@@ -3381,6 +3382,25 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
 static const char* check_test_fixture_root = "tests";
 static const char check_test_fixture_header[] = "buster-fixtures v1 checker-sources";
 
+static bool check_test_fixture_path(char* path, size_t capacity, const char* relative)
+{
+    return test_fixture_path(path, capacity, check_test_fixture_root, relative);
+}
+
+static char check_test_source_digest_path[PATH_MAX];
+static char check_test_stream_digest_path[PATH_MAX];
+
+static bool check_test_fixture_digests(void)
+{
+    test_digests_reset(&check_source_digests);
+    test_digests_reset(&check_stream_digests);
+    const bool valid = check_test_fixture_path(check_test_source_digest_path, sizeof(check_test_source_digest_path), "checker/source-digests.tsv") &&
+                       check_test_fixture_path(check_test_stream_digest_path, sizeof(check_test_stream_digest_path), "checker/stream-digests.tsv");
+    check_source_digests.path = check_test_source_digest_path;
+    check_stream_digests.path = check_test_stream_digest_path;
+    return valid;
+}
+
 enum
 {
     // A catalog's cases, and a catalog's or a case file's bytes, at most.
@@ -3475,6 +3495,35 @@ static bool check_test_fixture_word(const char* text, size_t limit)
     return word;
 }
 
+static bool check_test_fixture_columns(char* row, char** fields, uint32_t count)
+{
+    bool valid = true;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        fields[i] = strsep(&row, "\t");
+        valid = valid && fields[i] != NULL && fields[i][0] != 0;
+    }
+    return valid && row == NULL;
+}
+
+static bool check_test_fixture_u32(const char* text, uint32_t* value)
+{
+    bool valid = text != NULL && *text != 0;
+    uint32_t number = 0;
+    for (const char* at = text; valid && *at != 0; at += 1)
+    {
+        valid = *at >= '0' && *at <= '9';
+        const uint32_t digit = valid ? (uint32_t)(*at - '0') : 0;
+        valid = valid && number <= (UINT32_MAX - digit) / 10;
+        number = valid ? number * 10 + digit : number;
+    }
+    if (valid)
+    {
+        *value = number;
+    }
+    return valid;
+}
+
 // A case's comma-separated flags, or -, into `fixture`; false, with the reason in `fixtures->problem`, for an unknown one.
 static bool check_test_fixture_flags(CheckTestFixtures* fixtures, char* flags, CheckSourceFixture* fixture, uint32_t line)
 {
@@ -3489,15 +3538,15 @@ static bool check_test_fixture_flags(CheckTestFixtures* fixtures, char* flags, C
             {
                 *comma = 0;
             }
-            if (strcmp(flag, "rejected") == 0)
+            if (strcmp(flag, "rejected") == 0 && !fixture->rejected)
             {
                 fixture->rejected = true;
             }
-            else if (strcmp(flag, "unsupported") == 0)
+            else if (strcmp(flag, "unsupported") == 0 && !fixture->unsupported)
             {
                 fixture->unsupported = true;
             }
-            else if (strcmp(flag, "extension") == 0)
+            else if (strcmp(flag, "extension") == 0 && !fixture->extension)
             {
                 fixture->extension = true;
             }
@@ -3513,11 +3562,11 @@ static bool check_test_fixture_flags(CheckTestFixtures* fixtures, char* flags, C
             {
                 fixture->standard = 1999;
             }
-            else if (strcmp(flag, "unsigned-char") == 0)
+            else if (strcmp(flag, "unsigned-char") == 0 && !fixture->char_unsigned)
             {
                 fixture->char_unsigned = true;
             }
-            else if (strcmp(flag, "undecided") == 0)
+            else if (strcmp(flag, "undecided") == 0 && !fixture->undecided)
             {
                 fixture->undecided = true;
             }
@@ -3593,8 +3642,8 @@ static bool check_test_fixtures_load_bound(CheckTestFixtures* fixtures, const ch
     *fixtures = (CheckTestFixtures){ .storage = arena_reserve(UINT64_C(1) << 28) };
     char directory[PATH_MAX];
     char path[PATH_MAX + 64];
-    snprintf(directory, sizeof(directory), "%s/%s", check_test_fixture_root, suite);
-    snprintf(path, sizeof(path), "%s/catalog.tsv", directory);
+    const bool named = check_test_fixture_path(directory, sizeof(directory), suite) &&
+                       test_fixture_path(path, sizeof(path), directory, "catalog.tsv");
     fixtures->cases = arena_push(&fixtures->storage, sizeof(CheckSourceFixture) * CHECK_TEST_FIXTURE_CASES, 8);
     fixtures->files = arena_push(&fixtures->storage, sizeof(const char*) * CHECK_TEST_FIXTURE_CASES, 8);
     const char** identifiers = arena_push(&fixtures->storage, sizeof(const char*) * CHECK_TEST_FIXTURE_CASES, 8);
@@ -3603,7 +3652,11 @@ static bool check_test_fixtures_load_bound(CheckTestFixtures* fixtures, const ch
         fixtures->expected = arena_push(&fixtures->storage, sizeof(*fixtures->expected) * CHECK_TEST_FIXTURE_CASES, 8);
     }
     uint64_t length = 0;
-    char* catalog = fixtures->cases != 0 && fixtures->files != 0 && identifiers != 0 && (!with_expected || fixtures->expected != NULL) ? check_test_fixture_read(fixtures, path, &length) : 0;
+    char* catalog = named && fixtures->cases != 0 && fixtures->files != 0 && identifiers != 0 && (!with_expected || fixtures->expected != NULL) ? check_test_fixture_read(fixtures, path, &length) : 0;
+    if (!named)
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "fixture path is too long for suite '%s'", suite);
+    }
     bool valid = catalog != 0;
     if (valid && (length == 0 || catalog[length - 1] != '\n'))
     {
@@ -3716,6 +3769,25 @@ static bool check_test_fixtures_load_bound(CheckTestFixtures* fixtures, const ch
 static bool check_test_fixtures_load(CheckTestFixtures* fixtures, const char* suite)
 {
     return check_test_fixtures_load_bound(fixtures, suite, NULL, 0, false);
+}
+
+// Required names select compiled structural checks. Additional ordinary rows do not change this coverage contract.
+static bool check_test_fixtures_require(CheckTest* test, const CheckTestFixtures* fixtures, const char* const* names, uint32_t count)
+{
+    bool complete = true;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        uint32_t found = 0;
+        for (uint32_t c = 0; c < fixtures->count; c += 1)
+        {
+            found += strcmp(fixtures->cases[c].name, names[i]) == 0;
+        }
+        char description[256];
+        snprintf(description, sizeof(description), "required fixture '%s' occurs exactly once (%u found)", names[i], found);
+        check_test_expect(test, found == 1, description);
+        complete = complete && found == 1;
+    }
+    return complete;
 }
 
 enum
@@ -4504,6 +4576,7 @@ static void check_test_undeclared(CheckTest* test, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
 {
+    check_test_fixture_root = "tests";
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
     // (oracle_epoch_begin, oracle_cache.c).
     const bool epoch = oracle_epoch_begin();
@@ -4514,6 +4587,7 @@ static int run_checker_tests(int argc, char** argv)
     bool direct_initializers = false;
     bool program_initializers = false;
     bool program_selection = false;
+    bool program_fixtures = false;
     bool const_values = false;
     bool program_vectors = false;
     bool program_amx = false;
@@ -4551,6 +4625,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--program-selection") == 0)
         {
             program_selection = true;
+        }
+        else if (strcmp(argv[i], "--program-fixtures") == 0)
+        {
+            program_fixtures = true;
         }
         else if (strcmp(argv[i], "--const-values") == 0)
         {
@@ -4644,16 +4722,23 @@ static int run_checker_tests(int argc, char** argv)
     options = options && (check_test_part.count == 1 || !(direct_initializers || program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
                                                            program_library || embed_initializers || requests || attested || sizeof_only || transitions_only || semantic_diagnostics ||
-                                                           program_selection));
+                                                           program_selection || program_fixtures));
+    options = options && check_test_fixture_digests();
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--fixtures DIR] [--part K/N] [--direct-initializers|--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--attested|--const-values|--sizeof|--transitions|--semantic-diagnostics]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--fixtures DIR] [--part K/N] [--direct-initializers|--program-initializers|--program-selection|--program-fixtures|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--attested|--const-values|--sizeof|--transitions|--semantic-diagnostics]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && direct_initializers)
+        if (initialized && program_fixtures)
+        {
+            check_test_constant_conversions(&test, clang);
+            check_test_branch_conditions(&test, clang);
+            check_test_program_implicit_int(&test, clang);
+        }
+        else if (initialized && direct_initializers)
         {
             check_test_direct_initializers(&test, clang);
         }

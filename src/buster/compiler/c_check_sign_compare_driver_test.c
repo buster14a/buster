@@ -56,8 +56,8 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
         { "compound unsigned mask retains its computation range", "int f(signed char x,unsigned mask,unsigned n){return (x&=mask)<n;}\n", 0, NULL, NULL },
         { "compound negative mask can remain negative", "int f(signed char x,unsigned n){return (x&=-1)<n;}\n", 1, NULL, NULL },
         { "compound right shift preserves signed range", "int f(signed char x,unsigned n){return (x>>=1)<n;}\n", 1, NULL, NULL },
-        { "ordinary conditional result ranges", NULL, 43, NULL, "tests/driver/sign_compare_conditional.c" },
-        { "arithmetic and converted result ranges", NULL, 36, "-Wno-constant-conversion", "tests/driver/sign_compare_ranges.c" },
+        { "ordinary conditional result ranges", NULL, 43, NULL, "driver/sign_compare_conditional.c" },
+        { "arithmetic and converted result ranges", NULL, 36, "-Wno-constant-conversion", "driver/sign_compare_ranges.c" },
     };
     static const char* const policies[] = { NULL, "-Werror=sign-compare", "-Wno-sign-compare", "-w" };
     char source[PATH_MAX];
@@ -69,9 +69,10 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
         char* file_source = NULL;
         if (cases[c].file != NULL)
         {
-            const int file = open(cases[c].file, O_RDONLY | O_CLOEXEC);
+            char path[PATH_MAX];
+            const int file = check_test_fixture_path(path, sizeof(path), cases[c].file) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
             const bool read = file >= 0 && check_test_driver_read_file(file, &file_source);
-            check_test_expect(test, read, "sign-comparison fixture is read (run from the repository root)");
+            check_test_expect(test, read, "sign-comparison fixture is read");
             if (file >= 0)
             {
                 close(file);

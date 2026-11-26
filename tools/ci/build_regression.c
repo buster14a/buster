@@ -1323,9 +1323,9 @@ static const char ownership_checker_units[] = "main_unit_backend.c main_unit_che
 static const char ownership_backend_units[] = "main_unit_backend.c main_unit_checker.c";
 
 static const OwnershipException ownership_exceptions[] = {
-    { "src/buster/compiler/c_checker_test.c", ownership_checker_units, "comparison helpers for checker, builtin and backend consumers", UINT64_C(0xd9302eb5f10668a6) },
+    { "src/buster/compiler/c_checker_test.c", ownership_checker_units, "comparison helpers for checker, builtin and backend consumers; explicit runtime-path support include", UINT64_C(0xcaf42b6f7ed86fd2) },
     { "src/buster/compiler/c_parser_test.c", ownership_main_units, "parser construction and subprocess helpers used by shared parser/checker roots", UINT64_C(0xe85650d00dd1a0ba) },
-    { "src/buster/compiler/c_preprocessor_test.c", ownership_main_units, "preprocessor input and result builders used by shared parser helpers, and the digest tables (TestDigests) the parser's and the checker's tests read", UINT64_C(0x20dc465340221dac) },
+    { "src/buster/compiler/c_preprocessor_test.c", ownership_main_units, "preprocessor input and result builders used by shared parser helpers, and shared digest tables with reset for a new fixture root", UINT64_C(0x1eba45e1851a29ab) },
     { "src/buster/compiler/c_preprocessor_history_test.c", "main_unit_frontend.c main_unit_checker.c", "history matcher for preprocessor and checker pragma tests", UINT64_C(0x338bcc2b5286ad74) },
     { "src/buster/compiler/foreign_test.c", "main_unit_executable.c main_unit_checker.c", "foreign executable and checker debug/unwind builders", UINT64_C(0x3932f8b6055a62cb) },
     { "src/buster/compiler/ir_source_test.c", "main_unit_backend.c main_unit_checker.c", "source preparation interface for IR commands; CHECKER owns its implementation", UINT64_C(0x8366575ba00f1461) },
@@ -1355,7 +1355,7 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/x86_64_encoder_test.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_assembler.c main_unit_link.c main_unit_backend.c", "encoding/execute helpers for these six test families", UINT64_C(0xc4d128a61e85c6d3) },
     { "src/buster/compiler/x86_intrinsics_test.c", "main_unit_checker.c main_unit_x86.c", "object reading and instruction decoding for checker AMX and intrinsic tests", UINT64_C(0x83a1dc58c44b290a) },
     { "src/buster/compiler/x86_semantics_test.c", ownership_main_units, "form names for DRIVER/BACKEND and six forced-emission globals retained in all units", UINT64_C(0x929ee4e6ddcf62ef) },
-    { "src/buster/compiler/test_paths.h", ownership_main_units, "temporary-directory normalization and profiling paths shared by the checker, dynamic and executable test units", UINT64_C(0xba41187e146e65bd) },
+    { "src/buster/compiler/test_paths.h", ownership_main_units, "temporary-directory normalization, profiling paths and bounded runtime-fixture path joins", UINT64_C(0x12376d84ec0b92a5) },
     { "src/buster/compiler/test_tool.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_backend.c", "external tool probes for these six test families", UINT64_C(0xfc1a967b31b9b4af) },
     { "src/buster/compiler/test_tool.h", "main.c main_unit_x86.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_backend.c", "tool probe interface for its six implementation consumers", UINT64_C(0x398696e707640aa9) },
     { "src/buster/compiler/test_process.c", ownership_main_units, "CPU grant and capture-file helpers used by shared parser/process interfaces; its parts the frontend's and test-ssa-source's (#2658)", UINT64_C(0x853d3c228ca22194) },

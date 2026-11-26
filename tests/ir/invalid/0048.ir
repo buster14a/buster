@@ -1,0 +1,7 @@
+function (ptr, i32) -> void {
+b0:
+%0 = param.ptr 0
+%1 = param.i32 1
+%2 = store.void %0, %1 align=2 atomic release
+%3 = ret.void
+}

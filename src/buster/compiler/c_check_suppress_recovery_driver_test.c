@@ -8,7 +8,8 @@
 
 static void check_test_driver_suppress_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    FILE* catalog = fopen("tests/driver/suppress_recovery.cases", "r");
+    char path[PATH_MAX];
+    FILE* catalog = check_test_fixture_path(path, sizeof(path), "driver/suppress_recovery.cases") ? fopen(path, "r") : NULL;
     check_test_expect(test, catalog != NULL, "suppress recovery runtime catalogue is available");
     static const char* const standards[] =
     {

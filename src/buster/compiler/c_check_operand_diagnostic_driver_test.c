@@ -41,14 +41,17 @@ static void check_test_driver_operand_deferred(CheckTest* test, const char* clan
 // source with each reader and the deferred path, link it with the same Clang driver, and run its two-arm controls.
 static void check_test_driver_atomic_conditional(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    char source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/operand_diagnostics/atomic_conditional.c");
+    check_test_expect(test, located, "atomic conditional: fixture path fits");
     char object[PATH_MAX];
     char binary[PATH_MAX];
     snprintf(object, sizeof(object), "%s/atomic-conditional.o", directory);
     snprintf(binary, sizeof(binary), "%s/atomic-conditional", directory);
-    for (uint32_t route = 0; route < 4; route += 1)
+    for (uint32_t route = 0; located && route < 4; route += 1)
     {
         const char* compiler = route == 0 ? clang : executable != NULL ? executable : "/proc/self/exe";
-        char* arguments[12] = { (char*)compiler, "-std=gnu17", "-c", "tests/driver/operand_diagnostics/atomic_conditional.c", "-o", object };
+        char* arguments[12] = { (char*)compiler, "-std=gnu17", "-c", source, "-o", object };
         uint32_t count = 6;
         if (route == 2)
         {
@@ -109,12 +112,14 @@ static void check_test_driver_operand_diagnostics(CheckTest* test, const char* c
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)
     {
-        char path[256];
-        snprintf(path, sizeof(path), "tests/driver/operand_diagnostics/%s.c", files[i].name);
-        const int descriptor = open(path, O_RDONLY);
+        char relative[256];
+        char path[PATH_MAX];
+        const int size = snprintf(relative, sizeof(relative), "driver/operand_diagnostics/%s.c", files[i].name);
+        const bool located = size >= 0 && (size_t)size < sizeof(relative) && check_test_fixture_path(path, sizeof(path), relative);
+        const int descriptor = located ? open(path, O_RDONLY) : -1;
         char* source = NULL;
         const bool read = descriptor >= 0 && check_test_driver_read_file(descriptor, &source);
-        check_test_expect(test, read, "invalid-operand runtime fixture is available (run from the repository root)");
+        check_test_expect(test, read, "invalid-operand runtime fixture is available");
         if (descriptor >= 0)
         {
             close(descriptor);
