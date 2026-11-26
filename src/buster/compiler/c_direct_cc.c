@@ -1510,7 +1510,9 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                     cur_bf = NULL;
                 }
             }
-            if (fast_cc_peek(cc) == FTOK_ASSIGN) { cc->pos += 1u; }
+            // #3577: a designator without its `=` is GNU's, the full pipeline's -Wgnu-designator.
+            if (fast_cc_peek(cc) != FTOK_ASSIGN) { fast_cc_bail(cc, "a designator without its ="); break; }
+            cc->pos += 1u;
             if (cc->bailout) { break; }
             // #3577: a target the frame initialized (-Winitializer-overrides); and the positional elements after a designator
             // into a member's member continue there, which this path doesn't follow.
@@ -8600,7 +8602,9 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                     cur_bf = NULL;
                 }
             }
-            if (fast_cc_peek(cc) == FTOK_ASSIGN) { cc->pos += 1u; }
+            // #3577: a designator without its `=` is GNU's, the full pipeline's -Wgnu-designator.
+            if (fast_cc_peek(cc) != FTOK_ASSIGN) { fast_cc_bail(cc, "a designator without its ="); break; }
+            cc->pos += 1u;
             if (cc->bailout) { break; }
             // #3577: a target the frame initialized (-Winitializer-overrides); and the positional elements after a designator
             // into a member's member continue there, which this path doesn't follow.

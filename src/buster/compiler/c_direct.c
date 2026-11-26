@@ -4673,6 +4673,9 @@ static int c_direct_unit_tests(void)
         "int* f(int x) { return (int*)x; }\n",
         "void* f(char c) { return (void*)c; }\n",
         "unsigned long f(void* p) { return sizeof((int)p); }\n",
+        // -Wgnu-designator: an array designator without its `=`.
+        "int a[3] = { [1] 2 };\nint f(void) { return a[1]; }\n",
+        "int f(void) { int a[3] = { [1] 2 }; return a[1]; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
