@@ -4267,20 +4267,25 @@ instruction selection, encoding, branch-sizing, and link-object passes, `c_direc
 with private unity fragments `c_direct_lex.c`, `c_direct_x86.c`, `c_direct_types.c`, `c_direct_cc.c`) compiles clean
 single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an ELF64 `.o` file in one pass:
 
-- **Lexer and preprocessor (`c_direct_lex.c`):** the text becomes raw tokens (kind, first byte, length) a window of
-  2,048 at a time, in blocks of exactly 64 bytes (`fast_pp_lex_window`): one class table's lookup and a bit test a
-  class, the two-character punctuators from the two characters' classes at even places of each run of candidates, and
-  kinds, first bytes and lengths packed by three compresses and an expand. A block does no branch on its tokens and
-  carries what crosses its end in registers; it stops only at a byte that needs a decision (a comment, a directive, a
-  literal, a splice), and a token the masks cannot decide (`<<=`, a `.` before a digit, a number that goes on past its
-  digits) stays in the window marked for `fast_lex_one`. The emitter (`fast_pp_emit_window`) stores 64 kinds at a time
-  and visits the identifiers, numbers and literals: a 16 K-slot L2 identifier cache backed by a 64-way AVX-512
-  SwissTable, inline 1-to-8-digit decimal integers, and in-place expansion for empty, 1-token, 0-param-use
-  (`assert`/`testcase`), 1-param identity-wrapper (`ALWAYS`/`NEVER`) and short constant macros. Directives and macro
-  arguments read the same window (`fast_pp_read_tok`). An inactive group is skipped by masks too
-  (`fast_pp_skip_inactive`): each line's first character, a comment's start and what a literal may hide, 64 bytes a
-  step. Macro expansion is strictly iterative (`call_stack` + `arg_buf`, zero recursion). `test-direct` lexes its
-  cases at every offset of a block.
+- **Lexer and preprocessor (`c_direct_lex.c`):** the text becomes raw tokens (kind, first byte from the window's,
+  length) a window of 2,048 at a time, in blocks of exactly 64 bytes (`fast_pp_lex_window`): a class table's lookup on
+  the block's bytes and another on the bytes one further on (runs' ends, a `.` that goes on as a number, a
+  punctuator's second character, without a shift across the block's end), the two-character punctuators from the two
+  characters' classes, and kinds, first bytes and last bytes packed by three compresses (a token's last byte is the
+  n-th one when its first is). Only where candidates touch (`<<=`, `a+++b`), one is at the block's last byte or a `.`
+  goes on, a rare branch takes them at even places of each run and marks them. A block carries what crosses its end in
+  registers; it stops only at a byte that needs a decision (a comment, a directive, a literal, a splice), and a
+  comment that closes in the same block is passed from the block's own bytes. A token the masks cannot decide (`<<=`,
+  a `.` before a digit, a number that goes on past its digits) stays in the window marked for `fast_lex_one`. The
+  emitter (`fast_pp_emit_window`) stores 64 kinds at a time and visits the identifiers, numbers and literals: a
+  16 K-slot L2 identifier cache backed by a 64-way AVX-512 SwissTable, inline 1-to-8-digit decimal integers, and
+  in-place expansion for empty, 1-token, 0-param-use (`assert`/`testcase`), 1-param identity-wrapper
+  (`ALWAYS`/`NEVER`) and short constant macros. A directive's line and a macro call's arguments are converted from
+  the same window in bulk, and read a token at a time (`fast_pp_read_tok`) only where the window can't give them
+  whole (["Macro calls and directives in bulk"](#macro-calls-and-directives-in-bulk-2026-11-25-3584)). An inactive
+  group is skipped by masks too (`fast_pp_skip_inactive`): each line's first
+  character, a comment's start and what a literal may hide, 64 bytes a step. Macro expansion is strictly iterative
+  (`call_stack` + `arg_buf`, zero recursion). `test-direct` lexes its cases at every offset of a block.
 - **Direct one-pass parser, type checker, and SysV AMD64 emitter (`c_direct_types.c`, `c_direct_cc.c`, `c_direct_x86.c`):**
   uses compact 32-bit `FastType` handles, AVX-512 `vpcmpeqd` 16-wide struct-member search (`<= 64` fields, hash table
   above), iterative operator-precedence expression compilation directly into x86-64 machine bytes, lazy `EFLAGS`
@@ -4291,6 +4296,80 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   preventing 8-core Linux THP compaction contention and cutting 8-worker peak RSS to 29.5 MiB. A unit whose main
   file is under 1 MiB is advised the same way whatever the host, and starts with small identifier tables
   (["A small unit's start"](#a-small-units-start-2026-11-25-3592)).
+- **Language modes (#3592):** `-std=` `c99` to `c23` and their GNU forms, `-trigraphs`, `-fno-asm`, and `-w` alone
+  take the direct path, with what each changes for it as clang has it:
+  - a unit with a trigraph leaves; it is scanned 64 bytes a step in each file the unit reads (`fast_has_trigraph`);
+  - a strict mode makes `asm`, and `typeof` before C23, identifiers;
+  - `, ## __VA_ARGS__` keeps its comma, unless the variadic argument is left out, or the macro's only parameter is
+    variadic outside a strict mode;
+  - a strict mode leaves on a `main` that doesn't return `int`.
+- **A declaration's specifiers (#3599):** a declaration without a type specifier leaves. That is implicit int, which
+  C99 refused, or C23's `auto` or GNU's `__auto_type`, whose type is the initializer's. So do:
+  - two storage classes, or one written twice (`fast_cc_storage_class`);
+  - `register` or `auto` at file scope;
+  - a parameter's storage class other than `register`, and a member's or a type name's;
+  - a `for`'s `static`, `extern` or `typedef` declaration;
+  - `inline` or `_Noreturn` on anything but a function.
+
+  At main `f74b0b28` each compiled. Under `-std=c23` `auto x = 1.5;` was an `int`; `for (static int i = 0; …)` made
+  `i` automatic; `__auto_type` after `_Alignas` compiled wrongly; and `__private_extern__ int x;` declared an `int`
+  named `__private_extern__`, then a default `x` where the full pipeline's is hidden.
+- **Raw string literals and a directive's rest (#3600, #3603):** where the mode has raw string literals (GNU's from
+  C99, as the full pipeline's `pp_raw_strings` has them), a unit with one leaves. The scalar lexer leaves at a raw
+  prefix with its `"`; the windowed lexer hands such a run to it; and the scan of a skipped group decides, one literal
+  at a time, each line where an `R` comes right before a `"`, so that `"R"` stays an ordinary string. The rest of a
+  directive's line that the direct path doesn't lex (`fast_pp_skip_to_eol`) is lexed for its literals and comments: a
+  `/*` in a literal starts no comment, and a literal the line's end cuts leaves, as clang warns of one. At main
+  `20f3573e`, `#pragma message("/* look")` and the code after it compiled to an object with no symbols. A
+  `#pragma message` leaves, as clang warns of its text.
+- **musl's inline assembly (#3592's step 6b):** an asm statement of two shapes. One is musl's `syscall`: an `"=a"`
+  output; inputs `"a"`, `"D"`, `"S"` and `"d"`, or `"r"` of a local register variable; clobbers `rcx`, `r11`,
+  `memory` and `cc`. The other is its thread pointer, `mov %%fs:0,%0` with an `"=r"` or `"=a"` output
+  (`fast_cc_asm_statement`). Each input is evaluated into a slot of its own and loaded into its register just before
+  the instruction, and the output is stored from `rax`. A local register variable is a `register` 64-bit integer or
+  pointer labelled with a register a function may clobber (`rax`, `rcx`, `rdx`, `rsi`, `rdi`, `r8` to `r11`); it lives
+  in its slot, and its register holds it only as an input. Any other template, operand, constraint, clobber or label
+  leaves, and so does an input in a clobbered register or one register given twice, as clang refuses those.
+- **musl's atomics (#3592's step 6c):** the thirteen shapes of `arch/x86_64/atomic_arch.h` (`a_cas` and `a_cas_p`'s
+  `lock ; cmpxchg`, `a_swap`'s `xchg`, `a_fetch_add`'s `lock ; xadd`, `a_and` and `a_or` in 32 and 64 bits, `a_inc`,
+  `a_dec`, `a_store`'s `mov` and `lock ; orl $0,(%%rsp)`, `a_barrier`'s empty template, `a_spin`'s `pause`, `a_crash`'s
+  `hlt`, `a_ctz_64`'s `bsf` and `a_clz_64`'s `bsr ; xor $63`), and the empty templates of `explicit_bzero` (`"r"`) and
+  `__libc_start_main` (`"+r"`), each with its exact operands (`fast_cc_asm_atomic`). A memory operand is `*p` or
+  `*(T *)p` of a pointer local, whose size, 4 or 8 bytes, is the operation's; its address is loaded into `rdx`, the
+  register operand into `rax` (`cmpxchg`'s source into `rcx`), and a register output is stored at its own size after the
+  instruction. Another constraint or order, sizes that differ, another clobber than `memory`, or `"=m"` of anything but
+  `*p` leaves. 58 more of musl's units take the direct path in each mode (1,100 of 1,336).
+- **Dead arms (#3592's step 6d):** a `?:` whose condition folds to an integer constant, an `&&` or `||` whose constant
+  left side decides it, and an `if` whose condition folds have a dead side, which is checked as a `sizeof` operand is
+  (`eval_only`): no code, no symbol reference, a call's argument count and conversions checked but not its argument
+  types. The live arm's value is an rvalue in the common type, never a constant (`1 ? 0 : x` is no null pointer
+  constant), and a decided `&&` or `||` is 0 or 1 in a register. A dead `if` branch is checked so
+  (`FastCCState.dead`) only when `fast_cc_dead_simple` finds blocks, `if`s and expression statements in it; a
+  declaration, a jump, a loop, a switch, a label or an asm statement compiles it with code as before. musl's `isnan`,
+  `signbit` and `fpclassify` of a `float` or `double`, and its `FORCE_EVAL`, have a `long double` side; 51 more of its
+  units take the direct path in each mode (1,151 of 1,336), and musl's ctype macros (`0 ? isdigit(a) :
+  ...`) no longer reference the functions. Without code no value holds a register: `fval_release` frees none in
+  `eval_only`, where a `sizeof` operand's call freed `rax` under a live value (#3616).
+- **Function names and `HUGE_VAL` (#3618, #3592):** `__func__` and `__FUNCTION__` are the function's name, told apart
+  from `__PRETTY_FUNCTION__` by its identifier (one token kind holds all three). `__builtin_huge_val()` and
+  `__builtin_huge_valf()`, glibc's `HUGE_VAL` and `HUGE_VALF`, fold to infinities as `__builtin_inf()` does.
+- **`__PRETTY_FUNCTION__` (#3592, `c_direct_pretty.c`):** the signature as clang prints it in C, made from the
+  definition's tokens at the function's first use of it and kept for the rest of the function: the return and
+  parameter types as written (typedef names kept), parameters adjusted (an array to a pointer to its element with its
+  brackets' qualifiers, a function to a pointer, `va_list` to `struct __va_list_tag *`), a declarator's parentheses
+  kept, `(void)` and `()` as clang has them, no storage class or attribute: `void (*f(int, void (*)(int)))(int)`. A
+  declarator is read from its name outward by its parentheses' levels and a type printed by a stack of frames, since the
+  direct path has no recursion. What it can't print as clang does, or what the full pipeline prints otherwise (a
+  parameter's redundant parentheses, `()` after an earlier declaration, a parenthesized name), leaves.
+- **glibc's `assert` (#3592):** in GNU's modes it is a statement expression, `((void) sizeof ((e) ? 1 : 0),
+  __extension__ ({ if (e) ; else __assert_fail (...); }))`, and SQLite's `ALWAYS` and `NEVER` put one in an expression.
+  The direct path compiles no statement in an expression, so that shape alone is rewritten in place, where the
+  expression compiler or a dead branch's scan meets its `__extension__ ({`, as the conditional expression of as many
+  tokens that it computes: `__extension__ ((e) ? (void) 0 : __assert_fail (...))`. Any other statement expression
+  leaves. `__builtin_ceil`, `__builtin_floor` and their float forms are computed inline as the full pipeline's helper
+  computes them, on the bits: no library reference, no flag but a signaling NaN's, DAZ honored. A body nests up to 256
+  statement frames (`BUSTER_FSTMT_FRAMES`); an `else if` takes one. SQLite's `shell.c` takes the direct path with
+  these: 36.7 ms to 6.5 ms on the 9700X.
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 
@@ -4335,9 +4414,10 @@ are in
   flushed after mispredicted branches and 14% backend stalls; the hottest function had 23% of the cycles and the
   twelfth 2%. A token costs about 330 instructions and 1.5 mispredicted branches, through code of about 100 KB.
 - **What did not pay,** measured: a profile-guided build of the unit (-4.4%, all of it in the code generator, and the
-  ceiling of what placing its code can give); `-O2`, `-Os`, alignment and inlining flags (nothing); copying a value a
-  field at a time so that no load waits on a store (360 K fewer such loads, 1.2% slower: they are not on the critical
-  path); directive lines lexed inside the window (a third of the windows, the same time).
+  ceiling of what placing its code can give; `BUSTER_PGO=1` with `BUSTER_PGO_CORPUS` builds it so, #3582); `-O2`,
+  `-Os`, alignment and inlining flags (nothing); copying a value a field at a time so that no load waits on a store
+  (360 K fewer such loads, 1.2% slower: they are not on the critical path); directive lines lexed inside the window (a
+  third of the windows, the same time).
 - **What is left in the front,** by its share of the compile's cycles: the emitter with its identifier lookups
   (13.2%), the window's lexer (8.3%), the expansion engine (5.1%), the directives' and arguments' reader (4.3%), the
   skipper (2.5%), interning new names (2.2%). The code generator's stage reads 1% slower here than on main although
@@ -4403,7 +4483,49 @@ What changed:
   which needs the tables' first pages together: not done.
 - What a small unit still pays is #3592's: the process's own start (0.10 ms of the 0.27), the predefines lexed in
   every process, a header's system calls, and the options and constructs that keep a build's units off the direct
-  path altogether (`-MD`, `-Wall`, `-g`, a strict `-std=`).
+  path altogether (`-Wall`, `-g`; a strict `-std=` takes it since #3592's step 4, and `-MD` and its kin since its
+  dependency files below).
+
+### The kernel's cycles (2026-11-25, #3586)
+
+At main `20f3573e` the kernel took 9.3 M cycles of a `-c sqlite3.c` process's 90 M on the 9700X
+([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-kernel-3586-2026-11-25)).
+By `perf record -g`: the huge pages' first touch 21%, the `munmap` of each source file and header as it ended 14%,
+the object's `writev` 14%, RCU's frees 8%, the files' `mmap` 6%, the include search's path walks 8%. A compile made
+1,729 system calls: 614 `access` (401 found nothing), and an open, a map and an unmap for each of 216 includes of 155
+files, since a header with no guard (`<stddef.h>`, `<bits/mathcalls.h>`) was mapped again at each include.
+
+What changed:
+
+- **A file's mapping is kept for the compile.** Its path and mapping are a record in the persistent arena
+  (`FastFileRecord`), found from the guard table's entry: a header included again is pushed from its mapping with
+  no system call, and no file is unmapped as it ends. `fast_pp_release_files` unmaps them and closes the search
+  directories' descriptors when the compile bails out (the full pipeline runs next in the process) or its caller
+  releases its memory; a terminal command leaves them to its exit, as it leaves its arenas.
+- **A name is looked up from its directory's descriptor:** each search directory is opened (`O_PATH`) by its first
+  search, and one `openat` walks the name alone and gives the descriptor the file is mapped from, where `access`
+  and then `open` each walked the whole path.
+
+| 9700X, a process a unit, CPU 2, 31 rotated runs | main | this | kernel cycles, CPU 2 with the exit's teardown |
+| --- | ---: | ---: | ---: |
+| one function | 0.30 ms | 0.29 ms | 1.84 M to 1.80 M |
+| `stdio.h` and a `printf` | 0.65 ms | **0.58 ms** | 2.57 M to 2.27 M |
+| seven standard headers and a `main` | 1.66 ms | **1.42 ms** | 4.35 M to 3.18 M |
+| musl's `wcwidth.c` | 0.39 ms | 0.37 ms | 2.04 M to 1.99 M |
+| `sqlite3.c` | 16.64 ms | **16.16 ms** | 11.62 M to 9.88 M |
+
+- The process's own kernel cycles on `sqlite3.c` fell 22%, 10.02 M to 7.81 M, and the CPU's 15%: the kernel
+  cycles counted on the CPU include the teardown the exit helper makes after the process (#1444), where the
+  unmapping still happens. A compile makes 1,051 system calls. Every object is the same, on these units and on the
+  record's 7,556 units (1,860 of them the direct path's).
+- `FastPP` is still cleared by `fast_pp_init`. Left to the arena's zero pages, a unit took more faults
+  (`stdio.h`'s 188 became 216): the guard and missing-path tables are read before they are written, two faults a
+  page. The record is why the guard entry stays 16 bytes: in the entry, the mapping made `FastPP` 8 pages larger.
+- **Not done: the arenas' clearing**, now a third of the kernel's cycles on `sqlite3.c`. The arena's tables have
+  capacities for any unit, and each is written from its start: `sqlite3.c` writes 8.2 MB of a 22.4 MB extent, but
+  touches all eleven of its 2 MB regions, so the kernel clears 22 MB. Simulated on that page map, no order of the
+  42 tables touches fewer than nine regions; only tables sized by what a unit writes, growing when full, would clear
+  about the 8 MB used.
 
 ### A declaration's symbols (2026-11-25, #3595)
 
@@ -4437,6 +4559,105 @@ differs is only what this section doesn't claim:
 - objects initialized to zero in `.data` rather than `.bss`;
 - undefined references that only one side's code makes;
 - unused static functions kept.
+
+### The code generator's common cases (2026-11-25, #3581)
+
+The code generator was half of `sqlite3.c`'s compile and had had no redesign. A census of what its branches decide
+came first; the census, every step's readings and the scripts are in
+[buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-generator-3581-2026-11-25).
+
+| 9700X, `sqlite3.c`, CPU 2 | main `09c3b79b` | this | |
+| --- | ---: | ---: | ---: |
+| the product's `-c`, wall (21 rotated runs) | 16.44 ms | **15.57 ms** | -5.3% |
+| user cycles | 81.3 M | **76.6 M** | -5.8% |
+| user instructions | 220.6 M | **205.5 M** | -6.8% |
+| parsing and generating code (the harness's stage, medians of three placements, main `20f3573e`) | 8.61 ms | **7.95 ms** | -7.7% |
+| object | `f558aaf5...` | the same | |
+
+- **The census.** 46,973 expressions of 7.5 tokens; 85% of their identifiers are locals. Their cost is a long tail of
+  shapes: the 120 most common hold 59% of the expressions and about a quarter of their time, so selecting code by an
+  expression's whole shape (the smallest form of "typed and selected in rounds") was not built. What is common is a
+  value's case: 82,000 of `fval_convert`'s 116,000 calls are to the value's own type, 43,000 of `fval_to_gp`'s 130,000
+  take a register, 50,000 of `fval_spill_one`'s 61,000 have nothing to spill, half of the implicit conversions have no
+  pointer to check, `fval_flush_flags` finds flags 7 times in 30,000, and half of the declarators and most specifier
+  lists are one name or one keyword.
+- **What changed.** Those cases are answered inline, in a few ops, by the functions' names; the full functions, out of
+  line, take the rest. A quarter of `fval_convert`'s and `fval_to_gp`'s retired ops had been their entries and exits:
+  their rare cases made each of them save every register it might use on every call. `fval_to_gp`'s loads have a
+  lean function of their own. Every object of the 6,201-unit corpus is unchanged.
+- **What is left:** `fast_cc_expr`'s token loop (12.7% of the compile's ops), the statement loop (6.7%),
+  `fval_emit_call`'s four passes over its arguments (4.5%), and 940 K mispredicted branches, most of them on a
+  token's or a value's kind. Splitting `fast_expr_reduce_top` the same way measured nothing and was dropped.
+
+### Macro calls and directives in bulk (2026-11-25, #3584)
+
+After the window lexer, a directive's line and a function-like macro call's arguments were still read a token at a
+time (`fast_pp_read_tok`, 94,010 calls a compile of `sqlite3.c`), each call scanned its macro's body for the
+parameters to prescan (134,015 iterations), and a body was substituted a token at a time
+([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-bulk-3584-2026-11-25)).
+Now:
+
+- **A stretch of the window converts in bulk** (`fast_pp_window_convert`), sixteen tokens a step. Each token's end
+  comes from its start and length; a string's length is in the window now, where a byte holds it. The space before
+  a token is its start against the end before it, so no gap is scanned. Kinds and flags are made in registers, and a
+  loop visits the identifiers and literals. `fast_pp_window_limit` stops it before a token it can't take whole: one
+  the window left to `fast_lex_one`, a string past 255 bytes, a number that goes on past its run.
+- **A directive's line** (`fast_pp_read_line`): a `#define`'s parameters and body, an `#if`'s expression.
+- **A call's arguments** come from the window (`fast_pp_window_args`) or from the expansion frame on top
+  (`fast_pp_frame_args`). The `)` and the separating commas are found from the kinds as bits, with a prefix sum of the
+  parentheses' depth only where a `(` comes before the first `)`. A call across a window's end, or from an expansion
+  that ends before its `)`, is still read a token at a time.
+- **At `#define`** the body's plain parameters are listed (the prescan list), and for a body without `#` and `##`,
+  where each name stands: a call prescans from the list and substitutes by copies.
+
+| 9700X, `sqlite3.c`, CPU 2 | main `dced4e6b` | this | |
+| --- | ---: | ---: | ---: |
+| the product's `-c`, wall (21 rotated runs) | 16.450 ms | **16.210 ms** | -1.5% |
+| user cycles | 81.33 M | **80.03 M** | -1.6% |
+| user instructions | 220.05 M | **210.74 M** | -4.2% |
+| lexing and preprocessing (the harness's stage at main `20f3573e`, median of three code placements) | 6.953 ms | **6.756 ms** | -2.8% |
+| object | `f558aaf5...` | the same | |
+
+- **Measured and not kept:** the drain's loop over an expansion frame's tokens eight a step (frames are short and stop
+  at the next macro's name: slower than the token loop), and a `#define`'s body tokens all written again whole so
+  that no load waits on the first token's one-byte flag store (0.04 ms slower). Arguments from expansion frames in
+  bulk measured neutral, with fewer instructions.
+- **Checked:** the 7,556-unit corpus gives the same objects (1,860 of its units the direct path's). `test-direct` lays
+  out its macro calls and directives at every offset of a block, puts a call at each place across a window's end, and
+  checks `__LINE__` after calls and directives over lines. A round of single-line faults in the change fails it but
+  for four equivalent ones.
+
+### Dependency files (2026-11-25, #3592)
+
+`-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP` take the direct path, with the rule the full pipeline writes. The direct
+path records the files a unit reads, and the driver makes the rule from those records with the full pipeline's code
+(`dependency_prepare`), before the object is written, and publishes it after (`dependency_publish`). `-M` and `-MM`
+alone don't compile.
+
+- **A record a file**, by its device and inode, under the first path it was read by, in the order of the first
+  readings, as the full pipeline's `pp_dependency_observe` keeps them. The main file's isn't listed. An include that
+  its guard or `#pragma once` skips is a reading too (the guard entry keeps the file's record), and so is a
+  `__has_include` that finds a file. `fast_pp_dependency_find` compares eight records' devices and inodes a step.
+- **A system header's record** is one whose every reading was a system header's. A reading is as much a system
+  header's as the directory the search found it in and its includer are. `#pragma GCC system_header` makes the rest of
+  a header, and the header in its later inclusions, a system header's; in the main file it is ignored, as clang and the
+  full pipeline ignore it. The `--predefines` file is a system header, and an `-include` file is one when the search
+  found it in a system directory.
+- **`__has_include` and `__has_include_next` are defined** to `#ifdef`, `#ifndef`, `#elifdef`, `#elifndef` and
+  `defined`, as clang's builtin macros are. glibc's `<bits/statx.h>` and `<bits/unistd_ext.h>` test them, and include
+  `<linux/stat.h>` and `<linux/close_range.h>` where they are defined. The direct path read other headers than clang in
+  every unit with `_GNU_SOURCE` that includes `<sys/stat.h>` or `<unistd.h>`, `sqlite3.c` among them; their objects
+  are the same either way.
+- **What leaves** in a unit that collects records, where its records could differ from the full pipeline's:
+  - a `__has_include` that finds a directory, or names a macro (#3608);
+  - a line marker's or `#line`'s file name;
+  - more than 4,096 files;
+  - a rule the driver can't make, before any object is written.
+
+  `-H` keeps a unit off the direct path, which doesn't print its list of headers (#3612).
+
+The full pipeline keeps a path's system header level from that path's first lookup, where clang takes each lookup's
+(#3613). There the direct path's `-MMD` rule is clang's, and lists a header the full pipeline's leaves out.
 
 ## Related
 

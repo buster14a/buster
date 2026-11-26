@@ -2,4 +2,4 @@
 # counts them (#2850): "Hold sqlite3.c's compile to its instructions' baseline" fails the run where the median of
 # three compiles is more than half a percent from this count, above or below (docs/commands/ci.md). A change that
 # means to move the count, a feature's cost or a cut's gain, writes the count that step prints here.
-230887792
+196761445
