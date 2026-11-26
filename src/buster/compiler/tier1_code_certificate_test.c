@@ -2766,24 +2766,24 @@ static void tier1_code_certificate_asm_result(Tier1EmitTest* test)
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
     tier1_emit_test_expect(test, certified, "the asm output and its move before restores pass the code certificate");
-    uint32_t copies = 0;
-    for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
-    {
-        const X86Instruction move = emitted.code.records[r];
-        if (tier1_cert_emitted_kind(emitted.origins[r]) == TIER1_ORIGIN_MOVE && emitted.origin_values[r] == 1 &&
-            move.form == X86_FORM_MOV_R64_RM64 && move.mode == BUSTER_X86_REGISTER_DIRECT && move.rm == X86_REGISTER_RDX && move.reg != move.rm)
-        {
-            X86Instruction mutant = move;
-            mutant.rm = move.reg;
-            tier1_emit_test_expect(test, tier1_code_certificate_refuses(test, &plan, &emitted, r, mutant, UINT32_MAX), "a missing asm result copy fails the code certificate");
-            copies += 1;
-        }
-    }
-    tier1_emit_test_expect(test, !certified || copies == 1, "the asm output must leave rdx exactly once");
     const bool labels = certified && emitted.asm_label_count == 2 && emitted.asm_label_names[0] == 17 && emitted.asm_label_names[1] == 29 &&
                         emitted.asm_label_records[1] == emitted.asm_label_records[0] + 1 && emitted.asm_label_records[0] < emitted.code.count &&
                         tier1_cert_emitted_exactly(emitted.code.records[emitted.asm_label_records[0]], record);
     tier1_emit_test_expect(test, labels, "the asm labels name the first record and the body's end");
+    const uint32_t capture = labels ? emitted.asm_label_records[1] : emitted.code.count;
+    const bool bounded = capture < emitted.code.count;
+    const X86Instruction move = bounded ? emitted.code.records[capture] : (X86Instruction){ 0 };
+    const bool copied = bounded && move.form == X86_FORM_MOV_R64_RM64 && move.mode == BUSTER_X86_REGISTER_DIRECT &&
+                        move.rm == X86_REGISTER_RDX && move.reg != move.rm;
+    const bool spilled = bounded && move.form == X86_FORM_MOV_RM64_R64 && move.mode == BUSTER_X86_MEMORY_BASE && move.reg == X86_REGISTER_RDX;
+    tier1_emit_test_expect(test, copied || spilled, "the asm output is captured from rdx at the body's end");
+    if (copied || spilled)
+    {
+        X86Instruction mutant = move;
+        mutant.rm = copied ? move.reg : move.rm;
+        mutant.reg = spilled ? X86_REGISTER_RCX : move.reg;
+        tier1_emit_test_expect(test, tier1_code_certificate_refuses(test, &plan, &emitted, capture, mutant, UINT32_MAX), "a wrong asm result source fails the code certificate");
+    }
     if (certified)
     {
         function.asm_bodies[0].opaque = true;
