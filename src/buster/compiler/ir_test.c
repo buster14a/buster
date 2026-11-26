@@ -156,6 +156,7 @@ static void ir_test_asm_bodies(IrTestTally* tally, Arena* memory, Arena* scratch
             .count = 1,
             .touched = 1u << X86_REGISTER_RAX,
             .result = X86_REGISTER_RAX + 1,
+            .result_registers = 1u << X86_REGISTER_RAX,
             .label_records = label_records,
             .label_names = label_names,
             .label_count = 2,
@@ -166,8 +167,10 @@ static void ir_test_asm_bodies(IrTestTally* tally, Arena* memory, Arena* scratch
         function.asm_bodies[0].result = 0;
         ir_test_expect(tally, ir_verify(&function, scratch, NULL).error != IR_OK, "nonvoid asm call without a result register is refused");
         function.asm_bodies[0].result = X86_REGISTER_RCX + 1;
+        function.asm_bodies[0].result_registers = 1u << X86_REGISTER_RCX;
         ir_test_expect(tally, ir_verify(&function, scratch, NULL).error != IR_OK, "asm result in an untouched register is refused");
         function.asm_bodies[0].result = X86_REGISTER_RAX + 1;
+        function.asm_bodies[0].result_registers = 1u << X86_REGISTER_RAX;
         function.asm_bodies[0].label_records = NULL;
         ir_test_expect(tally, ir_verify(&function, scratch, NULL).error != IR_OK, "asm labels without record positions are refused");
         function.asm_bodies[0].label_records = label_records;
@@ -181,6 +184,7 @@ static void ir_test_asm_bodies(IrTestTally* tally, Arena* memory, Arena* scratch
         function.asm_bodies[0].records = NULL;
         function.asm_bodies[0].result = 0;
         function.asm_bodies[0].touched = 0;
+        function.asm_bodies[0].result_registers = 0;
         function.calls[0].result_type = IR_VOID;
         function.type[0] = IR_VOID;
         function.result_type = IR_VOID;
