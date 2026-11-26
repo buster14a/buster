@@ -2738,6 +2738,8 @@ static void tier1_code_certificate_asm_result(Tier1EmitTest* test)
             .count = 1,
             .touched = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX),
             .result = X86_REGISTER_RDX + 1,
+            .result_registers = 1u << X86_REGISTER_RDX,
+            .result_wide = 1u << X86_REGISTER_RDX,
             .label_records = label_records,
             .label_names = label_names,
             .label_count = 2,
