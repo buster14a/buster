@@ -67,6 +67,8 @@ BUSTER_UNICODE_ENTRY __attribute__((unused)) int32_t unicode_column_width(uint32
 
 // The longest name a lookup reads (a longer one is no name: the longest stored one has 88 bytes).
 #define BUSTER_UNICODE_NAME_BYTES 128
+// A loose spelling can omit every separator of a generated name's prefix; keep room to restore that prefix.
+#define BUSTER_UNICODE_NAME_REPLACEMENT_BYTES (2 * BUSTER_UNICODE_NAME_BYTES)
 // The suggestions of unicode_name_nearest, clang's MaxMatchesCount.
 #define BUSTER_UNICODE_NAME_MATCHES 5
 // The bytes clang's EscapeSingleCodepointForDiagnostic writes at most ("'X' U+10FFFF" with X four bytes, and a NUL).
@@ -263,7 +265,7 @@ static __attribute__((unused)) int32_t unicode_hangul_find(const uint8_t* name, 
 }
 
 // clang's nameToHangulCodePoint: "HANGUL SYLLABLE " and its initial, medial and final jamo.
-static __attribute__((unused)) bool unicode_name_hangul(const uint8_t* name, uint32_t length, bool strict, uint32_t* code_point)
+static __attribute__((unused)) bool unicode_name_hangul(const uint8_t* name, uint32_t length, bool strict, uint32_t* code_point, char* replacement)
 {
     uint32_t consumed = 0;
     uint8_t previous = 0;
@@ -277,13 +279,18 @@ static __attribute__((unused)) bool unicode_name_hangul(const uint8_t* name, uin
     }
     result = result && jamo[0] >= 0 && jamo[1] >= 0 && jamo[2] >= 0 && at == length;
     *code_point = result ? 0xAC00u + ((uint32_t)jamo[0] * 21 + (uint32_t)jamo[1]) * 28 + (uint32_t)jamo[2] : *code_point;
+    if (result && replacement != NULL)
+    {
+        snprintf(replacement, BUSTER_UNICODE_NAME_REPLACEMENT_BYTES, "HANGUL SYLLABLE %s%s%s", unicode_hangul_jamo[jamo[0]][0],
+                 unicode_hangul_jamo[jamo[1]][1], unicode_hangul_jamo[jamo[2]][2]);
+    }
     return result;
 }
 
 // clang's nameToGeneratedCodePoint: a prefix of the ranges' names made by rule, then a hexadecimal number in one of its
 // ranges (LLVM's getAsUnsignedInteger: one digit at least, no sign or "0x", within 64 bits). Strictly, a lowercase
 // digit is none.
-static __attribute__((unused)) bool unicode_name_generated(const uint8_t* name, uint32_t length, bool strict, uint32_t* code_point)
+static __attribute__((unused)) bool unicode_name_generated(const uint8_t* name, uint32_t length, bool strict, uint32_t* code_point, char* replacement)
 {
     bool found = false;
     bool refused = false;
@@ -306,6 +313,11 @@ static __attribute__((unused)) bool unicode_name_generated(const uint8_t* name, 
             }
             found = !refused && valid && value >= range->first && value <= range->last;
             *code_point = found ? (uint32_t)value : *code_point;
+            if (found && replacement != NULL)
+            {
+                // Clang repairs the prefix but retains the hexadecimal suffix's original spelling.
+                snprintf(replacement, BUSTER_UNICODE_NAME_REPLACEMENT_BYTES, "%s%.*s", range->prefix, (int)(length - consumed), name + consumed);
+            }
         }
     }
     return found;
@@ -339,7 +351,7 @@ static __attribute__((unused)) int32_t unicode_name_compare_keys(const uint8_t* 
 // over the buckets' first names finds the last bucket whose first key is below the name's, and a scan from there reads
 // the names of its key. clang's one exception loosely: HANGUL JUNGSEONG O-E and OE share a key, and a name with "O-E"
 // is the former.
-static __attribute__((unused)) bool unicode_name_stored(const uint8_t* name, uint32_t length, bool exact, uint32_t* code_point)
+static __attribute__((unused)) bool unicode_name_stored(const uint8_t* name, uint32_t length, bool exact, uint32_t* code_point, char* replacement)
 {
     uint8_t key[BUSTER_UNICODE_NAME_BYTES];
     uint8_t candidate[BUSTER_UNICODE_NAME_BYTES];
@@ -384,6 +396,11 @@ static __attribute__((unused)) bool unicode_name_stored(const uint8_t* name, uin
         }
         const bool jungseong = !exact && (cursor.code_point == 0x116C || cursor.code_point == 0x1180);
         *code_point = jungseong ? (hyphenated ? 0x1180 : 0x116C) : cursor.code_point;
+        if (replacement != NULL)
+        {
+            const char* spelled = jungseong ? (hyphenated ? "HANGUL JUNGSEONG O-E" : "HANGUL JUNGSEONG OE") : cursor.name;
+            memcpy(replacement, spelled, strlen(spelled) + 1);
+        }
     }
     return found;
 }
@@ -392,17 +409,23 @@ static __attribute__((unused)) bool unicode_name_stored(const uint8_t* name, uin
 BUSTER_UNICODE_ENTRY bool unicode_name_strict(const uint8_t* name, uint32_t length, uint32_t* code_point)
 {
     const bool valid = length != 0 && length < BUSTER_UNICODE_NAME_BYTES;
-    return valid && (unicode_name_hangul(name, length, true, code_point) || unicode_name_generated(name, length, true, code_point) ||
-                     unicode_name_stored(name, length, true, code_point));
+    return valid && (unicode_name_hangul(name, length, true, code_point, NULL) || unicode_name_generated(name, length, true, code_point, NULL) ||
+                     unicode_name_stored(name, length, true, code_point, NULL));
+}
+
+// The loose match and, only for a diagnostic, its exact stored alias or generated spelling.
+static bool unicode_name_loose_spelling(const uint8_t* name, uint32_t length, uint32_t* code_point, char* replacement)
+{
+    const bool valid = length != 0 && length < BUSTER_UNICODE_NAME_BYTES;
+    return valid && (unicode_name_hangul(name, length, false, code_point, replacement) || unicode_name_generated(name, length, false, code_point, replacement) ||
+                     unicode_name_stored(name, length, false, code_point, replacement));
 }
 
 // The code point a name stands for, ignoring case, spaces, underscores and medial hyphens (clang's
 // nameToCodepointLooseMatching).
 BUSTER_UNICODE_ENTRY bool unicode_name_loose(const uint8_t* name, uint32_t length, uint32_t* code_point)
 {
-    const bool valid = length != 0 && length < BUSTER_UNICODE_NAME_BYTES;
-    return valid && (unicode_name_hangul(name, length, false, code_point) || unicode_name_generated(name, length, false, code_point) ||
-                     unicode_name_stored(name, length, false, code_point));
+    return unicode_name_loose_spelling(name, length, code_point, NULL);
 }
 
 // The edit distances' rows of the name being measured (LLVM's matrix: a row per letter or digit of the name, a column
@@ -678,6 +701,7 @@ struct UnicodeNameNote
 {
     uint32_t offset;
     char message[BUSTER_UNICODE_NAME_TEXT];
+    char replacement[BUSTER_UNICODE_NAME_REPLACEMENT_BYTES];
 };
 
 typedef struct UnicodeNameDiagnosis UnicodeNameDiagnosis;
@@ -699,7 +723,8 @@ BUSTER_UNICODE_ENTRY void unicode_name_diagnose(const uint8_t* name, uint32_t le
     snprintf(diagnosis->error, sizeof(diagnosis->error), "'%s' is not a valid Unicode character name", escaped);
     diagnosis->note_count = 0;
     diagnosis->loose_code_point = 0;
-    diagnosis->loose = unicode_name_loose(name, length, &diagnosis->loose_code_point);
+    char replacement[BUSTER_UNICODE_NAME_REPLACEMENT_BYTES] = { 0 };
+    diagnosis->loose = unicode_name_loose_spelling(name, length, &diagnosis->loose_code_point, replacement);
     uint32_t illegal = length;
     for (uint32_t i = 0; literal && i < length && illegal == length; i += 1)
     {
@@ -711,14 +736,15 @@ BUSTER_UNICODE_ENTRY void unicode_name_diagnose(const uint8_t* name, uint32_t le
         char character[BUSTER_UNICODE_ESCAPE_BYTES + 8];
         unicode_escape(name + illegal, length - illegal, true, character, sizeof(character));
         UnicodeNameNote* note = &diagnosis->notes[diagnosis->note_count++];
-        note->offset = illegal;
+        *note = (UnicodeNameNote){ .offset = illegal };
         snprintf(note->message, sizeof(note->message), "character %s cannot appear in a Unicode character name", character);
     }
     if (diagnosis->loose)
     {
         UnicodeNameNote* note = &diagnosis->notes[diagnosis->note_count++];
-        note->offset = 0;
+        *note = (UnicodeNameNote){ 0 };
         snprintf(note->message, sizeof(note->message), "character names in Unicode escape sequences are sensitive to case and whitespaces");
+        memcpy(note->replacement, replacement, sizeof(note->replacement));
     }
     else if (literal && illegal == length)
     {
@@ -737,8 +763,9 @@ BUSTER_UNICODE_ENTRY void unicode_name_diagnose(const uint8_t* name, uint32_t le
                 char character[BUSTER_UNICODE_ESCAPE_BYTES + 8];
                 unicode_escape_code_point(matches[m].code_point, character, sizeof(character));
                 UnicodeNameNote* note = &diagnosis->notes[diagnosis->note_count++];
-                note->offset = 0;
+                *note = (UnicodeNameNote){ 0 };
                 snprintf(note->message, sizeof(note->message), "did you mean %s (%s)?", matches[m].name, character);
+                memcpy(note->replacement, matches[m].name, strlen(matches[m].name) + 1);
             }
         }
     }

@@ -1,4 +1,4 @@
-# Generated-origin endpoints were refreshed for #2376 with two TMPDIR lengths and the Clang oracle.
+# Generated-origin metadata was refreshed for #2376 with two TMPDIR lengths and the Clang oracle.
 # The vectorized kernels' outputs, a digest per kernel comparison of test-preprocessor and of test-x86-target's
 # preprocessor cases (c_preprocessor_test.c, pp_kernel_digest), recorded with BUSTER_PP_RECORD_DIGESTS where the
 # scalar twins gave the same outputs (#2924).
@@ -27,7 +27,7 @@ case/#119: an inactive group's includes aren't looked for #21797a86395ef21d	df92
 case/#119: an include cycle stops at clang's depth limit #a50b1f3c2c4a6fc9	5d363efc6e5fba02
 case/#119: an include's diagnostics, at clang's places #5c42191bed773f12	7081b5ca50c5ea70
 case/#119: clang's recoveries from a name not found #90a48224840fc757	d3403395f1e3db42
-case/#119: computed names, joined as clang joins them #3f2ee4d8bb8477ab	2ab21c9007ebe745
+case/#119: computed names, joined as clang joins them #3f2ee4d8bb8477ab	6114260a37e81c63
 case/#119: header names written out, a comment that runs on to the next line among them #ad72af5b74633e9d	72452f508597fd0d
 case/#119: one file through a symbolic link and a hard link #4adfcab6f366c124	4db8b652cfac2a07
 case/#252's review: __has_embed of files it only looks at #aa0be917eeec2922	69f33ecf1c7be8ae
@@ -514,7 +514,7 @@ compile/#119: an inactive group's includes aren't looked for #21797a86395ef21d	d
 compile/#119: an include cycle stops at clang's depth limit #a50b1f3c2c4a6fc9	5d363efc6e5fba02
 compile/#119: an include's diagnostics, at clang's places #5c42191bed773f12	7081b5ca50c5ea70
 compile/#119: clang's recoveries from a name not found #90a48224840fc757	d3403395f1e3db42
-compile/#119: computed names, joined as clang joins them #3f2ee4d8bb8477ab	2ab21c9007ebe745
+compile/#119: computed names, joined as clang joins them #3f2ee4d8bb8477ab	6114260a37e81c63
 compile/#119: header names written out, a comment that runs on to the next line among them #ad72af5b74633e9d	72452f508597fd0d
 compile/#119: one file through a symbolic link and a hard link #4adfcab6f366c124	4db8b652cfac2a07
 compile/#252's review: __has_embed of files it only looks at #aa0be917eeec2922	69f33ecf1c7be8ae
