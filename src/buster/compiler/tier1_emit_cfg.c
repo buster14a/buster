@@ -5285,6 +5285,7 @@ static uint32_t tier1_emit_cfg_callee_used(const Tier1CfgAllocation* cfg, uint32
 #include "tier1_emit_parameter_partition.c"
 #include "tier1_emit_batch_policy.c"
 #include "tier1_emit_call_windows.c"
+#include "tier1_emit_spill_regions.c"
 
 // An allocation's outcome as the function's: a constraint the allocator met is TIER1_EMIT_ALLOCATION; and without fixed
 // ranges there are no splits, each class's temporary slot a frame row of its own, so an allocation with either is too.
@@ -5692,6 +5693,11 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     if (error == TIER1_EMIT_OK && partition_env != 0 && strcmp(partition_env, "1") == 0)
     {
         tier1_emit_cfg_partition_parameters(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
+    }
+    const char* spill_env = getenv("BUSTER_TIER1_SPILL_REGIONS");
+    if (error == TIER1_EMIT_OK && spill_env != 0 && strcmp(spill_env, "1") == 0)
+    {
+        tier1_emit_cfg_spill_regions(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg, &retained_window_rows);
     }
 #endif
     if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 256u) != 0)

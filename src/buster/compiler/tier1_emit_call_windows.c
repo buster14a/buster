@@ -405,7 +405,7 @@ static void tier1_emit_cfg_call_windows(const Tier1SelectPlan* plan, const Tier1
         prior.cfg_input = *input;
         prior.cfg = original;
         ok = tier1_emit_cfg_saves(plan, scratch, &prior) == TIER1_EMIT_OK;
-        *retained_rows = ok ? prior.prepared.call_save_mask : 0;
+        *retained_rows |= ok ? prior.prepared.call_save_mask : 0;
     }
     const bool published = ok && count != 0 && (selected != 0 || (mode == 2 && bounded));
     if (published)

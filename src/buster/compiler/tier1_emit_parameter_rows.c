@@ -119,7 +119,10 @@ static const uint32_t* tier1_emit_cfg_parameter_rows_limit(const Tier1SelectPlan
     uint32_t parameters[BUSTER_ABI_INTEGER_ARGUMENTS];
     uint32_t parameter_count = 0;
     uint64_t work = 0;
-    const bool supported = function->block_count != 0 && blocks >= function->block_count && columns != 0 && emitted->prepared.call_count != 0;
+    // Inline assembly publishes all result owners together at its body boundary. The row replay does not
+    // model those simultaneous updates, so preserve ordinary emission for functions containing a body.
+    const bool supported = function->block_count != 0 && blocks >= function->block_count && columns != 0 &&
+                           emitted->prepared.call_count != 0 && emitted->prepared.asm_count == 0;
     Tier1EmitError error = supported ? TIER1_EMIT_OK : TIER1_EMIT_UNSUPPORTED;
     error = error != TIER1_EMIT_OK || tier1_emit_epoch_cache_charge(function->block_offsets[1], limit, &work) ? error : TIER1_EMIT_LIMIT;
     for (uint32_t node = 0; error == TIER1_EMIT_OK && node < function->block_offsets[1]; node += 1)

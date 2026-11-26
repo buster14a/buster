@@ -646,6 +646,8 @@ static void tier1_emit_test_calls_before(Tier1EmitTest* test)
 #include "tier1_batch_test.c"
 #include "tier1_partition_test.c"
 #include "tier1_call_window_test.c"
+#include "tier1_spill_region_test.c"
+#include "tier1_spill_region_proof_test.c"
 #include "tier1_upper_vectors_test.c"
 #include "tier1_upper_certificate_test.c"
 
@@ -1664,6 +1666,8 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_batch_tests(&test);
             tier1_partition_tests(&test);
             tier1_call_window_tests(&test);
+            tier1_spill_region_tests(&test);
+            tier1_spill_region_proof_tests(&test);
             tier1_upper_vectors_tests(&test);
             tier1_upper_certificate_tests(&test);
             tier1_emit_test_overlong(&test);
