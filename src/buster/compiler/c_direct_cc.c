@@ -6411,6 +6411,13 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         else if (ftype_is_record(then_t)) { common_t = then_t; }
         else if (ftype_is_ptr(then_t) && ftype_is_ptr(else_t))
         {
+            // #3577: pointers to incompatible types (but for qualifiers, and void's with an object's) are the full
+            // pipeline's -Wpointer-type-mismatch, in a dead branch's conditional too.
+            if (then_t != else_t && !fast_cc_pointer_pair_valid(cc, FTOK_EQ, then_t, else_t))
+            {
+                fast_cc_bail(cc, "a conditional's pointers to incompatible types");
+                return;
+            }
             // Prefer non-void* pointer if the other is void*
             common_t = ftype_is_void(ftype_deref(cc, then_t)) ? else_t : then_t;
         }

@@ -4436,6 +4436,9 @@ static int c_direct_unit_tests(void)
         "}\n",
         // 10. A pointer to void under `&` and in sizeof, which the full pipeline's -Wvoid-ptr-dereference leaves alone.
         "void* addressed(void* p) { return &*p; }\nunsigned long measured(void* p) { return sizeof(*p); }\n",
+        // 11. Conditionals of pointers the full pipeline's -Wpointer-type-mismatch leaves alone: one to void, one more
+        // qualified, a null pointer constant.
+        "const int* chosen(int c, int* p, const int* q, void* v) { return c ? p : (c > 1 ? q : (c > 2 ? (const int*)v : (void*)0)); }\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4534,6 +4537,12 @@ static int c_direct_unit_tests(void)
         "void f(const volatile void* p) { (void)*p; }\n",
         "void f(void* p) { if (0) { (void)*p; } }\n",
         "void f(void* p) { (void)p[0]; }\n",
+        // -Wpointer-type-mismatch: a conditional of pointers to incompatible types, char's and unsigned char's, two
+        // functions', in a constant conditional.
+        "void* f(int c, int* p, long* q) { return c ? p : q; }\n",
+        "void* f(int c, char* p, unsigned char* q) { return c ? p : q; }\n",
+        "int g(int);\nlong h(long);\nvoid f(int c) { (void)(c ? g : h); }\n",
+        "void* f(int* p, long* q) { return 1 ? p : q; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
