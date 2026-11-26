@@ -554,7 +554,8 @@ static inline __attribute__((always_inline)) IrCall ir_interpreter_unchained(con
 // argument's place, its records' or worked out as LLVM's assignment places a scalar, whose register counts must be its
 // incoming frame's, and the argument area's alignment. INTERPRETER_INVALID for a call its callee can't take, or whose
 // argument area is aligned past BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2.
-static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, IrCall call, uint32_t skipped, const IrFunction* target, const InterpreterValue* passed, const uint16_t* types, uint64_t destination, uint32_t owner, InterpreterRuntime* runtime, Arena* arena, InterpreterValue* parameters, IrInterpreterIncoming* incoming)
+// Keep argument transfer inside the interpreted call handler (#2758).
+static inline __attribute__((always_inline)) InterpreterStatus ir_interpreter_arguments(const IrFunction* function, IrCall call, uint32_t skipped, const IrFunction* target, const InterpreterValue* passed, const uint16_t* types, uint64_t destination, uint32_t owner, InterpreterRuntime* runtime, Arena* arena, InterpreterValue* parameters, IrInterpreterIncoming* incoming)
 {
     const IrAbiCall* records = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
     const bool check_undefined = runtime->check_undefined;

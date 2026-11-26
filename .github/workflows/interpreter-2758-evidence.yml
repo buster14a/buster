@@ -26,6 +26,8 @@ env:
   BASE_REVISION: 8e4d32879e17b7d9548cad54257a2f8461328366
   BASE_TREE: 8bf0a22e6067a7698ca6257d3e6cbe40f49b108a
   BASE_RUN: '45779319802'
+  MAPS_REVISION: c3d1b38eba50df2e9d0dc0a4e2231789ddab3407
+  PR_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
 
 jobs:
   prepare-hosted-tools:
@@ -74,6 +76,7 @@ jobs:
           EVIDENCE="$RUNNER_TEMP/interpreter-2758"
           printf 'EVIDENCE=%s\n' "$EVIDENCE" >> "$GITHUB_ENV"
           mkdir -p "$EVIDENCE/metadata"
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_REVISION"
           git rev-parse HEAD 'HEAD^{tree}' > "$EVIDENCE/metadata/head-revision-tree"
           cp .github/workflows/interpreter-2758-evidence.yml "$EVIDENCE/metadata/workflow.yml"
           bash tools/ci/vector-draw.sh probe 1 "$CANDIDATE" | tee "$EVIDENCE/vector-probe.log"
@@ -139,21 +142,55 @@ jobs:
           printf 'run\t%s\nartifact\t%s\narchive-sha256\t%s\n' "$BASE_RUN" "$BASE_ARTIFACT" "$BASE_DIGEST" > "$EVIDENCE/base/download"
           printf 'BASE_COMPILER=%s\n' "$product/bin/compiler" >> "$GITHUB_ENV"
 
-      - name: Build the complete HEAD Release product with the hosted settings
+      - name: Build the pinned maps Release product with the hosted settings
         if: steps.probe.outputs.verdict == 'qualified'
         run: |
+          git fetch --no-tags --depth=1 origin "$MAPS_REVISION"
+          git diff --exit-code "$MAPS_REVISION" "$PR_HEAD_REVISION" -- build.sh CMakeLists.txt cmake tools/ci \
+            tools/build-preprocessor-pragma-oracle.sh tools/clang-server .github/actions/hosted-tools tests/sanitizers
+          git diff --stat "$MAPS_REVISION" "$PR_HEAD_REVISION" > "$EVIDENCE/metadata/maps-head-diff-stat"
+          git checkout --detach "$MAPS_REVISION"
+          test "$(git rev-parse HEAD)" = "$MAPS_REVISION"
+          git diff --quiet HEAD --
           {
             bash tools/build-preprocessor-pragma-oracle.sh "$RUNNER_TEMP/preprocessor-pragma-oracle"
             bash tools/clang-server/build.sh "$RUNNER_TEMP/clang-server"
             ./build.sh --config Release --jobs 4
-          } 2>&1 | tee "$EVIDENCE/build.log"
+          } 2>&1 | tee "$EVIDENCE/maps-build.log"
           compiler=$(./build.sh print-output --config Release)
           test -x "$compiler"
           {
-            printf 'BUSTER_COMPILER=%s\nHEAD_COMPILER=%s\n' "$compiler" "$compiler"
+            printf 'BUSTER_COMPILER=%s\n' "$compiler"
             printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$RUNNER_TEMP/preprocessor-pragma-oracle"
             printf 'BUSTER_CLANG_SERVER=%s\n' "$RUNNER_TEMP/clang-server"
           } >> "$GITHUB_ENV"
+
+      - name: Preserve the maps product before rebuilding
+        if: steps.probe.outputs.verdict == 'qualified'
+        run: |
+          bash tools/ci/hosted-product.sh ownership 2>&1 | tee "$EVIDENCE/maps-ownership.log"
+          bash tools/ci/hosted-product.sh pack "$RUNNER_TEMP/maps-product" 2>&1 | tee "$EVIDENCE/maps-product.log"
+          cp -R "$RUNNER_TEMP/maps-product/record" "$EVIDENCE/maps"
+          cp build/compile_commands.json "$EVIDENCE/maps/"
+          tar --zstd -xOf "$RUNNER_TEMP/maps-product/product.tar.zst" product/files.sha256 > "$EVIDENCE/maps/files.sha256"
+          test "$(awk -F '\t' '$1 == "revision" { print $2 }' "$EVIDENCE/maps/identity/summary")" = "$MAPS_REVISION"
+          cp "$BUSTER_COMPILER" "$RUNNER_TEMP/maps-compiler"
+          sha256sum "$RUNNER_TEMP/maps-compiler" > "$EVIDENCE/maps/compiler.sha256"
+          test "$(cut -d ' ' -f 1 "$EVIDENCE/maps/compiler.sha256")" = \
+            "$(awk '$2 == "./bin/compiler" { print $1 }' "$EVIDENCE/maps/files.sha256")"
+          printf 'MAPS_COMPILER=%s\n' "$RUNNER_TEMP/maps-compiler" >> "$GITHUB_ENV"
+
+      - name: Restore the exact PR head and build incrementally in the same tree
+        if: steps.probe.outputs.verdict == 'qualified'
+        run: |
+          git checkout --detach "$PR_HEAD_REVISION"
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_REVISION"
+          git diff --quiet HEAD --
+          ./build.sh --config Release --jobs 4 2>&1 | tee "$EVIDENCE/head-build.log"
+          compiler=$(./build.sh print-output --config Release)
+          test -x "$compiler"
+          sha256sum --check --strict "$EVIDENCE/maps/compiler.sha256"
+          printf 'BUSTER_COMPILER=%s\nHEAD_COMPILER=%s\n' "$compiler" "$compiler" >> "$GITHUB_ENV"
 
       - name: Preserve HEAD identity and check equal build settings
         if: steps.probe.outputs.verdict == 'qualified'
@@ -163,12 +200,15 @@ jobs:
           cp -R "$RUNNER_TEMP/head-product/record" "$EVIDENCE/head"
           cp build/compile_commands.json "$EVIDENCE/head/"
           tar --zstd -xOf "$RUNNER_TEMP/head-product/product.tar.zst" product/files.sha256 > "$EVIDENCE/head/files.sha256"
-          for field in row host-flags toolchain; do
-            cmp <(awk -F '\t' -v key="$field" '$1 == key' "$EVIDENCE/base/identity/summary") \
-                <(awk -F '\t' -v key="$field" '$1 == key' "$EVIDENCE/head/identity/summary")
-          done
-          for file in configuration compile-flags sanitizer-flags sources target probe; do
-            cmp "$EVIDENCE/base/identity/$file" "$EVIDENCE/head/identity/$file"
+          test "$(awk -F '\t' '$1 == "revision" { print $2 }' "$EVIDENCE/head/identity/summary")" = "$PR_HEAD_REVISION"
+          for product in maps head; do
+            for field in row host-flags toolchain; do
+              cmp <(awk -F '\t' -v key="$field" '$1 == key' "$EVIDENCE/base/identity/summary") \
+                  <(awk -F '\t' -v key="$field" '$1 == key' "$EVIDENCE/$product/identity/summary")
+            done
+            for file in configuration compile-flags sanitizer-flags sources target probe; do
+              cmp "$EVIDENCE/base/identity/$file" "$EVIDENCE/$product/identity/$file"
+            done
           done
           bash tools/ci/fetch-c-testsuite.sh build/c-testsuite 2>&1 | tee "$EVIDENCE/c-testsuite-fetch.log"
           git -C build/c-testsuite rev-parse HEAD > "$EVIDENCE/metadata/c-testsuite-revision"
@@ -207,7 +247,7 @@ jobs:
 
       # time-runs discards child stdout/stderr. Bash's time keeps complete
       # diagnostics and three-form step counts for every measured execution.
-      - name: Compare one pair for 00040 and the full 220-program subset
+      - name: Compare base, maps and final head on 00040 and all 220 programs
         if: steps.probe.outputs.verdict == 'qualified'
         run: |
           mapfile -t subset < <(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
@@ -228,6 +268,8 @@ jobs:
               compiler=$BASE_COMPILER
               export BUSTER_CLANG_SERVER="$RUNNER_TEMP/base-product/product/bin/clang-server"
               export BUSTER_PPF_PRAGMA_ORACLE="$RUNNER_TEMP/base-product/product/bin/preprocessor-pragma-oracle"
+            elif [ "$side" = maps ]; then
+              compiler=$MAPS_COMPILER
             fi
             printf '%q ' "$compiler" test-ssa-source --typed --tier1 --keep "$@" > "$directory/command"
             printf '\n' >> "$directory/command"
@@ -261,8 +303,8 @@ jobs:
             ) > "$directory/outputs.sha256"
             test "$(wc -l < "$directory/outputs.sha256")" -eq "$((expected * 5))"
           )
-          order=(base head)
-          if [ "$CANDIDATE" = 2 ]; then order=(head base); fi
+          order=(base maps head)
+          if [ "$CANDIDATE" = 2 ]; then order=(head maps base); fi
           printf 'candidate\t%s\norder\t%s\n' "$CANDIDATE" "${order[*]}" > "$EVIDENCE/metadata/run-order"
           for workload in 00040 full220; do
             files=(build/c-testsuite/tests/single-exec/00040.c)
@@ -271,12 +313,14 @@ jobs:
             for side in "${order[@]}"; do
               run_case "$workload-$side" "$side" "$expected" "${files[@]}"
             done
-            for result in semantics outputs.sha256; do
-              cmp "$EVIDENCE/runs/$workload-base/$result" "$EVIDENCE/runs/$workload-head/$result"
+            for side in maps head; do
+              for result in semantics outputs.sha256; do
+                cmp "$EVIDENCE/runs/$workload-base/$result" "$EVIDENCE/runs/$workload-$side/$result"
+              done
             done
           done
-          printf 'passed: one base/head pair per workload; equal statuses, three-form counts and output bytes\n' > "$EVIDENCE/status"
-          printf '### %s candidate %s: comparisons passed\n\nOne pair each for 00040 and all 220 programs, in %s order, with equal statuses, three-form step counts and output hashes. Hosted timing is diagnostic screening; other qualified candidates provide independent repeats.\n' \
+          printf 'passed: base, maps and final head ran once per workload; equal statuses, three-form counts and output bytes\n' > "$EVIDENCE/status"
+          printf '### %s candidate %s: comparisons passed\n\nBase, maps and final head each ran once on 00040 and all 220 programs, in %s order, with equal statuses, three-form step counts and output hashes. Hosted timing is diagnostic screening; other qualified candidates provide independent repeats.\n' \
             "$BUSTER_SANITIZER" "$CANDIDATE" "${order[*]}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Audit all real execution reports, including failed steps
