@@ -6980,6 +6980,128 @@ static void check_test_driver_tier1_vectorize(CheckTest* test, const char* clang
     unlink(unit);
 }
 
+// #2806's generated loops, including the i64/f64 forms: one independent Clang driver linked to each compiler's
+// object. Clang's scalar loops use the same contraction policy and target, so fused results are compared with fused
+// results. The report checks admission separately from execution; --verify checks the emitted code's certificates.
+static void check_test_driver_tier1_floating_vectorize(CheckTest* test, const char* clang, const char* driver, const char* directory)
+{
+    const char* const executable = driver != NULL ? driver : "/proc/self/exe";
+    const char* const source = "tests/ir/vectorize/float-convert.c";
+    const char* const main_source = "tests/ir/vectorize/float-convert-main.c";
+    static const char* const targets[] = {
+        "x86-64",
+        "x86-64-v3",
+        "x86-64-v4",
+    };
+    // Three floating loops and the two signed dword conversions everywhere; unsigned dwords and all qwords on v4.
+    static const uint64_t expected_loops[] = {
+        5,
+        5,
+        11,
+    };
+    const X86Target native = x86_target_native();
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(targets); t += 1)
+    {
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(targets[t], strlen(targets[t]), &target);
+        const bool host = parsed && (native.features & target.features) == target.features;
+        char march[64];
+        char object[512];
+        char reference_object[512];
+        char program[512];
+        char reference[512];
+        snprintf(march, sizeof(march), "-march=%s", targets[t]);
+        snprintf(object, sizeof(object), "%s/tier1-floating-%u.o", directory, t);
+        snprintf(reference_object, sizeof(reference_object), "%s/tier1-floating-clang-%u.o", directory, t);
+        snprintf(program, sizeof(program), "%s/tier1-floating-%u", directory, t);
+        snprintf(reference, sizeof(reference), "%s/tier1-floating-clang-%u", directory, t);
+        char* compile[] = {
+            (char*)executable,
+            "--tier1",
+            "--tier1-strict",
+            "--tier1-passes=+vectorize",
+            "--tier1-report",
+            "--verify",
+            "-ffp-contract=on",
+            march,
+            "-c",
+            (char*)source,
+            "-o",
+            object,
+            NULL,
+        };
+        char* text = NULL;
+        const bool built = check_test_driver_spawn(compile, &text) == 0;
+        uint64_t internal = UINT64_MAX;
+        uint64_t fallbacks = UINT64_MAX;
+        uint64_t loops = UINT64_MAX;
+        const bool clean = built && check_test_tier1_field(text, "internal_failures", &internal) && internal == 0 &&
+                           check_test_tier1_field(text, "fallbacks", &fallbacks) && fallbacks == 0 &&
+                           check_test_tier1_vectorize_field(text, "vectorized", &loops) && loops == expected_loops[t];
+        char message[256];
+        snprintf(message, sizeof(message), "floating vector loops at %s: %llu admitted, %llu expected, no fallback and valid certificates",
+                 targets[t], (unsigned long long)loops, (unsigned long long)expected_loops[t]);
+        check_test_expect(test, clean, message);
+        if (!clean && text != NULL)
+        {
+            fprintf(stderr, "floating vector loops: %s: %s\n", targets[t], text);
+        }
+        free(text);
+        text = NULL;
+        char* reference_compile[] = {
+            (char*)clang,
+            "-O2",
+            "-ffp-contract=on",
+            "-fno-vectorize",
+            "-fno-slp-vectorize",
+            march,
+            "-c",
+            (char*)source,
+            "-o",
+            reference_object,
+            NULL,
+        };
+        const bool referenced = check_test_driver_spawn(reference_compile, &text) == 0;
+        free(text);
+        text = NULL;
+        char* link[] = {
+            (char*)clang,
+            "-O0",
+            "-march=x86-64",
+            (char*)main_source,
+            object,
+            "-o",
+            program,
+            NULL,
+        };
+        const bool linked = clean && check_test_driver_spawn(link, &text) == 0;
+        free(text);
+        text = NULL;
+        char* reference_link[] = {
+            (char*)clang,
+            "-O0",
+            "-march=x86-64",
+            (char*)main_source,
+            reference_object,
+            "-o",
+            reference,
+            NULL,
+        };
+        const bool reference_linked = referenced && check_test_driver_spawn(reference_link, &text) == 0;
+        free(text);
+        char expected[256] = { 0 };
+        char actual[256] = { 0 };
+        const bool same = linked && reference_linked && (!host || (check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0 &&
+                          check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0));
+        snprintf(message, sizeof(message), "floating vector loops at %s: every result and untouched tail matches Clang across lengths, offsets and overlapping SAXPY inputs", targets[t]);
+        check_test_expect(test, same, message);
+        unlink(object);
+        unlink(reference_object);
+        unlink(program);
+        unlink(reference);
+    }
+}
+
 // #1282's inlining: the unit's always_inline functions of internal linkage expanded into their callers by --tier1, the
 // x86 intrinsics' wrappers above all, whose vectors pass and return by value: their byte-wise copies into fresh slots,
 // split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
@@ -7145,6 +7267,7 @@ static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, c
     unlink(unit);
     check_test_driver_tier1_vector_copies(test, clang, executable, directory);
     check_test_driver_tier1_vectorize(test, clang, executable, directory);
+    check_test_driver_tier1_floating_vectorize(test, clang, executable, directory);
 }
 
 // #2541 step 2's classes and dead functions: an external definition (expanded at its calls, its code kept), a weak one

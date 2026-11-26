@@ -125,10 +125,207 @@ static void ir_interpreter_test_simd_permute(IrInterpreterTestTally* tally, Aren
     arena_pop_to(memory, mark);
 }
 
+static void ir_interpreter_test_simd_conversions(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    // The existing scalar interpreter decodes the significand before truncating and checking range. Require the
+    // vector interpreter to give the same value or arithmetic status, including negative unsigned fractions.
+    static const uint64_t inputs[][2] = {
+        {
+            0,
+            0,
+        },
+        {
+            0x80000000,
+            UINT64_C(0x8000000000000000),
+        },
+        {
+            0x3fe00000,
+            UINT64_C(0x3ffc000000000000),
+        },
+        {
+            0xbfe00000,
+            UINT64_C(0xbffc000000000000),
+        },
+        {
+            0xbf000000,
+            UINT64_C(0xbfe0000000000000),
+        },
+        {
+            0xbf7fffff,
+            UINT64_C(0xbfefffffffffffff),
+        },
+        {
+            0xbf800000,
+            UINT64_C(0xbff0000000000000),
+        },
+        {
+            0x80000001,
+            UINT64_C(0x8000000000000001),
+        },
+        {
+            0xcf000000,
+            UINT64_C(0xc3e0000000000000),
+        },
+        {
+            0xcf000001,
+            UINT64_C(0xc3e0000000000001),
+        },
+        {
+            0x4effffff,
+            UINT64_C(0x43dfffffffffffff),
+        },
+        {
+            0x4f000000,
+            UINT64_C(0x43e0000000000000),
+        },
+        {
+            0x4f7fffff,
+            UINT64_C(0x43efffffffffffff),
+        },
+        {
+            0x4f800000,
+            UINT64_C(0x43f0000000000000),
+        },
+        {
+            0x7f800000,
+            UINT64_C(0x7ff0000000000000),
+        },
+        {
+            0xff800000,
+            UINT64_C(0xfff0000000000000),
+        },
+        {
+            0x7fc12345,
+            UINT64_C(0x7ff8123456789abc),
+        },
+        {
+            0x7f800001,
+            UINT64_C(0x7ff0000000000001),
+        },
+    };
+    const uint64_t mark = memory->length;
+    const uint32_t saved = _mm_getcsr();
+    _mm_setcsr(0x1f80);
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        const IrType type = (IrType)(IR_V4I32 + width);
+        const uint32_t bytes = 16u << width;
+        IrFunction function = {0};
+        const IrSizes sizes = {
+            .instruction_count = 5,
+            .block_count = 1,
+            .parameter_count = 1,
+            .vector_constant_count = 1,
+        };
+        const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+        ir_interpreter_test_expect(tally, created, "packed conversion execution fixture allocation");
+        if (created)
+        {
+            uint8_t actual[80];
+            uint8_t expected[80];
+            function.parameter_types[0] = IR_PTR;
+            function.block_offsets[1] = 5;
+            ir_interpreter_test_instruction(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_interpreter_test_instruction(&function, 1, IR_VCONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_interpreter_test_instruction(&function, 3, IR_STORE, IR_VOID, 0, 2, BUSTER_IR_NONE);
+            ir_interpreter_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const InterpreterBinding object = {
+                .symbol = 2,
+                .bytes = actual,
+                .size = sizeof(actual),
+                .writable = true,
+            };
+            const IrInterpreterFunction binding = {
+                .symbol = 71,
+                .function = &function,
+            };
+            const IrInterpreterProgram program = {
+                .functions = &binding,
+                .function_count = 1,
+                .bindings = &object,
+                .binding_count = 1,
+            };
+            const InterpreterValue argument = { .low = (uintptr_t)(actual + 8) };
+            for (uint32_t wide = 0; wide < 2; wide += 1)
+            {
+                const uint32_t element = 4u << wide;
+                const uint64_t one = wide != 0 ? UINT64_C(0x3ff0000000000000) : 0x3f800000;
+                const uint64_t integer_one = 1;
+                for (uint32_t byte = 0; byte < bytes; byte += element)
+                {
+                    memcpy((uint8_t*)function.vector_constants[0].words + byte, &one, element);
+                }
+                for (uint32_t sign = 0; sign < 2; sign += 1)
+                {
+                    ir_interpreter_test_instruction(&function, 2, sign != 0 ? IR_FPTOSI : IR_FPTOUI, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    function.flags[2] = wide != 0 ? IR_SIMD_LANE_F64 : IR_SIMD_LANE_F32;
+                    ir_interpreter_test_expect(tally, ir_verify_complete(&function, execution).error == IR_OK,
+                                               "same-width signed and unsigned conversions verify with F32 and F64 lanes");
+                    for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(inputs); sample += 1)
+                    {
+                        const uint64_t bits = inputs[sample][wide];
+                        unsigned __int128 converted = 0;
+                        const InterpreterStatus status = interpreter_value_float_integer((InterpreterValue){ .low = bits },
+                                                          wide != 0 ? IR_F64 : IR_F32, wide != 0 ? IR_I64 : IR_I32, sign != 0, &converted);
+                        const uint64_t value = (uint64_t)converted;
+                        // Put the boundary case last so a failed lane cannot publish earlier converted lanes.
+                        memcpy((uint8_t*)function.vector_constants[0].words + bytes - element, &bits, element);
+                        memset(actual, 0xa5, sizeof(actual));
+                        memset(expected, 0xa5, sizeof(expected));
+                        if (status == INTERPRETER_OK)
+                        {
+                            for (uint32_t byte = 0; byte < bytes; byte += element)
+                            {
+                                memcpy(expected + 8 + byte, &integer_one, element);
+                            }
+                            memcpy(expected + 8 + bytes - element, &value, element);
+                        }
+                        ir_interpreter_test_run(tally, &program, 71, &argument, 1, NULL, execution, status, (InterpreterValue){0},
+                                                "packed conversion values and arithmetic failures match the existing scalar interpreter");
+                        ir_interpreter_test_expect(tally, memcmp(actual, expected, sizeof(actual)) == 0,
+                                                   "packed conversion stores exact-width results or stops before any store on arithmetic failure");
+                    }
+                    IrSimdValue source = {0};
+                    memcpy(source.words, function.vector_constants[0].words, bytes);
+                    uint32_t slots[] = {
+                        BUSTER_IR_NONE,
+                        0,
+                        1,
+                        BUSTER_IR_NONE,
+                        BUSTER_IR_NONE,
+                    };
+                    const IrInterpreterFrame frame = {
+                        .function = &function,
+                        .vector_indices = slots,
+                        .vector_values = &source,
+                    };
+                    const IrSimdValue before = source;
+                    function.flags[2] = IR_SIMD_LANE_COUNT;
+                    ir_interpreter_test_expect(tally, ir_interpreter_simd_operation(&frame, 2, &source) == INTERPRETER_UNSUPPORTED &&
+                                               memcmp(&source, &before, sizeof(source)) == 0,
+                                               "invalid conversion lane flags remain unsupported and leave the destination untouched");
+                    function.flags[2] = wide != 0 ? IR_SIMD_LANE_F64 : IR_SIMD_LANE_F32;
+                    if (width < 2)
+                    {
+                        source.words[bytes / 8] = 1;
+                        const IrSimdValue malformed = source;
+                        ir_interpreter_test_expect(tally, ir_interpreter_simd_operation(&frame, 2, &source) == INTERPRETER_UNSUPPORTED &&
+                                                   memcmp(&source, &malformed, sizeof(source)) == 0,
+                                                   "malformed conversion input tails remain unsupported rather than arithmetic failures");
+                    }
+                }
+            }
+        }
+        arena_pop_to(memory, mark);
+    }
+    _mm_setcsr(saved);
+}
+
 static void ir_interpreter_test_simd(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     ir_interpreter_test_splats(tally, memory, execution);
     ir_interpreter_test_simd_permute(tally, memory);
+    ir_interpreter_test_simd_conversions(tally, memory, execution);
     const uint64_t mark = memory->length;
     for (uint32_t width = 0; width < 3; width += 1)
     {

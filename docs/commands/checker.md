@@ -372,7 +372,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   `tests/driver/fp_contract.c` for float/double result bits, expression
   boundaries, option ordering, scoped pragmas and dynamic rounding. It covers
   both readers, object/direct output and strict Tier 1 without fallback,
-  with transition verification enabled). `--imaginary-bit-int-only` runs
+  with transition verification enabled). It also runs #2806's
+  `tests/ir/vectorize/float-convert.c` and `float-convert-main.c`: packed
+  FMA and all signed/unsigned same-width integer/float conversions, at
+  x86-64, x86-64-v3 and x86-64-v4, against Clang's scalar loops with the
+  same contraction policy. The full driver suite includes that check with
+  its loop-vectorization cases. `--imaginary-bit-int-only` runs
   `c_check_imaginary_bit_int_driver_test.c` (#2219):
   `tests/driver/imaginary-bit-int/`'s diagnostics sources (constants in every
   spelling and constant context, refused suffixes, the complex `_BitInt` types

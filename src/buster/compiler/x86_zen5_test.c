@@ -186,6 +186,105 @@ static bool x86_zen5_test_cases(void)
     return valid;
 }
 
+// The packed FMA and integer/float fixtures (#2806), including forms still awaiting measured rows: their exact
+// target records, complete dependency chains, and quiet execution at every rounding, FTZ and DAZ setting. A converted
+// nonzero result reinterpreted as the next source would otherwise round or become subnormal in a conversion chain.
+static bool x86_zen5_test_packed_numeric(void)
+{
+    static const struct
+    {
+        uint16_t form;
+        const char* name;
+    } forms[] = {
+#define BUSTER_X86_ZEN5_PACKED_TEST(name) { X86_FORM_##name, #name }
+        BUSTER_X86_ZEN5_PACKED_TEST(VFMADD213PS_X_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VFMADD213PS_Y_Y_YM256),
+        BUSTER_X86_ZEN5_PACKED_TEST(VFMADD213PS_X_X_XM128_EVEX),
+        BUSTER_X86_ZEN5_PACKED_TEST(VFMADD213PS_Y_Y_YM256_EVEX),
+        BUSTER_X86_ZEN5_PACKED_TEST(VFMADD213PS_Z_Z_ZM512),
+        BUSTER_X86_ZEN5_PACKED_TEST(VFMADD213PD_X_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VFMADD213PD_Y_Y_YM256),
+        BUSTER_X86_ZEN5_PACKED_TEST(VFMADD213PD_X_X_XM128_EVEX),
+        BUSTER_X86_ZEN5_PACKED_TEST(VFMADD213PD_Y_Y_YM256_EVEX),
+        BUSTER_X86_ZEN5_PACKED_TEST(VFMADD213PD_Z_Z_ZM512),
+        BUSTER_X86_ZEN5_PACKED_TEST(CVTDQ2PS_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTDQ2PS_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTDQ2PS_Y_YM256),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTDQ2PS_X_XM128_EVEX),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTDQ2PS_Y_YM256_EVEX),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTDQ2PS_Z_ZM512),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTUDQ2PS_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTUDQ2PS_Y_YM256),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTUDQ2PS_Z_ZM512),
+        BUSTER_X86_ZEN5_PACKED_TEST(CVTTPS2DQ_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPS2DQ_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPS2DQ_Y_YM256),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPS2DQ_X_XM128_EVEX),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPS2DQ_Y_YM256_EVEX),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPS2DQ_Z_ZM512),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPS2UDQ_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPS2UDQ_Y_YM256),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPS2UDQ_Z_ZM512),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTQQ2PD_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTQQ2PD_Y_YM256),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTQQ2PD_Z_ZM512),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTUQQ2PD_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTUQQ2PD_Y_YM256),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTUQQ2PD_Z_ZM512),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPD2QQ_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPD2QQ_Y_YM256),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPD2QQ_Z_ZM512),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPD2UQQ_X_XM128),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPD2UQQ_Y_YM256),
+        BUSTER_X86_ZEN5_PACKED_TEST(VCVTTPD2UQQ_Z_ZM512),
+#undef BUSTER_X86_ZEN5_PACKED_TEST
+    };
+    static X86CostHost host;
+    x86_zen5_host(&host);
+    bool valid = true;
+    uint32_t built = 0;
+    uint32_t ran = 0;
+    for (uint32_t f = 0; valid && f < BUSTER_ARRAY_LENGTH(forms); f += 1)
+    {
+        X86CostShape shape;
+        x86_zen5_shape(forms[f].form, X86_COST_REGISTER, &shape);
+        valid = (shape.experiments & (1u << X86_COST_CHAIN_RM)) != 0;
+        x86_zen5_fill(&shape);
+        for (uint32_t e = 0; valid && e < X86_COST_EXPERIMENT_COUNT; e += 1)
+        {
+            if (shape.experiments & (1u << e))
+            {
+                X86CostProgram program = { 0 };
+                valid = x86_zen5_program_targets(&shape, (X86CostExperiment)e) && x86_zen5_program(&shape, (X86CostExperiment)e, X86_COST_REFERENCE_NONE, &host, &program);
+                valid &= program.helper_count == 0 && program.body_count == BUSTER_X86_COST_BLOCK * (e >= X86_COST_MIX_FIRST ? 2u : 1u);
+                built += valid;
+                for (uint32_t mode = 0; valid && program.runnable && mode < 16; mode += 1)
+                {
+                    const uint32_t control = 0x1f80 | (mode & 3) << 13 | ((mode >> 2) & 1) << 15 | ((mode >> 3) & 1) << 6;
+                    uint32_t saved = 0;
+                    uint32_t status = 0;
+                    __asm__ volatile("stmxcsr %0\n\tldmxcsr %1" : "=m"(saved) : "m"(control) : "memory");
+                    x86_zen5_execute(&program, 2);
+                    __asm__ volatile("stmxcsr %0\n\tldmxcsr %1" : "=m"(status) : "m"(saved) : "memory");
+                    valid = status == control;
+                    ran += 1;
+                    if (!valid)
+                    {
+                        printf("  failed quiet fixture %s experiment %s mode %u: MXCSR %08x\n", forms[f].name, x86_zen5_experiment_names[e], mode, status);
+                    }
+                }
+                x86_zen5_release(&program, 1);
+                if (!valid)
+                {
+                    printf("  failed packed fixture %s experiment %s\n", forms[f].name, x86_zen5_experiment_names[e]);
+                }
+            }
+        }
+    }
+    printf("Zen 5 packed numeric fixtures: %u programs built, %u quiet runs over 16 MXCSR modes: %s\n", built, ran, valid ? "pass" : "FAIL");
+    return valid;
+}
+
 // Every case accounts for every column: measured, derived or absent, as measure-x86-zen5 --table writes them. A
 // column measured or derived holds a value; an absent or unknown one doesn't. A throughput, retired ops and the pipes
 // exist for every case that runs.
@@ -279,6 +378,7 @@ static int run_x86_zen5_tests(void)
     bool valid = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize();
     valid &= x86_zen5_test_lookup();
     valid &= x86_zen5_test_cases();
+    valid &= x86_zen5_test_packed_numeric();
     valid &= x86_zen5_test_programs();
     valid &= x86_zen5_test_table();
     return valid ? 0 : 1;

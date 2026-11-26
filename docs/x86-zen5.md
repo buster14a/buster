@@ -108,8 +108,12 @@ registers 0 to 11 are written and 13 to 15 are constants, opmasks 1 to 5 and 6
 and 7. A masked case's target runs under k7, every other element selected:
 merging, or zeroing for a load into a vector register. A floating-point case's registers start at 1.0 of its element and its
 constant sources are 1.0, or 0.0 for an addition, subtraction or fused
-multiply-add, so that every chain keeps the value 1.0 and never reaches a
-denormal, infinity or NaN; integers are 3. Divisions divide a 57-bit dividend
+multiply-add, keeping those arithmetic chains at 1.0 or 0.0; integers are 3.
+Packed integer/float conversions start their vector registers and sources at
+zero: their result bits feed the next conversion exactly, without producing a
+subnormal or rounding. `test-x86-zen5` checks every packed FMA and conversion
+fixture with clear MXCSR status at all four rounding modes, both FTZ settings
+and both DAZ settings. Divisions divide a 57-bit dividend
 (`0x0123456789abcdef`) by 3 with RDX zero: their latency is that operand
 range's, not a small quotient's.
 

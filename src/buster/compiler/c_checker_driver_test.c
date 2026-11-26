@@ -9694,7 +9694,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool asm_definitions_only = false;
     // --call-counts-only: the call argument count section alone (#1860).
     bool call_counts_only = false;
-    // --fp-contract-only: scalar contraction's command-line, pragma and native result matrix alone (#1239).
+    // --fp-contract-only: scalar contraction's command-line, pragma and native results (#1239), plus the floating
+    // vector loop fixture's FMA and numeric conversions (#2806).
     bool fp_contract_only = false;
     // --imaginary-bit-int-only: imaginary bit-precise constants' diagnostics and program against Clang alone (#2219).
     bool imaginary_bit_int_only = false;
@@ -10532,6 +10533,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && fp_contract_only)
     {
         check_test_driver_fp_contract(&test, clang, executable, directory);
+        check_test_driver_tier1_floating_vectorize(&test, clang, executable, directory);
     }
     if (temporary && imaginary_bit_int_only)
     {

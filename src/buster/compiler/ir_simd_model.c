@@ -719,8 +719,8 @@ static uint64_t ir_simd_fma_bits(bool wide, uint64_t a, uint64_t b, uint64_t c)
     return result;
 }
 
-// One lane of a same-width integer/float conversion (#2806). A float that is not finite, or that does not fit the
-// integer, fails; every integer converts.
+// One lane of a same-width integer/float conversion (#2806). A nonfinite float or a truncated value that does not fit
+// the integer fails; negative fractions above -1 truncate to a valid unsigned zero. Every integer converts.
 static bool ir_simd_convert_lane(IrSimdOperation operation, uint64_t bits, uint32_t lane_bits, uint64_t* result)
 {
     bool ok = lane_bits == 32 || lane_bits == 64;
@@ -747,7 +747,8 @@ static bool ir_simd_convert_lane(IrSimdOperation operation, uint64_t bits, uint3
         memcpy(&number, &word, sizeof(number));
         const bool finite = ((word >> 23) & 0xff) != 0xff;
         const bool signed_result = operation == IR_SIMD_FPTOSI;
-        const bool fits = finite && (signed_result ? number >= -2147483648.0f && number < 2147483648.0f : number >= 0.0f && number < 4294967296.0f);
+        const bool fits = finite && (signed_result ? number >= -2147483648.0f && number < 2147483648.0f :
+                                     number > -1.0f && number < 4294967296.0f);
         ok = fits;
         value = fits && signed_result ? (uint32_t)(int32_t)number : fits ? (uint32_t)number : 0;
     }
@@ -758,7 +759,7 @@ static bool ir_simd_convert_lane(IrSimdOperation operation, uint64_t bits, uint3
         const bool finite = ((bits >> 52) & 0x7ff) != 0x7ff;
         const bool signed_result = operation == IR_SIMD_FPTOSI;
         const bool fits = finite && (signed_result ? number >= -9223372036854775808.0 && number < 9223372036854775808.0 :
-                                     number >= 0.0 && number < 18446744073709551616.0);
+                                     number > -1.0 && number < 18446744073709551616.0);
         ok = fits;
         value = fits && signed_result ? (uint64_t)(int64_t)number : fits ? (uint64_t)number : 0;
     }

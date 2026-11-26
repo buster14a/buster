@@ -213,6 +213,33 @@ row whose emission would send the function to Tier 0. Below AVX-512 that is the
 element-wise operations and splats at 16 bytes (SSE2) or 32 (AVX2); masks,
 conversions between lane widths, reductions and population counts are EVEX's.
 
+**Floating FMA and conversions (#2806).** Packed `fma` keeps the scalar
+operation's one rounding and first-NaN order at both f32 and f64, including
+when the destination aliases two inputs. The same-width numeric conversions
+are signed i32/f32 at SSE2, AVX and AVX-512 widths, unsigned i32/f32 with
+AVX512F, and signed or unsigned i64/f64 with AVX512DQ. The 16- and 32-byte
+EVEX forms also require AVX512VL. The target table queries the exact form for
+each lane kind; a target without it keeps the scalar loop. These rows keep
+the original scalar remainder, since an inactive floating lane could still
+raise an exception. Conversions between different lane widths remain outside
+this operation family.
+
+The original SAXPY, matrix and i32-to-f32 kernels already have a
+[9700X digest and timing record from #3421](https://github.com/buster14a/buster-performance/blob/main/docs/measurements/tier1-vectorize-default-2743-2026-11-23/README.md).
+That record does not supply the selector's missing exact-form Zen 5 cost
+observations for packed FMA and numeric conversions. Those stay unknown
+until measured; scalar instruction costs are not substituted for them.
+
+`test-ir-vectorize` exercises f32/f64 FMA and signed/unsigned integer-to-float
+loops through the interpreter at every vector width and with overlapping
+buffers. The driver's floating-loop fixture adds all eight same-width
+conversions, SAXPY at both precisions and the matrix inner loop. It compares
+Tier 1's generated objects with Clang's scalar loops using a shared driver,
+all lengths from 0 through 129, unaligned starts, overlapping SAXPY arrays,
+numeric boundaries and untouched destination tails. Explicit vector selector
+tests cover every FMA destination/input alias assignment and exact target
+feature refusals.
+
 **Data-parallel part.** Every row's admission kind is one two-register byte
 lookup of its opcode per 64 rows, with the volatile and atomic flags folded in
 (`ir_vectorize_kinds`), and each loop's blocks are scanned 64 rows at a time

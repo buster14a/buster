@@ -13,6 +13,9 @@
 // lane without a NaN has a subnormal operand. The rewrite keeps the original row for its flags and traps. The folds never
 // read or write the compiler's own MXCSR: they are integer arithmetic, a lane at a time (#2924 removed their embedded-
 // rounding vector form with the optimizer's vector passes).
+// FMA and numeric conversions use the stricter exact-and-quiet rule: NaNs, subnormal operands, inexact results and
+// invalid conversions stay at run time. FMA forms its product and sum before the one representability check. Their
+// original rows remain roots like the other vector floating rows, even when a constant replaces their users.
 // Layout: ir_optimize_simd_effect, ir_optimize_simd_storage, ir_optimize_simd_value, ir_optimize_simd_meet,
 // ir_optimize_simd_float_encode, ir_optimize_simd_float_lane, ir_optimize_simd_float_compare,
 // ir_optimize_simd_float, ir_optimize_simd_fold, ir_optimize_simd_transfer,
@@ -22,7 +25,8 @@ static bool ir_optimize_simd_effect(const IrFunction* f, uint32_t i)
 {
     const uint32_t op = f->op[i];
     const bool result = f->flags[i] >= IR_SIMD_LANE_F32 &&
-                        (op == IR_VCMP || op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV);
+                        (op == IR_VCMP || op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV ||
+                         op == IR_FMA || op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI);
     return result;
 }
 
@@ -111,6 +115,93 @@ static bool ir_optimize_simd_float_encode(uint64_t sign, unsigned __int128 m, in
     {
         const uint64_t fraction = (UINT64_C(1) << (precision - 1)) - 1;
         *value = sign | ((uint64_t)biased << (precision - 1)) | (((uint64_t)odd << (precision - length)) & fraction);
+    }
+    return result;
+}
+
+// The unrounded a*b+c of normal operands and signed zeros. The product has at most 106 significant bits. Remove
+// powers of two before aligning it with c, so exact cancellation can leave a result that no rounded multiply has.
+// If the higher exponent needs more than 127 bits, the lower, odd significand (at most 106 bits) cannot cancel its
+// high bits enough to fit f64's 53 bits. The two shifted magnitudes otherwise sum in 128 bits without overflow.
+static bool ir_optimize_simd_float_fma(uint64_t a, uint64_t b, uint64_t c, uint32_t width, uint64_t* value)
+{
+    const uint32_t precision = width == 32 ? 24 : 53;
+    const int32_t bias = width == 32 ? 127 : 1023;
+    const uint64_t sign = UINT64_C(1) << (width - 1);
+    const uint64_t fraction = (UINT64_C(1) << (precision - 1)) - 1;
+    const uint64_t exponent = (sign - 1) & ~fraction;
+    const uint64_t a_magnitude = a & ~sign;
+    const uint64_t b_magnitude = b & ~sign;
+    const uint64_t c_magnitude = c & ~sign;
+    const bool nan = a_magnitude > exponent || b_magnitude > exponent || c_magnitude > exponent;
+    const bool subnormal = (a_magnitude != 0 && (a & exponent) == 0) || (b_magnitude != 0 && (b & exponent) == 0) ||
+                           (c_magnitude != 0 && (c & exponent) == 0);
+    const bool product_infinite = a_magnitude == exponent || b_magnitude == exponent;
+    const bool product_zero = a_magnitude == 0 || b_magnitude == 0;
+    const bool c_infinite = c_magnitude == exponent;
+    const uint64_t product_sign = (a ^ b) & sign;
+    const uint64_t c_sign = c & sign;
+    bool result = !nan && !subnormal;
+    uint64_t bits = 0;
+    if (result && product_infinite)
+    {
+        result = !product_zero && !(c_infinite && product_sign != c_sign);
+        bits = product_sign | exponent;
+    }
+    else if (result && c_infinite)
+    {
+        bits = c;
+    }
+    else if (result && product_zero)
+    {
+        // Opposite signed zeros add to -0 only when rounding down.
+        result = c_magnitude != 0 || product_sign == c_sign;
+        bits = c;
+    }
+    else if (result)
+    {
+        const unsigned __int128 a_m = (a & fraction) | (fraction + 1);
+        const unsigned __int128 b_m = (b & fraction) | (fraction + 1);
+        const unsigned __int128 product = a_m * b_m;
+        const int32_t a_e = (int32_t)((a & exponent) >> (precision - 1)) - bias - (int32_t)(precision - 1);
+        const int32_t b_e = (int32_t)((b & exponent) >> (precision - 1)) - bias - (int32_t)(precision - 1);
+        if (c_magnitude == 0)
+        {
+            result = ir_optimize_simd_float_encode(product_sign, product, a_e + b_e, width, &bits);
+        }
+        else
+        {
+            const uint64_t product_low = (uint64_t)product;
+            const uint32_t product_trailing = product_low != 0 ? (uint32_t)__builtin_ctzll(product_low) : 64 + (uint32_t)__builtin_ctzll((uint64_t)(product >> 64));
+            const unsigned __int128 product_m = product >> product_trailing;
+            const int32_t product_e = a_e + b_e + (int32_t)product_trailing;
+            const uint64_t c_m = (c & fraction) | (fraction + 1);
+            const uint32_t c_trailing = (uint32_t)__builtin_ctzll(c_m);
+            const unsigned __int128 addend_m = c_m >> c_trailing;
+            const int32_t addend_e = (int32_t)((c & exponent) >> (precision - 1)) - bias - (int32_t)(precision - 1) + (int32_t)c_trailing;
+            const bool product_higher = product_e >= addend_e;
+            const uint32_t distance = (uint32_t)(product_higher ? product_e - addend_e : addend_e - product_e);
+            const unsigned __int128 higher = product_higher ? product_m : addend_m;
+            const unsigned __int128 lower = product_higher ? addend_m : product_m;
+            const uint64_t high = (uint64_t)(higher >> 64);
+            const uint32_t length = high != 0 ? 128 - (uint32_t)__builtin_clzll(high) : 64 - (uint32_t)__builtin_clzll((uint64_t)higher);
+            result = distance <= 127 - length;
+            if (result)
+            {
+                const unsigned __int128 shifted = higher << distance;
+                const bool same_sign = product_sign == c_sign;
+                const unsigned __int128 magnitude = same_sign ? shifted + lower : shifted >= lower ? shifted - lower : lower - shifted;
+                const uint64_t higher_sign = product_higher ? product_sign : c_sign;
+                const uint64_t lower_sign = product_higher ? c_sign : product_sign;
+                const uint64_t sum_sign = same_sign || shifted >= lower ? higher_sign : lower_sign;
+                // A nonzero cancellation is exact only if its surviving bits fit. Zero's sign depends on rounding.
+                result = magnitude != 0 && ir_optimize_simd_float_encode(sum_sign, magnitude, product_higher ? addend_e : product_e, width, &bits);
+            }
+        }
+    }
+    if (result)
+    {
+        *value = bits;
     }
     return result;
 }
@@ -303,6 +394,25 @@ static bool ir_optimize_simd_fold(const IrFunction* f, uint32_t i, const IrSimdV
     if (f->flags[i] >= IR_SIMD_LANE_F32 && (op == IR_VCMP || op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV))
     {
         folded = ir_optimize_simd_float(op, width, bits, op == IR_VCMP ? f->c[i] : IR_EQ, operands, operands + 1, &staged);
+    }
+    else if (op == IR_FMA || op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI)
+    {
+        for (uint32_t lane = 0; folded && lane < bits / width; lane += 1)
+        {
+            const uint64_t a = ir_simd_lane_read(operands, width, lane);
+            uint64_t value = 0;
+            if (op == IR_FMA)
+            {
+                const uint64_t b = ir_simd_lane_read(operands + 1, width, lane);
+                const uint64_t c = ir_simd_lane_read(operands + 2, width, lane);
+                folded = ir_optimize_simd_float_fma(a, b, c, width, &value);
+            }
+            else
+            {
+                folded = ir_optimize_float_conversion(op, width, width, a, &value);
+            }
+            ir_simd_lane_write(&staged, width, lane, value);
+        }
     }
     else if (op == IR_AND || op == IR_OR || op == IR_XOR || op == IR_NOT)
     {
@@ -599,7 +709,7 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
     }
     else if (op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR || op == IR_NOT ||
              op == IR_SHL || op == IR_LSHR || op == IR_ASHR || op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV ||
-             op == IR_VCMP || op == IR_VSELECT)
+             op == IR_FMA || op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI || op == IR_VCMP || op == IR_VSELECT)
     {
         const uint32_t mask = ir_value_mask(f, i);
         const uint32_t ids[3] = { a, b, f->c[i] };

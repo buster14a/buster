@@ -330,6 +330,22 @@ where every lane does. Folding never removes the operation: its row stays, with
 its operands live, ahead of the constant its users receive, for its flags and
 traps.
 
+Vector `fma`, `sitofp`, `uitofp`, `fptosi` and `fptoui` (#2806) use the
+stricter exact-and-quiet rule of the scalar conversion folder. A conversion
+must be exact and in range, with no subnormal input; a fractional float-to-int
+conversion stays at run time even when its truncated value is in range. FMA
+forms the unrounded significand product and sum in bounded 128-bit integer
+arithmetic, then checks the final result's representability once. A rounded
+multiply followed by a rounded add is never used as its fold. NaNs,
+subnormals, invalid operations, inexact results and cancellation to a
+rounding-dependent signed zero remain unfolded. The whole vector folds only
+when every lane qualifies, and the original operation and its operands remain
+live for the runtime floating effects, as with the other vector floating rows.
+The new folds never touch the compiler's MXCSR. Their tests compare against
+packed hardware operations under all four rounding modes and all four DAZ/FTZ
+combinations, including fused cancellation, unsigned limits, and exact normal
+results whose intermediate product alone would overflow or underflow.
+
 The folds never read or write the compiler's own MXCSR: a lane
 (`ir_optimize_simd_float_lane`) is integer arithmetic on significands and
 exponents: a sum aligned in 128 bits, a product of significands, a quotient's

@@ -2505,8 +2505,799 @@ static void ir_test_lane_ops(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, admitted_count == 3 * (4 * 4 + 4 * 2), "every lane operation of the IR's vector widths is admitted, and no other");
 }
 
+static void ir_test_packed_float_rows(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const IrOp operations[] = {
+        IR_FMA,
+        IR_SITOFP,
+        IR_UITOFP,
+        IR_FPTOSI,
+        IR_FPTOUI,
+    };
+    const uint64_t mark = output->length;
+    IrFunction function = {0};
+    const IrSizes sizes = {
+        .instruction_count = 5,
+        .block_count = 1,
+    };
+    const bool created = ir_create(output, &sizes, &function) == IR_OK;
+    ir_test_expect(test, created, "packed float verifier fixture allocation");
+    if (created)
+    {
+        function.block_offsets[1] = 5;
+        ir_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            const IrType type = (IrType)(IR_V4I32 + width);
+            for (uint32_t operand = 0; operand < 3; operand += 1)
+            {
+                ir_test_instruction(&function, operand, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            for (uint32_t operation = 0; operation < BUSTER_ARRAY_LENGTH(operations); operation += 1)
+            {
+                const bool fma = operations[operation] == IR_FMA;
+                ir_test_instruction(&function, 3, operations[operation], type, 0, fma ? 1 : BUSTER_IR_NONE, fma ? 2 : BUSTER_IR_NONE);
+                for (uint32_t flags = 0; flags <= UINT8_MAX; flags += 1)
+                {
+                    function.flags[3] = (uint8_t)flags;
+                    const bool valid = flags == IR_SIMD_LANE_F32 || flags == IR_SIMD_LANE_F64;
+                    ir_test_expect(test, (ir_verify(&function, scratch, NULL).error == IR_OK) == valid &&
+                                   (ir_verify_complete(&function, scratch).error == IR_OK) == valid,
+                                   "packed FMA and conversions admit exactly the F32/F64 lane flags at every vector width");
+                }
+                function.flags[3] = IR_SIMD_LANE_F32;
+                for (uint32_t operand = 0; operand < (fma ? 3u : 1u); operand += 1)
+                {
+                    function.type[operand] = (uint8_t)(IR_V4I32 + (width + 1) % 3);
+                    ir_test_expect(test, ir_verify(&function, scratch, NULL).error != IR_OK &&
+                                   ir_verify_complete(&function, scratch).error != IR_OK,
+                                   "packed FMA and same-width conversions refuse every mismatched operand width");
+                    function.type[operand] = IR_I128;
+                    ir_test_expect(test, ir_verify(&function, scratch, NULL).error != IR_OK &&
+                                   ir_verify_complete(&function, scratch).error != IR_OK,
+                                   "packed float operations refuse scalar operands even at equal bit width");
+                    function.type[operand] = (uint8_t)type;
+                }
+            }
+        }
+    }
+    arena_pop_to(output, mark);
+}
+
+typedef struct IrPackedConversionTest IrPackedConversionTest;
+struct IrPackedConversionTest
+{
+    IrSimdOperation operation;
+    uint64_t input[2];
+    uint64_t expected[2];
+    bool valid;
+};
+
+static void ir_test_packed_conversions(IrTestTally* test)
+{
+    // Frozen IEEE-754 encodings at the exact same-width conversion boundaries. The inexact integer cases are
+    // halfway values that round to the even significand; FP-to-integer cases truncate toward zero.
+    static const IrPackedConversionTest cases[] = {
+        {
+            IR_SIMD_SITOFP,
+            {
+                0,
+                0,
+            },
+            {
+                0,
+                0,
+            },
+            true,
+        },
+        {
+            IR_SIMD_SITOFP,
+            {
+                1,
+                1,
+            },
+            {
+                0x3f800000,
+                UINT64_C(0x3ff0000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_SITOFP,
+            {
+                0xffffffff,
+                UINT64_MAX,
+            },
+            {
+                0xbf800000,
+                UINT64_C(0xbff0000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_SITOFP,
+            {
+                0x80000000,
+                UINT64_C(0x8000000000000000),
+            },
+            {
+                0xcf000000,
+                UINT64_C(0xc3e0000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_SITOFP,
+            {
+                0x7fffffff,
+                UINT64_C(0x7fffffffffffffff),
+            },
+            {
+                0x4f000000,
+                UINT64_C(0x43e0000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_SITOFP,
+            {
+                0x01000001,
+                UINT64_C(0x0020000000000001),
+            },
+            {
+                0x4b800000,
+                UINT64_C(0x4340000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_SITOFP,
+            {
+                0xfeffffff,
+                UINT64_C(0xffdfffffffffffff),
+            },
+            {
+                0xcb800000,
+                UINT64_C(0xc340000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_UITOFP,
+            {
+                0,
+                0,
+            },
+            {
+                0,
+                0,
+            },
+            true,
+        },
+        {
+            IR_SIMD_UITOFP,
+            {
+                1,
+                1,
+            },
+            {
+                0x3f800000,
+                UINT64_C(0x3ff0000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_UITOFP,
+            {
+                0xffffffff,
+                UINT64_MAX,
+            },
+            {
+                0x4f800000,
+                UINT64_C(0x43f0000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_UITOFP,
+            {
+                0x80000000,
+                UINT64_C(0x8000000000000000),
+            },
+            {
+                0x4f000000,
+                UINT64_C(0x43e0000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_UITOFP,
+            {
+                0x01000001,
+                UINT64_C(0x0020000000000001),
+            },
+            {
+                0x4b800000,
+                UINT64_C(0x4340000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0,
+                0,
+            },
+            {
+                0,
+                0,
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0x80000000,
+                UINT64_C(0x8000000000000000),
+            },
+            {
+                0,
+                0,
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0x3fe00000,
+                UINT64_C(0x3ffc000000000000),
+            },
+            {
+                1,
+                1,
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0xbfe00000,
+                UINT64_C(0xbffc000000000000),
+            },
+            {
+                0xffffffff,
+                UINT64_MAX,
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0xcf000000,
+                UINT64_C(0xc3e0000000000000),
+            },
+            {
+                0x80000000,
+                UINT64_C(0x8000000000000000),
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0x4effffff,
+                UINT64_C(0x43dfffffffffffff),
+            },
+            {
+                0x7fffff80,
+                UINT64_C(0x7ffffffffffffc00),
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0xcf000001,
+                UINT64_C(0xc3e0000000000001),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0x4f000000,
+                UINT64_C(0x43e0000000000000),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0x7f800000,
+                UINT64_C(0x7ff0000000000000),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0xff800000,
+                UINT64_C(0xfff0000000000000),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0x7fc12345,
+                UINT64_C(0x7ff8123456789abc),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOSI,
+            {
+                0x7f800001,
+                UINT64_C(0x7ff0000000000001),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0,
+                0,
+            },
+            {
+                0,
+                0,
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0x80000000,
+                UINT64_C(0x8000000000000000),
+            },
+            {
+                0,
+                0,
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0xbf000000,
+                UINT64_C(0xbfe0000000000000),
+            },
+            {
+                0,
+                0,
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0xbf7fffff,
+                UINT64_C(0xbfefffffffffffff),
+            },
+            {
+                0,
+                0,
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0x80000001,
+                UINT64_C(0x8000000000000001),
+            },
+            {
+                0,
+                0,
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0x3f7fffff,
+                UINT64_C(0x3fefffffffffffff),
+            },
+            {
+                0,
+                0,
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0x4f7fffff,
+                UINT64_C(0x43efffffffffffff),
+            },
+            {
+                0xffffff00,
+                UINT64_C(0xfffffffffffff800),
+            },
+            true,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0xbf800000,
+                UINT64_C(0xbff0000000000000),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0x4f800000,
+                UINT64_C(0x43f0000000000000),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0x7f800000,
+                UINT64_C(0x7ff0000000000000),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0xff800000,
+                UINT64_C(0xfff0000000000000),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0x7fc12345,
+                UINT64_C(0x7ff8123456789abc),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+        {
+            IR_SIMD_FPTOUI,
+            {
+                0x7f800001,
+                UINT64_C(0x7ff0000000000001),
+            },
+            {
+                0,
+                0,
+            },
+            false,
+        },
+    };
+    const uint32_t saved = _mm_getcsr();
+    _mm_setcsr(0x1f80);
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const uint32_t bytes = 16u << width;
+        for (uint32_t wide = 0; wide < 2; wide += 1)
+        {
+            const uint32_t element = 4u << wide;
+            const uint64_t one = wide != 0 ? UINT64_C(0x3ff0000000000000) : 0x3f800000;
+            for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+            {
+                const bool from_integer = cases[c].operation == IR_SIMD_SITOFP || cases[c].operation == IR_SIMD_UITOFP;
+                const uint64_t initial = from_integer ? 1 : one;
+                const uint64_t converted = from_integer ? one : 1;
+                IrSimdValue source = {0};
+                IrSimdValue expected = {0};
+                for (uint32_t byte = 0; byte < bytes; byte += element)
+                {
+                    memcpy((uint8_t*)source.words + byte, &initial, element);
+                    memcpy((uint8_t*)expected.words + byte, &converted, element);
+                }
+                // The last lane fails only after all previous lanes have converted successfully.
+                memcpy((uint8_t*)source.words + bytes - element, &cases[c].input[wide], element);
+                memcpy((uint8_t*)expected.words + bytes - element, &cases[c].expected[wide], element);
+                const IrSimdValue before = source;
+                const IrSimdAction action = {
+                    .operation = cases[c].operation,
+                    .result = shape,
+                    .operands = {
+                        shape,
+                        IR_SIMD_NONE,
+                        IR_SIMD_NONE,
+                    },
+                    .lane = wide != 0 ? IR_SIMD_LANE_F64 : IR_SIMD_LANE_F32,
+                };
+                const IrSimdValue* operands[3] = {
+                    &source,
+                    NULL,
+                    NULL,
+                };
+                IrSimdValue result;
+                memset(&result, 0xa5, sizeof(result));
+                const IrSimdValue sentinel = result;
+                const bool evaluated = ir_simd_evaluate(&action, operands, NULL, NULL, 0, &result);
+                ir_test_expect(test, evaluated == cases[c].valid &&
+                               memcmp(&result, cases[c].valid ? &expected : &sentinel, sizeof(result)) == 0,
+                               "same-width conversions preserve boundary bits, truncate fractions and commit only complete vectors");
+                const bool aliased = ir_simd_evaluate(&action, operands, NULL, NULL, 0, &source);
+                ir_test_expect(test, aliased == cases[c].valid &&
+                               memcmp(&source, cases[c].valid ? &expected : &before, sizeof(source)) == 0,
+                               "same-width conversions can overwrite their source and preserve it on arithmetic failure");
+            }
+        }
+    }
+    _mm_setcsr(saved);
+}
+
+static void ir_test_packed_fma(IrTestTally* test)
+{
+    // a, b, c, a*b+c: first-NaN payload order, invalid products, signed zeros, a product residual requiring one
+    // rounding, infinities and the smallest subnormal. Expectations are raw bits, not an unfused scalar expression.
+    static const uint64_t cases[2][13][4] = {
+        {
+            {
+                0x7fc12345,
+                0x7fc23456,
+                0x7f800003,
+                0x7fc12345,
+            },
+            {
+                0x7f800001,
+                0xffc23456,
+                0x7f800003,
+                0x7fc00001,
+            },
+            {
+                0x3f800000,
+                0xff800002,
+                0x7fc34567,
+                0xffc00002,
+            },
+            {
+                0x3f800000,
+                0x3f800000,
+                0x7f800003,
+                0x7fc00003,
+            },
+            {
+                0x7f800000,
+                0,
+                0x7fc34567,
+                0x7fc34567,
+            },
+            {
+                0x7f800000,
+                0,
+                0x3f800000,
+                0xffc00000,
+            },
+            {
+                0x7f800000,
+                0x3f800000,
+                0xff800000,
+                0xffc00000,
+            },
+            {
+                0x80000000,
+                0x3f800000,
+                0x80000000,
+                0x80000000,
+            },
+            {
+                0x80000000,
+                0xbf800000,
+                0x80000000,
+                0,
+            },
+            {
+                0,
+                0x3f800000,
+                0x80000000,
+                0,
+            },
+            {
+                0x3f800001,
+                0x3f800001,
+                0xbf800002,
+                0x28800000,
+            },
+            {
+                0xff800000,
+                0xbf800000,
+                0,
+                0x7f800000,
+            },
+            {
+                1,
+                0x3f800000,
+                0,
+                1,
+            },
+        },
+        {
+            {
+                UINT64_C(0x7ff8123456789abc),
+                UINT64_C(0x7ff823456789abcd),
+                UINT64_C(0x7ff0000000000003),
+                UINT64_C(0x7ff8123456789abc),
+            },
+            {
+                UINT64_C(0x7ff0000000000001),
+                UINT64_C(0xfff823456789abcd),
+                UINT64_C(0x7ff0000000000003),
+                UINT64_C(0x7ff8000000000001),
+            },
+            {
+                UINT64_C(0x3ff0000000000000),
+                UINT64_C(0xfff0000000000002),
+                UINT64_C(0x7ff83456789abcde),
+                UINT64_C(0xfff8000000000002),
+            },
+            {
+                UINT64_C(0x3ff0000000000000),
+                UINT64_C(0x3ff0000000000000),
+                UINT64_C(0x7ff0000000000003),
+                UINT64_C(0x7ff8000000000003),
+            },
+            {
+                UINT64_C(0x7ff0000000000000),
+                0,
+                UINT64_C(0x7ff83456789abcde),
+                UINT64_C(0x7ff83456789abcde),
+            },
+            {
+                UINT64_C(0x7ff0000000000000),
+                0,
+                UINT64_C(0x3ff0000000000000),
+                UINT64_C(0xfff8000000000000),
+            },
+            {
+                UINT64_C(0x7ff0000000000000),
+                UINT64_C(0x3ff0000000000000),
+                UINT64_C(0xfff0000000000000),
+                UINT64_C(0xfff8000000000000),
+            },
+            {
+                UINT64_C(0x8000000000000000),
+                UINT64_C(0x3ff0000000000000),
+                UINT64_C(0x8000000000000000),
+                UINT64_C(0x8000000000000000),
+            },
+            {
+                UINT64_C(0x8000000000000000),
+                UINT64_C(0xbff0000000000000),
+                UINT64_C(0x8000000000000000),
+                0,
+            },
+            {
+                0,
+                UINT64_C(0x3ff0000000000000),
+                UINT64_C(0x8000000000000000),
+                0,
+            },
+            {
+                UINT64_C(0x3ff0000000000001),
+                UINT64_C(0x3ff0000000000001),
+                UINT64_C(0xbff0000000000002),
+                UINT64_C(0x3970000000000000),
+            },
+            {
+                UINT64_C(0xfff0000000000000),
+                UINT64_C(0xbff0000000000000),
+                0,
+                UINT64_C(0x7ff0000000000000),
+            },
+            {
+                1,
+                UINT64_C(0x3ff0000000000000),
+                0,
+                1,
+            },
+        },
+    };
+    const uint32_t saved = _mm_getcsr();
+    _mm_setcsr(0x1f80);
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        for (uint32_t wide = 0; wide < 2; wide += 1)
+        {
+            const uint32_t element = 4u << wide;
+            for (uint32_t first = 0; first < BUSTER_ARRAY_LENGTH(cases[0]); first += 1)
+            {
+                IrSimdValue inputs[3] = {0};
+                IrSimdValue expected = {0};
+                for (uint32_t byte = 0; byte < (16u << width); byte += element)
+                {
+                    const uint32_t c = (first + byte / element) % BUSTER_ARRAY_LENGTH(cases[0]);
+                    for (uint32_t operand = 0; operand < 3; operand += 1)
+                    {
+                        memcpy((uint8_t*)inputs[operand].words + byte, &cases[wide][c][operand], element);
+                    }
+                    memcpy((uint8_t*)expected.words + byte, &cases[wide][c][3], element);
+                }
+                const IrSimdAction action = {
+                    .operation = IR_SIMD_FMA,
+                    .result = shape,
+                    .operands = {
+                        shape,
+                        shape,
+                        shape,
+                    },
+                    .lane = wide != 0 ? IR_SIMD_LANE_F64 : IR_SIMD_LANE_F32,
+                };
+                const IrSimdValue* operands[3] = {
+                    &inputs[0],
+                    &inputs[1],
+                    &inputs[2],
+                };
+                IrSimdValue result = {0};
+                ir_test_expect(test, ir_simd_evaluate(&action, operands, NULL, NULL, 0, &result) &&
+                               memcmp(&result, &expected, sizeof(result)) == 0,
+                               "packed FMA preserves first-NaN payloads, signed zeros and the one-rounding residual in every lane");
+            }
+        }
+    }
+    _mm_setcsr(saved);
+}
+
 static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
+    ir_test_packed_float_rows(test, output, scratch);
+    ir_test_packed_conversions(test);
+    ir_test_packed_fma(test);
     ir_test_scalar_shifts(test, output, scratch);
     ir_test_lane_ops(test, output, scratch);
     ir_test_ternary_dominance(test, output, scratch);
