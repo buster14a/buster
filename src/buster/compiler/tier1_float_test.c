@@ -1254,6 +1254,8 @@ static void tier1_float_fma_factor_addresses(Tier1EmitTest* test)
     }
 }
 
+#include "tier1_float_resize_load_test.c"
+
 static void tier1_float_cases(Tier1EmitTest* test)
 {
     tier1_float_unsigned_i64_forms(test);
@@ -1261,6 +1263,7 @@ static void tier1_float_cases(Tier1EmitTest* test)
     test->width = 8;
     test->selects = false;
     tier1_float_conversion_loads(test);
+    tier1_float_resize_load_tests(test);
     tier1_float_unsigned_dword_memory(test);
     tier1_float_first_fma_load(test);
     tier1_float_fma_loads(test);

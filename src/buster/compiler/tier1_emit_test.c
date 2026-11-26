@@ -150,7 +150,7 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_emit_test_call(co
 
 // The code with its branches sized, encoded into `bytes` of new pages and made executable: whether it runs natively
 // here. The caller unmaps `executable` (MAP_FAILED where nothing was mapped).
-static bool tier1_emit_test_load(Tier1EmitTest* test, Tier1SelectCode* code, void** executable, uint64_t* bytes)
+static bool tier1_emit_test_load_checked(Tier1EmitTest* test, Tier1SelectCode* code, void** executable, uint64_t* bytes, bool measured)
 {
     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     *bytes = (capacity + 4095) & ~UINT64_C(4095);
@@ -175,7 +175,10 @@ static bool tier1_emit_test_load(Tier1EmitTest* test, Tier1SelectCode* code, voi
         }
         tier1_emit_test_expect(test, covered, "every frame and body record has a covered form");
         // #181: and a complete Zen 5 row (x86_zen5_rows.c), which the model's consumers need.
-        tier1_emit_test_expect(test, x86_zen5_missing(code->records, code->count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "every frame and body record has a complete Zen 5 row");
+        if (measured)
+        {
+            tier1_emit_test_expect(test, x86_zen5_missing(code->records, code->count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "every frame and body record has a complete Zen 5 row");
+        }
         ready = x86_target_validate(test->allowed, code->records, code->count) == code->count && x86_encode(code->records, code->count, *executable, capacity, 0, 0) > 0;
         tier1_emit_test_expect(test, ready, "baseline encoder accepts complete frame and body");
         ready = ready && mprotect(*executable, *bytes, PROT_READ | PROT_EXEC) == 0;
@@ -183,6 +186,18 @@ static bool tier1_emit_test_load(Tier1EmitTest* test, Tier1SelectCode* code, voi
     }
     free(offsets);
     return ready && tier1_emit_test_native(test, code->records, code->count);
+}
+
+static bool tier1_emit_test_load(Tier1EmitTest* test, Tier1SelectCode* code, void** executable, uint64_t* bytes)
+{
+    return tier1_emit_test_load_checked(test, code, executable, bytes, true);
+}
+
+// New memory forms can be checked for exact semantics and target legality before native timing supplies their
+// scheduler rows. Keep the existing measured fixtures' cost-coverage assertion; never invent a cost for these tests.
+static bool tier1_emit_test_load_unmeasured(Tier1EmitTest* test, Tier1SelectCode* code, void** executable, uint64_t* bytes)
+{
+    return tier1_emit_test_load_checked(test, code, executable, bytes, false);
 }
 
 static void tier1_emit_test_execute(Tier1EmitTest* test, const IrFunction* function, Tier1EmitResult* emitted)
@@ -634,10 +649,13 @@ static void tier1_emit_test_calls_before(Tier1EmitTest* test)
 #include "tier1_code_certificate_test.c"
 #include "tier1_stack_test.c"
 #include "tier1_float_test.c"
+#include "tier1_packed_memory_test.c"
+#include "tier1_float_row_load_test.c"
 #include "tier1_induction_test.c"
 #include "tier1_storage_test.c"
 #include "tier1_branch_layout_test.c"
 #include "tier1_float_select_emit_test.c"
+#include "tier1_float_compare_load_test.c"
 #include "tier1_address_sink_test.c"
 #include "tier1_hot_recipes_test.c"
 #include "tier1_symbol_fold_test.c"
@@ -1639,6 +1657,8 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_code_certificate_tests(&test);
             tier1_stack_tests(&test);
             tier1_float_tests(&test);
+            tier1_packed_memory_tests(&test);
+            tier1_float_row_load_tests(&test);
             tier1_induction_tests(&test);
             tier1_storage_tests(&test);
             tier1_storage_phi_tests(&test);
@@ -1650,6 +1670,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_storage_parameter_tests(&test);
             tier1_branch_layout_tests(&test);
             tier1_float_select_tests(&test);
+            tier1_float_compare_load_tests(&test);
             tier1_address_sink_tests(&test);
             tier1_hot_recipes_tests(&test);
             tier1_symbol_fold_tests(&test);
