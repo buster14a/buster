@@ -38,9 +38,9 @@
 //   opmask registers' saves and reloads around it are moves, decoded as any.
 // - An asm body (TIER1_RULE_ASM, #1839) is its records placed by the certificate (the operand block's addresses from the
 //   frame base register, by the layout) and compared, its own branches exactly the body's; one ORIGINAL that reads its
-//   register operands, defines its optional result and kills every register the body touches (IrAsmBody.touched,
+//   register operands and kills every register the body touches (IrAsmBody.touched,
 //   .masks: the front end's account of the template, trusted as the IR) and the frame bytes its stores write. A form the
-//   semantics' tables don't cover writes no register but those. The saves, result copy and reloads around it are moves.
+//   semantics' tables don't cover writes no register but those. Declared results are defined at the body boundary. The saves, captures and reloads are moves.
 // - A by-value aggregate (#789): a parameter's copy at entry, a call's argument copies (into staging slots, zmm16 and on,
 //   stack slots or the outgoing area), its parts' loads, the hidden pointer, the result parts' stores and the function's
 //   own result are regenerated as the emitter writes them (tier1_emit_copy_bytes', tier1_emit_store_part's) and
@@ -2866,9 +2866,8 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
 // (BUSTER_TIER0_ASM_BLOCK) addressing the block's frame object from the frame base register, by the frame's layout; and
 // compares them with the emitted ones, which carry no reference. The body's own branches are exactly its branches, each
 // to its target's record (its end's for one to the body's end), and no other branch leaves its records. The records
-// are one ORIGINAL whose optional definition is in the body's result register, before its result's copy and the
-// restores; its uses are its register operands (#2144, IrAsmBody.locations), each read in its own register, where the
-// operands' moves before it left it: they read the block's memory too, which isn't a value the
+// are one ORIGINAL with no definition. Its register operands (#2144, IrAsmBody.locations) are read in their own
+// registers, where the preceding moves left them. The records also read the block's memory, which isn't a value the
 // allocation keeps, and kill every register the body touches (IrAsmBody.touched and .masks: callee-saved ones too, which
 // the prologue saved) and the frame bytes their stores write. Then the declared scalar results are defined in their
 // fixed registers, from which the following moves must prove their allocated homes. The projections are found from
@@ -2901,11 +2900,10 @@ static bool tier1_cert_emitted_asm(Tier1CertEmittedBuild* build, uint32_t node, 
     }
     valid = valid && branch == body->branch_count;
     valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
-    const uint32_t value = valid && body->result != 0 ? emitted->node_values[node] : BUSTER_TIER1_CFG_NONE;
     Tier1CertEmittedKernel kernel = {
         .referenced = UINT32_MAX,
-        .definition = value,
-        .definition_location = value != BUSTER_TIER1_CFG_NONE ? tier1_cert_emitted_register(build, value, body->result - 1) : BUSTER_CERT_NONE,
+        .definition = BUSTER_TIER1_CFG_NONE,
+        .definition_location = BUSTER_CERT_NONE,
         .condition = X86_FORM_NONE,
         .body = body,
     };
