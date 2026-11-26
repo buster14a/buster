@@ -61,7 +61,6 @@ jobs:
       CANDIDATE: ${{ matrix.candidate }}
       BASE_DIGEST: ${{ matrix.digest }}
       BASE_ARTIFACT: ${{ matrix.artifact }}
-      EVIDENCE: ${{ runner.temp }}/interpreter-2758
     steps:
       - name: Check out the exact PR head
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -72,6 +71,8 @@ jobs:
       - name: Probe this runner before installing or executing the products
         id: probe
         run: |
+          EVIDENCE="$RUNNER_TEMP/interpreter-2758"
+          printf 'EVIDENCE=%s\n' "$EVIDENCE" >> "$GITHUB_ENV"
           mkdir -p "$EVIDENCE/metadata"
           git rev-parse HEAD 'HEAD^{tree}' > "$EVIDENCE/metadata/head-revision-tree"
           cp .github/workflows/interpreter-2758-evidence.yml "$EVIDENCE/metadata/workflow.yml"
@@ -291,6 +292,7 @@ jobs:
       - name: Retain evidence and hashes without executable payloads
         if: always()
         run: |
+          EVIDENCE="${EVIDENCE:-$RUNNER_TEMP/interpreter-2758}"
           mkdir -p "$EVIDENCE"
           test -f "$EVIDENCE/status" || printf 'incomplete: inspect the failing step and retained evidence\n' > "$EVIDENCE/status"
           (cd "$EVIDENCE" && find . -type f -perm /111 -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum) > "$EVIDENCE/omitted-executables.sha256"
