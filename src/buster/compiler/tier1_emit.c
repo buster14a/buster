@@ -42,14 +42,15 @@ _Static_assert(BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT == BUSTER_TIER1_FRAME_MA
 #define BUSTER_TIER1_EMIT_MASK_LOCATION (32u * BUSTER_TIER1_ALLOCATE_MASK)
 // The opmask registers the CFG consumer's masks take, k1 to k7, k0 its scratch: and every one a call clobbers.
 #define BUSTER_TIER1_EMIT_MASK_REGISTERS 0xfeu
-// A floating value's xmm register's location (#141), 32 + n, and the registers the CFG consumer's floating values take,
-// xmm0 to xmm14, xmm15 its scratch (BUSTER_TIER1_SELECT_FLOAT_SCRATCH): every one a call clobbers.
+// A vector-class value's location, 32 + n. xmm15 remains the class's move scratch; upper registers are candidates only
+// after the selected operands and their transport forms qualify them and the function reserves its row/call scratch.
 #define BUSTER_TIER1_EMIT_VECTOR_LOCATION (32u * BUSTER_TIER1_ALLOCATE_VECTOR)
-#define BUSTER_TIER1_EMIT_VECTOR_REGISTERS 0x7fffu
+#define BUSTER_TIER1_EMIT_VECTOR_REGISTERS 0xffff7fffu
+#define BUSTER_TIER1_EMIT_LOW_VECTOR_REGISTERS 0x7fffu
 // A call's records past its node's share, a kmov store and load of each of k1 to k7 that a mask holds across it among
-// them (#179), and a movsd store and load of each of xmm0 to xmm14 that a floating value holds across it, its floating
-// arguments' moves and its floating result's (#141).
-#define BUSTER_TIER1_EMIT_CALL_RECORDS (2 * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 3 * BUSTER_ABI_INTEGER_ARGUMENTS + 6 + 2 * 7 + 2 * (BUSTER_TIER1_SELECT_MAX_ARGUMENTS - BUSTER_TIER1_SELECT_CALL_ARGUMENTS) + 2 * 15 + 2 * BUSTER_ABI_VECTOR_ARGUMENTS + 2)
+// them (#179), and a full-width store and load of each of the 31 allocatable vector registers a value holds across it,
+// its floating arguments' moves and its floating result's (#141, #3625).
+#define BUSTER_TIER1_EMIT_CALL_RECORDS (2 * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 3 * BUSTER_ABI_INTEGER_ARGUMENTS + 6 + 2 * 7 + 2 * (BUSTER_TIER1_SELECT_MAX_ARGUMENTS - BUSTER_TIER1_SELECT_CALL_ARGUMENTS) + 2 * 31 + 2 * BUSTER_ABI_VECTOR_ARGUMENTS + 2)
 // The records a node of a fixed-register rule writes past its share, BUSTER_TIER1_SELECT_RECORDS_PER_NODE: its sequence's,
 // and the saves and restores of the two fixed registers a division takes (tier1_emit_fixed).
 #define BUSTER_TIER1_EMIT_FIXED_RECORDS (BUSTER_TIER1_SELECT_FIXED_RECORDS + 4 - BUSTER_TIER1_SELECT_RECORDS_PER_NODE)
@@ -105,7 +106,8 @@ typedef struct Tier1EmitOptions Tier1EmitOptions;
 struct Tier1EmitOptions
 {
     uint32_t register_mask;
-    // The xmm registers the CFG consumer's floating values may take (#141), of xmm0 to xmm14; 0 for all of them.
+    // Vector-register candidates, intersected with each value's selected forms and the function's reservations; 0
+    // uses all qualified registers. xmm15 is always scratch. Scalar floating values still require low registers.
     uint32_t vector_register_mask;
     uint32_t frame_flags;
     // With BUSTER_TIER1_FRAME_KEEP_POINTER in `frame_flags`: a function without calls keeps no frame pointer
@@ -189,10 +191,15 @@ struct Tier1EmitPrepared
     uint32_t mask_columns;
     uint32_t vector_save_mask;
     uint32_t vector_columns;
+    // Upper vector registers owned by machine-row placements and 64-byte ABI argument staging throughout the function.
+    // Reserving them before allocation keeps those existing temporary placements disjoint from every allocated value.
+    uint32_t vector_reserved;
     // The CFG consumer's asm bodies (#1839, TIER1_RULE_ASM), which its frame takes as calls (rsp aligned at each, no leaf
     // frame), and the callee-saved registers they touch, which its prologue saves.
     uint32_t asm_count;
     uint32_t asm_callee;
+    // An opaque assembled byte span whose record positions post-allocation scheduling must retain (#2351).
+    bool asm_opaque;
     // Secondary result snapshots by producer node (#2144). The lists contain IR_ASM_RESULT nodes only; each body's
     // primary result is its own node. Null without asm bodies.
     uint32_t* asm_result_heads;
@@ -361,6 +368,16 @@ struct Tier1EmitResult
     // entries, preserving the function's label indices, and none in a function without labels.
     uint32_t* label_records;
     uint32_t label_count;
+    // The asm bodies' named labels (#2351), in emitted order: each name's front-end index and its record, including
+    // the body's end. They become EmittedCode.asm_label_records/names, and are scheduling boundaries.
+    uint32_t* asm_label_records;
+    uint32_t* asm_label_names;
+    uint32_t asm_label_count;
+    uint32_t asm_label_capacity;
+    // The bodies' [first, end) record pairs, in emitted order. Post scheduling preserves every record in them,
+    // including the exact instruction following a named label (#2351).
+    uint32_t* asm_ranges;
+    uint32_t asm_range_count;
     // Each return's ret, in record order: its record's index in `code`, right after its epilogue (tier1_frame_emit's),
     // `exit_count` of them.
     uint32_t* exits;
@@ -851,7 +868,7 @@ static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const 
     const uint16_t general = load ? (width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32) : (width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32);
     const X86Instruction record = {
         .displacement = frame->offset[allocation->spill_ids[value]],
-        .reg = mask ? (uint8_t)(reg & 7) : vector ? (uint8_t)(reg & 15) : reg,
+        .reg = mask ? (uint8_t)(reg & 7) : vector ? (uint8_t)(reg & 31) : reg,
         .rm = (uint8_t)frame->base_register,
         .mode = BUSTER_X86_MEMORY_BASE,
         .form = mask ? (load ? forms->load : forms->store) : vector ? (load ? floats->load : floats->store) : general,

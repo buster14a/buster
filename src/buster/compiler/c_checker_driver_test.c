@@ -1194,7 +1194,8 @@ static bool check_test_driver_needed(const char* path, char* names, uint64_t cap
 }
 
 // Each row supplies an ID followed by the files the specialized driver check consumes, in the role
-// order named by its header. The checker-owned harness stages them in its existing temporary layout.
+// order named by its header. V2 also accepts @paths relative to the fixture root for shared inputs.
+// The checker-owned harness stages private inputs in its existing temporary layout.
 enum { CHECK_DRIVER_PROGRAM_INPUTS = 16 };
 
 typedef struct CheckDriverProgramInput CheckDriverProgramInput;
@@ -1202,6 +1203,7 @@ struct CheckDriverProgramInput
 {
     const char* bytes;
     uint64_t length;
+    const char* file;
 };
 
 typedef void CheckDriverProgramRun(CheckTest*, const char*, const char*, const char*, const CheckDriverProgramInput*);
@@ -1213,23 +1215,110 @@ static const char* check_test_driver_input_text(CheckTest* test, const CheckDriv
     return input->bytes;
 }
 
+// An expectation row has exactly `count` nonempty, tab-separated fields and one final newline. The catalog owns
+// mutable, terminated copies of the bytes, so splitting them is private to this invocation of the case.
+static bool check_test_driver_input_fields(CheckTest* test, const CheckDriverProgramInput* input, char** fields, uint32_t count)
+{
+    bool valid = input->length != 0 && input->bytes[input->length - 1] == '\n' && memchr(input->bytes, 0, input->length) == NULL &&
+                 memchr(input->bytes, '\n', input->length - 1) == NULL;
+    char* row = (char*)input->bytes;
+    if (valid)
+    {
+        row[input->length - 1] = 0;
+    }
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        fields[i] = strsep(&row, "\t");
+        valid = fields[i] != NULL && fields[i][0] != 0;
+    }
+    valid = valid && row == NULL;
+    check_test_expect(test, valid, "the driver expectation row has every required field");
+    return valid;
+}
+
+static bool check_test_driver_input_count(const char* text, uint32_t* count)
+{
+    uint64_t value = 0;
+    bool valid = text != NULL && text[0] != 0;
+    for (const char* at = text; valid && *at != 0; at += 1)
+    {
+        valid = *at >= '0' && *at <= '9';
+        value = valid ? value * 10 + (uint32_t)(*at - '0') : value;
+        valid = valid && value <= UINT32_MAX;
+    }
+    if (valid)
+    {
+        *count = (uint32_t)value;
+    }
+    return valid;
+}
+
+// Local names are one word. Shared names contain safe relative components under the chosen root, with no
+// empty, dot or parent component. Neither form can escape its data directory through a catalog path.
+static bool check_test_driver_input_name(const char* file, bool shared)
+{
+    const bool reference = file != NULL && file[0] == '@';
+    const char* name = reference ? file + 1 : file;
+    const char* suffix = name != NULL ? strrchr(name, '.') : NULL;
+    bool valid = name != NULL && suffix != NULL && strlen(name) < PATH_MAX && (!reference || shared) &&
+                 (strcmp(suffix, ".c") == 0 || strcmp(suffix, ".h") == 0 || strcmp(suffix, ".expected") == 0);
+    if (valid && !reference)
+    {
+        valid = check_test_fixture_word(name, 128);
+    }
+    for (const char* at = name; valid && reference && *at != 0;)
+    {
+        const size_t length = strcspn(at, "/");
+        char part[129];
+        valid = length != 0 && length < sizeof(part);
+        if (valid)
+        {
+            memcpy(part, at, length);
+            part[length] = 0;
+            valid = check_test_fixture_word(part, 128) && strcmp(part, ".") != 0 && strcmp(part, "..") != 0;
+            at += length;
+            if (*at == '/')
+            {
+                at += 1;
+                valid = valid && *at != 0;
+            }
+        }
+    }
+    return valid;
+}
+
+static bool check_test_driver_input_path(char* path, size_t capacity, const char* folder, const char* file)
+{
+    return file[0] == '@' ? check_test_fixture_path(path, capacity, file + 1) : test_fixture_path(path, capacity, folder, file);
+}
+
 static void check_test_driver_programs(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* suite,
                                        const char* roles, CheckDriverProgramRun* run)
 {
     CheckTestFixtures storage = { .storage = arena_reserve(UINT64_C(1) << 26) };
     const char** ids = arena_push(&storage.storage, sizeof(*ids) * CHECK_TEST_FIXTURE_CASES, 8);
+    uint32_t* lines = arena_push(&storage.storage, sizeof(*lines) * CHECK_TEST_FIXTURE_CASES, 4);
     storage.files = arena_push(&storage.storage, sizeof(*storage.files) * CHECK_TEST_FIXTURE_CASES * CHECK_DRIVER_PROGRAM_INPUTS, 8);
-    char folder[PATH_MAX];
-    int size = snprintf(folder, sizeof(folder), "%s/driver/programs/%s", check_test_fixture_root, suite);
-    char path[PATH_MAX + 132];
-    snprintf(path, sizeof(path), "%s/catalog.tsv", folder);
+    char relative[256];
+    const int size = snprintf(relative, sizeof(relative), "driver/programs/%s", suite);
+    char folder[PATH_MAX] = { 0 };
+    char path[PATH_MAX];
+    bool valid = size >= 0 && (size_t)size < sizeof(relative) && check_test_fixture_path(folder, sizeof(folder), relative) &&
+                 test_fixture_path(path, sizeof(path), folder, "catalog.tsv") && ids != NULL && lines != NULL && storage.files != NULL;
     uint64_t length = 0;
-    char* catalog = check_test_fixture_read(&storage, path, &length);
-    bool valid = size >= 0 && (size_t)size < sizeof(folder) && ids != NULL && storage.files != NULL &&
-                 catalog != NULL && length != 0 && catalog[length - 1] == '\n';
+    char* catalog = valid ? check_test_fixture_read(&storage, path, &length) : NULL;
+    valid = valid && catalog != NULL && length != 0 && catalog[length - 1] == '\n';
     char header[512];
-    size = snprintf(header, sizeof(header), "buster-fixtures v1 driver-programs\t%s", roles);
-    valid = valid && size >= 0 && (size_t)size < sizeof(header) && strcmp(strsep(&catalog, "\n"), header) == 0;
+    const int header_size = snprintf(header, sizeof(header), "buster-fixtures v1 driver-programs\t%s", roles);
+    valid = valid && header_size >= 0 && (size_t)header_size < sizeof(header);
+    const char* version = valid ? strsep(&catalog, "\n") : "";
+    const bool first = valid && strcmp(version, header) == 0;
+    if (valid)
+    {
+        (void)snprintf(header, sizeof(header), "buster-fixtures v2 driver-programs\t%s", roles);
+    }
+    const bool shared = valid && strcmp(version, header) == 0;
+    valid = valid && (first || shared);
     uint32_t inputs = 1;
     for (const char* at = roles; *at != 0; at += 1)
     {
@@ -1248,45 +1337,64 @@ static void check_test_driver_programs(CheckTest* test, const char* clang, const
             continue;
         }
         const char* id = strsep(&row, "\t");
-        valid = check_test_fixture_word(id, 64) && cases < CHECK_TEST_FIXTURE_CASES;
+        valid = id != NULL && check_test_fixture_word(id, 64) && cases < CHECK_TEST_FIXTURE_CASES;
         for (uint32_t i = 0; valid && i < cases; i += 1)
         {
             valid = strcmp(id, ids[i]) != 0;
         }
-        CheckDriverProgramInput files[CHECK_DRIVER_PROGRAM_INPUTS];
         for (uint32_t i = 0; valid && i < inputs; i += 1)
         {
             const char* file = strsep(&row, "\t");
-            const char* suffix = file != NULL ? strrchr(file, '.') : NULL;
-            valid = suffix != NULL && check_test_fixture_word(file, 128) &&
-                    (strcmp(suffix, ".c") == 0 || strcmp(suffix, ".h") == 0 || strcmp(suffix, ".expected") == 0);
+            valid = check_test_driver_input_name(file, shared);
             if (valid)
             {
-                snprintf(path, sizeof(path), "%s/%s", folder, file);
-                files[i].bytes = check_test_fixture_read_bytes(&storage, path, true, &files[i].length);
                 storage.files[storage.count++] = file;
-                valid = files[i].bytes != NULL;
             }
         }
         valid = valid && row == NULL;
         if (valid)
         {
-            ids[cases++] = id;
+            ids[cases] = id;
+            lines[cases++] = line;
+        }
+    }
+    valid = valid && cases != 0 && check_test_fixture_orphans(&storage, folder);
+    // Validate the whole inventory and every file before any case runs. Reuse the per-case byte storage rather than
+    // retaining all inputs in the arena; a suite can contain more source bytes than fit in one case's storage.
+    for (uint32_t i = 0; valid && i < storage.count; i += 1)
+    {
+        uint64_t bytes = 0;
+        valid = check_test_driver_input_path(path, sizeof(path), folder, storage.files[i]) &&
+                check_test_fixture_read_bytes(&storage, path, true, &bytes) != NULL;
+        arena_pop_to(&storage.storage, mark);
+    }
+    for (uint32_t c = 0; valid && c < cases; c += 1)
+    {
+        CheckDriverProgramInput files[CHECK_DRIVER_PROGRAM_INPUTS];
+        for (uint32_t i = 0; valid && i < inputs; i += 1)
+        {
+            files[i].file = storage.files[c * inputs + i];
+            valid = check_test_driver_input_path(path, sizeof(path), folder, files[i].file);
+            files[i].bytes = valid ? check_test_fixture_read_bytes(&storage, path, true, &files[i].length) : NULL;
+            valid = valid && files[i].bytes != NULL;
+        }
+        if (valid)
+        {
             const uint64_t failures = test->failures;
             run(test, clang, executable, directory, files);
             if (test->failures != failures)
             {
-                fprintf(stderr, "%s/catalog.tsv line %u: driver case '%s' failed\n", folder, line, id);
+                fprintf(stderr, "%s/catalog.tsv line %u: driver case '%s' failed\n", folder, lines[c], ids[c]);
             }
-            arena_pop_to(&storage.storage, mark);
         }
+        arena_pop_to(&storage.storage, mark);
     }
-    valid = valid && cases != 0 && check_test_fixture_orphans(&storage, folder);
     if (!valid)
     {
         fprintf(stderr, "%s/catalog.tsv line %u: %s\n", folder, line, storage.problem[0] ? storage.problem : "invalid driver program catalog");
     }
     check_test_expect(test, valid, "driver program catalog is complete and well formed");
+    arena_release(&storage.storage);
 }
 
 // The driver's -l libraries, through the production command (#145): a program that calls libm's functions, takes
@@ -1394,89 +1502,60 @@ static void check_test_driver_libraries(CheckTest* test, const char* clang, cons
 // A value held across a call in a function that calls __builtin_setjmp, which a longjmp's resumption must find: a deep
 // expression's, in its depth's slot, which later expressions share, and which the call snapshots (#2465); a long double's,
 // whose slot the call snapshots (#1843); and a function with no value held. Both paths compile all three.
-static void check_test_driver_setjmp_held(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_compile_inputs(CheckTest* test, const char* executable, const char* directory, const CheckDriverProgramInput* inputs,
+                                              const char* stem, const char* written_label)
 {
-    static const char* const sources[3] = {
-        "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
-        "int run(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j)\n"
-        "{ int r = a + (b * (c - (d + (e * (f - (g + (h * (i - (j + __builtin_setjmp(buf)))))))))); if (r == 0) jump(); return r; }\n",
-        "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
-        "long double run(long double x) { long double r = x + __builtin_setjmp(buf); if (r == x) jump(); return r; }\n",
-        "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
-        "long double run(long double x) { if (__builtin_setjmp(buf) == 0) { x = x * 2; jump(); } return x; }\n",
-    };
+    char* policy[4];
+    uint32_t wanted = 0;
+    const bool valid = check_test_driver_input_fields(test, inputs + 1, policy, BUSTER_ARRAY_LENGTH(policy)) &&
+                       check_test_driver_input_count(policy[0], &wanted) && wanted <= 1;
+    check_test_expect(test, valid, "the driver compile policy has a valid exit status");
     char source[256];
     char object[256];
-    snprintf(source, sizeof(source), "%s/setjmp_held.c", directory);
-    snprintf(object, sizeof(object), "%s/setjmp_held.o", directory);
-    for (uint32_t s = 0; s < 3; s += 1)
+    snprintf(source, sizeof(source), "%s/%s.c", directory, stem);
+    snprintf(object, sizeof(object), "%s/%s.o", directory, stem);
+    const bool written = valid && parse_test_write(source, inputs[0].bytes, inputs[0].length);
+    for (uint32_t path = 0; written && path < 2; path += 1)
     {
-        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
-        for (uint32_t path = 0; written && path < 2; path += 1)
-        {
-            char* const vector_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
-            char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
-            char* text = NULL;
-            const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
-            const bool compiled = status == 0;
-            check_test_expect(test, compiled,
-                              s == 0   ? (path == 0 ? "a deep expression held across __builtin_setjmp compiles" : "the same, scalar")
-                              : s == 1 ? (path == 0 ? "a long double held across __builtin_setjmp compiles" : "the same, scalar")
-                                       : (path == 0 ? "a long double not held across __builtin_setjmp compiles" : "the same, scalar"));
-            free(text);
-        }
-        check_test_expect(test, written, "setjmp's held-value sources written");
+        char* const vector_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
+        char* text = NULL;
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        const bool diagnostic = strcmp(policy[1], "-") == 0 || (text != NULL && strstr(text, policy[1]) != NULL);
+        check_test_expect(test, status == (int)wanted && diagnostic, policy[2 + path]);
+        free(text);
     }
+    check_test_expect(test, written, written_label);
     unlink(source);
     unlink(object);
+}
+
+static void check_test_driver_setjmp_held_input(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                                const CheckDriverProgramInput* inputs)
+{
+    (void)clang;
+    check_test_driver_compile_inputs(test, executable, directory, inputs, "setjmp_held", "setjmp's held-value sources written");
+}
+
+static void check_test_driver_setjmp_held(CheckTest* test, const char* executable, const char* directory)
+{
+    check_test_driver_programs(test, NULL, executable, directory, "setjmp-held", "program.c\tpolicy.expected", check_test_driver_setjmp_held_input);
 }
 
 // An asm label naming a block-scope static's symbol, `f.n` (#2439), which clang joins to the static where it emits the
 // static's function before the label's first use (the first source prints 6) and not otherwise (the second, whose link
 // fails), and makes one GLOBAL of the static's storage for a definition so labelled (the third). Both paths refuse the
 // three by name; a label of another dotted name, which no static has, compiles.
+static void check_test_driver_static_label_input(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                                 const CheckDriverProgramInput* inputs)
+{
+    (void)clang;
+    check_test_driver_compile_inputs(test, executable, directory, inputs, "static_label", "the static labels' sources written");
+}
+
 static void check_test_driver_static_label(CheckTest* test, const char* executable, const char* directory)
 {
-    static const char* const sources[4] = {
-        "int printf(const char*, ...);\nint f(void) { static int n = 5; return n++; }\nextern int fn __asm__(\"f.n\");\n"
-        "int main(void) { f(); printf(\"%d\\n\", fn); return 0; }\n",
-        "int printf(const char*, ...);\nextern int fn __asm__(\"f.n\");\nint g(void) { return fn; }\nint f(void) { static int n = 5; return n++; }\n"
-        "int main(void) { f(); printf(\"%d\\n\", g()); return 0; }\n",
-        "int f(void) { static int n = 5; return n++; }\nint fn __asm__(\"f.n\") = 9;\nint main(void) { return f() + fn; }\n",
-        "int f(void) { static int n = 5; return n++; }\nint fm __asm__(\"f.m\") = 9;\nint main(void) { return f() + fm; }\n",
-    };
-    char source[256];
-    char object[256];
-    snprintf(source, sizeof(source), "%s/static_label.c", directory);
-    snprintf(object, sizeof(object), "%s/static_label.o", directory);
-    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
-    {
-        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
-        for (uint32_t path = 0; written && path < 2; path += 1)
-        {
-            char* const vector_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
-            char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
-            char* text = NULL;
-            const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
-            const bool refused = status == 1 && text != NULL &&
-                                 strstr(text, "unsupported: an asm label naming a block-scope static's symbol, which clang joins to the static by its emission order") != NULL;
-            char description[160];
-            if (s < 3)
-            {
-                snprintf(description, sizeof(description), "an asm label naming a block-scope static's symbol, shape %u, is refused by name%s", s,
-                         path == 0 ? "" : ", scalar");
-            }
-            else
-            {
-                snprintf(description, sizeof(description), "an asm label of a dotted name no static has compiles%s", path == 0 ? "" : ", scalar");
-            }
-            check_test_expect(test, s < 3 ? refused : status == 0, description);
-            free(text);
-        }
-        check_test_expect(test, written, "the static labels' sources written");
-    }
-    unlink(source);
-    unlink(object);
+    check_test_driver_programs(test, NULL, executable, directory, "static-label", "program.c\tpolicy.expected", check_test_driver_static_label_input);
 }
 
 // --selection-census (#2536's step 2.1): on a unit whose exact selection leaves out a function only a constant if's dead arm
@@ -8505,6 +8584,8 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_label_attribute_driver_test.c"
 #include "c_check_resume_driver_test.c"
 #include "c_check_semantic_recovery_driver_test.c"
+#include "c_check_invalid_record_driver_test.c"
+#include "c_check_format_matches_driver_test.c"
 #include "c_check_statement_recovery_driver_test.c"
 #include "c_check_type_attribute_recovery_driver_test.c"
 #include "c_check_attribute_declaration_driver_test.c"
@@ -9631,6 +9712,7 @@ static void check_test_driver_correctness_edges(CheckTest* test, const char* exe
 
 static int run_checker_driver_tests(int argc, char** argv)
 {
+    check_test_fixture_root = "tests";
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
     // (oracle_epoch_begin, oracle_cache.c).
     const bool epoch = oracle_epoch_begin();
@@ -9662,6 +9744,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool label_attributes_only = false;
     // --attribute-recovery-only: the label, declaration and call recovery fixtures and their combined source.
     bool attribute_recovery_only = false;
+    bool invalid_records_only = false;
+    bool format_matches_only = false;
     // --malformed-calls-only: type-first balanced malformed calls and their independent later diagnostics (#2406).
     bool malformed_calls_only = false;
     // --operand-diagnostics-only: rejected record and atomic operands, including constant contexts (#2441).
@@ -9699,7 +9783,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool tier1_asm_only = false;
     // --call-counts-only: the call argument count section alone (#1860).
     bool call_counts_only = false;
-    // --fp-contract-only: scalar contraction's command-line, pragma and native result matrix alone (#1239).
+    // --fp-contract-only: scalar contraction's command-line, pragma and native results (#1239), plus the floating
+    // vector loop fixture's FMA and numeric conversions (#2806).
     bool fp_contract_only = false;
     // --imaginary-bit-int-only: imaginary bit-precise constants' diagnostics and program against Clang alone (#2219).
     bool imaginary_bit_int_only = false;
@@ -9777,6 +9862,14 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--attribute-recovery-only") == 0)
         {
             attribute_recovery_only = true;
+        }
+        else if (strcmp(argv[i], "--invalid-records-only") == 0)
+        {
+            invalid_records_only = true;
+        }
+        else if (strcmp(argv[i], "--format-matches-only") == 0)
+        {
+            format_matches_only = true;
         }
         else if (strcmp(argv[i], "--malformed-calls-only") == 0)
         {
@@ -9908,8 +10001,10 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
                              (uint32_t)float_precision_only + (uint32_t)reach_filter_only + (uint32_t)branch_truth_only +
                              (uint32_t)constant_logical_only + (uint32_t)quiet_roots_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only +
-                             (uint32_t)stack_protector_only + (uint32_t)cf_protection_only + (uint32_t)visibility_only + (uint32_t)missing_variable_only;
+                             (uint32_t)stack_protector_only + (uint32_t)cf_protection_only + (uint32_t)visibility_only +
+                             (uint32_t)invalid_records_only + (uint32_t)format_matches_only + (uint32_t)missing_variable_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
+    options = options && check_test_fixture_digests();
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
     check_test_expect(&test, options, "driver test options are recognized");
@@ -10539,6 +10634,14 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_gnu_empty_struct(&test, clang, executable, directory);
         check_test_driver_record_extensions(&test, clang, executable, directory);
     }
+    if (temporary && invalid_records_only)
+    {
+        check_test_driver_invalid_records(&test, clang, executable, directory);
+    }
+    if (temporary && format_matches_only)
+    {
+        check_test_driver_format_matches(&test, clang, executable, directory);
+    }
     if (temporary && call_counts_only)
     {
         check_test_driver_call_counts(&test, clang, executable, directory);
@@ -10554,6 +10657,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && fp_contract_only)
     {
         check_test_driver_fp_contract(&test, clang, executable, directory);
+        check_test_driver_tier1_floating_vectorize(&test, clang, executable, directory);
     }
     if (temporary && imaginary_bit_int_only)
     {
@@ -10696,6 +10800,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         // Long sweeps that deal their own fixtures and checks.
         if (!lazy)
         {
+            check_test_driver_invalid_records(&test, clang, executable, directory);
+            check_test_driver_format_matches(&test, clang, executable, directory);
             check_test_driver_semantic_recovery(&test, clang, executable, directory);
             check_test_driver_statement_recovery(&test, clang, executable, directory);
         }

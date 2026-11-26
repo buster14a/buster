@@ -2,63 +2,23 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #2219's imaginary bit-precise constants (5wbi, clang's _Complex _BitInt(N)) through the real driver against Clang:
-// tests/driver/imaginary-bit-int's diagnostics sources, each in the standards cases.txt names, by the shared
+// tests/driver/imaginary-bit-int/diagnostics sources, each in the catalog's standards, by the shared
 // default-warning harness (both readers, one and three lanes, -Werror and -w, -fsyntax-only and -c), and its program,
 // built by Clang -O0 as the oracle and by buster at Tier 0 and strict Tier 1, by both readers, as an object Clang links
 // and directly, whose output must be Clang's.
 
 static void check_test_driver_imaginary_bit_int_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    CheckTestFixtures files = { .storage = arena_reserve(UINT64_C(2) * CHECK_TEST_FIXTURE_BYTES + 4096) };
-    uint64_t length = 0;
-    char* catalog = files.storage.base != NULL ? check_test_fixture_read(&files, "tests/driver/imaginary-bit-int/cases.txt", &length) : NULL;
-    check_test_expect(test, catalog != NULL, "imaginary bit-precise diagnostics case list is read (run from the repository root)");
-    const uint64_t mark = files.storage.length;
-    char* cursor = NULL;
-    char* line = catalog != NULL ? strtok_r(catalog, "\n", &cursor) : NULL;
-    uint32_t count = 0;
-    bool valid = catalog != NULL;
-    for (; valid && line != NULL; line = strtok_r(NULL, "\n", &cursor))
-    {
-        if (line[0] == '#')
-        {
-            continue;
-        }
-        char name[128];
-        char standard[16];
-        char extra;
-        CheckDriverDefaultWarningFixture fixture = { 0 };
-        valid = sscanf(line, "%127s %15s %u %u %u %c", name, standard, &fixture.warnings, &fixture.errors, &fixture.notes, &extra) == 5 &&
-                check_test_fixture_word(name, sizeof(name) - 1) && (strcmp(standard, "c23") == 0 || strcmp(standard, "gnu17") == 0);
-        check_test_expect(test, valid, "imaginary bit-precise diagnostics case metadata is valid");
-        if (valid)
-        {
-            char path[PATH_MAX];
-            char description[192];
-            snprintf(path, sizeof(path), "tests/driver/imaginary-bit-int/%s.c", name);
-            snprintf(description, sizeof(description), "imaginary bit-precise %s, -std=%s", name, standard);
-            fixture.name = description;
-            fixture.c23 = strcmp(standard, "c23") == 0;
-            fixture.source = check_test_fixture_read(&files, path, &length);
-            check_test_expect(test, fixture.source != NULL, path);
-            if (fixture.source != NULL)
-            {
-                check_test_driver_warning_fixtures(test, clang, executable, directory, &fixture, 1);
-            }
-            count += 1;
-            arena_pop_to(&files.storage, mark);
-        }
-    }
-    check_test_expect(test, count != 0, "imaginary bit-precise diagnostics case list is nonempty");
-    arena_release(&files.storage);
+    check_test_driver_warning_suite(test, clang, executable, directory, "driver/imaginary-bit-int/diagnostics", false);
 }
 
-static void check_test_driver_imaginary_bit_int_program(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_imaginary_bit_int_program(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
     const char* const buster = executable != NULL ? executable : "/proc/self/exe";
-    const char* const source = "tests/driver/imaginary-bit-int/program.c";
-    const bool available = access(source, R_OK) == 0;
-    check_test_expect(test, available, "imaginary bit-precise program is available (run from the repository root)");
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/imaginary-bit-int.c", directory);
+    const bool available = parse_test_write(source, inputs[0].bytes, inputs[0].length);
+    check_test_expect(test, available, "imaginary bit-precise program is staged from the selected fixture root");
     char object[PATH_MAX];
     char binary[PATH_MAX];
     char reference[PATH_MAX];
@@ -151,10 +111,11 @@ static void check_test_driver_imaginary_bit_int_program(CheckTest* test, const c
     }
     free(expected);
     unlink(reference);
+    unlink(source);
 }
 
 static void check_test_driver_imaginary_bit_int(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_imaginary_bit_int_diagnostics(test, clang, executable, directory);
-    check_test_driver_imaginary_bit_int_program(test, clang, executable, directory);
+    check_test_driver_programs(test, clang, executable, directory, "imaginary-bit-int", "program.c", check_test_driver_imaginary_bit_int_program);
 }

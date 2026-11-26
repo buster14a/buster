@@ -5,7 +5,8 @@
 # installs, every way one must be refused (digest, files, entries, identity, libraries, native, no server), a vector
 # configuration's product (#2033), which installs only where the runner's probe qualifies, and only as the same target,
 # the clang server's status 77 (a failure on the hosted toolchain, none elsewhere), and the inventory's ownership heading
-# on a shard. No network; tiny scripts stand in for the executables.
+# on a shard, and the producer's exclusive runtime-fixture dependency check. No network; tiny scripts stand in for
+# the executables.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 work=$(mktemp -d)
@@ -111,6 +112,14 @@ false
 == Check unity fixture ownership without rebuilding
 test -x "$BUSTER_COMPILER"
 if [ -n "${FIXTURE_OWNERSHIP_SKIP:-}" ]; then exit 77; fi
+cat > build/build-regression <<'REGRESSION'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -eq 2 ] && [ "$1" = --runtime-fixtures-only ] && [ "$2" = "$BUSTER_COMPILER" ]
+[ -z "${FIXTURE_DEPENDENCIES_FAIL:-}" ] || exit 1
+echo 'runtime fixture dependencies checked before packing'
+REGRESSION
+chmod +x build/build-regression
 echo ownership checked
 == A later heading
 false
@@ -162,7 +171,7 @@ chmod +x "$probe"
 # The shared target is the explicit vector one alone since the scalar host went (#2924).
 export GITHUB_REPOSITORY_ID=1421805693 GITHUB_RUN_ID=42 BUSTER_HOST_ARCH=vector BUSTER_SANITIZER=none
 export BUSTER_SANITIZER_OPTIMIZATION=3 BUSTER_VECTOR_PROBE="$probe"
-unset BUSTER_PRODUCT BUSTER_COMPILER BUSTER_CLANG_SERVER BUSTER_PPF_PRAGMA_ORACLE FIXTURE_SERVER FIXTURE_OWNERSHIP_SKIP
+unset BUSTER_PRODUCT BUSTER_COMPILER BUSTER_CLANG_SERVER BUSTER_PPF_PRAGMA_ORACLE FIXTURE_SERVER FIXTURE_OWNERSHIP_SKIP FIXTURE_DEPENDENCIES_FAIL
 
 # A producer: build (with or without a server), the ownership check, and the pack, into $work/products/NAME.
 produce()
@@ -202,6 +211,7 @@ produce plain
 # pack keeps, as a shard's does from its install: the pack's configure leaves the tree's build out of date.
 packed=$(sed -n 's/^BUSTER_PRODUCT=//p' "$GITHUB_ENV")
 [ "$packed" = "$RUNNER_TEMP/product/record" ] && [ "$(head -n 1 "$packed/provenance/ownership")" = passed ] && [ -f "$packed/identity/summary" ] || fail "the pack's record of its product: '$packed'"
+grep -qx 'runtime fixture dependencies checked before packing' "$packed/provenance/ownership" || fail 'no runtime dependency check in the product record'
 pass
 consume 0 'a verified product' "$work/products/plain" "$(cat "$work/products/plain.digest")"
 grep -qx "BUSTER_COMPILER=$checkout/build/compiler" "$GITHUB_ENV" || fail 'BUSTER_COMPILER is not build/compiler'
@@ -364,5 +374,11 @@ if run pack "$RUNNER_TEMP/product" > "$work/log" 2>&1; then fail 'packed without
 pass
 if FIXTURE_OWNERSHIP_SKIP=1 run ownership > "$work/log" 2>&1; then fail 'a skipped ownership check passed'; fi
 [ ! -e "$RUNNER_TEMP/product-ownership" ] || fail 'a skipped ownership check left a record'
+pass
+run ownership > /dev/null 2>&1
+test -f "$RUNNER_TEMP/product-ownership" || fail 'a passed ownership check left no record'
+if FIXTURE_DEPENDENCIES_FAIL=1 run ownership > "$work/log" 2>&1; then fail 'a failed runtime dependency check passed'; fi
+[ ! -e "$RUNNER_TEMP/product-ownership" ] || fail 'a failed dependency check retained an earlier pass'
+if run pack "$RUNNER_TEMP/product" > "$work/log" 2>&1; then fail 'packed after a failed runtime dependency check'; fi
 pass
 printf 'hosted-product fixture: %u checks passed\n' "$checks"

@@ -1,0 +1,7 @@
+function (ptr, i16) -> i16 {
+b0:
+%0 = param.ptr 0
+%1 = param.i16 1
+%2 = rmw.i16 %0, %1 align=1 add seq_cst
+%3 = ret.void %2
+}

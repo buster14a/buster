@@ -503,7 +503,9 @@ static void check_test_driver_tier1_float_select(CheckTest* test, const char* cl
 
 static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    const int descriptor = open("tests/driver/tier1_if_convert.c", O_RDONLY | O_CLOEXEC);
+    char fixture_path[PATH_MAX];
+    const int descriptor = check_test_fixture_path(fixture_path, sizeof(fixture_path), "driver/tier1_if_convert.c") ?
+                           open(fixture_path, O_RDONLY | O_CLOEXEC) : -1;
     char* unit = NULL;
     const bool loaded = descriptor >= 0 && check_test_driver_read_file(descriptor, &unit);
     if (descriptor >= 0)

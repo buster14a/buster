@@ -1,0 +1,9 @@
+%d/structure.c:4:8: error: character 'A' cannot be specified by a universal character name
+%d/structure.c:4:15: error: universal character name refers to a control character
+%d/structure.c:5:10: error: character 'B' cannot be specified by a universal character name
+%d/structure.c:6:11: error: character 'C' cannot be specified by a universal character name
+%d/structure.c:7:17: error: character 'D' cannot be specified by a universal character name
+%d/structure.c:8:11: error: character 'E' cannot be specified by a universal character name
+%d/structure.c:12:28: error: character 'A' cannot be specified by a universal character name
+%d/structure.c:13:5: error: character 'J' cannot be specified by a universal character name
+%d/structure.c:14:1: error: character 'K' cannot be specified by a universal character name

@@ -37,10 +37,10 @@
 //   ORIGINAL, as a node's; the operands' staging into their roles' registers, the result's move out and the borrowed
 //   opmask registers' saves and reloads around it are moves, decoded as any.
 // - An asm body (TIER1_RULE_ASM, #1839) is its records placed by the certificate (the operand block's addresses from the
-//   frame base register, by the layout) and compared, its own branches exactly the body's; one ORIGINAL that reads no
-//   value and kills every register the body touches (IrAsmBody.touched, .masks: the front end's account of the
-//   template, trusted as the IR) and the frame bytes its stores write. A record of a form the semantics' tables don't
-//   cover writes no register but those. The saves and reloads of the values live in those registers around it are moves.
+//   frame base register, by the layout) and compared, its own branches exactly the body's; one ORIGINAL that reads its
+//   register operands and kills every register the body touches (IrAsmBody.touched,
+//   .masks: the front end's account of the template, trusted as the IR) and the frame bytes its stores write. A form the
+//   semantics' tables don't cover writes no register but those. Declared results are defined at the body boundary. The saves, captures and reloads are moves.
 // - A by-value aggregate (#789): a parameter's copy at entry, a call's argument copies (into staging slots, zmm16 and on,
 //   stack slots or the outgoing area), its parts' loads, the hidden pointer, the result parts' stores and the function's
 //   own result are regenerated as the emitter writes them (tier1_emit_copy_bytes', tier1_emit_store_part's) and
@@ -103,6 +103,8 @@ typedef enum Tier1CertEmittedReason
     // implicitly (#1284: its one ORIGINAL wouldn't say when); a long double's (its x87 stack).
     TIER1_CERT_EMITTED_VECTOR,
     TIER1_CERT_EMITTED_X87,
+    // A reserved record span becomes assembled bytes after record certification (#2351).
+    TIER1_CERT_EMITTED_OPAQUE,
     // The code doesn't decode to its own certificate: a refusal.
     TIER1_CERT_EMITTED_ORIGIN,
     TIER1_CERT_EMITTED_DECODE,
@@ -133,6 +135,7 @@ static __attribute__((unused)) const char* tier1_cert_emitted_reason_name(Tier1C
         "probe",
         "vector",
         "x87",
+        "opaque-asm",
         "origin",
         "decode",
         "kernel",
@@ -180,9 +183,10 @@ struct Tier1CertEmittedStats
 #define BUSTER_CERT_EMITTED_KERNEL (BUSTER_TIER1_SELECT_FIXED_RECORDS + BUSTER_TIER1_SELECT_RECORDS_PER_NODE + 8)
 // The records whose effects one call resolves where a check walks a record run of any length (#2924).
 #define BUSTER_CERT_EMITTED_EFFECTS 64u
-// Source records per node at most: its uses' (up to 15 of a call's, in eights), its clobbers' (16 general, 16 xmm, 8
-// opmask registers and a frame range, in eights) and its definition's.
-#define BUSTER_CERT_EMITTED_NODE_SOURCES 10u
+// Source records per node at most: its uses' (up to 15 of a call's, in eights), its clobbers' (16 general, 32 vector, 8
+// opmask registers and a frame range, in eights) and its definition's. The upper vector registers are caller-saved
+// too (#3625), so their clobbers need two more records than the former xmm0 to xmm15 bound.
+#define BUSTER_CERT_EMITTED_NODE_SOURCES 12u
 // A node's clobbers at most: its registers' (16 general, 32 vector and 8 opmask ones) and its frame bytes' locations of
 // 64 bytes each (tier1_cert_emitted_kills).
 #define BUSTER_CERT_EMITTED_REGISTER_CLOBBERS 56u
@@ -392,12 +396,6 @@ static uint32_t tier1_cert_emitted_vector(const Tier1CertEmittedBuild* build, ui
 static uint32_t tier1_cert_emitted_mask(uint32_t reg, uint32_t width)
 {
     return BUSTER_CERT_EMITTED_MASK + 4 * (reg & 7) + (width == 1 ? 0 : width == 2 ? 1 : width == 4 ? 2 : 3);
-}
-
-// A whole vector register's location, which a write to it kills: zmm's 64 bytes in a wide function, else xmm's 16.
-static uint32_t tier1_cert_emitted_vector_whole(const Tier1CertEmittedBuild* build, uint32_t reg)
-{
-    return tier1_cert_emitted_vector(build, reg, build->wide ? 64 : 16);
 }
 
 // A value's width in its certificate: a general one's 8 bytes or 4 (every narrower one is in its 32-bit canonical form), a
@@ -776,7 +774,6 @@ static uint32_t tier1_cert_emitted_definition(const Tier1EmitResult* emitted, ui
 typedef struct Tier1CertEmittedKernel Tier1CertEmittedKernel;
 struct Tier1CertEmittedKernel
 {
-    X86Instruction records[BUSTER_CERT_EMITTED_KERNEL];
     LinkReference reference;
     uint32_t count;
     // The record whose immediate's form a request chooses (tier1_cert_emitted_choices), or UINT32_MAX: its request's row,
@@ -790,15 +787,11 @@ struct Tier1CertEmittedKernel
     uint32_t referenced;
     // A conditional branch's condition's form (its comparison's jcc), else X86_FORM_NONE.
     uint16_t condition;
-    uint32_t uses[BUSTER_CERT_EMITTED_USES];
-    uint32_t use_locations[BUSTER_CERT_EMITTED_USES];
     uint32_t use_count;
     uint32_t definition;
     uint32_t definition_location;
     // A call's aggregate result's parts (#789, #1284), which it defines in their registers after it: up to a split
     // vector's four (#1624, tier1_select_result_parts).
-    uint32_t results[BUSTER_TIER1_SELECT_RESULT_PARTS];
-    uint32_t result_locations[BUSTER_TIER1_SELECT_RESULT_PARTS];
     uint32_t result_count;
     // A call's outgoing area's bytes from rsp, which its callee owns: killed after it.
     uint32_t outgoing;
@@ -807,7 +800,25 @@ struct Tier1CertEmittedKernel
     // An asm body's (#1839, TIER1_RULE_ASM): its records of forms x86 semantics doesn't cover write only memory, and every
     // register it touches (IrAsmBody.touched, .masks) is killed after it, as the front end's account of its template.
     const IrAsmBody* body;
+    // Counted scratch buffers: each producer writes the complete elements it publishes, and consumers read only the
+    // prefixes named by count, use_count and result_count. Keep them after the reset prefix so unused capacity is not
+    // cleared for every node, including the wide call-operand capacity that scalar kernels rarely need (#1337).
+    X86Instruction records[BUSTER_CERT_EMITTED_KERNEL];
+    uint32_t uses[BUSTER_CERT_EMITTED_USES];
+    uint32_t use_locations[BUSTER_CERT_EMITTED_USES];
+    uint32_t results[BUSTER_TIER1_SELECT_RESULT_PARTS];
+    uint32_t result_locations[BUSTER_TIER1_SELECT_RESULT_PARTS];
 };
+
+static void tier1_cert_emitted_kernel_reset(Tier1CertEmittedKernel* kernel)
+{
+    memset(kernel, 0, offsetof(Tier1CertEmittedKernel, records));
+    kernel->referenced = UINT32_MAX;
+    kernel->request = UINT32_MAX;
+    kernel->condition = X86_FORM_NONE;
+    kernel->definition = BUSTER_TIER1_CFG_NONE;
+    kernel->definition_location = BUSTER_CERT_NONE;
+}
 
 // A use of `value` at `location`: one for each distinct pair, so that a value read at two locations (a call's argument
 // passed twice, in two registers) is proved at both.
@@ -1505,13 +1516,9 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
     const uint32_t value = emitted->node_values[node];
     const bool defines = function->type[node] != IR_VOID && value != BUSTER_TIER1_CFG_NONE;
     const uint32_t destination = defines ? tier1_cert_emitted_definition(emitted, node, use + 1) : UINT32_MAX;
-    *kernel = (Tier1CertEmittedKernel){
-        .referenced = UINT32_MAX,
-        .request = UINT32_MAX,
-        .condition = X86_FORM_NONE,
-        .definition = defines ? value : BUSTER_TIER1_CFG_NONE,
-        .definition_location = defines && destination != UINT32_MAX ? tier1_cert_emitted_register(build, value, destination) : BUSTER_CERT_NONE,
-    };
+    tier1_cert_emitted_kernel_reset(kernel);
+    kernel->definition = defines ? value : BUSTER_TIER1_CFG_NONE;
+    kernel->definition_location = defines && destination != UINT32_MAX ? tier1_cert_emitted_register(build, value, destination) : BUSTER_CERT_NONE;
     bool valid = !defines || kernel->definition_location != BUSTER_CERT_NONE;
     if (valid && (op == IR_CALL || op == IR_CALL_INDIRECT))
     {
@@ -1737,11 +1744,105 @@ static bool tier1_cert_emitted_unchanged(X86Instruction record)
     return x86_effects_immediate_kind(effects) == BUSTER_X86_IMMEDIATE_VALUE && ((zero && value == 0) || (operation == X86_OPERATION_AND && value == all));
 }
 
+// The written registers' whole locations in register order, each register's general, vector and opmask locations in
+// that order. `clobbers` has room for BUSTER_CERT_EMITTED_REGISTER_CLOBBERS entries; only the returned count is written.
+// The 56 candidates fit in one byte vector. Depositing the three write masks into their interleaved positions keeps the
+// certificate's order, while compression emits only selected locations. Narrow functions have no vector past xmm15;
+// their whole vector locations are two entries past the wide layout's, the 16-byte rather than 64-byte locations.
+static uint32_t tier1_cert_emitted_clobbers(bool wide, uint64_t writes, uint16_t masks, uint32_t* clobbers)
+{
+    _Static_assert(BUSTER_CERT_EMITTED_REGISTERS <= UINT8_MAX + 1u, "register locations fit in bytes");
+    _Static_assert(BUSTER_CERT_EMITTED_REGISTER_CLOBBERS >= 16u + 32u + 8u, "register clobbers have room for every class");
+    const uint64_t general_slots = UINT64_C(0x0000005555249249);
+    const uint64_t vector_slots = UINT64_C(0x00ffffaaaa492492);
+    const uint64_t mask_slots = UINT64_C(0x0000000000924924);
+    // Registers 0..7 have three candidates, 8..15 have two, and 16..31 have only a vector candidate. The last eight bytes
+    // pad the readable load and are never selected. rsp has a candidate here but cannot be a register clobber.
+    static const uint8_t whole[64] = {
+        BUSTER_CERT_EMITTED_GPR + 0,
+        BUSTER_CERT_EMITTED_VECTOR + 0,
+        BUSTER_CERT_EMITTED_MASK + 3,
+        BUSTER_CERT_EMITTED_GPR + 2,
+        BUSTER_CERT_EMITTED_VECTOR + 5,
+        BUSTER_CERT_EMITTED_MASK + 7,
+        BUSTER_CERT_EMITTED_GPR + 4,
+        BUSTER_CERT_EMITTED_VECTOR + 10,
+        BUSTER_CERT_EMITTED_MASK + 11,
+        BUSTER_CERT_EMITTED_GPR + 6,
+        BUSTER_CERT_EMITTED_VECTOR + 15,
+        BUSTER_CERT_EMITTED_MASK + 15,
+        BUSTER_CERT_EMITTED_GPR + 8,
+        BUSTER_CERT_EMITTED_VECTOR + 20,
+        BUSTER_CERT_EMITTED_MASK + 19,
+        BUSTER_CERT_EMITTED_GPR + 10,
+        BUSTER_CERT_EMITTED_VECTOR + 25,
+        BUSTER_CERT_EMITTED_MASK + 23,
+        BUSTER_CERT_EMITTED_GPR + 12,
+        BUSTER_CERT_EMITTED_VECTOR + 30,
+        BUSTER_CERT_EMITTED_MASK + 27,
+        BUSTER_CERT_EMITTED_GPR + 14,
+        BUSTER_CERT_EMITTED_VECTOR + 35,
+        BUSTER_CERT_EMITTED_MASK + 31,
+        BUSTER_CERT_EMITTED_GPR + 16,
+        BUSTER_CERT_EMITTED_VECTOR + 40,
+        BUSTER_CERT_EMITTED_GPR + 18,
+        BUSTER_CERT_EMITTED_VECTOR + 45,
+        BUSTER_CERT_EMITTED_GPR + 20,
+        BUSTER_CERT_EMITTED_VECTOR + 50,
+        BUSTER_CERT_EMITTED_GPR + 22,
+        BUSTER_CERT_EMITTED_VECTOR + 55,
+        BUSTER_CERT_EMITTED_GPR + 24,
+        BUSTER_CERT_EMITTED_VECTOR + 60,
+        BUSTER_CERT_EMITTED_GPR + 26,
+        BUSTER_CERT_EMITTED_VECTOR + 65,
+        BUSTER_CERT_EMITTED_GPR + 28,
+        BUSTER_CERT_EMITTED_VECTOR + 70,
+        BUSTER_CERT_EMITTED_GPR + 30,
+        BUSTER_CERT_EMITTED_VECTOR + 75,
+        BUSTER_CERT_EMITTED_VECTOR + 80,
+        BUSTER_CERT_EMITTED_VECTOR + 85,
+        BUSTER_CERT_EMITTED_VECTOR + 90,
+        BUSTER_CERT_EMITTED_VECTOR + 95,
+        BUSTER_CERT_EMITTED_VECTOR + 100,
+        BUSTER_CERT_EMITTED_VECTOR + 105,
+        BUSTER_CERT_EMITTED_VECTOR + 110,
+        BUSTER_CERT_EMITTED_VECTOR + 115,
+        BUSTER_CERT_EMITTED_VECTOR + 120,
+        BUSTER_CERT_EMITTED_VECTOR + 125,
+        BUSTER_CERT_EMITTED_VECTOR + 130,
+        BUSTER_CERT_EMITTED_VECTOR + 135,
+        BUSTER_CERT_EMITTED_VECTOR + 140,
+        BUSTER_CERT_EMITTED_VECTOR + 145,
+        BUSTER_CERT_EMITTED_VECTOR + 150,
+        BUSTER_CERT_EMITTED_VECTOR + 155,
+    };
+    const uint64_t general = writes & BUSTER_X86_RESOURCE_GPRS & ~BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RSP);
+    const uint64_t vectors = (writes >> BUSTER_X86_RESOURCE_VECTOR_SHIFT) & (wide ? UINT64_C(0xffffffff) : UINT64_C(0xffff));
+    const uint64_t selected = _pdep_u64(general, general_slots) | _pdep_u64(vectors, vector_slots) | _pdep_u64(masks >> 8, mask_slots);
+    const uint32_t count = (uint32_t)__builtin_popcountll(selected);
+    if (count != 0)
+    {
+        const __m512i locations = _mm512_loadu_si512(whole);
+        const __m512i adjusted = _mm512_mask_add_epi8(locations, (__mmask64)vector_slots, locations, _mm512_set1_epi8(wide ? 0 : 2));
+        __m512i compact = _mm512_maskz_compress_epi8((__mmask64)selected, adjusted);
+        for (uint32_t at = 0; at < count; at += 16)
+        {
+            const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - at);
+            const __m512i expanded = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(compact));
+            _mm512_mask_storeu_epi32(clobbers + at, lanes, expanded);
+            compact = _mm512_alignr_epi32(_mm512_setzero_si512(), compact, 4);
+        }
+    }
+    return count;
+}
+
 // Node `node`'s ORIGINALs, its records [first, first + count) its kernel's: its uses in eights, then every register and
 // frame range its records write, killed in eights, then its definition. A general register its records give back is not
 // killed: one that holds its own value at the run's end, followed through the records' full-width copies between general
 // registers (a compare-exchange's save of rax in the scratch register and its restore, tier1_select's
-// TIER1_RULE_ATOMIC_RMW); any other write leaves a register holding nothing known.
+// TIER1_RULE_ATOMIC_RMW); any other write leaves a register holding nothing known. A gather or scatter saves its mask
+// through a general register by kmovw: track those low two bytes too. Its restore clears the mask's upper six bytes,
+// so they remain clobbered even where its incoming byte or word value survives (#2808).
 static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t node, const Tier1CertEmittedKernel* kernel, const X86Instruction* records, uint32_t count)
 {
     uint64_t writes = 0;
@@ -1752,9 +1853,17 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
     spans.count = 0;
     // Whose value at the run's start each general register holds, or UINT8_MAX for none known.
     uint8_t holds[16];
+    // The original mask whose low word each mask register or a general register's saved word holds.
+    uint8_t mask_holds[8];
+    uint8_t saved_masks[16];
     for (uint32_t reg = 0; reg < 16; reg += 1)
     {
         holds[reg] = (uint8_t)reg;
+        saved_masks[reg] = UINT8_MAX;
+    }
+    for (uint32_t reg = 0; reg < 8; reg += 1)
+    {
+        mask_holds[reg] = (uint8_t)reg;
     }
     bool valid = true;
     // The records' effects with their opmask registers, a batch of BUSTER_CERT_EMITTED_EFFECTS at a time.
@@ -1788,13 +1897,29 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
         const bool load = plain && record.form == X86_FORM_MOV_R64_RM64;
         const bool store = plain && record.form == X86_FORM_MOV_RM64_R64;
         const uint8_t copied = load ? holds[record.rm] : store ? holds[record.reg] : UINT8_MAX;
+        const bool mask_save = plain && record.form == X86_FORM_KMOVW_R32_K && record.rm < 8;
+        const bool mask_restore = plain && record.form == X86_FORM_KMOVW_K_R32 && record.reg < 8;
+        const uint8_t mask_copied = mask_save ? mask_holds[record.rm] : mask_restore ? saved_masks[record.rm] : UINT8_MAX;
         for (uint32_t reg = 0; reg < 16; reg += 1)
         {
             holds[reg] = (written & BUSTER_X86_RESOURCE_GPR(reg)) != 0 ? UINT8_MAX : holds[reg];
+            saved_masks[reg] = (written & BUSTER_X86_RESOURCE_GPR(reg)) != 0 ? UINT8_MAX : saved_masks[reg];
+        }
+        for (uint32_t reg = 0; reg < 8; reg += 1)
+        {
+            mask_holds[reg] = ((opmasks >> 8 >> reg) & 1) != 0 ? UINT8_MAX : mask_holds[reg];
         }
         if (load || store)
         {
             holds[load ? record.reg : record.rm] = copied;
+        }
+        if (mask_save)
+        {
+            saved_masks[record.reg] = mask_copied;
+        }
+        if (mask_restore)
+        {
+            mask_holds[record.reg] = mask_copied;
         }
         // No record writes the frame base register but the prologue and the epilogues, nor rsp but a call's and a ret's
         // own push and pop.
@@ -1842,21 +1967,33 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
     }
     valid = valid && (kernel->outgoing == 0 || tier1_cert_emitted_span(&spans, 0, kernel->outgoing, false));
     valid = valid && tier1_cert_emitted_kills(build, &spans, clobbers, &clobber_count, BUSTER_ARRAY_LENGTH(clobbers) - BUSTER_CERT_EMITTED_REGISTER_CLOBBERS);
-    for (uint32_t reg = 0; valid && reg < 32; reg += 1)
+    if (valid)
     {
-        if (reg < 16 && reg != X86_REGISTER_RSP && (writes & BUSTER_X86_RESOURCE_GPR(reg)) != 0)
+        const uint32_t first = clobber_count;
+        clobber_count += tier1_cert_emitted_clobbers(build->wide, writes, masks, clobbers + clobber_count);
+        if ((masks >> 8) != 0 && kernel->body == 0 && !kernel->call)
         {
-            clobbers[clobber_count++] = tier1_cert_emitted_gpr(reg, 8);
-        }
-        // A vector register a wide function's layout has (zmm16 and on its own: a machine row's, a part's staging, #1284).
-        const uint32_t whole = tier1_cert_emitted_vector_whole(build, reg);
-        if (whole != BUSTER_CERT_NONE && (writes & BUSTER_X86_RESOURCE_VECTOR(reg)) != 0)
-        {
-            clobbers[clobber_count++] = whole;
-        }
-        if (reg < 8 && ((masks >> 8 >> reg) & 1) != 0)
-        {
-            clobbers[clobber_count++] = tier1_cert_emitted_mask(reg, 8);
+            // KMOVW preserves the saved low word and its existing tokens, while clearing the upper six bytes.
+            for (uint32_t i = first; valid && i < clobber_count; i += 1)
+            {
+                const uint32_t location = clobbers[i];
+                if (location >= BUSTER_CERT_EMITTED_MASK)
+                {
+                    const uint32_t reg = (location - BUSTER_CERT_EMITTED_MASK) / 4;
+                    if (mask_holds[reg] == reg)
+                    {
+                        valid = build->location_count < build->location_capacity;
+                        if (valid)
+                        {
+                            const Tier1CertLocation whole = build->locations[location];
+                            clobbers[i] = build->location_count++;
+                            build->locations[clobbers[i]] = (Tier1CertLocation){
+                                .unit = whole.unit + 2, .width = 2, .extent = 6, .class = TIER1_CERT_MASK, .reg = (uint8_t)reg,
+                            };
+                        }
+                    }
+                }
+            }
         }
     }
     Tier1CertSource* record = 0;
@@ -2044,9 +2181,10 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
         reason = TIER1_CERT_EMITTED_ENTRY_LOOP;
     }
     // An asm body that moves a value into rsp (#1846, IrAsmBody.stack) leaves the frame to the program: a dynamic one.
+    // Opaque bodies reserve bytes replaced after this record-level proof, which cannot certify those bytes (#2351).
     for (uint32_t b = 0; reason == TIER1_CERT_EMITTED_OK && b < function->asm_body_count && function->asm_bodies != 0; b += 1)
     {
-        reason = function->asm_bodies[b].stack ? TIER1_CERT_EMITTED_DYNAMIC : reason;
+        reason = function->asm_bodies[b].opaque ? TIER1_CERT_EMITTED_OPAQUE : function->asm_bodies[b].stack ? TIER1_CERT_EMITTED_DYNAMIC : reason;
     }
     // A probe's loop in the prologue isn't decoded.
     for (uint32_t k = 0; reason == TIER1_CERT_EMITTED_OK && k < emitted->frame.prologue_count && k < BUSTER_TIER1_FRAME_STEP_CAPACITY; k += 1)
@@ -2576,7 +2714,10 @@ static bool tier1_cert_emitted_row_place(X86Instruction record, uint32_t r, cons
         const uint8_t reg = early ? placement->early : tier1_cert_emitted_row_register(role, classes[k], placement, &name);
         name = early ? 0 : name;
         const bool mask = classes[k] == BUSTER_X86_CLASS_OPMASK;
-        valid = reg != UINT8_MAX && name < BUSTER_CERT_EMITTED_ROLE_NAMES;
+        // Reject an unencodable role before its register can be reduced to a resource bit. Legacy/VEX forms and
+        // /is4 operands cannot name an upper vector register even when the output target also has AVX-512 (#3625).
+        const uint32_t registers = vector && description->family == BUSTER_X86_FAMILY_EVEX ? 32 : mask ? 8 : 16;
+        valid = reg < registers && name < BUSTER_CERT_EMITTED_ROLE_NAMES;
         *fields[k] = reg;
         *named |= valid ? UINT64_C(1) << name : 0;
         *explicit_registers |= valid && !mask ? (vector ? BUSTER_X86_RESOURCE_VECTOR(reg & 31) : BUSTER_X86_RESOURCE_GPR(reg & 15)) : 0;
@@ -2862,8 +3003,8 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
 // (BUSTER_TIER0_ASM_BLOCK) addressing the block's frame object from the frame base register, by the frame's layout; and
 // compares them with the emitted ones, which carry no reference. The body's own branches are exactly its branches, each
 // to its target's record (its end's for one to the body's end), and no other branch leaves its records. The records
-// are one ORIGINAL of no definition, whose uses are its register operands (#2144, IrAsmBody.locations), each read in its
-// own register, where the operands' moves before it left it: they read the block's memory too, which isn't a value the
+// are one ORIGINAL with no definition. Its register operands (#2144, IrAsmBody.locations) are read in their own
+// registers, where the preceding moves left them. The records also read the block's memory, which isn't a value the
 // allocation keeps, and kill every register the body touches (IrAsmBody.touched and .masks: callee-saved ones too, which
 // the prologue saved) and the frame bytes their stores write. Then the declared scalar results are defined in their
 // fixed registers, from which the following moves must prove their allocated homes. The projections are found from
@@ -3167,7 +3308,8 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
         *next = end;
         return tier1_cert_emitted_asm(build, node, r, end);
     }
-    Tier1CertEmittedKernel kernel = { 0 };
+    Tier1CertEmittedKernel kernel;
+    tier1_cert_emitted_kernel_reset(&kernel);
     // A call's by-value aggregates' steps before it, all decoded (#789, #1284).
     bool valid = !calls || (tier1_cert_emitted_steps_begin(build, node) && (build->step_next == build->step_before || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r)));
     valid = valid && (tier1_cert_emitted_kernel(build, node, &kernel) || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r));
@@ -3277,7 +3419,8 @@ static bool tier1_cert_emitted_flush(Tier1CertEmittedBuild* build, uint32_t* cur
         const bool body = !plan->covered[n] && plan->patterns[n].rule == TIER1_RULE_ASM;
         bool silent = row || body || tier1_cert_emitted_silent(build->emitted, plan, n);
         const bool branch = function->op[n] == IR_CBR && !plan->covered[n] && degree == 2;
-        Tier1CertEmittedKernel kernel = { 0 };
+        Tier1CertEmittedKernel kernel;
+        tier1_cert_emitted_kernel_reset(&kernel);
         if (!silent || branch)
         {
             valid = tier1_cert_emitted_kernel(build, n, &kernel) && kernel.count == 0;
@@ -4392,9 +4535,13 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
 {
     const uint64_t scratch_saved = scratch->length;
     const Tier1SelectCode* code = &emitted->code;
+    // Check the actual fields before canonicalization can discard an unused VEX operand, or a resource mask can
+    // reduce an illegal upper register to a low one. The certificate is independent of the emitter's check (#3625).
+    const uint32_t valid_records = (uint32_t)x86_validate(code->records, code->count);
+    const bool encodable = valid_records == code->count;
     X86Instruction* canonical = 0;
     bool room = true;
-    for (uint32_t first = 0; room && first < code->count; first += 16)
+    for (uint32_t first = 0; encodable && room && first < code->count; first += 16)
     {
         uint32_t found = x86_vex_lookup(code->records + first, code->count - first, x86_vex_legacy);
         while (room && found != 0)
@@ -4419,7 +4566,11 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
     }
     Tier1EmitResult view = *emitted;
     view.code.records = canonical != 0 ? canonical : code->records;
-    const Tier1CertEmittedReason reason = room ? tier1_certificate_emitted_records(plan, &view, output, scratch, definitions, phis, program, stats) : TIER1_CERT_EMITTED_CAPACITY;
+    const Tier1CertEmittedReason reason = !encodable ? TIER1_CERT_EMITTED_DECODE : room ? tier1_certificate_emitted_records(plan, &view, output, scratch, definitions, phis, program, stats) : TIER1_CERT_EMITTED_CAPACITY;
+    if (!encodable && stats != 0)
+    {
+        *stats = (Tier1CertEmittedStats){ .reason = reason, .record = valid_records, .records = code->count };
+    }
     arena_pop_to(scratch, scratch_saved);
     return reason;
 }

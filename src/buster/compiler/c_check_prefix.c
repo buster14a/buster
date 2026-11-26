@@ -574,6 +574,7 @@ static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* d
         result.argument = diagnostic->argument < count ? origin[diagnostic->argument] : diagnostic->argument;
         result.note = diagnostic->note < count ? origin[diagnostic->note] : diagnostic->note;
         result.publication = diagnostic->publication != 0 ? (diagnostic->publication < count ? origin[diagnostic->publication] : original_count) : 0;
+        result.fixit_type_end = diagnostic->fixit_type_end != 0 && diagnostic->fixit_type_end <= count ? origin[diagnostic->fixit_type_end - 1] + 1 : 0;
         result.resume_callee = diagnostic->resume_call && diagnostic->resume_callee < count ? origin[diagnostic->resume_callee] : diagnostic->resume_callee;
         result.recovery_expression_begin = diagnostic->recovery_expression_begin != 0 && diagnostic->recovery_expression_begin < count ?
                                            origin[diagnostic->recovery_expression_begin] : diagnostic->recovery_expression_begin;

@@ -1,0 +1,7 @@
+%d/structure.c:1:1: error: character '@' cannot be specified by a universal character name
+%d/structure.c:6:1: error: character 'B' cannot be specified by a universal character name
+%d/structure.c:8:1: error: invalid universal character
+%d/structure.c:10:1: error: universal character name refers to a control character
+%d/structure.c:11:2: error: #else after #else
+%d/structure.c:12:1: error: character ' ' cannot be specified by a universal character name
+%d/structure.c:17:1: error: universal character name refers to a control character

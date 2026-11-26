@@ -1,0 +1,23 @@
+function (ptr, ptr, i64) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = param.ptr 1
+  %2 = param.i64 2
+  %3 = const.i64 0x00000000000000000000000000000000
+  %4 = br.void b1
+b1:
+  %5 = phi.i64 [%3, b0], [%14, b2]
+  %6 = icmp.i1 %5, %2 ult
+  %7 = cbr.void %6, b2, b3
+b2:
+  %8 = address.ptr %1 + %5 * 8 offset=0
+  %9 = load.i64 %8 align=1
+  %10 = uitofp.f64 %9
+  %11 = address.ptr %0 + %5 * 8 offset=0
+  %12 = store.void %11, %10 align=1
+  %13 = const.i64 0x00000000000000000000000000000001
+  %14 = add.i64 %5, %13
+  %15 = br.void b1
+b3:
+  %16 = ret.void
+}

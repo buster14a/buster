@@ -1,0 +1,7 @@
+function () -> void {
+b0:
+%0 = undef.i64
+%1 = switch.void %0, default b1, [0x1, b1], [0x1, b1]
+b1:
+%2 = ret.void
+}

@@ -79,7 +79,25 @@ patterns are:
   walk's block: the producer materializes every slot address in the preheader,
   which dominates every use, and the address is pure with a function-global
   offset. Memory operands can fold this leaf even when it has several users;
-  an escaping address still materializes. A direct symbol's address
+  an escaping address still materializes. After the cover is chosen, a stable
+  frame leaf with several raw IR uses but just one selected operand occurrence
+  can move into that user's full-width copy or address pattern (#3644,
+  `tier1_select_sink_frame_addresses`). The existing dependency walk counts
+  those occurrences, including call arguments, indirect callees, result
+  destinations and phi edges; duplicate operands count separately. The user
+  stays at its original node and keeps its index and displacement, while the
+  entry leaf becomes covered before liveness. A plain copy keeps the frame's
+  rematerialization recipe, and an input-free constant-offset frame address
+  has the same recipe with its addend. Multiple selected users retain their
+  shared address. Incoming overflow areas, dynamic allocations, narrow values
+  and non-entry cross-block leaves keep their original placement. This avoids
+  quadratic live memberships and intervals for initialized buffers in successive
+  scopes with early returns, without changing allocation limits or frame
+  lifetimes. `test-tier1-emit` checks actual selected CFG preparation at 1,536
+  and 3,072 scopes and certifies small shared, phi, indexed and dynamic cases;
+  `test-checker-driver` compiles 1,536 scopes strictly with rematerialization on
+  and off against a separate Clang helper and compact reference, checking all
+  bytes, callee writes and early exits. A direct symbol's address
   (`IR_SYMBOL_ADDR`) ends the walk the same way (#2573), from any block, since
   it reads no value either: the operand is rip-relative, the symbol plus the
   walked displacement, and the CFG consumer gives the access's one rip-relative
@@ -697,8 +715,8 @@ patterns are:
   slots of 8 bytes, a whole vector register's its register's bytes'
   (`tier1_select_part_slots`, a payload's too, #2798), but a zmm register's
   (a 64-byte vector's, or a 40-, 48- or 56-byte payload's), which waits in
-  zmm16 and on instead (#141, `tier1_select_part_in_zmm`: Tier 1 allocates no
-  register past xmm15, and only an AVX-512F target passes a zmm one), so that a
+  zmm16 and on instead (#141, `tier1_select_part_in_zmm`: the CFG consumer
+  reserves the call's staging span before allocation, and only an AVX-512F target passes a zmm one), so that a
   call takes all eight of its vector registers' 64-byte vectors. Up to 14
   staging slots use the red zone. If any call needs more, the CFG consumer
   reserves one frame object sized for the largest call (#1450), with a
@@ -1444,8 +1462,9 @@ them.
 ## Vectors (#141)
 
 The IR's vectors, `v4i32`, `v8i32` and `v16i32` (#732), are the vector class's,
-as the floating values are: xmm0 to xmm14, xmm15 the class's scratch, a node's
-register its location's low four bits. Their rules (`TIER1_RULE_VECTOR`, its kind
+as the floating values are. xmm15 is the class's scratch; true vector values
+may also take registers 16 to 31 when their selected forms and transport qualify
+them (#3625). A node's register is its location's low five bits. Their rules (`TIER1_RULE_VECTOR`, its kind
 in the pattern's `scale`) are AVX-512's EVEX forms at the vector's width, 16, 32
 or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 
@@ -1456,7 +1475,7 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `vconst` of one lane in all | `SPLAT` | `mov r11d, imm32` and `vpbroadcastd x, r11d` |
 | a `vconst` whose quadwords are one value, at an EVEX target | `CONSTANT` | the quadword into the scratch general register by the shortest `mov` that holds it and `vpbroadcastq` from it (`tier1_emit_cfg_vector_constant`, #2744's step 1: `_mm512_set1_epi64(63)`) |
 | any other `vconst` | `CONSTANT` | its literal's load, `vmovdqu32` of `[rip + literal]` (`tier1_emit_cfg_vector_constant`, #2744's step 2; "The literal pool" below) |
-| `copy` | `COPY` | `vmovdqa64` (`movaps` for 16 bytes), none where allocation gave both one register |
+| `copy` | `COPY` | `vmovdqa64` (`movaps` for 16 bytes between low registers), none where allocation gave both one register |
 | `add`, `sub`, `mul`, `and`, `or`, `xor` | `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpandq`, `vporq`, `vpxord`: three operands, the destination any register |
 | `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |
 | `vcmp` | `COMPARE` | `vpcmpd k, a, b, imm` (`vpcmpud` for an unsigned predicate) into the mask's opmask register |
@@ -1474,9 +1493,10 @@ node, whose intrinsic cost is two; they never fold into another instruction's
 wide memory operand. Unpaired scalar pieces retain their ordinary folds because
 the provenance flag is not an access effect.
 
-The ordinary vector allocation class names xmm0 through xmm14, with xmm15
-reserved for scratch. Its CFG locations are `32 + register`; an unused load's
-`NO_REGISTER` destination still performs both accesses into xmm15. VEX therefore
+The paired load's result stays in xmm0 through xmm14 because its selected
+legacy or VEX records cannot name an upper register. CFG vector locations are
+`32 + register`; an unused load's `NO_REGISTER` destination still performs both
+accesses into xmm15. VEX therefore
 suffices for both loads even at an AVX-512
 target, uses shorter encodings than EVEX, and uses the existing measured Zen 5
 rows. The destination store keeps its target's normal vector form. No new EVEX
@@ -1491,6 +1511,35 @@ admits one. Displacement addition is checked before either half is emitted.
 indexed addresses and guard-page boundaries against byte copies, along with
 selection's metadata and scalar-fold behavior. The emitted-code certificate
 checks both halves through the same frame-aware regeneration as other nodes.
+
+### Upper vector registers (#3625)
+
+The CFG consumer starts with registers 0 to 31 except scratch register 15, then
+intersects each value's allowed set with its producer, every selected use and
+its spill, reload and full-width copy forms. `tier1_select_upper_vector_roles`
+expands the selected kernel with distinct upper probe registers and checks the
+actual encoded fields against the output target's allow-list. Legacy, VEX and
+`/is4` fields keep their values low. Scalar `F32` and `F64` values stay low too.
+AVX512F without VL qualifies only 64-byte transport; legacy and VEX targets
+retain the low set.
+
+Before allocation, the consumer reserves the union of the function's machine
+row fallback registers and 64-byte ABI argument staging registers. A row also
+checks that its scratch span overlaps no live allocated value. Functions with
+asm bodies retain the low set because `IrAsmBody.touched` describes only the
+low vector registers. Calls save and restore every live allocated vector at
+the function's full vector width, and phi copies retain that width. Register
+decoding preserves all five bits, including in instruction validation and the
+emitted-code certificate.
+
+`test-tier1-select` exercises upper destinations and aliasing at all three
+widths, including packed FMA where the destination, first input and addend
+share a register: both reads move to scratch before the destination takes the
+other input. `test-tier1-emit` compares more than 15 simultaneously live vectors
+against independent C expectations, including loops, phis, calls, machine rows,
+register 31 and allocation rollback. Certificate mutations reject narrowed
+transport, invalid registers and scratch collisions. Structural spill counts
+alone do not establish a runtime speedup.
 
 A masked operation (`tier1_select_masked_binary`) has four values: the
 operation's two operands, the mask and the passthrough `w` (`values[3]`, the
@@ -1664,7 +1713,8 @@ as any operand's): a row call isn't a call of a function's
 and it makes no frame a caller's. The selector takes a row Tier 0 places
 (`tier0_operation_valid`, which needs x86_semantics.c's tables), whose vector
 and floating roles fit: a row whose records name vector registers in EVEX forms
-alone has its vector roles in zmm16 and on, which no value takes, and its floating
+alone has its vector roles in zmm16 and on, whose fallback span is reserved
+before allocation, and its floating
 roles past them below 32; a row with a VEX or legacy form's vector register has
 its vector roles below 16, each that doesn't stay in place in a free register;
 and a row that names a
@@ -1878,6 +1928,15 @@ The other results stay available while the copies resolve cycles, and no restore
 can overwrite a result before it is captured. A result's interval does not count
 as crossing the body that defines it.
 
+The body's retained labels travel to `Tier1EmitResult.asm_label_records` and
+`asm_label_names`, then the C driver's `EmittedCode`: their offsets name the
+template's exact records, including the next-record boundary of an empty
+body. `asm_ranges` retains each body's emitted record range. Post scheduling
+puts a boundary at every record in those ranges, preserving template order
+while scheduling the surrounding C code. An asm goto's eax result is its exit
+number; the following typed dispatch is ordinary IR control flow, with no
+helper call. Named bodies are not inlined, and the unroller refuses all calls.
+
 The general registers it touches are its fixed registers
 (`tier1_select_node_fixed`), so that the frame gives them call-save rows where a
 value crosses the body in one (`tier1_emit_cfg_saves`, a callee-saved register's
@@ -1903,8 +1962,17 @@ results, both scalar widths and primary register classes, with a division betwee
 the producer and projections. Constrained masks force initial spills, and native
 execution checks an independent integer oracle.
 
-Registers outside `touched` hold no value across the node: the allocator gives
-values xmm0 to xmm14 alone (xmm15 is the vector class's scratch within a node,
+A whole assembled unit uses a body's opaque reserved span
+(`IrAsmBody.opaque`). Final emission replaces it with aligned bytes and rebases
+the unit's symbols and fixups into the containing function. Its hidden label
+anchor also prevents duplication. Such a function skips post scheduling and
+reports `opaque-asm` instead of claiming emitted-code certification of the
+placeholder records; the allocation certificate remains enabled. The
+[inline assembly guide](c-inline-assembly.md)'s "Templates that take directives"
+describes the effects gate, final layout and remaining helper boundaries.
+
+Registers outside `touched` hold no value across the node: a function with an
+asm body keeps its vector values in xmm0 to xmm14 (xmm15 is the class's scratch within a node,
 zmm16 and on a row's or a call's staging within a node), and the x87 stack is
 empty after every node (`tier1_emit_cfg_x87`), so a template may use all eight
 of its slots. The masks live in the opmask registers its records write

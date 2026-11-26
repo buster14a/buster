@@ -142,12 +142,14 @@ static const uint8_t x86_zen5_gpr_order[BUSTER_X86_COST_POOL] = {
 };
 
 // How a case's memory slots and registers start: the element of its floating-point operation, and whether its
-// constant sources are additive identities (0.0) or multiplicative ones (1.0). Integers are 3.
+// constant sources are additive identities (0.0) or multiplicative ones (1.0). Integers are 3; packed integer/float
+// conversions use zero, whose bits are a fixed point in both interpretations of the chain.
 typedef enum X86CostFill
 {
     X86_COST_FILL_INTEGER,
     X86_COST_FILL_FLOAT,
     X86_COST_FILL_DOUBLE,
+    X86_COST_FILL_ZERO,
 } X86CostFill;
 
 typedef struct X86CostShape X86CostShape;
@@ -372,6 +374,12 @@ static void x86_zen5_fill_of(const X86Effects* effects, X86CostShape* shape)
             break;
     }
     shape->fill = !floating ? X86_COST_FILL_INTEGER : effects->width == 8 ? X86_COST_FILL_DOUBLE : X86_COST_FILL_FLOAT;
+    // A packed conversion's result feeds the next conversion as raw bits in the same register file. Zero keeps both
+    // integer/float directions exact and quiet. Starting a float-to-int chain at 1.0 would feed bits(1), a subnormal,
+    // into its second operation; an int-to-float chain would eventually round. Scalar conversions keep their fixtures.
+    const bool conversion = effects->operation == X86_OPERATION_INT_TO_FLOAT || effects->operation == X86_OPERATION_FLOAT_TO_INT;
+    const bool packed = x86_zen5_file(shape->description->reg) == X86_COST_FILE_VECTOR && x86_zen5_file(shape->description->rm) == X86_COST_FILE_VECTOR;
+    shape->fill = conversion && packed ? X86_COST_FILL_ZERO : shape->fill;
     shape->additive = effects->operation == X86_OPERATION_FADD || effects->operation == X86_OPERATION_FSUB || effects->operation == X86_OPERATION_FMA;
 }
 
@@ -1373,6 +1381,7 @@ static int64_t x86_zen5_fill_bits(const X86CostShape* shape)
     int64_t bits = 3;
     bits = shape->fill == X86_COST_FILL_FLOAT ? INT64_C(0x3f8000003f800000) : bits;
     bits = shape->fill == X86_COST_FILL_DOUBLE ? INT64_C(0x3ff0000000000000) : bits;
+    bits = shape->fill == X86_COST_FILL_ZERO ? 0 : bits;
     return bits;
 }
 
@@ -1579,7 +1588,7 @@ static void x86_zen5_fill(const X86CostShape* shape)
 {
     uint8_t* data = x86_zen5_data;
     const uint32_t width = shape->effects->width >= 1 && shape->effects->width <= 8 ? shape->effects->width : 8;
-    uint64_t initial = 3;
+    uint64_t initial = shape->fill == X86_COST_FILL_ZERO ? 0 : 3;
     uint32_t size = 4;
     if (shape->fill == X86_COST_FILL_FLOAT)
     {

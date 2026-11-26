@@ -1,0 +1,9 @@
+buster-fixtures v2 checker-warnings
+constants-c23	constants.c	1	0	0	c23	-	imaginary bit-precise constants, -std=c23
+constants-gnu17	constants.c	38	0	0	-	-	imaginary bit-precise constants, -std=gnu17
+suffixes-c23	suffixes.c	0	12	0	c23	-	imaginary bit-precise suffixes, -std=c23
+suffixes-gnu17	suffixes.c	0	12	0	-	-	imaginary bit-precise suffixes, -std=gnu17
+types-c23	types.c	0	5	0	c23	-	imaginary bit-precise types, -std=c23
+error-order-gnu17	error-order.c	6	5	1	-	-	imaginary bit-precise error-order, -std=gnu17
+assertions-c23	assertions.c	0	5	0	c23	-	imaginary bit-precise assertions, -std=c23
+assertions-gnu17	assertions.c	3	5	0	-	-	imaginary bit-precise assertions, -std=gnu17

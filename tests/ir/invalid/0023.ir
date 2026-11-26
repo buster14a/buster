@@ -1,0 +1,5 @@
+function () -> void {
+b0:
+%0 = call.void @1() fixed=() variadic=2
+%1 = ret.void
+}

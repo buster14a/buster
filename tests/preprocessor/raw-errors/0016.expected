@@ -1,0 +1,7 @@
+%d/structure.c:2:1: error: character 'A' cannot be specified by a universal character name
+%d/structure.c:5:1: error: invalid universal character
+%d/structure.c:6:2: error: #else after #else
+%d/structure.c:7:1: error: universal character name refers to a control character
+%d/structure.c:9:1: error: universal character name refers to a control character
+%d/structure.c:10:2: warning: use of a '#elifdef' directive is a C23 extension [-Wc23-extensions]
+%d/structure.c:11:1: error: character 'B' cannot be specified by a universal character name

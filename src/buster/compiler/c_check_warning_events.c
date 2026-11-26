@@ -313,6 +313,10 @@ enum
     CHECK_WARNING_ID_SWITCH_BOOL,
     CHECK_WARNING_ID_CHAR_SUBSCRIPTS,
     CHECK_WARNING_ID_SIZEOF_ARRAY_ARGUMENT,
+    CHECK_WARNING_ID_FORMAT_SIGNEDNESS,
+    CHECK_WARNING_ID_FORMAT_NONLITERAL,
+    CHECK_WARNING_ID_FORMAT_ZERO_LENGTH,
+    CHECK_WARNING_ID_MISSING_FORMAT_ATTRIBUTE,
     // A file-scope definition with external linkage and no preceding non-defining declaration (#2222).
     CHECK_WARNING_ID_MISSING_VARIABLE_DECLARATIONS,
     CHECK_WARNING_ID_COUNT,
@@ -903,6 +907,10 @@ struct CheckWarningEvent
     // Optional order inside a completed construct, independent of its source location and publication boundary.
     uint64_t suborder;
     CheckWarningPayload payload;
+    // Optional highlighted source range, in translation-unit parser [begin, end) coordinates. end == 0 means none.
+    // Kept where an event's diagnostic token is not its expression root (a nonliteral null conversion's, #2376).
+    uint32_t range_begin;
+    uint32_t range_end;
     uint32_t note_first;
     uint32_t note_count;
 };

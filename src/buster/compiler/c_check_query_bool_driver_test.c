@@ -51,8 +51,10 @@ static void check_test_driver_query_bool_execution(CheckTest* test, const char* 
     char program[PATH_MAX];
     snprintf(object, sizeof(object), "%s/query-bool.o", directory);
     snprintf(program, sizeof(program), "%s/query-bool", directory);
-    const char* source = "tests/driver/query_bool_execution.c";
-    for (uint32_t language = 0; language < 2; language += 1)
+    char source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/query_bool_execution.c");
+    check_test_expect(test, located, "query boolean execution: fixture path fits");
+    for (uint32_t language = 0; located && language < 2; language += 1)
     {
         for (uint32_t route = 0; route < 5; route += 1)
         {
@@ -101,7 +103,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
     static const CheckDriverQueryBoolFile cases[] =
     {
         {
-            .path = "tests/driver/query_bool_original.c",
+            .path = "driver/query_bool_original.c",
             .fixture =
             {
                 .name = "successful queries and assertions retain boolean conversions",
@@ -109,7 +111,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_types.c",
+            .path = "driver/query_bool_types.c",
             .fixture =
             {
                 .name = "array bounds and type queries retain boolean conversions",
@@ -120,7 +122,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_floating.c",
+            .path = "driver/query_bool_floating.c",
             .fixture =
             {
                 .name = "erased queries retain floating literal conversions",
@@ -129,14 +131,14 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_controls.c",
+            .path = "driver/query_bool_controls.c",
             .fixture =
             {
                 .name = "omitted middle expressions and explicit casts remain quiet",
             },
         },
         {
-            .path = "tests/driver/query_bool_logical.c",
+            .path = "driver/query_bool_logical.c",
             .fixture =
             {
                 .name = "logical conversions retain independent unevaluated suppression",
@@ -146,7 +148,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_nested.c",
+            .path = "driver/query_bool_nested.c",
             .fixture =
             {
                 .name = "nested query conversions keep construction order",
@@ -154,7 +156,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_selections.c",
+            .path = "driver/query_bool_selections.c",
             .fixture =
             {
                 .name = "boolean conditions peel static selections without passing explicit casts",
@@ -162,7 +164,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_signed_selections.c",
+            .path = "driver/query_bool_signed_selections.c",
             .fixture =
             {
                 .name = "floating conditions keep one sign through selections and extension wrappers",
@@ -170,7 +172,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_selection_controls.c",
+            .path = "driver/query_bool_selection_controls.c",
             .fixture =
             {
                 .name = "logical selection and builtin constant query controls keep their warnings",
@@ -179,7 +181,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_shared_conversions.c",
+            .path = "driver/query_bool_shared_conversions.c",
             .fixture =
             {
                 .name = "shared selection peeling keeps ordinary conversion locations",
@@ -187,7 +189,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_macro.c",
+            .path = "driver/query_bool_macro.c",
             .fixture =
             {
                 .name = "query conversions retain macro and forwarded argument notes",
@@ -196,7 +198,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_policy.c",
+            .path = "driver/query_bool_policy.c",
             .fixture =
             {
                 .name = "query conversion policy follows the condition and macro expansion",
@@ -205,7 +207,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_promoted.c",
+            .path = "driver/query_bool_promoted.c",
             .fixture =
             {
                 .name = "source promotion and category suppression remain independent",
@@ -215,7 +217,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_signed.c",
+            .path = "driver/query_bool_signed.c",
             .fixture =
             {
                 .name = "query signed shift conversions remain ignored by default",
@@ -223,7 +225,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_signed.c",
+            .path = "driver/query_bool_signed.c",
             .fixture =
             {
                 .name = "query signed shift conversions can be enabled",
@@ -232,7 +234,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_scopes.c",
+            .path = "driver/query_bool_scopes.c",
             .fixture =
             {
                 .name = "query conversions retain member and deferred body ownership",
@@ -240,7 +242,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_failed.c",
+            .path = "driver/query_bool_failed.c",
             .fixture =
             {
                 .name = "query conversions precede failed assertion diagnostics",
@@ -251,7 +253,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_failed.c",
+            .path = "driver/query_bool_failed.c",
             .fixture =
             {
                 .name = "query conversion recovery obeys the error limit",
@@ -263,7 +265,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_failed.c",
+            .path = "driver/query_bool_failed.c",
             .fixture =
             {
                 .name = "query conversion recovery obeys fatal errors",
@@ -275,7 +277,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_recovery_brace.c",
+            .path = "driver/query_bool_recovery_brace.c",
             .fixture =
             {
                 .name = "query conversions survive recovered names before a missing brace",
@@ -285,7 +287,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_recovery_brace.c",
+            .path = "driver/query_bool_recovery_brace.c",
             .fixture =
             {
                 .name = "query recovery respects the error limit before a missing brace",
@@ -295,7 +297,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_recovery_brace.c",
+            .path = "driver/query_bool_recovery_brace.c",
             .fixture =
             {
                 .name = "fatal name errors suppress later query conversion recovery",
@@ -304,7 +306,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_recovery_label.c",
+            .path = "driver/query_bool_recovery_label.c",
             .fixture =
             {
                 .name = "query conversions remain before a missing goto label",
@@ -313,7 +315,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_recovery_label.c",
+            .path = "driver/query_bool_recovery_label.c",
             .fixture =
             {
                 .name = "query conversion recovery precedes a fatal missing-label error",
@@ -323,7 +325,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_original.c",
+            .path = "driver/query_bool_original.c",
             .fixture =
             {
                 .name = "query tautological conversions obey command-line suppression",
@@ -331,7 +333,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_floating.c",
+            .path = "driver/query_bool_floating.c",
             .fixture =
             {
                 .name = "query literal conversion suppression keeps unrelated folding warnings",
@@ -340,7 +342,7 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
             },
         },
         {
-            .path = "tests/driver/query_bool_execution.c",
+            .path = "driver/query_bool_execution.c",
             .fixture =
             {
                 .name = "query diagnostics preserve accepted program evaluation",
@@ -350,10 +352,11 @@ static void check_test_driver_query_bool(CheckTest* test, const char* clang, con
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(cases); f += 1)
     {
-        const int file = open(cases[f].path, O_RDONLY | O_CLOEXEC);
+        char path[PATH_MAX];
+        const int file = check_test_fixture_path(path, sizeof(path), cases[f].path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
         char* source = NULL;
         const bool read = file >= 0 && check_test_driver_read_file(file, &source);
-        check_test_expect(test, read, "query boolean runtime fixture is read (run from the repository root)");
+        check_test_expect(test, read, "query boolean runtime fixture is read");
         if (read)
         {
             for (uint32_t language = 0; language < 2; language += 1)

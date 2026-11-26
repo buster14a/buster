@@ -12,6 +12,7 @@
 //   ./build-regression --develop-only  # The Develop configuration's checks alone, on the selected tree.
 //   ./build-regression --self-built-only  # BUSTER_SELF_BUILT's checks alone, on the selected tree.
 //   ./build-regression --ownership-only [COMPILER]  # Check an existing build's fixture ownership; builds nothing.
+//   ./build-regression --runtime-fixtures-only [COMPILER]  # Probe an existing build's data dependencies, exclusively.
 //
 // It removes every tree under build/cmake (clean --all) and checks that
 //   - guarded test roots retain their private entry points when preprocessed without main.c's unity-unit selector;
@@ -163,8 +164,78 @@ static const char* const develop_edited[] = {
 static char develop_copies[BUSTER_REGRESSION_DEVELOP_EDITS][PATH_MAX];
 static bool develop_saved[BUSTER_REGRESSION_DEVELOP_EDITS];
 
+// The focused dependency check runs before the hosted builder publishes its product or starts any test suite.
+// Save bytes and timestamps before changing anything; fail() and the signal handler restore every active probe.
+typedef struct RuntimeFixtureChange RuntimeFixtureChange;
+struct RuntimeFixtureChange
+{
+    const char* path;
+    Text original;
+    struct stat status;
+    bool existed;
+    bool changed;
+};
+static RuntimeFixtureChange runtime_changes[6];
+static uint32_t runtime_change_count;
+static const char* const runtime_directory = "tests/preprocessor/named-ucns";
+static struct stat runtime_directory_status;
+static bool runtime_directory_saved;
+static struct timespec runtime_probe_time;
+
+static bool runtime_fixture_write(const char* path, const void* bytes, size_t length, bool create)
+{
+    const int file = open(path, O_WRONLY | O_CLOEXEC | (create ? O_CREAT | O_EXCL : O_TRUNC), 0644);
+    size_t done = 0;
+    bool valid = file >= 0;
+    while (valid && done < length)
+    {
+        const ssize_t count = write(file, (const char*)bytes + done, length - done);
+        valid = count > 0 || (count < 0 && errno == EINTR);
+        done += count > 0 ? (size_t)count : 0;
+    }
+    if (file >= 0)
+    {
+        valid = close(file) == 0 && valid;
+    }
+    return valid;
+}
+
+static bool restore_runtime_fixtures(void)
+{
+    bool valid = true;
+    for (uint32_t i = 0; i < runtime_change_count; i += 1)
+    {
+        RuntimeFixtureChange* change = &runtime_changes[i];
+        bool restored = true;
+        if (change->changed)
+        {
+            restored = change->existed ? runtime_fixture_write(change->path, change->original.data, change->original.length, false) :
+                                        unlink(change->path) == 0 || errno == ENOENT;
+            change->changed = !restored;
+        }
+        // Reading the saved originals can change atime even if an earlier probe fails before these files' edits.
+        if (change->existed && S_ISREG(change->status.st_mode))
+        {
+            const struct timespec times[2] = { change->status.st_atim, change->status.st_mtim };
+            restored = utimensat(AT_FDCWD, change->path, times, 0) == 0 && restored;
+        }
+        valid = valid && restored;
+        if (!restored)
+        {
+            fprintf(stderr, "build-regression: can't restore %s: %s\n", change->path, strerror(errno));
+        }
+    }
+    if (runtime_directory_saved)
+    {
+        const struct timespec times[2] = { runtime_directory_status.st_atim, runtime_directory_status.st_mtim };
+        valid = utimensat(AT_FDCWD, runtime_directory, times, 0) == 0 && valid;
+    }
+    return valid;
+}
+
 static void restore(void)
 {
+    (void)restore_runtime_fixtures();
     if (edited)
     {
         char command[2 * PATH_MAX];
@@ -887,12 +958,16 @@ static OwnershipIssue ownership_check(const OwnershipUnits* units, const Ownersh
     for (uint32_t i = 0; i < graph->count && issue.reason == 0; i += 1)
     {
         const OwnershipFile* file = &graph->files[i];
+        if (strncmp(file->path, "tests/", 6) == 0)
+        {
+            issue = (OwnershipIssue){ .reason = "runtime fixture is a compiler dependency", .path = file->path, .actual = file->owners };
+        }
         bool shared = false;
         for (uint32_t j = 0; j < count; j += 1)
         {
             shared = shared || strcmp(file->path, exceptions[j].path) == 0;
         }
-        if (file->fixture && !shared && (file->owners & (file->owners - 1)) != 0)
+        if (issue.reason == 0 && file->fixture && !shared && (file->owners & (file->owners - 1)) != 0)
         {
             issue = (OwnershipIssue){ .reason = "private fixture has multiple unity owners", .path = file->path, .actual = file->owners };
         }
@@ -1298,6 +1373,20 @@ static void check_ownership_fixtures(void)
                  cases[test].error != 0 ? cases[test].error : "success");
         }
     }
+    static const char* const runtime_paths[] = { "tests/driver/program.c", "tests/ir/input.ir", "tests/preprocessor/input.expected", "tests/checker/catalog.tsv" };
+    for (uint32_t i = 0; i < sizeof(runtime_paths) / sizeof(runtime_paths[0]); i += 1)
+    {
+        const OwnershipGraph runtime = {
+            .files = { { .path = runtime_paths[i], .owners = 2, .fixture = true } },
+            .count = 1,
+        };
+        const OwnershipIssue issue = ownership_check(&units, &runtime, NULL, 0);
+        if (issue.reason == NULL || strcmp(issue.reason, "runtime fixture is a compiler dependency") != 0)
+        {
+            fail("a single-owner runtime fixture escaped the no-build-input invariant: %s", runtime_paths[i]);
+        }
+    }
+    pass("runtime sources, IR, expectations and catalogs cannot be compiler dependencies even with one owner");
     // Narrowing an obsolete exception to match its now-private file must not keep the exception alive.
     static const OwnershipException unnecessary[] = {
         { "src/buster/compiler/shared_test.c", "main_unit_backend.c", "obsolete exception negative fixture", 0 },
@@ -1323,9 +1412,9 @@ static const char ownership_checker_units[] = "main_unit_backend.c main_unit_che
 static const char ownership_backend_units[] = "main_unit_backend.c main_unit_checker.c";
 
 static const OwnershipException ownership_exceptions[] = {
-    { "src/buster/compiler/c_checker_test.c", ownership_checker_units, "comparison helpers for checker, builtin and backend consumers", UINT64_C(0xd9302eb5f10668a6) },
+    { "src/buster/compiler/c_checker_test.c", ownership_checker_units, "comparison helpers for checker, builtin and backend consumers; explicit runtime-path support include", UINT64_C(0xcaf42b6f7ed86fd2) },
     { "src/buster/compiler/c_parser_test.c", ownership_main_units, "parser construction and subprocess helpers used by shared parser/checker roots", UINT64_C(0xe85650d00dd1a0ba) },
-    { "src/buster/compiler/c_preprocessor_test.c", ownership_main_units, "preprocessor input and result builders used by shared parser helpers, and the digest tables (TestDigests) the parser's and the checker's tests read", UINT64_C(0x20dc465340221dac) },
+    { "src/buster/compiler/c_preprocessor_test.c", ownership_main_units, "preprocessor input and result builders used by shared parser helpers, and shared digest tables with reset for a new fixture root", UINT64_C(0x1eba45e1851a29ab) },
     { "src/buster/compiler/c_preprocessor_history_test.c", "main_unit_frontend.c main_unit_checker.c", "history matcher for preprocessor and checker pragma tests", UINT64_C(0x338bcc2b5286ad74) },
     { "src/buster/compiler/foreign_test.c", "main_unit_executable.c main_unit_checker.c", "foreign executable and checker debug/unwind builders", UINT64_C(0x3932f8b6055a62cb) },
     { "src/buster/compiler/ir_source_test.c", "main_unit_backend.c main_unit_checker.c", "source preparation interface for IR commands; CHECKER owns its implementation", UINT64_C(0x8366575ba00f1461) },
@@ -1356,7 +1445,7 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/x86_64_encoder_test.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_assembler.c main_unit_link.c main_unit_backend.c", "encoding/execute helpers for these six test families", UINT64_C(0xc4d128a61e85c6d3) },
     { "src/buster/compiler/x86_intrinsics_test.c", "main_unit_checker.c main_unit_x86.c", "object reading and instruction decoding for checker AMX and intrinsic tests", UINT64_C(0x83a1dc58c44b290a) },
     { "src/buster/compiler/x86_semantics_test.c", ownership_main_units, "form names for DRIVER/BACKEND and six forced-emission globals retained in all units", UINT64_C(0x929ee4e6ddcf62ef) },
-    { "src/buster/compiler/test_paths.h", ownership_main_units, "temporary-directory normalization and profiling paths shared by the checker, dynamic and executable test units", UINT64_C(0xba41187e146e65bd) },
+    { "src/buster/compiler/test_paths.h", ownership_main_units, "temporary-directory normalization, profiling paths and bounded runtime-fixture path joins", UINT64_C(0x12376d84ec0b92a5) },
     { "src/buster/compiler/test_tool.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_backend.c", "external tool probes for these six test families", UINT64_C(0xfc1a967b31b9b4af) },
     { "src/buster/compiler/test_tool.h", "main.c main_unit_x86.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_backend.c", "tool probe interface for its six implementation consumers", UINT64_C(0x398696e707640aa9) },
     { "src/buster/compiler/test_process.c", ownership_main_units, "CPU grant and capture-file helpers used by shared parser/process interfaces; its parts the frontend's and test-ssa-source's (#2658)", UINT64_C(0x853d3c228ca22194) },
@@ -1561,6 +1650,7 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
         { "src/buster/compiler/tier1_schedule.c", backend, false },
         { "src/buster/compiler/tier1_allocate.c", backend, false },
         { "src/buster/compiler/tier1_frame.c", backend, false },
+        { "src/buster/compiler/tier1_select_upper.c", backend, false },
         // DRIVER still owns the shared IR scan counter and baked BURS data, without their implementation bodies.
         { "src/buster/compiler/ir.c", "main.c main_unit_backend.c main_unit_checker.c", false },
         { "src/buster/compiler/tier1_select_burs.c", "main.c main_unit_backend.c main_unit_checker.c", false },
@@ -1642,7 +1732,9 @@ static void check_ownership(const char* directory, const char* config)
     free(sources.data);
 }
 
-static void check_existing_ownership(const char* compiler)
+static void check_runtime_fixture_dependencies(const char* directory, const char* config);
+
+static void check_existing_ownership(const char* compiler, bool runtime_fixtures)
 {
     char selected[PATH_MAX];
     if (compiler == 0)
@@ -1682,6 +1774,10 @@ static void check_existing_ownership(const char* compiler)
     char* config = strrchr(resolved, '/') + 1;
     config[-1] = 0;
     check_ownership(resolved, config);
+    if (runtime_fixtures)
+    {
+        check_runtime_fixture_dependencies(resolved, config);
+    }
 }
 
 // The objects' file names, without .o, whose depfiles name the source `file`, sorted, each followed by a space.
@@ -1758,6 +1854,178 @@ static bool planned(char* names, size_t size)
     }
     free(plan.data);
     return work_to_do;
+}
+
+static void runtime_fixture_change(uint32_t index, const void* bytes, size_t length)
+{
+    RuntimeFixtureChange* change = &runtime_changes[index];
+    change->changed = true;
+    if (!runtime_fixture_write(change->path, bytes, length, !change->existed))
+    {
+        // A concurrent creator must not have its file removed by our failure cleanup.
+        change->changed = change->existed || errno != EEXIST;
+        fail("can't change runtime dependency probe %s: %s", change->path, strerror(errno));
+    }
+    const struct timespec times[2] = { change->existed ? change->status.st_atim : runtime_probe_time, runtime_probe_time };
+    if (utimensat(AT_FDCWD, change->path, times, 0) != 0 ||
+        (!change->existed && utimensat(AT_FDCWD, runtime_directory, times, 0) != 0))
+    {
+        fail("can't date runtime dependency probe %s: %s", change->path, strerror(errno));
+    }
+}
+
+static void runtime_fixture_append(uint32_t index, const char* suffix)
+{
+    const Text original = runtime_changes[index].original;
+    const size_t added = strlen(suffix);
+    char* bytes = malloc(original.length + added);
+    if (bytes == NULL)
+    {
+        fail("can't allocate the runtime dependency probe");
+    }
+    memcpy(bytes, original.data, original.length);
+    memcpy(bytes + original.length, suffix, added);
+    runtime_fixture_change(index, bytes, original.length + added);
+    free(bytes);
+}
+
+// Check the complete target, not just its C objects: a hidden link, bake or generated-table dependency fails too.
+// A dry run must be empty before running Ninja for real, so a regression cannot silently start a compiler rebuild.
+static void runtime_fixture_no_work(const char* directory, const char* config, const char* compiler, const struct stat* built,
+                                    const Snapshot* before, const char* label)
+{
+    char ninja_file[64];
+    snprintf(ninja_file, sizeof(ninja_file), "build-%s.ninja", config);
+    char* dry[] = { "ninja", "-C", (char*)directory, "-f", ninja_file, "-n", "compiler", NULL };
+    char* actual[] = { "ninja", "-C", (char*)directory, "-f", ninja_file, "compiler", NULL };
+    char** commands[] = { dry, actual };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        Text output = capture(commands[i]);
+        const bool empty = strstr(output.data, "ninja: no work to do.") != NULL && strstr(output.data, "[1/") == NULL;
+        if (!empty)
+        {
+            fputs(output.data, stderr);
+            free(output.data);
+            fail("runtime fixture %s scheduled build work%s", label, i == 0 ? " (nothing was built)" : "");
+        }
+        free(output.data);
+    }
+    char names[8192];
+    ran_since(before, names, sizeof(names));
+    const struct stat after = status_of(compiler);
+    if (names[0] != 0 || after.st_ino != built->st_ino || after.st_size != built->st_size || !same_time(after, *built))
+    {
+        fail("runtime fixture %s changed the compiler or ran %s", label, names);
+    }
+    pass("runtime fixture %s: 0 compile, 0 link and 0 bake commands", label);
+}
+
+// This is deliberately separate from --ownership-only: that read-only inventory item can run beside tests.
+// Run this mode only on an exclusive, already-built checkout, as the hosted producer does before packing.
+static void check_runtime_fixture_dependencies(const char* directory, const char* config)
+{
+    static const char* const paths[] = {
+        "tests/preprocessor/named-ucns/0001.c",
+        "tests/preprocessor/named-ucns/0001.expected",
+        "tests/preprocessor/named-ucns/catalog.tsv",
+        "tests/preprocessor/named-ucns/build-dependency-added.c",
+        "tests/preprocessor/named-ucns/build-dependency-added.expected",
+        "src/buster/compiler/ir_parse_test.c",
+    };
+    char compiler[PATH_MAX];
+    snprintf(compiler, sizeof(compiler), "%s/%s/compiler", directory, config);
+    snprintf(ninja_log, sizeof(ninja_log), "%s/.ninja_log", directory);
+    const struct stat built = status_of(compiler);
+    runtime_probe_time = built.st_mtim;
+    runtime_probe_time.tv_sec += 1;
+    static Snapshot before;
+    snapshot(&before);
+    runtime_fixture_no_work(directory, config, compiler, &built, &before, "unchanged baseline");
+    runtime_directory_status = status_of(runtime_directory);
+    runtime_directory_saved = true;
+    for (uint32_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i += 1)
+    {
+        RuntimeFixtureChange* change = &runtime_changes[i];
+        *change = (RuntimeFixtureChange){ .path = paths[i], .existed = i != 3 && i != 4 };
+        runtime_change_count = i + 1;
+        const int status = lstat(change->path, &change->status);
+        if (change->existed)
+        {
+            if (status != 0 || !S_ISREG(change->status.st_mode))
+            {
+                fail("runtime dependency probe needs a regular file: %s", change->path);
+            }
+            change->original = read_file(change->path);
+        }
+        else if (status == 0 || errno != ENOENT)
+        {
+            fail("runtime dependency probe will not replace an existing path: %s", change->path);
+        }
+    }
+    static const char* const labels[] = { "input edit", "expected-output edit", "catalog metadata edit" };
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        runtime_fixture_append(i, i == 2 ? "# Build dependency regression: metadata changes remain runtime data.\n" : "\n");
+        runtime_fixture_no_work(directory, config, compiler, &built, &before, labels[i]);
+        if (!restore_runtime_fixtures())
+        {
+            fail("can't restore the runtime fixture %s", labels[i]);
+        }
+    }
+    runtime_fixture_change(3, runtime_changes[0].original.data, runtime_changes[0].original.length);
+    runtime_fixture_change(4, runtime_changes[1].original.data, runtime_changes[1].original.length);
+    runtime_fixture_append(2, "build-dependency-added\tgnu17\t-\t-\tbuild dependency added case\n");
+    runtime_fixture_no_work(directory, config, compiler, &built, &before, "added source, expectation and catalog row");
+    if (!restore_runtime_fixtures())
+    {
+        fail("can't restore the added runtime case");
+    }
+
+    // Positive control: changing the C runner must schedule its owner, the link and the post-link bake. The source's
+    // time is later than the built executable's, so even a coarse filesystem clock cannot hide this edit.
+    runtime_fixture_append(5, "\n/* Runtime fixture dependency regression: runner edit. */\n");
+    char ninja_file[64];
+    snprintf(ninja_file, sizeof(ninja_file), "build-%s.ninja", config);
+    char* arguments[] = { "ninja", "-C", (char*)directory, "-f", ninja_file, "-n", "-v", "compiler", NULL };
+    Text plan = capture(arguments);
+    bool linked = false;
+    bool baked = false;
+    bool compiled = false;
+    bool extra = false;
+    char* cursor = plan.data;
+    for (char* line = strsep(&cursor, "\n"); line != NULL; line = strsep(&cursor, "\n"))
+    {
+        if (strstr(line, " -c ") != NULL)
+        {
+            const bool owner = strstr(line, "main_unit_backend") != NULL;
+            compiled |= owner;
+            extra |= !owner;
+        }
+        else if (strstr(line, " -o ") != NULL && strstr(line, "compiler.link") != NULL)
+        {
+            linked = true;
+        }
+        baked |= strstr(line, "BusterPostLink.cmake") != NULL;
+    }
+    free(plan.data);
+    if (!restore_runtime_fixtures())
+    {
+        fail("can't restore the runner dependency probe");
+    }
+    if (!compiled || extra || !linked || !baked)
+    {
+        fail("the IR runner's edit must schedule only BACKEND's compile, then link and bake (compile %u, other %u, link %u, bake %u)",
+             compiled, extra, linked, baked);
+    }
+    pass("the IR C runner schedules its BACKEND owner, link and bake; the positive control builds nothing");
+    runtime_fixture_no_work(directory, config, compiler, &built, &before, "all bytes and timestamps restored");
+    for (uint32_t i = 0; i < runtime_change_count; i += 1)
+    {
+        free(runtime_changes[i].original.data);
+    }
+    runtime_change_count = 0;
+    runtime_directory_saved = false;
 }
 
 static void sleep_seconds(unsigned seconds)
@@ -1990,6 +2258,7 @@ static void check_incremental(void)
     pass("an unchanged build compiles, links, bakes and publishes nothing");
 
     check_ownership(tree, "Release");
+    check_runtime_fixture_dependencies(tree, "Release");
 
     char selected[PATH_MAX];
     snprintf(selected, sizeof(selected), "%s/Release/compile_commands.json", tree);
@@ -4431,13 +4700,14 @@ int main(int argc, char** argv)
     const bool commands_only = argc == 2 && strcmp(argv[1], "--compile-commands-only") == 0;
     const bool driver_only = argc == 2 && strcmp(argv[1], "--driver-only") == 0;
     const bool codegen_only = argc == 2 && strcmp(argv[1], "--parallel-codegen-only") == 0;
-    const bool ownership_only = (argc == 2 || argc == 3) && strcmp(argv[1], "--ownership-only") == 0;
+    const bool runtime_fixtures_only = (argc == 2 || argc == 3) && strcmp(argv[1], "--runtime-fixtures-only") == 0;
+    const bool ownership_only = runtime_fixtures_only || ((argc == 2 || argc == 3) && strcmp(argv[1], "--ownership-only") == 0);
     const bool develop_only = argc == 2 && strcmp(argv[1], "--develop-only") == 0;
     const bool self_only = argc == 2 && strcmp(argv[1], "--self-built-only") == 0;
     if (argc != 1 && !flags_only && !commands_only && !driver_only && !ownership_only && !codegen_only && !develop_only && !self_only)
     {
         fail("usage: build-regression [--flags-only | --compile-commands-only | --driver-only | --parallel-codegen-only | --develop-only | --self-built-only | "
-             "--ownership-only [COMPILER]]");
+             "--ownership-only [COMPILER] | --runtime-fixtures-only [COMPILER]]");
     }
     if (getcwd(root, sizeof(root)) == 0 || access("build.sh", X_OK) != 0)
     {
@@ -4465,7 +4735,7 @@ int main(int argc, char** argv)
     }
     if (ownership_only)
     {
-        check_existing_ownership(argc == 3 ? argv[2] : 0);
+        check_existing_ownership(argc == 3 ? argv[2] : 0, runtime_fixtures_only);
     }
     if (argc == 1 || codegen_only)
     {

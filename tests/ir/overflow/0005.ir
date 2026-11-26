@@ -1,0 +1,6 @@
+function () -> void {
+b0:
+%0 = undef.ptr
+%1 = address.ptr %0 offset=9223372036854775808
+%2 = ret.void
+}

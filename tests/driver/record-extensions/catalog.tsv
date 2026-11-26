@@ -1,0 +1,45 @@
+buster-fixtures v3 checker-warnings
+0001-gnu17	records.c	19	0	0	-	-Wc++-compat	-	records
+0001-c23	records.c	19	0	0	c23	-Wc++-compat	-	records
+0002-gnu17	records.c	31	0	0	-	-Wc++-compat -Wgnu-empty-struct	-	records
+0002-c23	records.c	31	0	0	c23	-Wc++-compat -Wgnu-empty-struct	-	records
+0003-gnu17	record-controls.c	2	0	0	-	-Wc++-compat	-	record-controls
+0003-c23	record-controls.c	2	0	0	c23	-Wc++-compat	-	record-controls
+0004-gnu17	arrays.c	16	0	0	-	-Wzero-length-array	-	arrays
+0004-c23	arrays.c	16	0	0	c23	-Wzero-length-array	-	arrays
+0005-gnu17	arrays.c	16	0	0	-	-Wgnu	-	arrays
+0005-c23	arrays.c	16	0	0	c23	-Wgnu	-	arrays
+0006-gnu17	arrays.c	16	0	0	-	-pedantic	-	arrays
+0006-c23	arrays.c	16	0	0	c23	-pedantic	-	arrays
+0007-gnu17	arrays.c	0	16	0	-	-pedantic-errors	-	arrays
+0007-c23	arrays.c	0	16	0	c23	-pedantic-errors	-	arrays
+0008-gnu17	arrays.c	0	0	0	-	-Wzero-length-array -Wno-zero-length-array	-	arrays
+0008-c23	arrays.c	0	0	0	c23	-Wzero-length-array -Wno-zero-length-array	-	arrays
+0009-gnu17	arrays.c	16	0	0	-	-Wno-zero-length-array -Wzero-length-array	-	arrays
+0009-c23	arrays.c	16	0	0	c23	-Wno-zero-length-array -Wzero-length-array	-	arrays
+0010-gnu17	inferred.c	10	0	0	-	-Wzero-length-array	-	inferred
+0010-c23	inferred.c	10	0	0	c23	-Wzero-length-array	-	inferred
+0011-gnu17	array-controls.c	4	0	0	-	-Wzero-length-array	-	array-controls
+0011-c23	array-controls.c	4	0	0	c23	-Wzero-length-array	-	array-controls
+0012-gnu17	array-ice.c	6	0	0	-	-Wzero-length-array -Wno-gnu-folding-constant	-	array-ice
+0012-c23	array-ice.c	6	0	0	c23	-Wzero-length-array -Wno-gnu-folding-constant	-	array-ice
+0013-gnu17	array-recovery.c	2	2	0	-	-Wzero-length-array	-	array-recovery
+0013-c23	array-recovery.c	2	2	0	c23	-Wzero-length-array	-	array-recovery
+0014-gnu17	macros.c	11	0	10	-	-Wc++-compat -Wzero-length-array	-	macros
+0014-c23	macros.c	11	0	10	c23	-Wc++-compat -Wzero-length-array	-	macros
+0015-gnu17	policy.c	4	0	0	-	-	-	policy
+0015-c23	policy.c	4	0	0	c23	-	-	policy
+0016-gnu17	policy.c	6	0	0	-	-Wc++-compat -Wzero-length-array	-	policy
+0016-c23	policy.c	6	0	0	c23	-Wc++-compat -Wzero-length-array	-	policy
+0017-gnu17	errors.c	2	3	0	-	-Wc++-compat -Wzero-length-array	-	errors
+0017-c23	errors.c	2	3	0	c23	-Wc++-compat -Wzero-length-array	-	errors
+0018-gnu17	system.c	0	0	0	-	-isystem @suite -Wc++-compat	system-records.h	system
+0018-c23	system.c	0	0	0	c23	-isystem @suite -Wc++-compat	system-records.h	system
+0019-gnu17	system.c	1	0	0	-	-isystem @suite -Wc++-compat -Wsystem-headers	system-records.h	system
+0019-c23	system.c	1	0	0	c23	-isystem @suite -Wc++-compat -Wsystem-headers	system-records.h	system
+0020-gnu17	system.c	1	0	0	-	-isystem @suite -Wzero-length-array -Wsystem-headers	system-records.h	system
+0020-c23	system.c	1	0	0	c23	-isystem @suite -Wzero-length-array -Wsystem-headers	system-records.h	system
+0021-gnu17	records.c	0	0	0	-	-	-	records
+0021-c23	records.c	0	0	0	c23	-	-	records
+0022-gnu17	arrays.c	0	0	0	-	-	-	arrays
+0022-c23	arrays.c	0	0	0	c23	-	-	arrays

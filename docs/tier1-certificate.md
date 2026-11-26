@@ -591,7 +591,12 @@ The decoding:
   (`tier1_cert_emitted_unchanged`, #2963). A general register the records
   give back is not killed: one holding its own value at the run's end, followed
   through their 64-bit `mov`s between general registers (the compare-exchange's
-  save of rax in the scratch register and its restore, #1059). A call's sequence is checked
+  save of rax in the scratch register and its restore, #1059). A gather or scatter's
+  `kmovw` save and restore similarly preserve the mask's low two bytes (#2808).
+  The decoder follows their provenance through the general register, invalidating
+  it on intervening writes. The restored mask's upper six bytes remain clobbered:
+  a byte or word mask survives, while a wider live mask still fails the proof.
+  This preservation does not apply to an asm body or a call. A call's sequence is checked
   against the IR (its target's reference, `al`, its result's extension), its
   arguments read in their ABI registers and outgoing slots (a value passed
   twice at each of its locations), then every register the SysV ABI lets the
@@ -627,6 +632,14 @@ The decoding:
   decoded moves; a projection's later IR position does not read a register or
   define the value again. The mixed result pressure fixtures corrupt each
   initial output store's source register and require refusal.
+  The same capture checks cover an asm goto's eax exit number. Its typed dispatch uses ordinary IR branches.
+- **Opaque assembled asm** (#2351, `IrAsmBody.opaque`) reports
+  `TIER1_CERT_EMITTED_OPAQUE`, printed as `opaque-asm`, and counts as
+  `code_uncertified`. The reserved records are placeholders for bytes that
+  final emission will align and splice into the function; certifying those
+  NOPs would not certify the actual template. The emitted-code certificate records an unsupported shape. The allocation certificate still runs, and record-only bodies
+  retain the checks above. A function whose body restores an explicit rsp
+  input can also have the existing dynamic-frame limitation independently.
 - **Machine rows** (`TIER1_RULE_ROW`, #1284). The emitter publishes the
   placement it gave each row (`Tier1RowPlacement`: each role's register, and
   the opmask registers the row names by number, renamed). The certificate

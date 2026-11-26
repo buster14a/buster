@@ -82,6 +82,9 @@ each, the longest first, 32.3 s and 233 s; with the homes, 25.3 s and 200 s
 (#270). Under `cores`, that is the grant. A build reports the units it
 compiled, its time and the three longest compiles, from Ninja's log.
 
+For per-step build timings and verbose Clang traces of units and IR partitions,
+see [measuring build latency](profiling.md#build-latency-and-clang-passes).
+
 ## Configurations
 
 One tree holds **Release**, **Debug** and **Develop**, in `CONFIG/`
@@ -386,18 +389,35 @@ time (clang 18, locally).
 
 ### Unity test dependencies
 
-**Regression programs are runtime data** (#2053): a suite's ordinary inputs,
+**Regression programs are runtime data** (#2053, #3629): a suite's ordinary inputs,
 expected outputs and case list live under `tests/`, which the tests read when
 they run, so that editing a case or adding one compiles, links and bakes
 nothing. A new ordinary regression program goes there, not into a C string.
 The checker's suites are its shared source fixtures, `tests/checker/sources/`,
 and thirteen test files' own tables beside them ([the checker
 guide](checker.md#runtime-fixtures)); Tier 1's mask IR is `tests/tier1/masks/`
-and the IR parser's fixtures `tests/ir/catalog.tsv`'s. The warning driver reads
-its case inventories and source bytes under `tests/driver/warnings/`.
+and the IR parser's canonical, invalid, overflow, reachability and diagnostic
+fixtures live under `tests/ir/`. The warning driver reads its case inventories
+and source bytes under `tests/driver/warnings/`; specialized driver programs
+and their frozen expectations live under `tests/driver/programs/`. Named-UCN
+preprocessor cases and their diagnostic goldens are under
+`tests/preprocessor/named-ucns/`.
 C keeps what isn't data: independent oracles, generated inputs, guarded
 memory and the checks themselves. Nothing under `tests/` is a build input:
 no generated C array, `#include` or `#embed` brings it back.
+
+The checker, checker driver, preprocessor, IR parser and mask commands accept
+`--fixtures DIR`. The selected root supplies inputs, catalogs and recorded
+expectations, including the checker and preprocessor digest tables. An absolute
+root works from another working directory. Catalogs reject malformed metadata,
+duplicate identities, missing inputs, orphan files and empty inventories.
+Special structural checks require their named cases; they do not freeze a
+catalog's total. `tools/ci/runtime-fixtures.c`, run by the correctness inventory,
+tests these contracts against an already built compiler using private copies
+of the data. A fixture edit or added ordinary case must leave Ninja with no
+compile, link or table-bake work; editing a runner still rebuilds its owner.
+The hosted producer checks those build dependencies synchronously before
+packing its product or starting runtime suites, using the focused mode below.
 
 The eleven `main.c` units share the compiler interfaces and the fixtures
 used across test families. Production bodies are limited to their consumers,
@@ -647,7 +667,9 @@ names, fixture names and explicit nonstandard roots seed a literal quoted-includ
 closure. Every active descendant is checked regardless of suffix, extension or
 directory, including headers, `.inc` files and generated fixture data. The
 default is exactly one unity owner. A shared root never exempts a new child or
-prefix. Important nonstandard paths also assert the command's exact owner.
+prefix. Any `tests/` path in those unity dependency records fails even with
+one owner: runtime data must not enter the compiler through an include or
+embedding. Important nonstandard paths also assert the command's exact owner.
 Production implementation boundaries have separate exact path/owner rows even
 when their filenames do not identify fixtures. A boundary may name several
 consumers; missing, added or substituted owners all fail. Configuration-specific
@@ -700,6 +722,31 @@ rebuild the compiler. The ordinary correctness inventory runs it against its
 own compiler, including on source-only PRs that do not trigger the separate
 build-regression workflow. Representative edit-plan checks remain in the full
 build regression to verify Ninja's actual invalidation behavior.
+
+`--runtime-fixtures-only [COMPILER]` first runs those ownership checks, then
+temporarily edits a runtime source, expected-output file and catalog, and adds
+a source/expected pair with its catalog row. After each edit, both Ninja's dry
+run and a real invocation must report no work; Ninja's command log and the
+compiler's inode, size and modification time must stay unchanged. The positive
+control edits the IR parser's C runner and requires a dry-run plan for BACKEND
+alone, followed by the link and bake, including configurations that generate
+the unit's native code in parts. That positive control builds nothing. The
+check restores every original byte and access/modification timestamp and
+removes its added files, including on ordinary failures and handled interrupts.
+It finally requires a clean graph again.
+
+Run this mutating mode on an **exclusive, already built checkout**:
+
+```sh
+/tmp/buster-build-regression --runtime-fixtures-only "$(./build.sh print-output --config Release)"
+```
+
+`tools/ci/hosted-product.sh ownership` runs it synchronously after the inventory's
+read-only ownership heading, before `pack` or any parallel correctness suites.
+Its complete log is retained in the product's ownership record. A failed check
+removes any earlier pass, so that product cannot be packed. The ordinary
+correctness inventory keeps its ownership heading read-only. The full build
+regression runs the fixture dependency probes after its own clean Release build.
 
 The [cleanup inventory](../build-dependency-cleanup.md) records completed packets,
 necessary sharing, remaining production boundaries and validation limits.

@@ -20,6 +20,159 @@ requirements. [Command index](README.md).
   `ab` or `time-runs` compares, and every executable `perf` profiles, is built
   with `./build.sh --config Release` (`shifts` builds Release by default).
 
+## Measuring a hand edit
+
+`tools/performance/dev.sh` has three commands. Each prints its results directory
+under `build/perf-runs/`. Use `--out NEW_DIR` before the command to name a run.
+For editor navigation, point clangd at the compilation database published by
+`./build.sh` with `clangd --compile-commands-dir=build`.
+
+### Compile paths and generated programs
+
+This example has an externally visible kernel for disassembly and checks its own
+answer. Substitute the translation unit you are editing for a representative run.
+
+```sh
+p=tools/performance/dev.sh
+$p build
+cat > build/mix.c <<'C'
+unsigned mix(unsigned x) { return x * 33u + 1u; }
+int main(void)
+{
+    unsigned x = 0;
+    for (unsigned i = 0; i < 1000000; i += 1) x = mix(x);
+    return x != 0x6b071e40u;
+}
+C
+$p --out build/mix-before paths --runs 9 --run build/mix.c
+$p asm build/mix-before/direct.o mix
+```
+
+| Row in `paths.tsv` | What Buster compiles |
+| --- | --- |
+| `direct` | Single-TU `-c` through the fused C-to-ELF64 compiler. Admission requires the `buster direct` producer string in the object's `.comment`. A bailout writes `direct.skipped` and excludes that row. An explicit `--only direct` fails on bailout. |
+| `tier0` | `--no-direct -c` forces the full Tier 0 pipeline on the same source. |
+| `tier1` | `--tier1 -c` uses the normal Tier 1 policy. The separate diagnostic compile records `compiled` and `fallbacks` in `tier1.stages`. For an exclusively Tier 1 workload, use `paths --only tier1 file.c -- --tier1-strict`. |
+
+`compile.txt` contains the interleaved `time-runs` samples after warmup, wall
+medians and ranges, user/system CPU, wait4 peak RSS, faults and, when the kernel
+allows counting, user cycles and instructions. Each path also saves its ELF
+object, section sizes and one separate `--time-stages` breakdown. Single-lane
+compiles are pinned. `--compiler FILE` selects an existing Release binary.
+
+`--run` links each object with `cc -no-pie` (or `CC`), checks a successful exit
+and identical stdout across paths, then compares executable runtimes in
+`runtime.txt`. Use a single-TU program with a deterministic result and enough
+work in `main` to exceed process startup time. Pass each workload argument with
+`--arg`. For an object without `main`, omit `--run`.
+
+```sh
+$p paths --only direct --cpu 2 --runs 11 \
+    --events cycles:u,instructions:u,branches:u,branch-misses:u,cache-misses:u \
+    --record build/mix.c -- -std=c17
+```
+
+`--events` runs a separate `perf stat` and saves its per-event counts. `--record`
+saves a user-cycle profile and a text hotspot report. With `--run` both switches
+also profile the generated programs. Pick events exposed by `perf list` on the
+measurement CPU. `commands.sh` records argv, and `context.txt` records the
+revision, worktree status and machine. `inputs.sha256` identifies the compiler and source.
+
+### Build latency and Clang passes
+
+```sh
+$p build --config Develop --jobs 4
+$p build --trace --report --config Develop --jobs 4
+$p build --trace --report --config Develop --target buster_c_direct
+```
+
+Keep configuration, job count and timing options fixed between edits. The first
+instrumented build starts its own tree. Repeat immediately for a no-op baseline,
+then edit and repeat for incremental cost. A plain `build` measures the normal
+tree. The underlying build publishes the selected executable and compile
+database as usual. Use Release for compiler throughput and generated-code work.
+
+| File | What to read |
+| --- | --- |
+| `build.log` | End-to-end wall, user and system time inside the host grant. `--report` includes Clang's pass timing reports. |
+| `phases.tsv` | Build-driver wall time in microseconds for setup, tree lock, configure check, preparation, previous stage, Ninja, receipt collection and publication when applicable. |
+| `edges.tsv` | Start, finish and duration in milliseconds for each Ninja command in this invocation. The first output identifies a multi-output step. Splitting, compiling a part, joining, linking and baking appear when those steps run. Parallel intervals overlap. |
+| `traces/` | With `--trace`, verbose Clang time-trace JSON for rebuilt C units and native IR parts. Open one in Perfetto or `chrome://tracing`. A no-op build emits no new traces. |
+
+If Ninja compacts its log during a build, the wrapper reports that the
+per-step receipt was unavailable. The build log and phase timings still apply.
+
+### Function disassembly and instruction costs
+
+```sh
+$p asm build/compiler c_direct_try_compile
+$p asm build/mix-before/tier1.o mix --mca znver4 --mca znver5
+$p asm build/mix-before/direct.o mix --uops "$HOME/.cache/buster/uops/instructions.xml"
+```
+
+Plain disassembly needs Python 3 and GNU binutils. It prints Intel syntax, raw
+bytes and relocations for one sized ELF function. Use `nm -nS` to find its
+emitted name. For duplicate local names, select the defining object. An inlined
+function may have code only in its callers.
+
+`--mca` uses `llvm-mc` to decode the bytes and `llvm-mca` to print each
+instruction's modeled µops, latency, reciprocal throughput and resource
+pressure. Install LLVM tools with the requested CPU models on PATH or set
+`LLVM_MC` and `LLVM_MCA` to versioned binaries. These are LLVM scheduling
+estimates. `runtime.txt` measures the executed paths and loop counts.
+
+For uops.info, build the XED-to-XML Python extension once and download the
+measurement XML. The example pins the decoder and its build helper used for
+qualification. The extension build needs a C toolchain, Python development
+headers and setuptools. Use the same Python interpreter to build and run it.
+
+```sh
+uops_dir=$HOME/.cache/buster/uops
+mkdir -p "$uops_dir"
+(
+    cd "$uops_dir"
+    git clone https://github.com/andreas-abel/XED-to-XML.git
+    git -C XED-to-XML checkout 56fe1b1c228c2407fbde6b2de24b7b39d1e8da9a
+    git clone https://github.com/intelxed/mbuild.git
+    git -C mbuild checkout 1b437e409221a2b5703b4d8896baa20d43e4ba1a
+    cd XED-to-XML
+    python3 mfile.py --opt=2 --no-encoder pymodule
+)
+curl -fL https://uops.info/instructions.xml -o "$uops_dir/instructions.xml"
+export PYTHONPATH="$uops_dir/XED-to-XML${PYTHONPATH:+:$PYTHONPATH}"
+$p asm build/mix-before/direct.o mix --uops "$uops_dir/instructions.xml"
+```
+
+The lookup matches each instruction's bytes, XED form and XML attributes.
+It prints the separately published Zen 4 and Zen 5 measurements, available
+ports and throughputs, operand-pair latencies and upper bounds. Same-register
+and indexed-address measurement variants retain their XML suffixes. Missing
+measurements and ambiguous forms are marked unavailable. The script reads the
+local XML offline. [uops.info data and attribution](https://uops.info/xml.html) ·
+[XED-to-XML](https://github.com/andreas-abel/XED-to-XML)
+
+### Running on the 9700X
+
+Point `--9700x` at your own checkout on benchpress, including the scripts and
+the source edits you intend to measure. The checkout path can be absolute or
+relative to the remote home. Input paths refer to that checkout. This example uses `build/mix.c` in that checkout.
+
+```sh
+checkout=buster-fast-bench/hand/buster
+$p --9700x "$checkout" build --jobs 8
+$p --9700x "$checkout" --out build/mix-9700x paths --runs 9 --run build/mix.c
+$p asm build/mix-9700x/direct.o mix --mca znver5
+```
+
+Each remote build or measurement takes the existing benchpress lock. The
+default host target is `znver5` and the measurement CPU is 2. Set
+`EXCLUSIVE_OWNER`, `EXCLUSIVE_TITLE` and `EXCLUSIVE_LINK` locally to identify
+your run. Benchpress commands have a five-minute timeout (30 minutes for a
+build). Set `BUSTER_PERF_TIMEOUT` to change it for a larger workload.
+The wrapper uses Tailscale SSH, prints the remote results path and
+copies results back to the local output directory. The downloaded objects can
+be annotated offline on your workstation. [Benchpress access and host setup](benchpress.md)
+
 ## Comparing generated Tier 1 code over layouts (#1450)
 
 Compare Lua's run time across several **relative code layouts** before attributing

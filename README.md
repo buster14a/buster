@@ -39,6 +39,11 @@ See [AGENTS.md](AGENTS.md) for test commands and the shared 9700X host lock,
 [the encoder design](docs/x86-64-encoder.md), and
 [the object writer and linker design](docs/object-writer-and-linker.md).
 
+For the hand-edit loop, `tools/performance/dev.sh` measures builds, compares
+Tier 0, Tier 1 and direct-to-ELF compiles, and disassembles a function with
+Zen 4/5 instruction costs, locally or on benchpress.
+[Commands and worked example](docs/commands/profiling.md#measuring-a-hand-edit).
+
 The [assembly frontend](docs/assembler.md) assembles its documented Intel/AT&T
 subset into ELF objects with AVX-512 and scalar paths. Try
 `./build/compiler assemble -o /tmp/sum.o examples/assembler/sum.s`;

@@ -1,0 +1,8 @@
+1:1: error: character 'A' cannot be specified by a universal character name
+1:10: error: invalid universal character
+1:17: error: character '$' cannot be specified by a universal character name
+1:25: error: universal character name refers to a control character
+1:33: error: character 'A' cannot be specified by a universal character name
+1:42: error: character 'A' cannot be specified by a universal character name
+1:49: error: invalid universal character
+1:59: error: universal character name refers to a control character

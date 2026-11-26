@@ -33,6 +33,7 @@
 #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 #: unmeasured Test the early driver feedback corpus
 #: unmeasured Test deterministic work and growth contracts [1 CPU]
+#: unmeasured Test runtime fixture roots and catalog contracts [1 CPU]
 #: unmeasured Test the fused direct-to-object compiler [1 CPU]
 #: unmeasured Compare the direct path with the full pipeline on tests/'s C files [4 CPUs]
 #: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
@@ -220,6 +221,7 @@
 #: peak 88 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
 35.6 Test the early driver feedback corpus
 35.6 Test deterministic work and growth contracts [1 CPU]
+35.6 Test runtime fixture roots and catalog contracts [1 CPU]
 9.2 Check unity fixture ownership without rebuilding
 200.1 Test the foreign inputs [8 CPUs]
 212.8 Check the no-recursion rule on the call graph [8 CPUs]

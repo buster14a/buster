@@ -65,14 +65,16 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
     snprintf(path, sizeof(path), "%s/redefinition.c", directory);
     static const char* const sources[] =
     {
-        "tests/driver/const-redefinitions.c",
-        "tests/driver/designated-redefinition.c",
+        "driver/const-redefinitions.c",
+        "driver/designated-redefinition.c",
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures) + BUSTER_ARRAY_LENGTH(sources); f += 1)
     {
         const bool embedded = f < BUSTER_ARRAY_LENGTH(fixtures);
-        char* source = embedded ? path : (char*)sources[f - BUSTER_ARRAY_LENGTH(fixtures)];
-        const bool available = embedded ? parse_test_write(source, fixtures[f], strlen(fixtures[f])) : access(source, R_OK) == 0;
+        char fixture_path[PATH_MAX];
+        char* source = embedded ? path : fixture_path;
+        const bool available = embedded ? parse_test_write(source, fixtures[f], strlen(fixtures[f])) :
+                               check_test_fixture_path(fixture_path, sizeof(fixture_path), sources[f - BUSTER_ARRAY_LENGTH(fixtures)]) && access(source, R_OK) == 0;
         char* reference[] =
         {
             (char*)clang,
@@ -117,7 +119,11 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
     }
     check_test_expect(test, unlink(path) == 0, "redefinition fixture removed");
 
-    char designator_source[] = "tests/driver/invalid-designator-redefinition.c";
+    char designator_source[PATH_MAX];
+    char string_source[PATH_MAX];
+    const bool located = check_test_fixture_path(designator_source, sizeof(designator_source), "driver/invalid-designator-redefinition.c") &&
+                         check_test_fixture_path(string_source, sizeof(string_source), "driver/invalid-string-redefinition.c");
+    check_test_expect(test, located, "redefinition recovery: fixture paths fit");
     char* recovery_arguments[] =
     {
         (char*)executable,
@@ -128,16 +134,15 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
         NULL,
     };
     char* diagnostics = NULL;
-    const int status = check_test_driver_spawn(recovery_arguments, &diagnostics);
+    const int status = located ? check_test_driver_spawn(recovery_arguments, &diagnostics) : -1;
     const char* index = diagnostics != NULL ? strstr(diagnostics, "error: invalid or unsupported declaration") : NULL;
     check_test_expect(test, status == 1 && index != NULL && strstr(index, "error: redefinition of 'later'") != NULL,
                       "a rejected designator reports its error and leaves the next redefinition visible");
     free(diagnostics);
 
-    char string_source[] = "tests/driver/invalid-string-redefinition.c";
     recovery_arguments[4] = string_source;
     diagnostics = NULL;
-    const int string_status = check_test_driver_spawn(recovery_arguments, &diagnostics);
+    const int string_status = located ? check_test_driver_spawn(recovery_arguments, &diagnostics) : -1;
     const char* later = diagnostics != NULL ? strstr(diagnostics, "error: redefinition of 'later'") : NULL;
     const char* direct = diagnostics != NULL ? strstr(diagnostics, "error: redefinition of 'direct'") : NULL;
     const char* trailing = direct != NULL ? strstr(direct, "error: hex escape sequence out of range") : NULL;

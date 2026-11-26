@@ -165,6 +165,7 @@ static InterpreterStatus ir_interpreter_simd_operation(const IrInterpreterFrame*
     const IrFunction* function = frame->function;
     const uint8_t op = function->op[i];
     bool executed = false;
+    bool arithmetic = false;
     if (op == IR_INTRINSIC && function->c[i] == BUSTER_IR_INTRINSIC_SPLAT)
     {
         const uint32_t source = function->a[i];
@@ -211,6 +212,10 @@ static InterpreterStatus ir_interpreter_simd_operation(const IrInterpreterFrame*
             }
         }
         executed = ir_simd_evaluate(&action, operands, 0, 0, 0, result);
+        // A valid conversion can still refuse a nonfinite or out-of-range lane. Match the scalar interpreter's
+        // arithmetic status while preserving unsupported for malformed operations, shapes and input tails.
+        arithmetic = !executed && result != NULL && (op == IR_FPTOSI || op == IR_FPTOUI) &&
+                     ir_simd_action_valid(&action) && ir_simd_value_valid(operands[0], action.operands[0]);
     }
-    return executed ? INTERPRETER_OK : INTERPRETER_UNSUPPORTED;
+    return executed ? INTERPRETER_OK : arithmetic ? INTERPRETER_ARITHMETIC : INTERPRETER_UNSUPPORTED;
 }

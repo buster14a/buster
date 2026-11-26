@@ -31,3 +31,36 @@ requirements. [Command index](README.md).
   forms' output/status comparison. [The tools guide](../../docs/ir-tools.md)
   records the API, text grammar and frontend-dependent acceptance. Run builds
   and tests through the approved 9700X's shared per-run lock.
+
+## Runtime parser contracts
+
+`test-ir-parse --fixtures DIR` selects the root containing `ir/` for all
+canonical inputs, parser contracts and frozen expectations. The default is
+`tests/` under the working directory. An absolute root works from outside
+the checkout.
+
+The `ir/invalid`, `ir/overflow`, `ir/reachable` and `ir/diagnostics` directories
+hold the 53 rejection, five numeric-overflow, four reachability and six named
+diagnostic records extracted from the C runner. Each directory's `catalog.tsv`
+starts with `buster-fixtures v1 ir-parser-cases`, followed by six tab-separated
+fields per row: ID, FILE.ir, ERROR, REJECTED, LINE and COLUMN. IDs and filenames
+are unique within their suite; inputs are raw bounded bytes, including empty
+files. A missing or malformed catalog, duplicate, unlisted file, unreadable
+input or empty inventory fails the suite before any of its cases runs.
+
+ERROR names the expected parser result (`end`, `syntax`, `limit` or `verify`
+for invalid inputs; `limit-or-syntax` for overflow; `ok` or `verify` for
+reachability). Named diagnostic records require `syntax`, the rejected token
+spelling and its positive line and column; the runner also checks its first
+byte offset in the raw input. Other records use `-`, `0`, `0` for those fields.
+The original assertion loops, ordering, arena checks and verifier checks remain
+compiled. Guard-page placement, generated input and independently constructed
+IR models remain in C too.
+
+The ordered contract results retain their frozen expectation in
+`ir/parser-digest.expected`: sixteen lowercase hexadecimal digits and a final
+newline. Adding or changing a contract requires reviewing the expected parser
+result and this golden together; both are runtime data and neither triggers a
+host compile, link or table bake. The digest covers the same results and IR
+columns as before the extraction. Canonical round-trip cases retain their
+separate raw-byte and opcode/type-coverage checks.

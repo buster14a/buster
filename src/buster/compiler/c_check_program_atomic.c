@@ -24,7 +24,7 @@ static const CheckProgramHelper* check_lower_atomic_leaf(const CheckLowerWriter*
     for (uint32_t i = 0; i < helpers->count && found == NULL; i += 1)
     {
         const CheckProgramHelper* helper = helpers->items + i;
-        if (helper->id == id && helper->bytes == size && (!helper->rmw || helper->rmw_format == CBUILTIN_ATOMIC_RMW_INTEGER_BITS))
+        if (helper->id == id && helper->bytes == size && helper->segments == 0 && (!helper->rmw || helper->rmw_format == CBUILTIN_ATOMIC_RMW_INTEGER_BITS))
         {
             found = helper;
         }
@@ -103,7 +103,9 @@ static void check_lower_atomic_call(CheckLowerWriter* writer, const CheckLowerAt
     const bool compare = operation == BUSTER_CHECK_ATOMIC_COMPARE;
     const bool load = operation == BUSTER_CHECK_ATOMIC_LOAD;
     const bool store = operation == BUSTER_CHECK_ATOMIC_STORE;
-    const bool direct = check_lower_atomic_direct_plan(plan->builtin, plan->native, operation);
+    // A segmented object's native plan uses the same typed accesses as an implicit object's. The ordinary shared
+    // leaf takes a flat pointer, so it cannot implement that object access. These markers preserve its seq_cst policy.
+    const bool direct = check_lower_atomic_direct_plan(plan->builtin, plan->native, operation) || (plan->native && plan->segment != 0);
     const CBuiltinId id = compare ? CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N
                           : load  ? CBUILTIN_ATOMIC_LOAD_N
                           : store ? CBUILTIN_ATOMIC_STORE_N
@@ -145,10 +147,20 @@ static void check_lower_atomic_call(CheckLowerWriter* writer, const CheckLowerAt
             }
             check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, plan->result);
         }
-        else
+        else if (store)
         {
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, bits, plan->desired);
             check_lower_emit(writer, BUSTER_TYPED_SET, bits, marker);
+        }
+        else
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, bits, plan->desired);
+            check_lower_emit(writer, BUSTER_TYPED_ATOMIC_RMW, bits, BUSTER_TYPED_FENCE_SEQ_CST | plan->segment);
+            if (bits != BUSTER_TYPED_CLASS_U64)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            }
+            check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, plan->result);
         }
     }
     else if (plan->native && helper == NULL)
@@ -553,11 +565,11 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
             // A generic compare-exchange's desired value is where its third argument points.
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->desired);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[2]);
-            check_lower_copy(writer, plan->size, false, false, 0);
+            check_lower_copy(writer, plan->size, false, false, plan->pointer_segments[2]);
         }
         check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->expected);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
-        check_lower_copy(writer, type_size(types, plan->value_type), false, false, 0);
+        check_lower_copy(writer, type_size(types, plan->value_type), false, false, plan->pointer_segments[1]);
         check_lower_atomic_call(writer, plan, BUSTER_CHECK_ATOMIC_COMPARE);
         const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
         const uint32_t end = check_lower_label(writer);
@@ -565,7 +577,7 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
         check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, end);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->expected);
-        check_lower_copy(writer, type_size(types, plan->value_type), false, false, 0);
+        check_lower_copy(writer, type_size(types, plan->value_type), false, false, (uint8_t)(plan->pointer_segments[1] << 2));
         check_lower_place(writer, end);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, result);
         check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
@@ -578,14 +590,14 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
         {
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->desired);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
-            check_lower_copy(writer, plan->size, false, false, 0);
+            check_lower_copy(writer, plan->size, false, false, plan->pointer_segments[1]);
         }
         check_lower_atomic_call(writer, plan, plan->operation);
         if (plan->operation != BUSTER_CHECK_ATOMIC_STORE)
         {
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[plan->operation == BUSTER_CHECK_ATOMIC_LOAD ? 1 : 2]);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->result);
-            check_lower_copy(writer, plan->size, false, false, 0);
+            check_lower_copy(writer, plan->size, false, false, (uint8_t)(plan->pointer_segments[plan->operation == BUSTER_CHECK_ATOMIC_LOAD ? 1 : 2] << 2));
         }
     }
     else
@@ -738,11 +750,17 @@ static void check_lower_atomic_plan(CheckLowerWriter* writer, uint32_t node, boo
         .desired = check_lower_object(writer, bytes, alignment > 3 ? alignment : 3),
         .expected = check_lower_object(writer, bytes, alignment > 3 ? alignment : 3),
         .result = check_lower_object(writer, bytes, alignment > 3 ? alignment : 3),
-        // An _Atomic lvalue's segment (#1447); an atomic builtin's object in one is refused by name before this
-        // (check_lower_segment_access) but where a direct plan takes it (check_lower_atomic_direct).
-        .segment = !builtin && __builtin_expect(writer->segments, 0) ? check_lower_segment_override(types, object) : 0,
+        .segment = __builtin_expect(writer->segments, 0) ? (builtin ? (uint64_t)check_program_argument_segment(program, node, 0) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT : check_lower_segment_override(types, object)) : 0,
     };
     writer->segment_entries = writer->segment_entries || plan->segment != 0;
+    if (builtin && __builtin_expect(writer->segments, 0))
+    {
+        for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(plan->pointer_segments); a += 1)
+        {
+            plan->pointer_segments[a] = check_program_argument_segment(program, node, a);
+            writer->segment_entries = writer->segment_entries || plan->pointer_segments[a] != 0;
+        }
+    }
     const uint32_t walked = !builtin ? check_graph_atomic_address_alignment(types, graph, stream, target, NULL, true, true) : UINT32_MAX;
     const bool aligned = builtin ? effect != NULL && effect->alignment_known && effect->minimum_alignment >= size
                                  : walked < 64 && (UINT64_C(1) << walked) >= size;

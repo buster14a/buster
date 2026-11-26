@@ -1,0 +1,12 @@
+ignoring return value of function declared with pure attribute
+ignoring return value of function declared with 'warn_unused_result' attribute
+ignoring return value of function declared with const attribute
+relational comparison result unused
+division by zero is undefined
+shift count >= width of type
+unsequenced modification and access to 'a'
+unsequenced modification and access to 'b'
+implicit conversion from 'int' to 'char' changes value from 300 to 44
+implicit conversion from 'double' to 'int' changes value from 2.5 to 2
+implicit conversion from 'int' to 'char' changes value from 400 to -112
+remainder by zero is undefined

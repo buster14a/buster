@@ -2733,6 +2733,33 @@ static void check_test_program_source_standard(CheckTest* test, const char* sour
     check_test_program_source_native_bounds(test, source, name, clang, false, -1, 0, NULL, true, 0, NULL, false, standard, gnu, standard_flag);
 }
 
+// C89's implicit-int regressions run each catalog row in strict C89, then GNU89, at their former call-site position.
+// The language pair is the specialized harness; ordinary programs and their names stay runtime data.
+static void check_test_program_implicit_int(CheckTest* test, const char* clang)
+{
+    CheckTestFixtures catalog;
+    const bool loaded = check_test_fixtures_load(&catalog, "checker/programs/implicit-int");
+    char description[768];
+    snprintf(description, sizeof(description), "implicit-int programs: %s", loaded ? "catalog loaded" : catalog.problem);
+    check_test_expect(test, loaded, description);
+    for (uint32_t i = 0; loaded && i < catalog.count; i += 1)
+    {
+        const CheckSourceFixture* fixture = catalog.cases + i;
+        const bool valid = check_test_fixture_word(fixture->name, 128) && fixture->standard == 1989 && !fixture->rejected &&
+                           !fixture->unsupported && !fixture->extension && !fixture->undecided && !fixture->char_unsigned &&
+                           fixture->capacity == NULL && fixture->overload_tables == 0;
+        snprintf(description, sizeof(description), "implicit-int program '%s' uses the C89/GNU89 harness flags", fixture->name);
+        check_test_expect(test, valid, description);
+        for (uint32_t gnu = 0; valid && gnu < 2; gnu += 1)
+        {
+            char name[160];
+            snprintf(name, sizeof(name), "%s-%s", fixture->name, gnu ? "gnu89" : "c89");
+            check_test_program_source_standard(test, fixture->source, name, clang, 1989, gnu != 0, gnu ? "-std=gnu89" : "-std=c89");
+        }
+    }
+    arena_release(&catalog.storage);
+}
+
 // A program fixture with plain char signed, x86-64's, against clang's build of another source of the same names, a
 // model of what the program computes or a mutant of it: the program must agree with it, or with `mismatch` differ from
 // it on some input.
@@ -4326,47 +4353,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_lower_calls_twice(test);
         check_test_program_result_lanes(test, clang);
         check_test_program_bodies(test, clang);
-        // C89's implicit int in the runtime program harness (#1121): the declarations' types and qualifiers decide what
-        // `tested` computes, and clang's build of the same source in the same mode is the oracle the executable compares.
-        static const char implicit_int_source[] =
-            "x = 3;\n"
-            "typedef t;\n"
-            "t y = 1;\n"
-            "int q = 7;\n"
-            "*const p = &q;\n"
-            "*__restrict r = &q;\n"
-            "*__attribute__((unused)) a = &q;\n"
-            "struct S { const x; };\n"
-            "int tested(int n)\n"
-            "{\n"
-            "    return x == 3 && sizeof(x) == sizeof(int) && y == 1 && sizeof(y) == sizeof(int) && q == 7 && *p == 7 && *a == 7 &&\n"
-            "           *r == 7 && p == &q && a == &q && r == &q && sizeof(*p) == sizeof(int) && sizeof(const) == sizeof(int) &&\n"
-            "           sizeof(volatile) == sizeof(int) && sizeof(struct S) == sizeof(int) && (const)1 == 1 ? 0 : 1;\n"
-            "}\n";
-        check_test_program_source_standard(test, implicit_int_source, "implicit-int-c89", clang, 1989, false, "-std=c89");
-        check_test_program_source_standard(test, implicit_int_source, "implicit-int-gnu89", clang, 1989, true, "-std=gnu89");
-        // The issue's whole old-style program, run (#1121): a file-scope static and `helper`'s old-style definition
-        // read implicit int, `tested`'s `n` is the undeclared identifier-list kind and `i` a block-scope register —
-        // the call and the declarations' types decide the value clang's build of the same source computes.
-        static const char implicit_int_program_source[] =
-            "static x = 3;\n"
-            "helper(a) int a; { return a + 1; }\n"
-            "tested(n) { register i; i = helper(x + n); return i; }\n";
-        check_test_program_source_standard(test, implicit_int_program_source, "implicit-int-program-c89", clang, 1989, false, "-std=c89");
-        check_test_program_source_standard(test, implicit_int_program_source, "implicit-int-program-gnu89", clang, 1989, true, "-std=gnu89");
-        // Prototype parameters without a type specifier (#1121, after #1240's parser): a pointer declarator, a const, a
-        // register and a volatile object, and a pointer after a typed parameter, whose declaration the definition's
-        // `int *` must match — each parameter's type decides the value clang's build computes.
-        static const char implicit_int_parameter_source[] =
-            "static f(*p) { return *p + (int)sizeof(*p); }\n"
-            "static g(const x) { return x * 2; }\n"
-            "static h(register r) { return r + 1; }\n"
-            "static m(const *p, volatile v) { return *p - v; }\n"
-            "int k(int a, *p);\n"
-            "int k(int a, int *p) { return a + *p; }\n"
-            "int tested(int n) { int v = 5; return f(&v) + g(n) + h(n) + m(&v, n) + k(n, &v); }\n";
-        check_test_program_source_standard(test, implicit_int_parameter_source, "implicit-int-parameters-c89", clang, 1989, false, "-std=c89");
-        check_test_program_source_standard(test, implicit_int_parameter_source, "implicit-int-parameters-gnu89", clang, 1989, true, "-std=gnu89");
+        check_test_program_implicit_int(test, clang);
     }
     if (check_test_takes())
     {

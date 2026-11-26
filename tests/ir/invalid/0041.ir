@@ -1,0 +1,5 @@
+function () -> void {
+b0:
+%0 = symbol_addr.ptr @0
+%1 = ret.void
+}

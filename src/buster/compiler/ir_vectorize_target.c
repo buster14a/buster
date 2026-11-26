@@ -89,7 +89,8 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
         }
         if (moves)
         {
-            // Packed fma and the i32/f32 conversions (#2806). The bits are the float lane's.
+            // Packed fma and same-width integer/float conversions (#2806). The bits are the float lane's; the
+            // exact forms keep unsigned dword and every qword conversion behind their AVX-512 feature gates.
             const uint16_t fma32 = tier1_select_packed_fma_form(IR_SIMD_LANE_F32, width, encoding);
             const uint16_t fma64 = tier1_select_packed_fma_form(IR_SIMD_LANE_F64, width, encoding);
             target->binary[IR_FMA][IR_SIMD_LANE_F32] |= ir_vectorize_target_allows(allowed, fma32) ? bit : 0;
@@ -97,8 +98,11 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
             const uint32_t conversions[] = { IR_SITOFP, IR_UITOFP, IR_FPTOSI, IR_FPTOUI };
             for (uint32_t k = 0; k < 4; k += 1)
             {
-                const uint16_t form = tier1_select_packed_convert_form(conversions[k], width, encoding);
-                target->binary[conversions[k]][IR_SIMD_LANE_F32] |= ir_vectorize_target_allows(allowed, form) ? bit : 0;
+                for (uint32_t lane = IR_SIMD_LANE_F32; lane <= IR_SIMD_LANE_F64; lane += 1)
+                {
+                    const uint16_t form = tier1_select_packed_convert_form(conversions[k], lane, width, encoding);
+                    target->binary[conversions[k]][lane] |= ir_vectorize_target_allows(allowed, form) ? bit : 0;
+                }
             }
         }
         for (uint32_t from = 0; moves && from < 4; from += 1)
@@ -127,6 +131,25 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
             target->masked[from] |= !legacy && masked ? bit : 0;
             // A strided load's de-interleave (#2808): vpermt2b to vpermt2q.
             target->permute2[from] |= !legacy && ir_vectorize_target_allows(allowed, ir_simd_permute2_forms[from][w]) ? bit : 0;
+        }
+        // Indexed memory uses the integer forms even for floating lanes' bits. The index must have exactly one
+        // dword or qword per data lane; the form tables leave the impossible widths empty. Account for the selector's
+        // kmovw save/restore of the destructive mask, its zeroed gather destination, and its index scratch copy too.
+        for (uint32_t size = 2; moves && size < 4; size += 1)
+        {
+            const uint32_t lanes = width >> size;
+            const Tier1SelectMaskForms* mask_forms = tier1_select_mask_forms(lanes <= 8 ? 1 : 2);
+            const bool mask = ir_vectorize_target_allows(allowed, mask_forms->from_general) && ir_vectorize_target_allows(allowed, mask_forms->xnor_forms) &&
+                              ir_vectorize_target_allows(allowed, X86_FORM_KMOVW_R32_K) && ir_vectorize_target_allows(allowed, X86_FORM_KMOVW_K_R32);
+            for (uint32_t index = 0; mask && index < 2; index += 1)
+            {
+                const uint32_t index_width = lanes << (2 + index);
+                const bool index_moves = ir_vectorize_has(target->moves, index_width);
+                const uint16_t index_move = index_width <= 16 ? X86_FORM_MOVAPS_X_XM : tier1_select_vector_forms(index_width, BUSTER_TIER1_ENCODING_EVEX)->move;
+                const bool gather_moves = index_moves && ir_vectorize_target_allows(allowed, index_move) && ir_vectorize_target_allows(allowed, X86_FORM_VPXOR_X_X_XM128);
+                target->gather[size][index] |= gather_moves && ir_vectorize_target_allows(allowed, ir_simd_gather_forms[0][size - 2][index][w]) ? bit : 0;
+                target->scatter[size][index] |= index_moves && ir_vectorize_target_allows(allowed, ir_simd_scatter_forms[0][size - 2][index][w]) ? bit : 0;
+            }
         }
         // A reduction: tier1_select_reduce's halvings down to one lane, each with its combining form, then lane 0's move.
         for (uint32_t size = 2; moves && size < 4; size += 1)

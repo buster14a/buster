@@ -102,6 +102,397 @@ static void tier1_address_sink_execute(Tier1EmitTest* test, Tier1EmitResult* emi
     }
 }
 
+// #3644: entry-defined frame leaves have several raw memory uses but only one selected address-valued use. The early
+// returns separate continuing scopes in layout, so retaining every leaf at entry creates a triangular interval count.
+// Shapes 0 and 1 use a ptrtoint and a copy; 2 keeps an indexed address's scale and displacement, and 7 its offset alone. Shapes 3, 4 and 6
+// keep a second selected use (another conversion, a phi operand, and a direct call argument respectively), and 5
+// takes its address from an alloca, which cannot become a stable frame recipe.
+static bool tier1_frame_sink_function(Tier1EmitTest* test, uint32_t scopes, uint32_t shape, uint32_t alignment, IrFunction* function)
+{
+    const bool indexed = shape == 2;
+    const bool addressed = indexed || shape == 7;
+    const bool shared = shape == 3 || shape == 4 || shape == 6;
+    const bool dynamic = shape == 5;
+    const uint32_t calls = scopes * (1u + shared);
+    const IrSizes sizes = {
+        .instruction_count = scopes * 24 + 8,
+        .block_count = scopes * 2 + 2,
+        .extra_count = calls * 2 + (shape == 4 ? scopes * 2 : 0),
+        .constant_count = scopes + dynamic,
+        .slot_count = dynamic ? 0 : scopes,
+        .address_count = addressed ? 1 : 0,
+        .call_count = calls,
+        .call_type_count = calls * 2,
+        .parameter_count = 3,
+    };
+    const bool created = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        function->result_type = IR_I64;
+        function->parameter_types[0] = IR_I64;
+        function->parameter_types[1] = IR_PTR;
+        function->parameter_types[2] = IR_I64;
+        if (addressed)
+        {
+            function->addresses[0] = (IrAddress){ .scale = indexed ? 8 : 1, .offset = 8 };
+        }
+        uint32_t next = 0;
+        tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_PARAM, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint32_t size = BUSTER_IR_NONE;
+        if (dynamic)
+        {
+            function->constants[scopes].low = 32;
+            size = tier1_select_test_append(function, &next, IR_CONST, IR_I64, scopes, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        const uint32_t first_address = next;
+        for (uint32_t scope = 0; scope < scopes; scope += 1)
+        {
+            function->constants[scope].low = scope;
+            if (!dynamic)
+            {
+                function->slots[scope] = (IrSlot){
+                    .size = 32,
+                    .alignment = alignment,
+                    .type = IR_VOID,
+                    .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN,
+                };
+            }
+            tier1_select_test_append(function, &next, dynamic ? IR_ALLOCA : IR_STACK_ADDR, IR_PTR, dynamic ? size : scope, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        tier1_select_test_append(function, &next, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint32_t extra = 0;
+        uint32_t call = 0;
+        for (uint32_t scope = 0; scope < scopes; scope += 1)
+        {
+            const uint32_t block = scope * 2 + 1;
+            const uint32_t address = first_address + scope;
+            function->block_offsets[block] = next;
+            uint32_t phi = BUSTER_IR_NONE;
+            if (shape == 4)
+            {
+                function->extra[extra] = scope == 0 ? 0 : block - 2;
+                function->extra[extra + 1] = address;
+                phi = tier1_select_test_append(function, &next, IR_PHI, IR_PTR, extra, 1, BUSTER_IR_NONE);
+                extra += 2;
+            }
+            if (!dynamic)
+            {
+                if (scope != 0)
+                {
+                    tier1_select_test_append(function, &next, IR_LIFETIME, IR_VOID, scope - 1, 1, BUSTER_IR_NONE);
+                }
+                tier1_select_test_append(function, &next, IR_LIFETIME, IR_VOID, scope, 0, BUSTER_IR_NONE);
+            }
+            const uint32_t ordinal = tier1_select_test_append(function, &next, IR_CONST, IR_I64, scope, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t memory = addressed ? tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, address, indexed ? 2 : BUSTER_IR_NONE, 0) : address;
+            tier1_select_test_append(function, &next, IR_STORE, IR_VOID, memory, 0, BUSTER_IR_NONE);
+            for (uint32_t use = 0; use < 1u + shared; use += 1)
+            {
+                uint32_t argument = address;
+                if (shape == 4 && use != 0)
+                {
+                    argument = phi;
+                }
+                else if (shape != 6 || use == 0)
+                {
+                    argument = tier1_select_test_append(function, &next, addressed ? IR_ADDRESS : shape == 1 ? IR_COPY : IR_PTRTOINT,
+                                                       addressed || shape == 1 ? IR_PTR : IR_I64, address, indexed ? 2 : BUSTER_IR_NONE, addressed ? 0 : BUSTER_IR_NONE);
+                }
+                function->extra[extra] = argument;
+                function->extra[extra + 1] = ordinal;
+                function->call_types[call * 2] = function->type[argument];
+                function->call_types[call * 2 + 1] = IR_I64;
+                function->calls[call] = (IrCall){
+                    .argument_first = extra,
+                    .argument_count = 2,
+                    .type_first = call * 2,
+                    .parameter_count = 2,
+                    .result_type = IR_I64,
+                };
+                tier1_select_test_append(function, &next, IR_CALL_INDIRECT, IR_I64, 1, call, BUSTER_IR_NONE);
+                extra += 2;
+                call += 1;
+            }
+            const uint32_t matches = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, 0, ordinal, IR_EQ);
+            tier1_select_test_append(function, &next, IR_CBR, IR_VOID, matches, block + 1, block + 2);
+            function->block_offsets[block + 1] = next;
+            const uint32_t from = addressed ? tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, address, indexed ? 2 : BUSTER_IR_NONE, 0) : address;
+            const uint32_t loaded = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, from, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            if (!dynamic)
+            {
+                tier1_select_test_append(function, &next, IR_LIFETIME, IR_VOID, scope, 1, BUSTER_IR_NONE);
+            }
+            tier1_select_test_append(function, &next, IR_RET, IR_VOID, loaded, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        function->block_offsets[scopes * 2 + 1] = next;
+        if (!dynamic)
+        {
+            tier1_select_test_append(function, &next, IR_LIFETIME, IR_VOID, scopes - 1, 1, BUSTER_IR_NONE);
+        }
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->block_offsets[function->block_count] = next;
+        function->instruction_count = next;
+        assert(next <= sizes.instruction_count && extra == sizes.extra_count && call == calls);
+    }
+    return created;
+}
+
+// The conversion is laid out after its consumer but dominates it (entry -> block 2 -> block 1), so selection visits
+// its operands through the pending walk. A second conversion in block 1 must still keep the shared frame leaf.
+static bool tier1_frame_sink_pending(Tier1EmitTest* test, bool shared, uint32_t alignment, IrFunction* function)
+{
+    const uint32_t calls = 1u + shared;
+    const IrSizes sizes = {
+        .instruction_count = 18,
+        .block_count = 3,
+        .extra_count = calls * 2,
+        .constant_count = 1,
+        .slot_count = 1,
+        .call_count = calls,
+        .call_type_count = calls * 2,
+        .parameter_count = 3,
+    };
+    const bool created = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        function->result_type = IR_I64;
+        function->parameter_types[0] = IR_I64;
+        function->parameter_types[1] = IR_PTR;
+        function->parameter_types[2] = IR_I64;
+        function->slots[0] = (IrSlot){ .size = 32, .alignment = alignment, .type = IR_VOID, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+        function->constants[0].low = 0;
+        uint32_t next = 0;
+        tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_PARAM, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t zero = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t address = tier1_select_test_append(function, &next, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->block_offsets[1] = next;
+        tier1_select_test_append(function, &next, IR_LIFETIME, IR_VOID, 0, 0, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_STORE, IR_VOID, address, 0, BUSTER_IR_NONE);
+        for (uint32_t call = 0; call < calls; call += 1)
+        {
+            if (call != 0)
+            {
+                function->extra[call * 2] = tier1_select_test_append(function, &next, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            function->extra[call * 2 + 1] = zero;
+            function->call_types[call * 2] = IR_I64;
+            function->call_types[call * 2 + 1] = IR_I64;
+            function->calls[call] = (IrCall){
+                .argument_first = call * 2,
+                .argument_count = 2,
+                .type_first = call * 2,
+                .parameter_count = 2,
+                .result_type = IR_I64,
+            };
+            tier1_select_test_append(function, &next, IR_CALL_INDIRECT, IR_I64, 1, call, BUSTER_IR_NONE);
+        }
+        const uint32_t loaded = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_LIFETIME, IR_VOID, 0, 1, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, loaded, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->block_offsets[2] = next;
+        function->extra[0] = tier1_select_test_append(function, &next, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->block_offsets[3] = next;
+        function->instruction_count = next;
+        assert(next <= sizes.instruction_count);
+    }
+    return created;
+}
+
+static uint64_t tier1_frame_sink_calls;
+static uint64_t tier1_frame_sink_hash;
+
+static __attribute__((noinline)) uint64_t tier1_frame_sink_callee(uint64_t address, uint64_t scope)
+{
+    uint64_t* word = (uint64_t*)(uintptr_t)address;
+    *word = *word * 3 + scope + 7;
+    tier1_frame_sink_calls += 1;
+    tier1_frame_sink_hash = tier1_frame_sink_hash * 31 + *word;
+    return *word;
+}
+
+static void tier1_frame_sink_execute(Tier1EmitTest* test, Tier1EmitResult* emitted, uint32_t scopes, bool shared, bool unconditionally)
+{
+    void* executable = MAP_FAILED;
+    uint64_t bytes = 0;
+    if (tier1_emit_test_load(test, &emitted->code, &executable, &bytes))
+    {
+        uint64_t (*callee)(uint64_t, uint64_t) = tier1_frame_sink_callee;
+        uint64_t pointer = 0;
+        memcpy(&pointer, &callee, sizeof(callee));
+        for (uint32_t sample = 0; sample < scopes + 3; sample += 1)
+        {
+            const uint64_t input = sample == scopes + 2 ? UINT64_MAX : sample;
+            const uint32_t visited = input < scopes ? (uint32_t)input + 1 : scopes;
+            uint64_t hash = 0;
+            uint64_t expected = input;
+            for (uint32_t scope = 0; scope < visited; scope += 1)
+            {
+                uint64_t value = input;
+                for (uint32_t use = 0; use < 1u + shared; use += 1)
+                {
+                    value = value * 3 + scope + 7;
+                    hash = hash * 31 + value;
+                }
+                expected = unconditionally || input == scope ? value : expected;
+            }
+            tier1_frame_sink_calls = 0;
+            tier1_frame_sink_hash = 0;
+            const uint64_t actual = tier1_address_sink_call(executable, input, pointer, sample & 1);
+            tier1_emit_test_expect(test, actual == expected && tier1_frame_sink_calls == (uint64_t)visited * (1u + shared) && tier1_frame_sink_hash == hash,
+                                   "sunk and shared frame addresses preserve calls, writes and every early return");
+        }
+    }
+    if (executable != MAP_FAILED)
+    {
+        munmap(executable, bytes);
+    }
+}
+
+static void tier1_frame_sink_tests(Tier1EmitTest* test)
+{
+    uint64_t previous_entries = 0;
+    uint64_t previous_intervals = 0;
+    // The two large fixtures stop after the actual selected CFG's interval preparation: no register assignment or
+    // native output is needed to detect #3644's capacity refusal. Small fixtures certify and execute the whole path.
+    for (uint32_t variant = 0; variant < 62; variant += 1)
+    {
+        const bool large = variant >= 60;
+        const uint32_t shape = large ? 0 : variant / 6;
+        const uint32_t frame = large ? 0 : variant % 6 / 2;
+        const bool rematerialize = (variant & 1) != 0;
+        const uint32_t scopes = large ? (variant == 60 ? 1536 : 3072) : shape >= 8 ? 1 : 3;
+        const bool sinks = shape < 3 || shape == 7 || shape == 8;
+        IrFunction function;
+        const bool created = shape >= 8 ? tier1_frame_sink_pending(test, shape == 9, frame == 2 ? 64 : 8, &function) :
+                                        tier1_frame_sink_function(test, scopes, shape, frame == 2 ? 64 : 8, &function);
+        const IrCheck valid = created ? ir_verify(&function, &test->scratch, 0) : (IrCheck){ .error = IR_ERROR_MEMORY };
+        tier1_emit_test_expect(test, valid.error == IR_OK, "frame-address sink fixture is valid IR");
+        if (valid.error != IR_OK && test->failures < 20)
+        {
+            fprintf(stderr, "  frame-address sink shape=%u scopes=%u IR error=%u instruction=%u detail=%u\n", shape, scopes, valid.error, valid.instruction, valid.detail);
+        }
+        IrDominance dominance;
+        const bool dominated = valid.error == IR_OK && tier1_terminal_dominance(test, &function, &dominance);
+        Tier1SelectPlan plan;
+        uint32_t node = BUSTER_IR_NONE;
+        const bool selected = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
+        tier1_emit_test_expect(test, selected, "frame-address sink fixture selects");
+        if (selected)
+        {
+            bool placed = true;
+            uint32_t recipes = 0;
+            for (uint32_t n = 0; n < function.instruction_count; n += 1)
+            {
+                const Tier1SelectPattern* pattern = &plan.patterns[n];
+                if (function.op[n] == IR_STACK_ADDR)
+                {
+                    placed &= (plan.covered[n] != 0) == sinks;
+                }
+                if (function.op[n] == IR_ALLOCA)
+                {
+                    placed &= plan.covered[n] == 0;
+                }
+                if (plan.covered[n] == 0 && function.op[n] != IR_STACK_ADDR && pattern->rule == TIER1_RULE_STACK_ADDRESS)
+                {
+                    recipes += 1;
+                    placed &= (shape < 2 || shape == 8) && pattern->immediate < scopes && plan.effective_use_offsets[n] == plan.effective_use_offsets[n + 1];
+                }
+                else if (plan.covered[n] == 0 && pattern->rule == TIER1_RULE_ADDRESS && pattern->stack_object != BUSTER_IR_NONE)
+                {
+                    recipes += 1;
+                    placed &= pattern->values[0] == BUSTER_IR_NONE && pattern->values[1] == (shape == 2 ? 2u : BUSTER_IR_NONE) && pattern->stack_object < scopes &&
+                              pattern->scale == (shape == 2 ? 3 : 0) && pattern->displacement == (shape == 2 || shape == 7 ? 8 : 0);
+                }
+            }
+            placed &= recipes == (sinks ? scopes : 0);
+            tier1_emit_test_expect(test, placed, "only the sole selected stable frame-address use sinks, preserving the address's index and displacement");
+            if (!placed && test->failures < 20)
+            {
+                fprintf(stderr, "  frame-address sink shape=%u scopes=%u recipes=%u\n", shape, scopes, recipes);
+            }
+            const Tier1EmitOptions options = {
+                .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
+                .rematerialize = rematerialize,
+                .certify = true,
+                .frame_flags = frame == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+            };
+            Tier1EmitResult emitted = { 0 };
+            if (large)
+            {
+                const Tier1EmitError model = tier1_emit_cfg_problem(&plan, 0, &options, &test->output, &test->scratch, &emitted);
+                Tier1CfgPrepared prepared;
+                const Tier1CfgError error = model == TIER1_EMIT_OK ? tier1_cfg_prepare(&emitted.cfg_input, &test->output, &test->scratch, &prepared) : TIER1_CFG_INVALID;
+                tier1_emit_test_expect(test, error == TIER1_CFG_OK, "thousands of initialized frame scopes prepare below the unchanged interval capacity");
+                if (error != TIER1_CFG_OK && test->failures < 20)
+                {
+                    fprintf(stderr, "  frame-address sink scopes=%u model=%u preparation=%u\n", scopes, model, error);
+                }
+                if (error == TIER1_CFG_OK)
+                {
+                    const uint64_t entries = prepared.candidate.live_entries;
+                    const uint64_t intervals = prepared.candidate.intervals.count;
+                    const bool bounded = entries <= (uint64_t)scopes * 16 && intervals <= (uint64_t)scopes * 16 &&
+                                         (previous_entries == 0 || (entries <= previous_entries * 2 + 16 && intervals <= previous_intervals * 2 + 16));
+                    tier1_emit_test_expect(test, bounded, "selected frame-scope live memberships and intervals grow linearly when the scope count doubles");
+                    printf("  frame-address scopes=%u live_entries=%" PRIu64 " intervals=%" PRIu64 "\n", scopes, entries, intervals);
+                    previous_entries = entries;
+                    previous_intervals = intervals;
+                    tier1_cfg_release(&prepared, &test->scratch);
+                }
+            }
+            else
+            {
+                const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
+                // Dynamic stack movement retains the code certificate's existing explicit boundary. Its allocation
+                // still certifies and the native check below exercises its unsunk pointers and memory effects.
+                const uint32_t expected_reason = shape == 5 ? TIER1_CERT_EMITTED_DYNAMIC : TIER1_CERT_EMITTED_OK;
+                const bool checked = error == TIER1_EMIT_OK && emitted.general && emitted.certified && emitted.code_checked && emitted.code_reason == expected_reason;
+                tier1_emit_test_expect(test, checked, "frame-address variants allocate and preserve the code certificate's supported boundary");
+                if (!checked && test->failures < 20)
+                {
+                    fprintf(stderr, "  frame-address sink shape=%u frame=%u rematerialize=%u error=%u node=%u general=%u certified=%u code_checked=%u code_reason=%u\n",
+                            shape, frame, rematerialize, error, node, emitted.general, emitted.certified, emitted.code_checked, emitted.code_reason);
+                }
+                if (checked)
+                {
+                    if (shape == 2 || shape == 7)
+                    {
+                        bool remat = true;
+                        uint32_t checked = 0;
+                        for (uint32_t n = 0; n < function.instruction_count; n += 1)
+                        {
+                            const Tier1SelectPattern* pattern = &plan.patterns[n];
+                            if (plan.covered[n] == 0 && pattern->rule == TIER1_RULE_ADDRESS && pattern->stack_object != BUSTER_IR_NONE)
+                            {
+                                checked += 1;
+                                const bool eligible = rematerialize && shape == 7;
+                                remat &= emitted.prepared.recipes.operations[n] == (eligible ? BUSTER_TIER1_REMAT_STACK : BUSTER_TIER1_REMAT_NONE);
+                                if (eligible)
+                                {
+                                    int32_t offset = 0;
+                                    remat &= tier1_emit_cfg_object(&function, &emitted, pattern->stack_object, &offset) && emitted.prepared.recipes.addends[n] == 8 &&
+                                             emitted.prepared.recipes.values[n] == (uint64_t)((int64_t)offset + 8) && (emitted.prepared.recipes.flags[n] & BUSTER_TIER1_REMAT_STABLE) != 0;
+                                }
+                            }
+                        }
+                        tier1_emit_test_expect(test, remat && checked == scopes, "only the input-free folded frame address retains its stable rematerialization recipe and offset");
+                    }
+                    tier1_frame_sink_execute(test, &emitted, scopes, shape == 3 || shape == 4 || shape == 6 || shape == 9, shape >= 8);
+                }
+            }
+        }
+        arena_pop_to(&test->output, 0);
+        arena_pop_to(&test->scratch, 0);
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 static void tier1_address_sink_tests(Tier1EmitTest* test)
 {
     for (uint32_t variant = 0; variant < 4; variant += 1)
@@ -170,4 +561,5 @@ static void tier1_address_sink_tests(Tier1EmitTest* test)
         arena_pop_to(&test->scratch, 0);
         arena_pop_to(&test->input, 0);
     }
+    tier1_frame_sink_tests(test);
 }

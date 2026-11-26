@@ -1,0 +1,8 @@
+1:4: error: 'LATIN SMALL LETTER NOT A THING' is not a valid Unicode character name
+2:5: error: 'latin small letter a' is not a valid Unicode character name
+2:5: note: character names in Unicode escape sequences are sensitive to case and whitespaces
+2:2: error: character 'a' cannot be specified by a universal character name
+3:5: error: 'latin small letter e with acute' is not a valid Unicode character name
+3:5: note: character names in Unicode escape sequences are sensitive to case and whitespaces
+4:1: error: character ' ' cannot be specified by a universal character name
+4:10: error: universal character name refers to a control character

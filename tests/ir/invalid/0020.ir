@@ -1,0 +1,6 @@
+function () -> void {
+b0:
+%0 = const.m64 0x1
+%1 = bitcast.f64 %0
+%2 = ret.void
+}

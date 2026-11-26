@@ -2641,6 +2641,9 @@ static __attribute__((noinline, cold)) uint32_t fval_to_gp_rare(FastExprCtx* ex,
         const uint32_t total_bits = w64 ? 64u : 32u;
         const uint32_t shl = total_bits - (v->bf_off + v->bf_width);
         const uint32_t shr = total_bits - v->bf_width;
+        // The shifts set the flags: a comparison still in them, such as a call's last argument while an earlier one is
+        // converted, is materialized first (#3659).
+        if ((shl | shr) != 0) { fval_flush_flags(ex); }
         if (shl > 0) { x86_shift_ri(obj, w64, 4u, r, (uint8_t)shl); }
         if (shr > 0) { x86_shift_ri(obj, w64, v->bf_signed ? 7u : 5u, r, (uint8_t)shr); }
         return r;
@@ -2824,6 +2827,8 @@ static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_convert(
 }
 
 // Convert FastVal `*v` in-place to `dst_type` (all scalar/pointer/float/bool C17 conversions, including exact u64<->fp!).
+// A path that sets the flags materializes any comparison still in them first (fval_flush_flags): a call converts its
+// arguments in order, and its last one can be a comparison, whose value the flags still hold (#3659).
 static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastExprCtx* ex, FastVal* v, FastType dst_type)
 {
     FastCCState* cc = ex->cc;
@@ -2866,6 +2871,8 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
         if (src_128 && dst_128) { v->type = dst_u; return; }
         if (dst_128 && !src_fp)
         {
+            // A constant 0's load is `xor`, and the high half's `sar` or `xor` set the flags too.
+            fval_flush_flags(ex);
             const int32_t slot = fast_cc_alloc_tmp(cc, 16u, 16u);
             const uint32_t ssz = ftype_size(cc, src_u);
             const bool ssgn = ftype_is_signed(cc, src_u);
@@ -2903,6 +2910,7 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
                 const uint32_t hi = fval_alloc_gp(ex);
                 x86_load(obj, hi, a, 8, 8u, false);
                 x86_load(obj, a, a, 0, 8u, false);
+                fval_flush_flags(ex);
                 x86_alu_rr(obj, true, 0x09u, a, hi);
                 x86_setcc_zext(obj, FCC_NE, a);
                 ex->gp_used &= (uint16_t)~(1u << hi);
@@ -3016,6 +3024,7 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
             const uint32_t lbl_big = fast_label_new(obj);
             const uint32_t lbl_end = fast_label_new(obj);
             const uint32_t tmp = fval_alloc_gp(ex);
+            fval_flush_flags(ex);
             x86_alu_rr(obj, true, 0x85u, g, g); // test g, g
             x86_jcc_label(obj, FCC_S, lbl_big);
             x86_cvtsi2fp(obj, is_f64, true, x, g);
@@ -3051,6 +3060,7 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
             const uint32_t xzero = fval_alloc_xmm(ex);
             const uint32_t tmp = fval_alloc_gp(ex);
             x86_sse_zero(obj, xzero);
+            fval_flush_flags(ex);
             x86_ucomis(obj, is_f64, x, xzero);
             x86_setcc_zext(obj, FCC_NE, g);
             x86_setcc_zext(obj, FCC_P, tmp);
@@ -3071,6 +3081,7 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
                 const uint32_t tmp = fval_alloc_gp(ex);
                 const uint32_t ro = is_f64 ? fast_cc_get_f64_2p63(cc) : fast_cc_get_f32_2p63(cc);
                 x86_sse_load_rip(obj, is_f64, x2p63, obj->sec_sym_rodata, (int64_t)ro);
+                fval_flush_flags(ex);
                 x86_ucomis(obj, is_f64, x, x2p63);
                 x86_jcc_label(obj, FCC_AE, lbl_big);
                 x86_cvttfp2si(obj, is_f64, true, g, x);
@@ -3116,6 +3127,7 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
         }
         const uint32_t g = fval_to_gp(ex, v, true);
         if (ssz < 4u) { x86_extend(obj, g, g, ssz, false); }
+        fval_flush_flags(ex);
         x86_alu_rr(obj, ssz == 8u, 0x85u, g, g); // test g, g
         x86_setcc_zext(obj, FCC_NE, g);
         *v = (FastVal){ .type = FTYPE_BOOL, .kind = FVAL_REG, .reg = (uint8_t)g };

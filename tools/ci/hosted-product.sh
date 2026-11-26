@@ -238,20 +238,25 @@ build_products()
 }
 
 # The inventory's own heading, run by the built executable's runner on the tree it was built in. A shard of a shared
-# product has no such tree, so its inventory skips the heading on this record (tools/ci/correctness.tests).
+# product has no such tree, so its inventory skips the heading on this record (tools/ci/correctness.tests). The
+# producer then checks fixture edits synchronously, before packing or starting suites that read those files.
 ownership()
 {
     : "${RUNNER_TEMP:?}" "${BUSTER_COMPILER:?}"
     local list="$RUNNER_TEMP/product-ownership.tests" report="$RUNNER_TEMP/product-ownership.report"
+    local dependencies="$RUNNER_TEMP/product-runtime-fixtures.report"
+    rm -f -- "$RUNNER_TEMP/product-ownership"
     awk -v heading="$ownership_heading" '/^== / { selected = $0 == heading } selected' tools/ci/correctness.tests > "$list"
     [ "$(grep -c '^== ' "$list")" -eq 1 ] || die "the inventory has no heading '$ownership_heading'"
     env -u BUSTER_PRODUCT "$BUSTER_COMPILER" parallel --github --timeout 600 < "$list" 2>&1 | tee "$report"
     # Passed, not skipped: the record's first line is what the shards' inventory reads.
     grep -q ': 1 passed, 0 failed, 0 skipped, 0 not started' "$report" || die "the ownership check didn't pass on the build's tree"
+    build/build-regression --runtime-fixtures-only "$BUSTER_COMPILER" 2>&1 | tee "$dependencies"
     {
         printf 'passed\n'
         printf '%s\n' "${ownership_heading#== }"
         grep -m 1 ': 1 passed, 0 failed, 0 skipped, 0 not started' "$report"
+        cat -- "$dependencies"
     } > "$RUNNER_TEMP/product-ownership"
 }
 

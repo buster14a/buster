@@ -609,6 +609,319 @@ static uint64_t ir_optimize_test_float_integer(IrOptimizeTest* test, uint32_t wi
     return negated & (UINT64_MAX >> (64 - width));
 }
 
+// #2806's independent oracle is the packed instruction itself. Unused lanes of the complete input cells are zero,
+// so the zmm operation has no additional exceptions when a fixture represents an xmm or ymm value. Each asm keeps
+// the operation between loading its own MXCSR and restoring the caller's, including when clang optimizes the tests.
+static __attribute__((noinline)) uint32_t ir_optimize_test_simd_numeric_hardware(uint32_t control, uint32_t op, uint32_t width, const IrSimdValue operands[3], IrSimdValue* value)
+{
+    const uint32_t saved = _mm_getcsr();
+    uint32_t status = 0;
+    __m512i a = _mm512_loadu_si512(operands[0].words);
+    const __m512i b = _mm512_loadu_si512(operands[1].words);
+    const __m512i c = _mm512_loadu_si512(operands[2].words);
+    if (op == IR_FMA && width == 32)
+    {
+        __asm__ volatile("ldmxcsr %[control]\n\tvfmadd213ps %[c], %[b], %[a]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [a] "+v"(a), [status] "=m"(status) : [b] "v"(b), [c] "v"(c), [control] "m"(control), [saved] "m"(saved));
+    }
+    else if (op == IR_FMA)
+    {
+        __asm__ volatile("ldmxcsr %[control]\n\tvfmadd213pd %[c], %[b], %[a]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [a] "+v"(a), [status] "=m"(status) : [b] "v"(b), [c] "v"(c), [control] "m"(control), [saved] "m"(saved));
+    }
+    else if (op == IR_SITOFP && width == 32)
+    {
+        __asm__ volatile("ldmxcsr %[control]\n\tvcvtdq2ps %[a], %[a]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [a] "+v"(a), [status] "=m"(status) : [control] "m"(control), [saved] "m"(saved));
+    }
+    else if (op == IR_SITOFP)
+    {
+        __asm__ volatile("ldmxcsr %[control]\n\tvcvtqq2pd %[a], %[a]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [a] "+v"(a), [status] "=m"(status) : [control] "m"(control), [saved] "m"(saved));
+    }
+    else if (op == IR_UITOFP && width == 32)
+    {
+        __asm__ volatile("ldmxcsr %[control]\n\tvcvtudq2ps %[a], %[a]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [a] "+v"(a), [status] "=m"(status) : [control] "m"(control), [saved] "m"(saved));
+    }
+    else if (op == IR_UITOFP)
+    {
+        __asm__ volatile("ldmxcsr %[control]\n\tvcvtuqq2pd %[a], %[a]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [a] "+v"(a), [status] "=m"(status) : [control] "m"(control), [saved] "m"(saved));
+    }
+    else if (op == IR_FPTOSI && width == 32)
+    {
+        __asm__ volatile("ldmxcsr %[control]\n\tvcvttps2dq %[a], %[a]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [a] "+v"(a), [status] "=m"(status) : [control] "m"(control), [saved] "m"(saved));
+    }
+    else if (op == IR_FPTOSI)
+    {
+        __asm__ volatile("ldmxcsr %[control]\n\tvcvttpd2qq %[a], %[a]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [a] "+v"(a), [status] "=m"(status) : [control] "m"(control), [saved] "m"(saved));
+    }
+    else if (width == 32)
+    {
+        __asm__ volatile("ldmxcsr %[control]\n\tvcvttps2udq %[a], %[a]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [a] "+v"(a), [status] "=m"(status) : [control] "m"(control), [saved] "m"(saved));
+    }
+    else
+    {
+        __asm__ volatile("ldmxcsr %[control]\n\tvcvttpd2uqq %[a], %[a]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [a] "+v"(a), [status] "=m"(status) : [control] "m"(control), [saved] "m"(saved));
+    }
+    _mm512_storeu_si512(value->words, a);
+    return status & 0x3f;
+}
+
+static bool ir_optimize_test_simd_numeric_oracle(uint32_t op, uint32_t width, uint32_t bits, const IrSimdValue operands[3], IrSimdValue* value)
+{
+    bool result = true;
+    for (uint32_t environment = 0; environment < 16; environment += 1)
+    {
+        const uint32_t control = UINT32_C(0x1f80) | ((environment & 3) << 13) | ((environment & 4) << 13) | ((environment & 8) << 3);
+        IrSimdValue observed = { 0 };
+        const uint32_t flags = ir_optimize_test_simd_numeric_hardware(control, op, width, operands, &observed);
+        result = result && flags == 0 && (environment == 0 || memcmp(&observed, value, sizeof(observed)) == 0);
+        if (environment == 0)
+        {
+            *value = observed;
+        }
+    }
+    // Quiet NaNs may raise no flag, and an infinite addend may suppress an input denormal's exception. Neither is
+    // admitted by the new folds: this is a semantic restriction independent of the instruction's observed flags.
+    if (op != IR_SITOFP && op != IR_UITOFP)
+    {
+        const uint64_t sign = UINT64_C(1) << (width - 1);
+        const uint64_t exponent = width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+        for (uint32_t operand = 0; operand < (op == IR_FMA ? 3u : 1u); operand += 1)
+        {
+            for (uint32_t lane = 0; lane < bits / width; lane += 1)
+            {
+                const uint64_t magnitude = ir_simd_lane_read(operands + operand, width, lane) & ~sign;
+                result = result && magnitude <= exponent && (magnitude == 0 || (magnitude & exponent) != 0);
+            }
+        }
+    }
+    return result;
+}
+
+// Twenty named boundary shapes per opcode, inserted into the last lane of an otherwise exact vector. Their expected
+// decisions are constants of the cases; the hardware independently checks both those decisions and every result bit.
+static bool ir_optimize_test_simd_numeric_boundary(uint32_t op, uint32_t width, uint32_t trial, uint64_t operands[3])
+{
+    const uint32_t precision = width == 32 ? 24 : 53;
+    const uint32_t bias = width == 32 ? 127 : 1023;
+    const uint64_t sign = UINT64_C(1) << (width - 1);
+    const uint64_t one = (uint64_t)bias << (precision - 1);
+    const uint64_t two = (uint64_t)(bias + 1) << (precision - 1);
+    const uint64_t three = two | (UINT64_C(1) << (precision - 2));
+    const uint64_t half = (uint64_t)(bias - 1) << (precision - 1);
+    const uint64_t infinity = (uint64_t)(2 * bias + 1) << (precision - 1);
+    const uint64_t normal = UINT64_C(1) << (precision - 1);
+    const uint64_t quiet = UINT64_C(1) << (precision - 2);
+    bool fold = true;
+    operands[0] = one;
+    operands[1] = two;
+    operands[2] = three;
+    if (op == IR_FMA)
+    {
+        switch (trial)
+        {
+            case 0: break;
+            case 1: operands[0] = one + 1; operands[1] = one - 2; operands[2] = one | sign; break;
+            case 2: operands[1] = one; operands[2] = one | sign; fold = false; break;
+            case 3: operands[0] = sign; operands[2] = sign; break;
+            case 4: operands[0] = 0; operands[2] = sign; fold = false; break;
+            case 5: operands[0] = infinity - 1; operands[1] = infinity - 1; operands[2] = infinity; break;
+            case 6: operands[0] = infinity; operands[1] = 0; fold = false; break;
+            case 7: operands[0] = infinity; operands[2] = infinity | sign; fold = false; break;
+            case 8: operands[0] = infinity | quiet | 0x123; fold = false; break;
+            case 9: operands[1] = infinity | 0x123; fold = false; break;
+            case 10: operands[2] = infinity | quiet | 0x456; fold = false; break;
+            case 11: operands[0] = 1; fold = false; break;
+            case 12: operands[0] = normal; operands[1] = half; operands[2] = 0; fold = false; break;
+            case 13: operands[0] = infinity - 1; operands[2] = 0; fold = false; break;
+            case 14: operands[1] = one; operands[2] = (uint64_t)(bias - precision - 1) << (precision - 1); fold = false; break;
+            case 15:
+                operands[0] = (uint64_t)(bias + (width == 32 ? 64 : 512)) << (precision - 1);
+                operands[1] = operands[0];
+                operands[2] = sign | ((uint64_t)(2 * bias) << (precision - 1));
+                break;
+            case 16:
+                operands[0] = (uint64_t)(bias - (width == 32 ? 74 : 537)) << (precision - 1);
+                operands[1] = (uint64_t)(bias - (width == 32 ? 75 : 537)) << (precision - 1);
+                operands[2] = normal;
+                break;
+            case 17: operands[1] = one; operands[2] = three | sign; break;
+            case 18: operands[0] = sign; break;
+            case 19: operands[0] = infinity | sign; operands[2] = infinity | sign; break;
+            default: break;
+        }
+    }
+    else if (op == IR_SITOFP || op == IR_UITOFP)
+    {
+        const uint64_t mask = UINT64_MAX >> (64 - width);
+        const uint64_t exact = UINT64_C(1) << precision;
+        const uint64_t step = UINT64_C(1) << (width - precision);
+        static const bool ordinary_folds[20] = {
+            true, true, true, true, true, false, true, true, true, false,
+            true, false, true, true, true, false, true, true, false, true,
+        };
+        const uint64_t values[20] = {
+            0, 1, sign, mask, exact, exact + 1, exact + 2, exact - 1, mask - (step - 1), sign - 1,
+            sign + step, sign + 1, mask - 16, 17, (exact >> 1) + 1, (exact << 2) + 3, exact << 2, step, sign - 3, mask - (step * 2 - 1),
+        };
+        operands[0] = values[trial];
+        fold = ordinary_folds[trial] && !(op == IR_UITOFP && (trial == 3 || trial == 12));
+    }
+    else
+    {
+        const uint64_t signed_limit = (uint64_t)(bias + width - 1) << (precision - 1);
+        const uint64_t unsigned_limit = (uint64_t)(bias + width) << (precision - 1);
+        static const bool ordinary_folds[20] = {
+            true, true, true, true, false, false, false, false, false, false,
+            false, false, true, true, true, false, true, true, true, false,
+        };
+        const uint64_t values[20] = {
+            0, sign, one, one | sign, half, half | sign, normal, 1, infinity, infinity | sign,
+            infinity | quiet | 0x123, infinity | 0x456, signed_limit | sign, signed_limit, unsigned_limit - 1, unsigned_limit,
+            signed_limit - 1, three, three | sign, one | quiet,
+        };
+        operands[0] = values[trial];
+        fold = ordinary_folds[trial] && !(op == IR_FPTOUI && (trial == 3 || trial == 12 || trial == 18)) && !(op == IR_FPTOSI && (trial == 13 || trial == 14));
+    }
+    return fold;
+}
+
+static void ir_optimize_test_simd_numeric_rewrite(IrOptimizeTest* test, const IrFunction* f, bool fold, Arena* output, Arena* scratch)
+{
+    const uint32_t op = f->op[3];
+    const uint32_t saved = _mm_getcsr();
+    for (uint32_t pass = 0; pass < 2; pass += 1)
+    {
+        const uint64_t mark = output->length;
+        const uint64_t scratch_mark = scratch->length;
+        IrOptimizeOptions options = ir_optimize_options();
+        options.passes = pass == 0 ? BUSTER_IR_OPTIMIZE_SCCP : BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG;
+        IrOptimizeResult optimized = { 0 };
+        const uint32_t unusual = UINT32_C(0xffe5);
+        _mm_setcsr(unusual);
+        const IrCheck check = ir_optimize(f, output, scratch, options, &optimized);
+        const uint32_t preserved = _mm_getcsr();
+        _mm_setcsr(UINT32_C(0x1f80));
+        uint32_t kept = 0;
+        uint32_t returned = BUSTER_IR_NONE;
+        for (uint32_t i = 0; check.error == IR_OK && i < optimized.function.instruction_count; i += 1)
+        {
+            kept += optimized.function.op[i] == op;
+            returned = optimized.function.op[i] == IR_RET ? optimized.function.a[i] : returned;
+        }
+        const bool constant = returned < optimized.function.instruction_count && optimized.function.op[returned] == IR_CONST;
+        ir_optimize_test_expect(test, check.error == IR_OK && kept == 1 && constant == fold && preserved == unusual,
+                                "vector fma and conversions propagate exact constants and retain their effect rows and caller MXCSR");
+        if (check.error == IR_OK)
+        {
+            const InterpreterResult before = ir_optimize_test_simd_run(f, NULL, 0, scratch);
+            const InterpreterResult after = ir_optimize_test_simd_run(&optimized.function, NULL, 0, scratch);
+            ir_optimize_test_expect(test, before.status == after.status && (before.status != INTERPRETER_OK || (before.value.low == after.value.low && before.value.high == after.value.high)) && scratch->length == scratch_mark,
+                                    "vector fma and conversion rewrites preserve every result bit and arithmetic failure");
+        }
+        arena_pop_to(output, mark);
+    }
+    _mm_setcsr(saved);
+}
+
+static void ir_optimize_test_simd_numeric(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    static const uint8_t operations[] = {
+        IR_FMA,
+        IR_SITOFP,
+        IR_UITOFP,
+        IR_FPTOSI,
+        IR_FPTOUI,
+    };
+    IrOptimizeTest generator = { .random = test->random ^ UINT64_C(0x2806f32f64) };
+    const uint32_t saved = _mm_getcsr();
+    for (uint32_t type = IR_V4I32; type <= IR_V16I32; type += 1)
+    {
+        const uint32_t bits = ir_type_bits[type];
+        for (uint32_t width = 32; width <= 64; width *= 2)
+        {
+            const uint32_t lane = width == 32 ? IR_SIMD_LANE_F32 : IR_SIMD_LANE_F64;
+            const uint32_t mask = ir_lane_mask(type, IR_SIMD_LANE_I8);
+            for (uint32_t kind = 0; kind < BUSTER_ARRAY_LENGTH(operations); kind += 1)
+            {
+                const uint32_t op = operations[kind];
+                const uint64_t mark = input->length;
+                const IrSizes sizes = {
+                    .instruction_count = 7,
+                    .block_count = 1,
+                    .vector_constant_count = 4,
+                };
+                IrFunction f = { 0 };
+                const bool created = ir_create(input, &sizes, &f) == IR_OK;
+                ir_optimize_test_expect(test, created, "vector fma and conversion fold fixture allocation");
+                if (created)
+                {
+                    f.result_type = mask;
+                    f.block_offsets[1] = 7;
+                    ir_optimize_test_instruction(&f, 0, IR_VCONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 1, IR_VCONST, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 2, IR_VCONST, type, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 3, op, type, 0, op == IR_FMA ? 1 : BUSTER_IR_NONE, op == IR_FMA ? 2 : BUSTER_IR_NONE);
+                    f.flags[3] = lane;
+                    ir_optimize_test_instruction(&f, 4, IR_VCONST, type, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 5, IR_VCMP, mask, 3, 4, IR_EQ);
+                    f.flags[5] = IR_SIMD_LANE_I8;
+                    ir_optimize_test_instruction(&f, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    uint32_t folds = 0;
+                    uint32_t refusals = 0;
+                    for (uint32_t trial = 0; trial < 532; trial += 1)
+                    {
+                        IrSimdValue operands[3] = { 0 };
+                        bool boundary_fold = false;
+                        for (uint32_t element = 0; element < bits / width; element += 1)
+                        {
+                            uint64_t values[3] = { 0 };
+                            if (trial < 20)
+                            {
+                                boundary_fold = ir_optimize_test_simd_numeric_boundary(op, width, element + 1 == bits / width ? trial : 0, values);
+                            }
+                            else
+                            {
+                                values[0] = op == IR_SITOFP || op == IR_UITOFP ? ir_optimize_test_float_integer(&generator, width) : ir_optimize_test_simd_float_operand(&generator, width);
+                                values[1] = ir_optimize_test_simd_float_operand(&generator, width);
+                                values[2] = ir_optimize_test_simd_float_operand(&generator, width);
+                            }
+                            for (uint32_t operand = 0; operand < (op == IR_FMA ? 3u : 1u); operand += 1)
+                            {
+                                ir_simd_lane_write(operands + operand, width, element, values[operand]);
+                            }
+                        }
+                        IrSimdValue expected = { 0 };
+                        const bool fold = ir_optimize_test_simd_numeric_oracle(op, width, bits, operands, &expected);
+                        if (trial < 20)
+                        {
+                            ir_optimize_test_expect(test, fold == boundary_fold, "packed hardware confirms the explicit fma and conversion fold boundaries");
+                        }
+                        IrSimdValue folded;
+                        memset(&folded, 0xa5, sizeof(folded));
+                        const IrSimdValue untouched = folded;
+                        const uint32_t unusual = UINT32_C(0xffc0) | (trial & 0x3f);
+                        _mm_setcsr(unusual);
+                        const bool accepted = ir_optimize_simd_fold(&f, 3, operands, &folded);
+                        const uint32_t preserved = _mm_getcsr();
+                        _mm_setcsr(UINT32_C(0x1f80));
+                        ir_optimize_test_expect(test, accepted == fold && memcmp(&folded, fold ? &expected : &untouched, sizeof(folded)) == 0 && preserved == unusual,
+                                                "vector fma and conversions fold exactly the quiet environment-independent hardware results");
+                        if (trial < 24)
+                        {
+                            memcpy(f.vector_constants, operands, sizeof(operands));
+                            f.vector_constants[3] = expected;
+                            ir_optimize_test_simd_numeric_rewrite(test, &f, fold, output, scratch);
+                        }
+                        folds += fold;
+                        refusals += !fold;
+                    }
+                    ir_optimize_test_expect(test, folds != 0 && refusals != 0, "each vector fma or conversion folds and refuses at every width");
+                }
+                arena_pop_to(input, mark);
+            }
+        }
+    }
+    _mm_setcsr(saved);
+}
+
 // #2720: SCCP's scalar floating operations and conversions on random operands against the hardware. Each must fold
 // exactly where the oracle finds the same bits and no flag in every environment and no operand is a NaN, to those bits;
 // and the interpreter must give the same before and after.
@@ -1264,6 +1577,7 @@ static void ir_optimize_test_simd(IrOptimizeTest* test)
         ir_optimize_test_simd_lanes(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_float_pairs(test);
         ir_optimize_test_scalar_floats(test, &input, &vector, &scratch);
+        ir_optimize_test_simd_numeric(test, &input, &vector, &scratch);
         ir_optimize_test_simd_flow(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_loop(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_splats(test, &input, &vector, &scalar, &scratch);

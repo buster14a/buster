@@ -158,6 +158,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_RETURN: result = "return does not match the function result type"; break;
         case CHECK_INPUT_TARGET: result = "unsupported checker language or target model"; break;
         case CHECK_INPUT_INCOMPLETE_MEMBER: result = "record member has incomplete type"; break;
+        case CHECK_INPUT_BIT_FIELD: result = "invalid bit-field"; break;
+        case CHECK_INPUT_FUNCTION_MEMBER: result = "field declared as a function"; break;
         case CHECK_INPUT_INCOMPLETE_OBJECT: result = "object has incomplete type"; break;
         case CHECK_INPUT_LOOP_HINT: result = "invalid '#pragma clang loop' directive"; break;
         case CHECK_INPUT_LOOP_PLACEMENT: result = "expected a for, while, or do-while loop to follow '#pragma clang loop'"; break;
@@ -458,6 +460,7 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_TLS_MODEL: snprintf(text, capacity, "tls_model must be \"global-dynamic\", \"local-dynamic\", \"initial-exec\" or \"local-exec\""); break;
         case CHECK_ARGUMENT_FORMAT_STRING: snprintf(text, capacity, "format argument not a string type"); break;
         case CHECK_ARGUMENT_FORMAT_RESULT: snprintf(text, capacity, "function does not return string type"); break;
+        case CHECK_ARGUMENT_FORMAT_NONLITERAL: snprintf(text, capacity, "format string is not a string literal"); break;
         case CHECK_ARGUMENT_STRFTIME: snprintf(text, capacity, "strftime format attribute requires 3rd parameter to be 0"); break;
         case CHECK_ARGUMENT_UNKNOWN_TYPE: snprintf(text, capacity, "unknown type name '%.*s'", (int)argument.length, argument.pointer); break;
         case CHECK_ARGUMENT_EXPECTED_TYPE: snprintf(text, capacity, "expected a type"); break;
@@ -1437,9 +1440,23 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
             PPOffsetNote notes[BUSTER_UNICODE_NAME_NOTES];
             for (uint32_t n = 0; n < unicode.note_count; n += 1)
             {
-                notes[n] = (PPOffsetNote){ name + unicode.notes[n].offset, unicode.notes[n].message };
+                const bool correction = unicode.notes[n].replacement[0] != 0;
+                notes[n] = (PPOffsetNote)
+                {
+                    .offset = name + unicode.notes[n].offset,
+                    .message = unicode.notes[n].message,
+                    .length = correction ? close - name : 0,
+                    .replacement = correction ? unicode.notes[n].replacement : NULL,
+                };
             }
+            const uint32_t saved_ranges = pp->diagnostic_range_count;
+            const bool saved_spans = pp->diagnostic_spans;
+            pp->diagnostic_arguments = false;
+            pp->diagnostic_spans = true;
+            pp_diagnostic_range_offsets(pp, source, name, close - name);
             pp_diagnose_output_offset_notes(pp, PP_SEVERITY_ERROR, source, name, publication, notes, unicode.note_count, "%s", unicode.error);
+            pp->diagnostic_range_count = saved_ranges;
+            pp->diagnostic_spans = saved_spans;
             break;
         }
         case CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC:
@@ -3722,6 +3739,44 @@ static const char* check_driver_conversion_hint(const TypeTable* types, const Ch
     return result;
 }
 
+// The edit accompanying the already selected conversion hint. A binary or conditional operand needs parentheses
+// under the inserted unary operator; an existing ParenExpr already supplies them.
+static void check_driver_conversion_fixit(const Parser* parser, Preprocessor* pp, const CheckStream* stream, uint32_t node, const char* hint)
+{
+    const CheckGraph* graph = stream->graph;
+    uint32_t written = node;
+    for (uint32_t steps = 0; written < graph->count && steps < graph->count && graph->ops[written] == CHECK_OP_VALUE && graph->operand0[written] < graph->count;
+         steps += 1)
+    {
+        written = graph->operand0[written];
+    }
+    const uint32_t token = written < graph->count ? graph->tokens[written] : BUSTER_CHECK_NONE;
+    const PPDiagnosticRange range = check_semantic_token_range(parser, token, true);
+    if (range.pending == PP_RANGE_TOKENS && hint[0] != 0)
+    {
+        const bool remove = strcmp(hint, "; remove &") == 0 || strcmp(hint, "; remove *") == 0;
+        if (remove)
+        {
+            const uint32_t source = parse_source_index(&parser->tokens, token);
+            pp_diagnostic_fixit_tokens(pp, source, source, "");
+        }
+        else
+        {
+            const CheckOp op = graph->ops[written];
+            const bool binary = (op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_OR) || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
+                                op == CHECK_OP_ASSIGN || (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN);
+            const PPDiagnosticRange bare = check_semantic_token_range(parser, token, false);
+            const bool grouped = range.begin != bare.begin || range.end != bare.end;
+            const bool address = strcmp(hint, "; take the address with &") == 0;
+            pp_diagnostic_fixit_insert(pp, range.begin, false, binary && !grouped ? (address ? "&(" : "*(") : (address ? "&" : "*"));
+            if (binary && !grouped)
+            {
+                pp_diagnostic_fixit_insert(pp, range.end, true, ")");
+            }
+        }
+    }
+}
+
 // The place of parameter `index` of the function declared at `declaration` (its name), for a note of a parameter that isn't
 // a pointer, or a pointer's that check_driver_parameter_source finds none of: the parameter's own name, or, unnamed, the
 // token that ends its declarator (the `,` or `)` after it), where clang's unnamed parameter is. BUSTER_CHECK_NONE where its
@@ -4152,6 +4207,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     if (result != NULL && source < stream->count)
     {
         check_semantic_range(parser, pp, graph->tokens[source], true);
+        check_driver_conversion_fixit(parser, pp, stream, source, check_driver_conversion_hint(types, stream, source, check_stream_type(stream, source), target));
     }
     return result;
 }
@@ -4232,6 +4288,7 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
         }
         // The ranges check_semantic_expression gave the message are its alone (#2376).
         pp_diagnostic_ranges_clear(pp);
+        pp_diagnostic_fixits_clear(pp);
     }
 }
 
@@ -4658,6 +4715,7 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
                                                                           scratch) : NULL;
     // (Only the conversion's words: its highlighted range is no overload's, #2376.)
     pp_diagnostic_ranges_clear(pp);
+    pp_diagnostic_fixits_clear(pp);
     const char* prefix = "incompatible function pointer types ";
     const bool shaped = words != NULL && strncmp(words, prefix, strlen(prefix)) == 0;
     // The target as the words spell it: between the action's words and the source's, whatever comes before them for
@@ -5778,11 +5836,21 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         char declared[512];
                         snprintf(suggestion, sizeof(suggestion), "did you mean '%.*s'?", (int)intern_length(pp->table, other), intern_bytes(pp->table, other));
                         snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)intern_length(pp->table, other), intern_bytes(pp->table, other));
-                        const PPOutputDiagnosticNote notes[2] =
+                        PPOutputDiagnosticNote notes[2] =
                         {
                             { .token = parse_source_index(&parser->tokens, token), .message = suggestion },
                             { .token = corrected ? parse_source_index(&parser->tokens, meant) : 0, .message = declared },
                         };
+                        if (corrected)
+                        {
+                            const uint32_t corrected_source = parse_source_index(&parser->tokens, token);
+                            notes[1].fixits[0] = (PPDiagnosticFixIt)
+                            {
+                                .range = { .begin = corrected_source, .end = corrected_source, .pending = PP_RANGE_TOKENS },
+                                .text = check_warning_text(scratch, "%.*s", (int)intern_length(pp->table, other), intern_bytes(pp->table, other)),
+                            };
+                            notes[1].fixit_count = 1;
+                        }
                         pp_diagnose_output_notes_at(pp, pp_severity, parse_source_index(&parser->tokens, token), publication, notes, corrected ? 2u : 0u,
                             builtin ? "use of unknown builtin '%.*s' [-Wimplicit-function-declaration]" :
                             "call to undeclared function '%.*s'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
@@ -5917,6 +5985,14 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         if (phase == 0)
                         {
                             check_driver_input_ranges(pp, input->reports + index, source);
+                            if (kind == CHECK_INPUT_CONSTANT_INITIALIZER)
+                            {
+                                check_semantic_range(parser, pp, located, false);
+                            }
+                        }
+                        else if (phase == 2 && message != NULL && strcmp(message, check_driver_initializer_message(CHECK_INIT_NON_CONSTANT)) == 0)
+                        {
+                            check_semantic_range(parser, pp, located, false);
                         }
                         if (kind >= CHECK_INPUT_MUSTTAIL_ARGUMENTS && kind <= CHECK_INPUT_MUSTTAIL_STATEMENT && named)
                         {
@@ -6346,6 +6422,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                            (String8){ 0 };
                             if (kind == CHECK_INPUT_ENUM_VALUE_TYPE)
                             {
+                                if (report->completion > located && report->completion <= count)
+                                {
+                                    pp_diagnostic_range_tokens(pp, source, parse_source_index(&parser->tokens, report->completion - 1));
+                                }
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
                                                       "integer constant expression must have integer type, not %.*s", (int)type.length, type.pointer);
                             }
@@ -6372,7 +6452,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                  kind == CHECK_INPUT_ARRAY_INCOMPLETE || kind == CHECK_INPUT_ARRAY_NEGATIVE || kind == CHECK_INPUT_ARRAY_TOO_LARGE ||
                                  kind == CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT ||
                                  kind == CHECK_INPUT_ARRAY_NON_INTEGER ||
-                                 ((kind == CHECK_INPUT_INCOMPLETE_OBJECT || kind == CHECK_INPUT_INCOMPLETE_TENTATIVE) && input->reports[index].type != 0)))
+                                 ((kind == CHECK_INPUT_INCOMPLETE_OBJECT || kind == CHECK_INPUT_INCOMPLETE_TENTATIVE || kind == CHECK_INPUT_INCOMPLETE_MEMBER) &&
+                                  input->reports[index].type != 0)))
                         {
                             // The element type as clang prints it, its typedef's name first (check_driver_warning_type).
                             const CheckInputReport* report = input->reports + index;
@@ -6454,6 +6535,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                      kind == CHECK_INPUT_FUNCTION_RETURN ? (function_returned ? "function cannot return function type %.*s" :
                                                                                                                 "function cannot return array type %.*s") :
                                                      kind == CHECK_INPUT_ARRAY_INCOMPLETE ? "array has incomplete element type %.*s" :
+                                                     kind == CHECK_INPUT_INCOMPLETE_MEMBER ? "field has incomplete type %.*s" :
                                                      kind == CHECK_INPUT_INCOMPLETE_TENTATIVE ? "tentative definition has type %.*s that is never completed" :
                                                                                                 "variable has incomplete type %.*s";
                                 pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, forward ? 1u : 0u, format, (int)type.length, type.pointer);
@@ -6590,6 +6672,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             char declared[512];
                             snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)intern_length(pp->table, other), intern_bytes(pp->table, other));
                             const PPOutputDiagnosticNote note = { .token = parse_source_index(&parser->tokens, meant), .message = declared };
+                            pp_diagnostic_fixit_tokens(pp, source, source,
+                                                       check_warning_text(scratch, "%.*s", (int)intern_length(pp->table, other), intern_bytes(pp->table, other)));
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "use of undeclared identifier '%.*s'; did you mean '%.*s'?",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name), (int)intern_length(pp->table, other),
                                                         intern_bytes(pp->table, other));
@@ -6653,6 +6737,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 .origin = pp_history_at(pp, note_source),
                                 .message = declared,
                             };
+                            pp_diagnostic_fixit_tokens(pp, source, source, check_warning_text(scratch, "%.*s", other_length, other));
                             pp_diagnose_placed_sources_phase(pp, PP_SEVERITY_ERROR, pp->output.locations[source], pp_history_at(pp, source), publication,
                                                               PP_DIAGNOSTIC_SEMANTIC, &note, predefined || meant < count ? 1u : 0u,
                                                               "%s '%.*s'; did you mean '%.*s'?", unknown_type ? "unknown type name" : "use of undeclared identifier",
@@ -7386,6 +7471,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     // A report's highlighted ranges, which its message's producer or check_driver_input_ranges set, are its
                     // alone (#2376).
                     pp_diagnostic_ranges_clear(pp);
+                    pp_diagnostic_fixits_clear(pp);
                     if (types->atomic_records && phase == 1 && stream->reports[index].message == CHECK_MESSAGE_ACTION &&
                         stream->reports[index].diagnostic == CHECK_DIAG_MEMBER && node < input->graph.count &&
                         check_common_atomic_member(&input->graph, stream, types, node))

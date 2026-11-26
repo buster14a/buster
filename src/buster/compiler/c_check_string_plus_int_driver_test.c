@@ -152,13 +152,15 @@ static void check_test_driver_string_plus_int(CheckTest* test, const char* clang
         },
     };
     CheckTestFixtures storage = { .storage = arena_reserve(UINT64_C(1) << 20) };
+    char folder[PATH_MAX];
+    const bool located = check_test_fixture_path(folder, sizeof(folder), "checker/string-plus-char");
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
         char path[PATH_MAX];
-        snprintf(path, sizeof(path), "%s/checker/string-plus-char/%s", check_test_fixture_root, cases[i].file);
+        const bool named = located && test_fixture_path(path, sizeof(path), folder, cases[i].file);
         uint64_t length = 0;
         CheckDriverDefaultWarningFixture fixture = cases[i].fixture;
-        fixture.source = check_test_fixture_read(&storage, path, &length);
+        fixture.source = named ? check_test_fixture_read(&storage, path, &length) : NULL;
         const bool ready = fixture.source != NULL && length != 0;
         check_test_expect(test, ready, "runtime string-plus-char source is readable");
         if (ready)

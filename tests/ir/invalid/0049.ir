@@ -1,0 +1,6 @@
+function (ptr) -> void {
+b0:
+%0 = param.ptr 0
+%1 = load.i32 %0 align=4 fs gs
+%2 = ret.void
+}

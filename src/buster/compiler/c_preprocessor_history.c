@@ -51,6 +51,9 @@ struct PPDiagnosticSource
     uint32_t location;
     uint32_t origin;
     uint32_t column;
+    // The generated spelling's beginning, and the space Clang prepends to a destringized _Pragma.
+    uint32_t scratch;
+    bool pragma;
 };
 
 // Retain a completed construct's own ordering across producers that render its warnings and errors separately.

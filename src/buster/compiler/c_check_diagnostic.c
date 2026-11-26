@@ -244,6 +244,10 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_SWITCH_BOOL] = { "-Wswitch-bool", NULL, "switch condition has boolean value" },
     [CHECK_WARNING_ID_CHAR_SUBSCRIPTS] = { "-Wchar-subscripts", NULL, "array subscript is of type 'char'" },
     [CHECK_WARNING_ID_SIZEOF_ARRAY_ARGUMENT] = { "-Wsizeof-array-argument", NULL, "sizeof on array function parameter will return size of a pointer" },
+    [CHECK_WARNING_ID_FORMAT_SIGNEDNESS] = { "-Wformat-signedness", NULL, "signedness of format specifier is incompatible" },
+    [CHECK_WARNING_ID_FORMAT_NONLITERAL] = { "-Wformat-nonliteral", "-Wformat=2", "format string is not a string literal" },
+    [CHECK_WARNING_ID_FORMAT_ZERO_LENGTH] = { "-Wformat-zero-length", "-Wformat", "format string is empty" },
+    [CHECK_WARNING_ID_MISSING_FORMAT_ATTRIBUTE] = { "-Wmissing-format-attribute", "-Wformat-nonliteral", "function may benefit from a format attribute" },
     [CHECK_WARNING_ID_MISSING_VARIABLE_DECLARATIONS] = { "-Wmissing-variable-declarations", NULL, "no previous extern declaration for non-static variable" },
 };
 

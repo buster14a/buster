@@ -399,6 +399,9 @@ static bool check_test_library_undefined(const char* path, const char* name)
 // Check the actual references at both tiers. A run against libc alone also passes when every operation is a call.
 static void check_test_library_memory_calls(CheckTest* test, const char* executable, const char* directory)
 {
+    char source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/fixed_memory_calls.c");
+    check_test_expect(test, located, "fixed memory calls: fixture path fits");
     static const struct
     {
         const char* bytes;
@@ -422,11 +425,11 @@ static void check_test_library_memory_calls(CheckTest* test, const char* executa
     };
     char object[512];
     snprintf(object, sizeof(object), "%s/fixed-memory.o", directory);
-    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    for (uint32_t c = 0; located && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
         for (uint32_t tier = 0; tier < 2; tier += 1)
         {
-            char* arguments[] = { (char*)executable, "-c", (char*)cases[c].bytes, (char*)cases[c].option, cases[c].clones ? "-DCLONES" : "-UCLONES", "tests/driver/fixed_memory_calls.c", "-o", object,
+            char* arguments[] = { (char*)executable, "-c", (char*)cases[c].bytes, (char*)cases[c].option, cases[c].clones ? "-DCLONES" : "-UCLONES", source, "-o", object,
                                   tier != 0 ? "--tier1" : NULL, "--tier1-strict", NULL };
             char* diagnostics = NULL;
             const int status = check_test_driver_spawn(arguments, &diagnostics);
@@ -532,6 +535,9 @@ static void check_test_library_lowering(CheckTest* test, const char* clang, cons
 // #3208: the ELF imports of eager and deferred calls when a pragma renames their library builtin.
 static void check_test_library_renames(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    char source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/pragma_renamed_builtins.c");
+    check_test_expect(test, located, "renamed library builtins: fixture path fits");
     static const struct
     {
         const char* name;
@@ -551,11 +557,11 @@ static void check_test_library_renames(CheckTest* test, const char* clang, const
     const char* compilers[] = { clang, executable };
     char object[512];
     snprintf(object, sizeof(object), "%s/pragma-renamed-builtins.o", directory);
-    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(compilers); c += 1)
+    for (uint32_t c = 0; located && c < BUSTER_ARRAY_LENGTH(compilers); c += 1)
     {
         for (uint32_t with_asm = 0; with_asm < 2; with_asm += 1)
         {
-            char* arguments[] = { (char*)compilers[c], "-O0", "-c", "tests/driver/pragma_renamed_builtins.c", "-o", object,
+            char* arguments[] = { (char*)compilers[c], "-O0", "-c", source, "-o", object,
                                   with_asm ? "-DWITH_ASM_LABEL" : NULL, NULL };
             char* diagnostics = NULL;
             const bool compiled = check_test_driver_spawn(arguments, &diagnostics) == 0;

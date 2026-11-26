@@ -12,16 +12,27 @@ requirements. [Command index](README.md).
   assembles it, by the checker's path, into records, branch columns,
   references and labels. A statement of register, memory and constant operands
   whose records name no register but its operands' is placed in its caller, a
-  Tier 0 `X86` row by role (#1059, `check_asm_row`); any other statement's code
-  calls the result, a per-unit helper; a template of no instructions, a
-  barrier's, is no code at all, but
-  one with x87 operands, whose helper passes them through the x87's stack as
-  clang's code does. A template that takes a directive besides the syntax
-  switches is instead one source assembled whole by `asm_assemble` (the
-  helper's frame and operand loads around it, or a naked function's templates),
-  whose atoms, symbols and fixups the emission merges; a template of alignment
-  or NOP fill alone publishes its atoms and calls nothing. `.set` absolute
-  symbols are the template's; `.globl` or a visibility directive upgrades a
+  Tier 0 `X86` row by role (#1059, `check_asm_row`); other eligible statements
+  are asm bodies at both tiers, including named labels, register results and
+  asm goto (#1839, #2351). A barrier's empty template emits no code, while
+  operands that need loads or stores, including x87's, keep those moves in a
+  body. A template with a directive besides the syntax switches is assembled
+  whole by `asm_assemble`. `check_asm_unit_place` embeds its bytes in the caller
+  where the matched instructions pass the effects checks; calls, returns,
+  stack mutations and unsupported forms keep the helper path. Raw data bytes
+  rely on the GNU operands and clobbers. The emission applies alignment at
+  the actual statement, compacts the maximum sizing reservation before debug
+  and unwind data, rebases entry-atom symbols and fixups into the function,
+  and publishes other atoms in their sections. This also handles trailing or
+  directive-only alignment, local `loop`/`jrcxz` across sized branches, and
+  32-bit addresses. A hidden anchor prevents duplication of a byte unit;
+  functions containing opaque bytes skip Tier 1 post scheduling. Units with
+  section groups or their own CFI procedures (including `.debug_frame`-only
+  ones) retain the existing helper or no-code path, as do directive-only held
+  operands before normalization. Inline frame directives that require the
+  ordinary caller's frame remain refused because those rows are not merged.
+  Naked functions still assemble their templates as their whole code.
+  `.set` absolute symbols are the template's; `.globl` or a visibility directive upgrades a
   label another template defines, `.type`/`.size` apply to its own template's
   label, a binding or visibility directive applies to the unit's C symbol of
   that name (`.weak` a function's, an extern's or a static variable's; an
@@ -64,6 +75,8 @@ requirements. [Command index](README.md).
   `test-checker-driver --tier1-asm-only` runs asm bodies and the multi-result fixture
   `tests/driver/asm-body-results.c` at both tiers against Clang, checks emitted
   frame accesses and code certificates, and exercises both Tier 1 schedulers (#2144).
+  The `checker/programs/asm-directive-placement` fixture checks helper-free placement at both tiers,
+  including byte layout, alignment, sections, relocations, dead spans and allocation failure.
   A `target_clones`
   body's copies, a naked one's among them, each plan their statements for
   their version's instruction set (#2247); `test-checker-driver
@@ -72,9 +85,15 @@ requirements. [Command index](README.md).
   `test-checker-driver` links and runs naked functions' labels and a template's
   call of `puts` by the direct path, and compares a template's `-c` symbols
   with clang's; it reads a placed statement's instructions from its function's
-  records (under `--tier1`, whose lowering keeps the helpers, Tier 1's calls of
-  them), and backtraces through a function of placed statements; and
-  (`c_check_register_variable_driver_test.c`, #1846) compares global register
+  records at both tiers, and backtraces through a function of placed statements.
+  `driver/tier1_asm_control.c` requires Tier 1 with verification for goto
+  outputs, live values, register results, named labels and label-only bodies,
+  with rematerialization off, post scheduling and unrolling as well. It checks
+  execution against clang, no helper or leaf call, exact label addresses and
+  uniqueness. Record bodies keep emitted-code certification; opaque byte
+  spans report `opaque-asm`, while allocation certification still runs
+  ([the certificate guide](../tier1-certificate.md)). The driver also compares
+  (`c_check_register_variable_driver_test.c`, #1846) global register
   variables' and register labels' errors with clang's, whole output on both
   paths and on deferred bodies' lanes, and runs a program of rsp, rbp, esp and
   ebp variables by both tiers against clang -O0's build. `test-assembler` checks
@@ -88,7 +107,7 @@ requirements. [Command index](README.md).
 The C driver's `-S` mode also preserves constant offset markers after
 substitution. A raw `->` marker uses a zero-width asm body anchored at its
 emitted record. A standalone `.ascii` marker retains the byte range that the
-assembler gives its directive in the helper. The [driver guide](driver.md#-s-1362)
+assembler gives its directive in the assembled unit. The [driver guide](driver.md#-s-1362)
 describes the supported operands and output.
 
 Other supported inline assembly uses the same constraint checks and placement

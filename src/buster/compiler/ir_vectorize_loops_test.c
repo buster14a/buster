@@ -18,6 +18,7 @@
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 
 #define BUSTER_IR_VECTORIZE_TEST_BUFFER 16384u
+#define BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER 131072u
 #define BUSTER_IR_VECTORIZE_TEST_SYMBOL 1u
 #define BUSTER_IR_VECTORIZE_TEST_ENTRY 7u
 // At most 64, 32 and 16 bytes wide with masked moves, then 64 bytes without them, whose tails are the scalar loop's,
@@ -35,13 +36,13 @@ struct IrVectorizeTest
     bool killed[BUSTER_IR_VECTORIZE_MUTATIONS];
     const char* print;
     // An FNV-1a digest of every fixture's result and counts at every target, in order (#2924): frozen where the pass's
-    // vector path and its scalar twin agreed, then refrozen when refuse-width's bytes compared into a 64-bit count became
-    // a count (#2808) and the fixture a sum of bytes into a 64-bit total instead, every other fixture's part unchanged. The
-    // fixtures don't depend on the seed, which picks execution inputs alone.
+    // vector path and its scalar twin agreed, then refrozen for #2808's count and strided-store admissions. For the
+    // latter, every other original fixture's transformed IR and counts at all six targets match the base byte for
+    // byte. The fixtures don't depend on the seed, which picks execution inputs alone.
     uint64_t digest;
 };
 
-#define BUSTER_IR_VECTORIZE_TEST_DIGEST UINT64_C(0x3a88bba4da93aa12)
+#define BUSTER_IR_VECTORIZE_TEST_DIGEST UINT64_C(0xf27b1ae257b44c8d)
 
 typedef struct IrVectorizeTestFixture IrVectorizeTestFixture;
 struct IrVectorizeTestFixture
@@ -51,7 +52,10 @@ struct IrVectorizeTestFixture
     // 'r' a count of rows (0 to 4), 's' a start below the bound, 'o' a small offset, 'k' any scalar; and for a 32-bit
     // index that wraps (#2808), 'w' 0xfffffff8 (a wrap within the first 64-byte vector of 4-byte lanes) and 'q' a pointer that many 4-byte elements before one into the buffer;
     // and 'z' a pointer to the bound's elements 64 bytes apart whose last 8 bytes end the buffer (#2808: a strided
-    // load's bytes past the last element would be outside it).
+    // load's bytes past the last element would be outside it). The remaining strided cases use 'v' for a pointer
+    // around the middle of the larger buffer, 'h' for one whose last accessed byte ends the binding, or 'l' for one
+    // whose first accessed byte starts it. access_step and access_size describe those parameters' byte ranges.
+    // 'j' starts at 0x80000020; 'y' puts 4 * sext(i32 j)'s byte inside the binding, while 4 * zext(j)'s is outside it.
     const char* roles;
     // The loops vectorized at 64, 32 and 16 bytes (and at 64 without masked moves).
     uint32_t vectorized[3];
@@ -69,6 +73,15 @@ struct IrVectorizeTestFixture
     // Whether some trials fault (#2808: a 32-bit index's wrap): the input and the result must fault alike, leaving the
     // same bytes.
     bool faults;
+    // New large/reverse-stride fixtures use a larger binding without changing the original fixtures' input stream.
+    uint32_t memory_bytes;
+    int32_t access_step[3];
+    uint32_t access_size[3];
+    // A synthetic target without a mask/memory form may keep the entire loop scalar.
+    uint32_t scalar_targets;
+    // Nonzero: the exact appended vector loads at the full target, including masked loads. Grouping is observable
+    // here even when duplicated loads would still execute correctly.
+    uint32_t vector_loads;
 };
 
 static const IrVectorizeTestFixture ir_vectorize_test_fixtures[] = {
@@ -102,7 +115,7 @@ static const IrVectorizeTestFixture ir_vectorize_test_fixtures[] = {
     { .name = "nested", .roles = "pprn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "refuse-prefix-sum", .roles = "pn", .refusal = IR_VECTORIZE_REFUSE_DEPENDENCE },
     { .name = "refuse-histogram", .roles = "ppn", .refusal = IR_VECTORIZE_REFUSE_ADDRESS },
-    { .name = "refuse-strided", .roles = "ppn", .refusal = IR_VECTORIZE_REFUSE_ADDRESS },
+    { .name = "refuse-strided", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .scalar_targets = 1u << 3 },
     { .name = "refuse-iv-data", .roles = "pn", .refusal = IR_VECTORIZE_REFUSE_USE },
     { .name = "refuse-call", .roles = "pn", .refusal = IR_VECTORIZE_REFUSE_OPERATION },
     { .name = "refuse-volatile", .roles = "ppn", .refusal = IR_VECTORIZE_REFUSE_OPERATION },
@@ -164,9 +177,9 @@ static uint32_t ir_vectorize_test_bytes(uint32_t index)
 
 // One run of `function` in the interpreter on `buffer` (its first `bytes` bytes the binding), the arguments placed by
 // the fixture's roles.
-static InterpreterResult ir_vectorize_test_run(const IrFunction* function, uint8_t* buffer, const InterpreterValue* arguments, uint32_t count, Arena* execution)
+static InterpreterResult ir_vectorize_test_run(const IrFunction* function, uint8_t* buffer, uint32_t bytes, const InterpreterValue* arguments, uint32_t count, Arena* execution)
 {
-    const InterpreterBinding binding = { .symbol = BUSTER_IR_VECTORIZE_TEST_SYMBOL, .bytes = buffer, .size = BUSTER_IR_VECTORIZE_TEST_BUFFER, .writable = true };
+    const InterpreterBinding binding = { .symbol = BUSTER_IR_VECTORIZE_TEST_SYMBOL, .bytes = buffer, .size = bytes, .writable = true };
     const IrInterpreterFunction entry = { .symbol = BUSTER_IR_VECTORIZE_TEST_ENTRY, .function = function };
     const IrInterpreterProgram program = { .functions = &entry, .function_count = 1, .bindings = &binding, .binding_count = 1 };
     InterpreterOptions options = interpreter_default_options();
@@ -181,32 +194,54 @@ static InterpreterResult ir_vectorize_test_run(const IrFunction* function, uint8
 // from it by none, one byte, an element (of 1 to 8 bytes) or a vector either way, or far; the bound one of the lengths
 // around the vectors' boundaries (a signed one negative too); a start and an offset below 40; rows below 5; scalars
 // random. A 32-bit parameter takes the low bits.
-static uint32_t ir_vectorize_test_arguments(IrVectorizeTest* test, const IrFunction* function, const char* roles, uint8_t* buffer, uint32_t trial, InterpreterValue* arguments)
+static uint32_t ir_vectorize_test_arguments(IrVectorizeTest* test, const IrVectorizeTestFixture* fixture, const IrFunction* function, uint8_t* buffer, uint32_t bytes, uint32_t trial, InterpreterValue* arguments)
 {
     static const int64_t deltas[] = { 0, 1, -1, 2, -2, 4, -4, 8, -8, 16, -16, 63, -63, 64, -64, 128, -128, 4096 };
     static const int64_t lengths[] = { 0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 129, 255, 300 };
     static const int64_t signed_lengths[] = { -1, -17, INT32_MIN, 5 };
     const uint32_t count = function->parameter_count;
+    const char* roles = fixture->roles;
     uint64_t first = 0;
     const int64_t length = lengths[trial % BUSTER_ARRAY_LENGTH(lengths)];
     for (uint32_t k = 0; k < count && roles[k] != 0; k += 1)
     {
         const uint32_t type = function->parameter_types[k];
         uint64_t value = 0;
-        if (roles[k] == 'p' || roles[k] == 'q')
+        if (roles[k] == 'p' || roles[k] == 'q' || roles[k] == 'y')
         {
             const uint64_t place = first == 0 ? 3072 + ir_vectorize_test_next(test) % 4096 : first + (uint64_t)deltas[ir_vectorize_test_next(test) % BUSTER_ARRAY_LENGTH(deltas)];
             first = first == 0 ? place : first;
-            value = (uint64_t)(uintptr_t)(buffer + place) - (roles[k] == 'q' ? UINT64_C(0xfffffff8) * 4 : 0);
+            value = (uint64_t)(uintptr_t)(buffer + place) - (roles[k] == 'q' ? UINT64_C(0xfffffff8) * 4 : 0) + (roles[k] == 'y' ? UINT64_C(0x7fffffe0) * 4 : 0);
         }
         else if (roles[k] == 'w')
         {
             value = UINT64_C(0xfffffff8);
         }
+        else if (roles[k] == 'j')
+        {
+            value = UINT64_C(0x80000020);
+        }
         else if (roles[k] == 'z')
         {
             const uint64_t span = length > 0 ? (uint64_t)(length - 1) * 64 + 8 : 64;
             value = (uint64_t)(uintptr_t)(buffer + BUSTER_IR_VECTORIZE_TEST_BUFFER - span);
+        }
+        else if (roles[k] == 'v' || roles[k] == 'h' || roles[k] == 'l')
+        {
+            const int64_t step = k < BUSTER_ARRAY_LENGTH(fixture->access_step) ? fixture->access_step[k] : 0;
+            const uint64_t size = k < BUSTER_ARRAY_LENGTH(fixture->access_size) ? fixture->access_size[k] : 0;
+            const uint64_t distance = length > 0 ? (uint64_t)(length - 1) * (uint64_t)(step < 0 ? -step : step) : 0;
+            uint64_t place = first == 0 ? bytes / 2 + ir_vectorize_test_next(test) % 127 : first + (uint64_t)deltas[ir_vectorize_test_next(test) % BUSTER_ARRAY_LENGTH(deltas)];
+            if (roles[k] == 'h')
+            {
+                place = bytes - size - (step > 0 ? distance : 0);
+            }
+            else if (roles[k] == 'l')
+            {
+                place = step < 0 ? distance : 0;
+            }
+            first = first == 0 ? place : first;
+            value = (uint64_t)(uintptr_t)(buffer + place);
         }
         else if (roles[k] == 'n')
         {
@@ -237,35 +272,36 @@ static uint32_t ir_vectorize_test_arguments(IrVectorizeTest* test, const IrFunct
 // on every one.
 static bool ir_vectorize_test_agree(IrVectorizeTest* test, const IrVectorizeTestFixture* fixture, const IrFunction* before, const IrFunction* after, Arena* execution, uint8_t* buffers)
 {
+    const uint32_t bytes = fixture->memory_bytes == 0 ? BUSTER_IR_VECTORIZE_TEST_BUFFER : fixture->memory_bytes;
     uint8_t* initial = buffers;
-    uint8_t* left = buffers + BUSTER_IR_VECTORIZE_TEST_BUFFER;
-    uint8_t* right = buffers + 2 * BUSTER_IR_VECTORIZE_TEST_BUFFER;
+    uint8_t* left = buffers + bytes;
+    uint8_t* right = buffers + 2 * bytes;
     bool agree = true;
     for (uint32_t trial = 0; agree && trial < 132; trial += 1)
     {
-        for (uint32_t k = 0; k < BUSTER_IR_VECTORIZE_TEST_BUFFER; k += 8)
+        for (uint32_t k = 0; k < bytes; k += 8)
         {
             const uint64_t word = ir_vectorize_test_next(test);
             memcpy(initial + k, &word, 8);
         }
         InterpreterValue arguments[16] = { 0 };
         InterpreterValue moved[16] = { 0 };
-        const uint32_t count = ir_vectorize_test_arguments(test, before, fixture->roles, left, trial, arguments);
+        const uint32_t count = ir_vectorize_test_arguments(test, fixture, before, left, bytes, trial, arguments);
         // The same places in the other buffer.
         for (uint32_t k = 0; k < count; k += 1)
         {
-            const bool pointer = fixture->roles[k] == 'p' || fixture->roles[k] == 'q' || fixture->roles[k] == 'z';
+            const bool pointer = fixture->roles[k] == 'p' || fixture->roles[k] == 'q' || fixture->roles[k] == 'y' || fixture->roles[k] == 'z' || fixture->roles[k] == 'v' || fixture->roles[k] == 'h' || fixture->roles[k] == 'l';
             moved[k] = arguments[k];
             moved[k].low = pointer ? arguments[k].low - (uint64_t)(uintptr_t)left + (uint64_t)(uintptr_t)right : arguments[k].low;
         }
-        memcpy(left, initial, BUSTER_IR_VECTORIZE_TEST_BUFFER);
-        memcpy(right, initial, BUSTER_IR_VECTORIZE_TEST_BUFFER);
-        const InterpreterResult a = ir_vectorize_test_run(before, left, arguments, count, execution);
-        const InterpreterResult b = ir_vectorize_test_run(after, right, moved, count, execution);
+        memcpy(left, initial, bytes);
+        memcpy(right, initial, bytes);
+        const InterpreterResult a = ir_vectorize_test_run(before, left, bytes, arguments, count, execution);
+        const InterpreterResult b = ir_vectorize_test_run(after, right, bytes, moved, count, execution);
         // A returned pointer would differ by the buffers' distance: no fixture returns one. A fault's value is none.
         const bool ok = a.status == INTERPRETER_OK;
         const bool value = !ok || (a.value.low == b.value.low && a.value.high == b.value.high);
-        agree = (ok || fixture->faults) && a.status == b.status && value && memcmp(left, right, BUSTER_IR_VECTORIZE_TEST_BUFFER) == 0;
+        agree = (ok || fixture->faults) && a.status == b.status && value && memcmp(left, right, bytes) == 0;
     }
     return agree;
 }
@@ -319,7 +355,7 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
             }
         }
         // Without selects of 32- and 64-bit lanes (t == 4) a loop may vectorize or not: its tail is the scalar loop's.
-        const uint32_t expected = fixture->refusal == IR_VECTORIZE_REFUSALS ? fixture->vectorized[t >= 3 ? 0 : t] : 0;
+        const uint32_t expected = fixture->refusal == IR_VECTORIZE_REFUSALS && ((fixture->scalar_targets >> t) & 1) == 0 ? fixture->vectorized[t >= 3 ? 0 : t] : 0;
         snprintf(what, sizeof(what), "%u loops vectorized at %u bytes, %u expected", a.vectorized, bytes, expected);
         ir_vectorize_test_expect(test, ac.error == IR_OK && (t == 4 ? a.vectorized <= expected : a.vectorized == expected && a.changed == (expected != 0)), fixture->name, what);
         // #2807: every integer loop's tail is masked where the target has masked moves, and none otherwise; without
@@ -339,6 +375,16 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
         }
         if (ac.error == IR_OK && a.changed)
         {
+            if (t == 0 && fixture->vector_loads != 0)
+            {
+                uint32_t loads = 0;
+                for (uint32_t i = function.instruction_count; i < a.function.instruction_count; i += 1)
+                {
+                    loads += ir_vector_type(a.function.type[i]) && (a.function.op[i] == IR_LOAD || a.function.op[i] == IR_MASKED_LOAD);
+                }
+                snprintf(what, sizeof(what), "%u vector loads after grouping, %u expected", loads, fixture->vector_loads);
+                ir_vectorize_test_expect(test, loads == fixture->vector_loads, fixture->name, what);
+            }
             if (t == 0 && test->print != NULL && strcmp(test->print, fixture->name) == 0)
             {
                 ir_print(&a.function, scratch, stdout);
@@ -498,7 +544,7 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
         Arena cleanup = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 28);
         Arena execution = arena_reserve(UINT64_C(1) << 28);
-        uint8_t* buffers = calloc(3, BUSTER_IR_VECTORIZE_TEST_BUFFER);
+        uint8_t* buffers = calloc(3, BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER);
         const bool ready = source.base != 0 && input.base != 0 && vector.base != 0 && cleanup.base != 0 && scratch.base != 0 && execution.base != 0 && buffers != NULL;
         ir_vectorize_test_expect(&test, ready, "setup", "the arenas and buffers are reserved");
         for (uint32_t k = 0; ready && k < BUSTER_ARRAY_LENGTH(ir_vectorize_test_fixtures); k += 1)
@@ -512,6 +558,10 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
         }
         // These cases postdate the frozen digest from #2924. Check their admission and execution at each width.
         static const IrVectorizeTestFixture minmax[] = {
+            { .name = "fma-f64", .roles = "ppkn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
+            { .name = "sitofp-i64", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
+            { .name = "uitofp-i32", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
+            { .name = "uitofp-i64", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
             { .name = "minmax-select", .roles = "pnk", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
             { .name = "refuse-minmax-clobber", .roles = "pnk", .refusal = IR_VECTORIZE_REFUSE_SHAPE },
             { .name = "refuse-minmax-partial", .roles = "ppnk", .refusal = IR_VECTORIZE_REFUSE_USE },
@@ -520,8 +570,8 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
             // and a 32-bit index that wraps.
             { .name = "count-u8", .roles = "pnk", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .counts = 1 },
             { .name = "count-i32", .roles = "pnkk", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .counts = 1 },
-            { .name = "aos-sum", .roles = "pn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
-            { .name = "rgb-gray", .roles = "ppm", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
+            { .name = "aos-sum", .roles = "pn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .vector_loads = 2 },
+            { .name = "rgb-gray", .roles = "ppm", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .vector_loads = 1 },
             { .name = "strided-pairs-i16", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
             { .name = "stride8-u8", .roles = "pn", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
             // Elements 64 bytes apart, the last ending the buffer (past 255 of them, its start is before the buffer: both fault):
@@ -533,9 +583,67 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
         {
             ir_vectorize_test_fixture(&test, &minmax[k], &source, &input, &vector, &cleanup, &scratch, &execution, buffers);
         }
+        // #2808's remaining affine accesses: exact binding ends, reverse traversal, large strides, every stored
+        // lane width, and aliased input/output pointers. The whole binding is compared, including untouched gaps.
+        static const IrVectorizeTestFixture strided[] = {
+            { .name = "stride9-i32", .roles = "hn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 36 }, .access_size = { 4 }, .scalar_targets = 1u << 3 },
+            { .name = "stride17-i64", .roles = "hn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 136 }, .access_size = { 8 }, .scalar_targets = (1u << 3) | (1u << 5) },
+            { .name = "reverse-i32", .roles = "ln", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { -4 }, .access_size = { 4 } },
+            { .name = "reverse-stride17-i64", .roles = "ln", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { -136 }, .access_size = { 8 }, .scalar_targets = (1u << 3) | (1u << 5) },
+            { .name = "reverse-stride3-i16", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 2, -6 }, .access_size = { 2, 2 } },
+            { .name = "reverse-stride9-i32", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 4, -36 }, .access_size = { 4, 4 }, .scalar_targets = 1u << 3 },
+            { .name = "store-stride3-u8", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 3, 1 }, .access_size = { 1, 1 }, .scalar_targets = 1u << 3 },
+            { .name = "store-reverse-stride3-i16", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { -6, 2 }, .access_size = { 2, 2 }, .scalar_targets = 1u << 3 },
+            { .name = "store-stride9-i32", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 36, 4 }, .access_size = { 4, 4 }, .scalar_targets = 1u << 3 },
+            { .name = "store-reverse-stride17-i64", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { -136, 8 }, .access_size = { 8, 8 }, .scalar_targets = (1u << 3) | (1u << 5) },
+            { .name = "copy-opposite-strides-i32", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { -36, 36 }, .access_size = { 4, 4 }, .scalar_targets = 1u << 3 },
+            { .name = "copy-stride17-u8", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 1, 17 }, .access_size = { 1, 1 }, .scalar_targets = 1u << 3 },
+            { .name = "store-stride9-u8", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 9, 1 }, .access_size = { 1, 1 }, .scalar_targets = 1u << 3 },
+            { .name = "store-stride17-u8", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 17, 1 }, .access_size = { 1, 1 }, .scalar_targets = 1u << 3 },
+            { .name = "copy-opposite-strides-i16", .roles = "vvn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { -18, 34 }, .access_size = { 2, 2 }, .scalar_targets = 1u << 3 },
+            { .name = "aos-order-i32", .roles = "hn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 16 }, .access_size = { 16 }, .vector_loads = 4 },
+            { .name = "aos-partial-i32", .roles = "hn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 16 }, .access_size = { 12 }, .vector_loads = 4 },
+            { .name = "aos-mixed-width", .roles = "hn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 16 }, .access_size = { 8 }, .vector_loads = 8 },
+            { .name = "strided-extension-domains", .roles = "ynj", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .faults = true },
+            // Unary negation is an affine reverse index too. Its unsigned 32-bit extension wraps after the ninth
+            // element; the vector guard must preserve the scalar fault after the initial valid accesses.
+            { .name = "narrow-negation-wrap", .roles = "pnw", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .faults = true },
+            // 2^31 + 1 elements per step requires qword indices. With i32 data, the lanes shrink until the index
+            // vector fits; a 16-byte-only target has no legal shape. Both functions fault at their second element.
+            { .name = "qword-index-i32", .roles = "pn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .faults = true,
+              .scalar_targets = (1u << 3) | (1u << 5) },
+            { .name = "qword-index-reverse-i64", .roles = "pn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .faults = true,
+              .scalar_targets = (1u << 3) | (1u << 5) },
+            { .name = "strided-store-reload-i32", .roles = "vn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
+              .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 8 }, .access_size = { 4 }, .scalar_targets = 1u << 3, .vector_loads = 4 },
+            { .name = "refuse-overlapping-stride-i32", .roles = "ppn", .refusal = IR_VECTORIZE_REFUSE_ADDRESS },
+        };
+        for (uint32_t k = 0; ready && k < BUSTER_ARRAY_LENGTH(strided); k += 1)
+        {
+            ir_vectorize_test_fixture(&test, &strided[k], &source, &input, &vector, &cleanup, &scratch, &execution, buffers);
+        }
         ir_vectorize_test_scans(&test);
         static const char* const mutants[BUSTER_IR_VECTORIZE_MUTATIONS] = {
             "none", "no overlap test", "an unrounded tail", "a reduction's identity", "the lanes' width", "a masked tail's lane more", "no 32-bit index wrap test", "a strided load's lane",
+            "a reverse access's direction", "a sparse store's mask", "a shared load's member", "no shared load relation guard",
         };
         for (uint32_t mutation = 1; ready && mutation < BUSTER_IR_VECTORIZE_MUTATIONS; mutation += 1)
         {

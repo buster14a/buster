@@ -38,6 +38,49 @@
 #define BUSTER_CHECK_PROGRAM_HELPER_X86 (BUSTER_CHECK_PROGRAM_HELPER_FIXED + (uint32_t)BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_rules) * 16u)
 #define BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES (BUSTER_CHECK_PROGRAM_HELPER_X86 + (uint32_t)CBUILTIN_X86_HELPER_COUNT)
 #define BUSTER_CHECK_PROGRAM_HELPER_IMMEDIATES (BUSTER_CBUILTIN_X86_IMMEDIATE_COUNT * BUSTER_CBUILTIN_X86_IMMEDIATE_VALUES)
+#define BUSTER_CHECK_PROGRAM_HELPER_SEGMENTS 16u
+
+// Clang's x86 address spaces, in the typed stream's and encoder's common numbering. The memory access carries this
+// separately from its offset; converting a pointer to the ordinary address ABI must not discard it.
+static uint8_t check_program_segment(const TypeTable* types, TypeId type)
+{
+    const uint32_t space = type_address_space(type_object_qualifiers(types, type));
+    const uint32_t target = space - BUSTER_TYPE_SPACE_TARGET;
+    static const uint8_t segments[3] = { BUSTER_TYPED_SEGMENT_GS, BUSTER_TYPED_SEGMENT_FS, BUSTER_TYPED_SEGMENT_SS };
+    return space >= BUSTER_TYPE_SPACE_TARGET && target >= 256 && target <= 258 ? segments[target - 256] : 0;
+}
+
+// Read the source pointer's pointee before the builtin conversion erases its address space. Only actual pointer or
+// array arguments carry an override, not integer offsets or a compare-exchange's desired value.
+static uint8_t check_program_argument_segment(const CheckProgram* program, uint32_t node, uint32_t argument)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const TypeTable* types = program->types;
+    const bool present = types != NULL && graph->argument_counts != NULL && graph->argument_offsets != NULL && graph->argument_nodes != NULL &&
+                         argument < graph->argument_counts[node];
+    const TypeId type = present ? type_strip_aligned(types, check_stream_type(program->stream, graph->argument_nodes[graph->argument_offsets[node] + argument])) : 0;
+    const uint8_t kind = type != 0 ? type_kind(types, type) : BUSTER_TYPE_KIND_VOID;
+    return kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? check_program_segment(types, type_element(types, type)) : 0;
+}
+
+// An asm register output can be an element of a vector or a real/imaginary part whose own type has lost its parent's
+// space. Retain the access's space before the operand is converted to a register value or an address-block slot.
+static uint8_t check_program_lvalue_segment(const CheckProgram* program, uint32_t node)
+{
+    const CheckStream* stream = program->stream;
+    const CheckGraph* graph = &program->input->graph;
+    const TypeTable* types = program->types;
+    uint8_t segment = node < stream->count ? check_program_segment(types, check_stream_type(stream, node)) : 0;
+    const uint32_t operand = node < stream->count ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    if (segment == 0 && operand < stream->count && check_stream_category(stream, operand) == CHECK_LVALUE)
+    {
+        const CheckOp op = graph->ops[node];
+        const bool part = (op == CHECK_OP_REAL || op == CHECK_OP_IMAGINARY) && check_action_kind(types, check_stream_type(stream, operand)) == BUSTER_TYPE_KIND_COMPLEX;
+        const bool element = op == CHECK_OP_SUBSCRIPT && (check_stream_flags(stream, node) & BUSTER_CHECK_VECTOR_ELEMENT) != 0;
+        segment = part || element ? check_program_segment(types, check_stream_type(stream, operand)) : 0;
+    }
+    return segment;
+}
 
 typedef struct CheckProgramHelper CheckProgramHelper;
 struct CheckProgramHelper
@@ -52,6 +95,8 @@ struct CheckProgramHelper
     // A read/modify/write leaf's (c_builtin_atomic_rmw_helpers.c) value format.
     CBuiltinAtomicRmwFormat rmw_format;
     bool rmw;
+    // Atomic helper accesses: the object's segment in bits 0..1, GNU CAS's expected pointer's in bits 2..3.
+    uint8_t segments;
     CheckBuiltinMathKind math_kind;
     TypeId floating_type;
     bool terminates;
@@ -908,9 +953,12 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     // String-comparison leaves have a distinct body for each imm8. Their dense key table is allocated only for a
     // unit that reaches one, keeping ordinary units' fixed-key initialization unchanged.
     uint32_t* immediate_keys = NULL;
+    // Atomic helpers keep ordinary units' key table unchanged. A segmented unit deduplicates the object/expected
+    // override pair separately, so a flat, FS and GS call of the same builtin cannot share the wrong body.
+    uint32_t* segment_keys = NULL;
     // At most a signature per builtin node, and per key.
     const uint64_t candidates = valid ? (uint64_t)program->builtin_count + (uint32_t)__builtin_popcount(implicit_widths) * 3 : 0;
-    const uint32_t maximum = BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES + BUSTER_CHECK_PROGRAM_HELPER_IMMEDIATES;
+    const uint32_t maximum = BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES * BUSTER_CHECK_PROGRAM_HELPER_SEGMENTS + BUSTER_CHECK_PROGRAM_HELPER_IMMEDIATES;
     const uint32_t signatures = candidates < maximum ? (uint32_t)candidates : maximum;
     CheckProgramHelperUse* uses = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelperUse, program->builtin_count) : 0;
     CheckProgramHelper* planned = signatures != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelper, signatures) : 0;
@@ -1187,6 +1235,14 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                         }
                     }
                 }
+                if (result->status == CHECK_PROGRAM_OK && !folded && graph->ops[node] == CHECK_OP_BUILTIN_ATOMIC)
+                {
+                    helper.segments = check_program_argument_segment(program, node, 0);
+                    if (helper.id == CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N)
+                    {
+                        helper.segments |= (uint8_t)(check_program_argument_segment(program, node, 1) << 2);
+                    }
+                }
                 if (result->status == CHECK_PROGRAM_OK && !folded)
                 {
                     const bool specialized = helper.x86 != CBUILTIN_X86_HELPER_NONE && cbuiltin_x86_helper_infos[helper.x86].immediate_argument != 0;
@@ -1207,7 +1263,17 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                                 memset(immediate_keys, 0, BUSTER_CHECK_PROGRAM_HELPER_IMMEDIATES * sizeof(*immediate_keys));
                             }
                         }
-                        uint32_t* entry = specialized ? (immediate_keys != NULL ? immediate_keys + key : NULL) : keys + key;
+                        if (helper.segments != 0 && segment_keys == NULL)
+                        {
+                            const uint32_t count = BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES * (BUSTER_CHECK_PROGRAM_HELPER_SEGMENTS - 1);
+                            segment_keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);
+                            if (segment_keys != NULL)
+                            {
+                                memset(segment_keys, 0, (uint64_t)count * sizeof(*segment_keys));
+                            }
+                        }
+                        uint32_t* entry = specialized ? (immediate_keys != NULL ? immediate_keys + key : NULL) :
+                                          helper.segments != 0 ? (segment_keys != NULL ? segment_keys + (helper.segments - 1) * BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES + key : NULL) : keys + key;
                         if (entry == NULL)
                         {
                             result->status = CHECK_PROGRAM_RESOURCE;
@@ -1319,6 +1385,25 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
         {
             const CBuiltinAtomicHelper native = cbuiltin_atomic_helper_emit(helper->id, helper->bytes, output);
             helper->code = native.code;
+        }
+        // These leaf ABIs keep the object in RDI and GNU CAS's expected address in RSI throughout their bodies.
+        // Other memory (the IEEE helpers' MXCSR scratch) is their own frame and remains flat.
+        for (uint32_t r = 0; helper->segments != 0 && helper->code.error == TIER0_OK && r < helper->code.count; r += 1)
+        {
+            X86Instruction* record = helper->code.records + r;
+            const uint32_t segment = record->rm == X86_REGISTER_RDI ? helper->segments & 3u :
+                                     record->rm == X86_REGISTER_RSI ? helper->segments >> 2 : 0;
+            if (segment != 0 && record->mode == BUSTER_X86_MEMORY_BASE)
+            {
+                if (x86_form_has_segment(record->form, segment))
+                {
+                    record->form = (uint16_t)(record->form + segment * X86_FORM_COUNT);
+                }
+                else
+                {
+                    helper->code.error = TIER0_ERROR_UNSUPPORTED;
+                }
+            }
         }
         if (helper->code.error != TIER0_OK)
         {

@@ -10,14 +10,18 @@
 // table also contains the unused function's initializer; --lower-all deliberately keeps that function and its image.
 static void check_test_driver_selected_initializer_pool(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    char source[] = "tests/driver/selected_initializer_pool.c";
+    char source[PATH_MAX];
+    char main_source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/selected_initializer_pool.c") &&
+                         check_test_fixture_path(main_source, sizeof(main_source), "driver/selected_initializer_pool_main.c");
+    check_test_expect(test, located, "selected initializer pool: fixture paths fit");
     char reference[256], object[256], executable_path[256];
     snprintf(reference, sizeof(reference), "%s/selected-init-pool-clang.o", directory);
     snprintf(object, sizeof(object), "%s/selected-init-pool.o", directory);
     snprintf(executable_path, sizeof(executable_path), "%s/selected-init-pool", directory);
     char* text = NULL;
     char* reference_arguments[] = { (char*)clang, "-std=gnu17", "-O0", "-c", "-o", reference, source, NULL };
-    const int reference_status = check_test_driver_spawn(reference_arguments, &text);
+    const int reference_status = located ? check_test_driver_spawn(reference_arguments, &text) : -1;
     if (reference_status != 0 && text != NULL)
     {
         fprintf(stderr, "%s", text);
@@ -40,7 +44,7 @@ static void check_test_driver_selected_initializer_pool(CheckTest* test, const c
                                  check_test_elf_range(reference_elf.file, reference_rodata->sh_offset, reference_rodata->sh_size) &&
                                  check_test_elf_defined(&reference_elf, "used") != 0 && check_test_elf_defined(&reference_elf, "dead") == 0;
     check_test_expect(test, reference_valid, "Clang emits the live initializer image and omits the dead function");
-    for (uint32_t mode = 0; mode < 4; mode += 1)
+    for (uint32_t mode = 0; located && mode < 4; mode += 1)
     {
         const bool scalar = (mode & 1) != 0;
         const bool all = (mode & 2) != 0;
@@ -88,7 +92,7 @@ static void check_test_driver_selected_initializer_pool(CheckTest* test, const c
         snprintf(description, sizeof(description), "selected initializer pools match object selection (%s, %s)",
                  scalar ? "scalar" : "vector", all ? "all bodies" : "selected bodies");
         check_test_expect(test, bytes, description);
-        char* link_arguments[] = { (char*)clang, object, "tests/driver/selected_initializer_pool_main.c", "-o", executable_path, NULL };
+        char* link_arguments[] = { (char*)clang, object, main_source, "-o", executable_path, NULL };
         text = NULL;
         const int linked = status == 0 ? check_test_driver_spawn(link_arguments, &text) : 1;
         if (linked != 0 && text != NULL)

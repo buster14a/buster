@@ -2131,8 +2131,13 @@ primary's and each note's, the renderer writes clang's caret display
 line numbers and a caret under the column ([the preprocessor
 guide](commands/preprocessor.md#caret-display-2376)), with the highlighted
 ranges a diagnostic's producer gives it, mapped through the expansion history
-as clang maps them. Fix-its and scratch-space excerpts are #2376's later
-pieces.
+as clang maps them. Primary and attached-note fix-its own their replacement
+text through collection and publication, and contribute removal ranges and
+insertion lines. Generated spellings have scratch-space excerpts; a paste
+retains its replacement-list endpoints for the macro note's range. A computed
+angled header records its generated spelling only on a diagnostic path.
+Named Unicode escape corrections keep their suggestion text through the same
+ownership path, including character-offset notes in unevaluated strings.
 
 The renderer assembles one diagnostic, its include stack and all expansion or
 definition notes in a 2 KiB stack buffer, growing into temporary scratch only
@@ -3599,9 +3604,9 @@ spellings alone would miss this change (#272).
   #109's comparison prints our stream with clang's spacing
   ([the fuzzing](preprocessor-fuzz.md), "Clang's `-P` printer, emulated").
 - Diagnostics include presumed locations, include stacks and macro backtraces
-  (#108, above), and clang's source lines, carets and, for the diagnostics
-  that give them so far, highlighted ranges (#2376); not yet fix-it lines or
-  scratch space's lines.
+  (#108, above), and clang's source lines, carets, producer-selected highlighted
+  ranges, independent note ranges and fix-it lines, and scratch-space excerpts
+  (#2376).
 - C++ (`-x c++`), dependency output (`-M`) aren't supported.
 - `-E`'s line markers for the pragma lines that a `_Pragma` without its `(`
   reads past (a directive's among a macro's arguments, another `_Pragma`'s):
@@ -3645,8 +3650,10 @@ spellings alone would miss this change (#272).
   an error at the backslash, both diagnosed where clang's lexer would read the
   UCN, as an invalid raw string literal's delimiter is: in active text, a
   directive's line, a macro's definition (once) and an unused argument, not in
-  a skipped group, a literal or a comment (`pp_named_ucn_at`,
-  `pp_diagnose_named_ucn`). In `#if`, a character constant's `\N{name}` is its
+  a literal or a comment (`pp_named_ucn_at`, `pp_diagnose_named_ucn`). A skipped
+  group still diagnoses an exact name's basic or control character, while its
+  malformed-name errors and extension warnings stay suppressed. In `#if`, a
+  character constant's `\N{name}` is its
   character (`pp_parse_named_ucn`), with clang's errors and notes at their
   bytes otherwise (a missing brace, an empty or unterminated name, a name not
   Unicode's with its "did you mean" notes, a basic or control character's
@@ -3730,8 +3737,8 @@ spellings alone would miss this change (#272).
   *before* its own note, which clang has because it prints the warning as it reads the marker. A diagnostic given
   while `Preprocessor.diagnostic_line_notes` is set keeps that count (`PPDiagnosticRecord.line_notes`), and its
   rendering presumes its place under those notes alone (`Preprocessor.presumed_note_limit`, `pp_presumed`,
-  `pp_line_note_at`), so a collected diagnostic reads the numbering its own run had. Not clang's yet, for `\N` as for `\u`: the error of a basic
-  or control character's UCN in a skipped group, which clang gives; a UCN of a
+  `pp_line_note_at`), so a collected diagnostic reads the numbering its own run had.
+  Not clang's yet, for `\N` as for `\u`: a UCN of a
   character no identifier may have within one ("character <U+2603> not allowed
   in an identifier"), which clang reads into the identifier after that error.
   The candidates' search takes a backslash before `u` and `U` too, so a `\u`
@@ -3743,9 +3750,16 @@ spellings alone would miss this change (#272).
   reads whole, of a character below U+00A0 or a surrogate, is clang's error at
   its backslash (`BUSTER_PP_UCN_ERROR`, `pp_diagnose_ucn`): "character 'A'
   cannot be specified by a universal character name", "universal character
-  name refers to a control character" or "invalid universal character". Not
-  clang's yet: that error in a skipped group, which clang gives (`\u` and `\N`
-  alike).
+  name refers to a control character" or "invalid universal character". These
+  hard character errors remain in skipped groups (`pp_read_skipped_ucns`),
+  including inactive directive operands, as clang's raw lexer gives them.
+  The sparse raw-error records are read between conditional-structure reports
+  to retain source order, including after a header query re-lexes a condition.
+  Malformed-name and incomplete-UCN diagnostics, extension warnings, and the
+  contents of literals and comments stay suppressed there. Runtime fixtures
+  under `tests/preprocessor/raw-errors/` compare the complete diagnostic output
+  with Clang, including nested and unterminated groups, splices, trigraphs,
+  included files and presumed line numbers.
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.

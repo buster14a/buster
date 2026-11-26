@@ -536,6 +536,14 @@ struct IrAsmBody
     // Whether it moves an input into rsp (#1846: rsp's explicit register variable, Tier0AsmBody.stack): its function's
     // frame is then the program's, which the code certificate leaves uncertified.
     bool stack;
+    // The records reserve assembled bytes copied during final emission (#2351). Record transformations preserve
+    // their span, and a certificate of the placeholders cannot certify the bytes that replace them.
+    bool opaque;
+    // Named labels retained by the front end, relative to the body's first record (its count for the end). Their
+    // names are front-end indices passed through to emission. Such a body cannot be duplicated by the inliner.
+    const uint32_t* label_records;
+    const uint32_t* label_names;
+    uint32_t label_count;
     // Its register operands' registers (#2144), one location per argument past the block, `passed` of them.
     const AbiLocation* locations;
     uint32_t passed;
@@ -1998,9 +2006,10 @@ static uint8_t ir_asm_result_type(const IrAsmBody* body, uint32_t reg)
 // register operand (#2144), each in a register; and the body's branch columns in order, each branch a record of it and
 // each target one of its records or its end. A non-void call returns its primary register's declared scalar type;
 // every declared result is in a touched register, and only declared results have a width bit.
+// Named labels identify a record or the end and must remain unique through transformations (#2351).
 static bool ir_body_call_valid(const IrFunction* f, const IrCall* call)
 {
-    const IrAsmBody* body = call->body <= f->asm_body_count ? &f->asm_bodies[call->body - 1] : 0;
+    const IrAsmBody* body = call->body != 0 && call->body <= f->asm_body_count ? &f->asm_bodies[call->body - 1] : 0;
     const bool block = body != 0 && call->argument_count > body->passed;
     const bool result = body != 0 && body->result != 0;
     bool valid = body != 0 && call->row == 0 && call->abi == 0 && !call->variadic && call->argument_count - body->passed <= 1 &&
@@ -2010,7 +2019,8 @@ static bool ir_body_call_valid(const IrFunction* f, const IrCall* call)
                  (body->result_registers & ~body->touched) == 0 && (body->result_wide & ~body->result_registers) == 0 &&
                  (body->result_registers & (1u << X86_REGISTER_RSP)) == 0 &&
                  (body->passed == 0 || body->locations != 0) &&
-                 (body->count == 0 || body->records != 0) && body->branch_count <= body->count && (body->branch_count == 0 || (body->branches != 0 && body->targets != 0));
+                 (body->count == 0 || body->records != 0) && body->branch_count <= body->count && (body->branch_count == 0 || (body->branches != 0 && body->targets != 0)) &&
+                 (body->label_count == 0 || (body->label_records != 0 && body->label_names != 0));
     for (uint32_t k = 0; valid && k < body->passed; k += 1)
     {
         const uint8_t type = f->call_types[call->type_first + (block ? 1 : 0) + k];
@@ -2019,6 +2029,10 @@ static bool ir_body_call_valid(const IrFunction* f, const IrCall* call)
     for (uint32_t k = 0; valid && k < body->branch_count; k += 1)
     {
         valid = body->branches[k] < body->count && (k == 0 || body->branches[k - 1] < body->branches[k]) && body->targets[k] <= body->count;
+    }
+    for (uint32_t k = 0; valid && k < body->label_count; k += 1)
+    {
+        valid = body->label_records[k] <= body->count;
     }
     return valid;
 }

@@ -223,6 +223,35 @@ static void pp_history_argument(Preprocessor* pp, const PPTokens* tokens, uint32
     }
 }
 
+// The operand following a paste or stringification operator in its definition. The retained token starts skip splices;
+// this runs only while recording expansion history, when the definition's columns are still live.
+static uint32_t pp_history_paste_end(const Preprocessor* pp, uint32_t location, uint32_t fallback)
+{
+    const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    const uint32_t file = range != BUSTER_PP_NONE ? pp->ranges[range].file : BUSTER_PP_NONE;
+    const PPFileData* data = file != BUSTER_PP_NONE ? &pp->datas[pp->files[file].data] : NULL;
+    uint32_t result = fallback;
+    if (data != NULL && data->starts != NULL)
+    {
+        const uint32_t offset = location - pp->ranges[range].base;
+        uint32_t low = 0;
+        uint32_t high = data->token_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = data->starts[middle] <= offset;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        while (low < data->token_count && pp_comment_token(data->bytes, data->kinds[low], data->starts[low]))
+        {
+            low += 1;
+        }
+        result = low < data->token_count ? pp->ranges[range].base + data->starts[low] : fallback;
+    }
+    return result;
+}
+
 static uint32_t pp_history_generated(Preprocessor* pp, PPGeneratedKind kind, uint32_t location, uint32_t anchor, const PPSource* sources, uint32_t count)
 {
     uint32_t result = 0;
@@ -236,6 +265,7 @@ static uint32_t pp_history_generated(Preprocessor* pp, PPGeneratedKind kind, uin
                 .expansion = pp->history_current,
                 .location = location,
                 .anchor = anchor,
+                .end = kind == PP_GENERATED_PASTE || kind == PP_GENERATED_STRING ? pp_history_paste_end(pp, kind == PP_GENERATED_PASTE ? pp->history_anchor : anchor, anchor) : anchor,
                 .first = pp->history_source_count,
                 .count = count,
                 .kind = kind,
@@ -602,15 +632,71 @@ static void pp_snippet_add_lines(uint32_t* first, uint32_t* last, uint32_t begin
     }
 }
 
+// Replacement text on one source line, at the original display columns. Sorting this bounded set also preserves
+// producer order for inserts at the same place. A multiline replacement is not representable on one insertion line.
+static void pp_snippet_fixits(PPDiagnostic* diagnostic, const PPDiagnosticFixIt* fixits, uint32_t fixit_count,
+                             const bool* kept, const uint32_t* begin_lines, const uint32_t* begin_bytes,
+                             uint32_t line, uint32_t length, const uint32_t* columns, uint32_t gutter)
+{
+    uint32_t order[BUSTER_PP_DIAGNOSTIC_FIXITS];
+    uint32_t count = 0;
+    for (uint32_t f = 0; f < fixit_count; f += 1)
+    {
+        const char* text = fixits[f].text;
+        const bool shown = kept[f] && begin_lines[f] == line && begin_bytes[f] <= length && text != NULL && text[0] != 0 &&
+                           strchr(text, '\n') == NULL && strchr(text, '\r') == NULL;
+        if (shown)
+        {
+            uint32_t at = count;
+            while (at != 0 && begin_bytes[order[at - 1]] > begin_bytes[f])
+            {
+                order[at] = order[at - 1];
+                at -= 1;
+            }
+            order[at] = f;
+            count += 1;
+        }
+    }
+    uint32_t column = 0;
+    if (count != 0 && gutter != 0)
+    {
+        pp_diagnostic_append(diagnostic, "%*s| ", (int)(gutter + 2), "");
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t f = order[i];
+        const uint32_t target = pp_snippet_containing_column(columns, begin_bytes[f]);
+        const uint32_t spaces = target > column ? target - column : 0;
+        pp_diagnostic_append(diagnostic, "%*s%s", (int)spaces, "", fixits[f].text);
+        column += spaces;
+        const uint8_t* text = (const uint8_t*)fixits[f].text;
+        const uint64_t size = strlen(fixits[f].text);
+        for (uint64_t at = 0; at < size;)
+        {
+            const uint8_t byte = text[at];
+            const uint32_t claimed = byte < 0xC0 ? 1 : byte < 0xE0 ? 2 : byte < 0xF0 ? 3 : 4;
+            const uint32_t point = claimed <= size - at ? pp_snippet_code_point(text + at, claimed) : UINT32_MAX;
+            const int32_t width = point != UINT32_MAX && point >= 0x80 ? unicode_column_width(point) : 1;
+            column += width >= 0 ? (uint32_t)width : 1;
+            at += point != UINT32_MAX ? claimed : 1;
+        }
+    }
+    if (count != 0)
+    {
+        pp_diagnostic_append(diagnostic, "\n");
+    }
+}
+
 // The source lines and caret under a diagnostic's line at `location`, its printed place (or a note's, with `note`), as
 // clang's emitSnippetAndCaret shows them, with `ranges` (`range_count`, mapped into its file: pp_diagnostic_map_range)
 // marked with '~': none where carets are off, at no place or a place in scratch space, or at the last diagnostic's
 // place again when this one has no range (but after a note where this one is no note), as clang's LastLoc rule says;
 // none past the file's end or the limits above. The caret's line and as many of its ranges' lines around it as the
 // snippet's line limit allows, each its physical line, the gutter numbered from the presumed one of the first.
-static void pp_diagnostic_snippet(Preprocessor* pp, PPDiagnostic* diagnostic, uint32_t location, bool note, const PPDiagnosticRange* ranges, uint32_t range_count)
+static void pp_diagnostic_snippet(Preprocessor* pp, PPDiagnostic* diagnostic, uint32_t location, bool note, const PPDiagnosticRange* ranges, uint32_t range_count,
+                                  const PPDiagnosticFixIt* fixits, uint32_t fixit_count)
 {
-    const bool repeated = location == pp->diagnostic_caret_location && range_count == 0 && (!pp->diagnostic_caret_note || note);
+    const bool repeated = location == pp->diagnostic_caret_location && range_count == 0 && fixit_count == 0 && (!pp->diagnostic_caret_note || note);
     const uint32_t range = pp->options.carets && location != 0 && !repeated ? pp_find_range(pp, location) : BUSTER_PP_NONE;
     const uint32_t file = range != BUSTER_PP_NONE ? pp->ranges[range].file : BUSTER_PP_NONE;
     PPFileData* data = file != BUSTER_PP_NONE ? &pp->datas[pp->files[file].data] : NULL;
@@ -628,24 +714,27 @@ static void pp_diagnostic_snippet(Preprocessor* pp, PPDiagnostic* diagnostic, ui
         uint32_t last = caret_line;
         // Each range's lines and bytes in the caret's file (findLinesForRange, prepareAndFilterRanges): its first byte's,
         // and its last token's and the byte after it.
-        uint32_t begin_lines[BUSTER_PP_DIAGNOSTIC_RANGES];
-        uint32_t begin_bytes[BUSTER_PP_DIAGNOSTIC_RANGES];
-        uint32_t end_lines[BUSTER_PP_DIAGNOSTIC_RANGES];
-        uint32_t end_bytes[BUSTER_PP_DIAGNOSTIC_RANGES];
-        bool kept[BUSTER_PP_DIAGNOSTIC_RANGES];
-        const uint32_t count = range_count < BUSTER_PP_DIAGNOSTIC_RANGES ? range_count : BUSTER_PP_DIAGNOSTIC_RANGES;
+        uint32_t begin_lines[BUSTER_PP_DIAGNOSTIC_RANGES + BUSTER_PP_DIAGNOSTIC_FIXITS] = { 0 };
+        uint32_t begin_bytes[BUSTER_PP_DIAGNOSTIC_RANGES + BUSTER_PP_DIAGNOSTIC_FIXITS] = { 0 };
+        uint32_t end_lines[BUSTER_PP_DIAGNOSTIC_RANGES + BUSTER_PP_DIAGNOSTIC_FIXITS] = { 0 };
+        uint32_t end_bytes[BUSTER_PP_DIAGNOSTIC_RANGES + BUSTER_PP_DIAGNOSTIC_FIXITS] = { 0 };
+        bool kept[BUSTER_PP_DIAGNOSTIC_RANGES + BUSTER_PP_DIAGNOSTIC_FIXITS];
+        const uint32_t highlights = range_count < BUSTER_PP_DIAGNOSTIC_RANGES ? range_count : BUSTER_PP_DIAGNOSTIC_RANGES;
+        const uint32_t fixes = fixit_count < BUSTER_PP_DIAGNOSTIC_FIXITS ? fixit_count : BUSTER_PP_DIAGNOSTIC_FIXITS;
+        const uint32_t count = highlights + fixes;
         for (uint32_t r = 0; r < count; r += 1)
         {
-            kept[r] = ranges[r].begin != 0 && ranges[r].end != 0 && pp_find_range(pp, ranges[r].begin) == range && pp_find_range(pp, ranges[r].end) == range;
+            const PPDiagnosticRange* span = r < highlights ? &ranges[r] : &fixits[r - highlights].range;
+            kept[r] = span->begin != 0 && span->end != 0 && pp_find_range(pp, span->begin) == range && pp_find_range(pp, span->end) == range;
             if (kept[r])
             {
                 uint32_t column;
-                begin_lines[r] = pp_line_of(pp, range, ranges[r].begin, &column);
+                begin_lines[r] = pp_line_of(pp, range, span->begin, &column);
                 begin_bytes[r] = column - 1;
-                end_lines[r] = pp_line_of(pp, range, ranges[r].end, &column);
-                end_bytes[r] = column - 1 + ranges[r].end_length;
+                end_lines[r] = pp_line_of(pp, range, span->end, &column);
+                end_bytes[r] = column - 1 + span->end_length;
                 pp_snippet_add_lines(&first, &last, begin_lines[r], end_lines[r], most);
-                const uint32_t begun = pp_presumed(pp, ranges[r].begin, &name, &name_length);
+                const uint32_t begun = pp_presumed(pp, span->begin, &name, &name_length);
                 display = begun < display ? begun : display;
             }
         }
@@ -721,6 +810,8 @@ static void pp_diagnostic_snippet(Preprocessor* pp, PPDiagnostic* diagnostic, ui
                     }
                     pp_diagnostic_append(diagnostic, "%.*s\n", (int)marked, marks);
                 }
+                pp_snippet_fixits(diagnostic, fixits, fixes, kept + highlights, begin_lines + highlights, begin_bytes + highlights,
+                                  line, line_length, columns, gutter);
             }
         }
     }
@@ -766,7 +857,7 @@ static PPRangePlace pp_range_expansion(const Preprocessor* pp, PPRangePlace plac
     }
     else if (kind == BUSTER_PP_ORIGIN_GENERATED)
     {
-        result = (PPRangePlace){ pp->generated[index].anchor, pp->generated[index].expansion };
+        result = (PPRangePlace){ begin ? pp->generated[index].anchor : pp->generated[index].end, pp->generated[index].expansion };
     }
     else
     {
@@ -1024,49 +1115,230 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_range_offse
 // output and its history, which an output diagnostic's path (pp_diagnose_source_location) has ensured; `resolve` false
 // keeps the places alone, as the lexical paths and the collection do, which mustn't ask for the history (its replay
 // reports through them). A range of tokens not in the output is dropped.
-static void pp_diagnostic_resolve_ranges(Preprocessor* pp, bool resolve)
+static bool pp_diagnostic_resolve_range(Preprocessor* pp, PPDiagnosticRange* range, bool resolve)
 {
     const uint32_t count = resolve ? pp->output.count : 0;
-    uint32_t kept = 0;
-    for (uint32_t r = 0; r < pp->diagnostic_range_count; r += 1)
+    bool valid = true;
+    if (range->pending == PP_RANGE_TOKENS || range->pending == PP_RANGE_INSERT_BEFORE || range->pending == PP_RANGE_INSERT_AFTER)
     {
-        PPDiagnosticRange range = pp->diagnostic_ranges[r];
-        bool valid = true;
-        if (range.pending == PP_RANGE_TOKENS)
+        valid = range->begin <= range->end && range->end < count;
+        if (valid)
         {
-            valid = range.end < count;
-            range = valid ? (PPDiagnosticRange)
-                            {
-                                .begin = pp->output.locations[range.begin],
-                                .begin_origin = pp_history_at(pp, range.begin),
-                                .end = pp->output.locations[range.end],
-                                .end_origin = pp_history_at(pp, range.end),
-                                .end_length = pp_diagnostic_token_length(pp, range.end),
-                            } : range;
+            const bool insertion = range->pending != PP_RANGE_TOKENS;
+            const uint32_t offset = range->pending == PP_RANGE_INSERT_AFTER ? pp_diagnostic_token_length(pp, range->begin) : 0;
+            *range = (PPDiagnosticRange)
+            {
+                .begin = pp->output.locations[range->begin] + offset,
+                .begin_origin = pp_history_at(pp, range->begin),
+                .end = pp->output.locations[range->end] + offset,
+                .end_origin = pp_history_at(pp, range->end),
+                .end_length = insertion ? 0 : pp_diagnostic_token_length(pp, range->end),
+            };
         }
-        else if (range.pending == PP_RANGE_OFFSETS)
+    }
+    else if (range->pending == PP_RANGE_OFFSETS)
+    {
+        valid = range->begin < count && range->end_length != 0 && range->end <= UINT32_MAX - (range->end_length - 1);
+        const uint32_t base = valid ? pp->output.locations[range->begin] : 0;
+        const uint32_t origin = valid ? pp_history_at(pp, range->begin) : 0;
+        *range = valid ? (PPDiagnosticRange)
         {
-            valid = range.begin < count;
-            const uint32_t base = valid ? pp->output.locations[range.begin] : 0;
-            const uint32_t origin = valid ? pp_history_at(pp, range.begin) : 0;
-            range = valid ? (PPDiagnosticRange)
-                            {
-                                .begin = pp_spelling_offset_location(pp, base, range.end),
-                                .begin_origin = origin,
-                                .end = pp_spelling_offset_location(pp, base, range.end + range.end_length - 1),
-                                .end_origin = origin,
-                                .end_length = 1,
-                            } : range;
-        }
-        pp->diagnostic_ranges[kept] = range;
+            .begin = pp_spelling_offset_location(pp, base, range->end),
+            .begin_origin = origin,
+            .end = pp_spelling_offset_location(pp, base, range->end + range->end_length - 1),
+            .end_origin = origin,
+            .end_length = 1,
+        } : *range;
+    }
+    return valid;
+}
+
+static uint32_t pp_diagnostic_resolve_range_array(Preprocessor* pp, PPDiagnosticRange* result, const PPDiagnosticRange* ranges, uint32_t count, bool resolve)
+{
+    const uint32_t bounded = count < BUSTER_PP_DIAGNOSTIC_RANGES ? count : BUSTER_PP_DIAGNOSTIC_RANGES;
+    uint32_t kept = 0;
+    for (uint32_t r = 0; r < bounded; r += 1)
+    {
+        PPDiagnosticRange range = ranges[r];
+        const bool valid = pp_diagnostic_resolve_range(pp, &range, resolve);
+        result[kept] = range;
         kept += valid ? 1 : 0;
     }
-    pp->diagnostic_range_count = kept;
+    return kept;
+}
+
+static bool pp_fixit_origin_contains(const Preprocessor* pp, uint32_t origin, uint32_t wanted)
+{
+    uint32_t pending[BUSTER_PP_RANGE_DEPTH];
+    uint32_t count = 0;
+    bool found = false;
+    bool truncated = false;
+    for (uint32_t steps = 0; !found && (origin != 0 || count != 0) && steps < BUSTER_PP_RANGE_STEPS; steps += 1)
+    {
+        if (origin == 0)
+        {
+            origin = pending[--count];
+        }
+        found = origin == wanted;
+        if (!found)
+        {
+            const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+            const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+            if (kind == BUSTER_PP_ORIGIN_ARGUMENT)
+            {
+                const PPSubstitution* substitution = &pp->substitutions[index];
+                if (substitution->source != 0 && count < BUSTER_PP_RANGE_DEPTH)
+                {
+                    pending[count++] = substitution->source;
+                }
+                else if (substitution->source != 0)
+                {
+                    truncated = true;
+                }
+                origin = substitution->expansion;
+            }
+            else
+            {
+                origin = kind == BUSTER_PP_ORIGIN_GENERATED ? pp->generated[index].expansion : pp->history[index].parent;
+            }
+        }
+    }
+    return found || truncated || origin != 0 || count != 0;
+}
+
+// A complete expansion can be edited at its invocation's boundary. An interior token cannot: the adjacent output
+// token still belongs to that expansion. Arguments instead retain the caller-written spelling, including forwarding.
+static bool pp_fixit_file_endpoint(const Preprocessor* pp, PPRangePlace* place, uint32_t neighbour, bool end, uint32_t* end_length)
+{
+    bool valid = true;
+    for (uint32_t depth = 0; valid && place->origin != 0 && depth < BUSTER_PP_RANGE_DEPTH; depth += 1)
+    {
+        if (pp_range_argument(*place))
+        {
+            const PPSubstitution* substitution = &pp->substitutions[(place->origin & BUSTER_PP_ORIGIN_INDEX) - 1];
+            const bool boundary = substitution->expansion != 0 && !pp_fixit_origin_contains(pp, neighbour, substitution->expansion);
+            *place = boundary ? pp_range_expansion(pp, *place, !end) : pp_range_spelling(pp, *place);
+        }
+        else
+        {
+            valid = !pp_fixit_origin_contains(pp, neighbour, place->origin);
+            if (valid)
+            {
+                *place = pp_range_expansion(pp, *place, !end);
+                *end_length = end ? pp_range_measure(pp, place->location) : *end_length;
+            }
+        }
+    }
+    return valid && place->origin == 0;
+}
+
+// Fix-its edit real file characters. Preserve argument spellings and complete expansion boundaries, and reject
+// interior macro-body edits. An unusable after-token location creates no insertion; an otherwise formed hint that
+// cannot map to a file rejects the diagnostic's hint group, as Clang does. This never replays preprocessing.
+static uint32_t pp_diagnostic_resolve_fixits(Preprocessor* pp, PPDiagnosticFixIt* result, const PPDiagnosticFixIt* fixits, uint32_t count, bool resolve)
+{
+    const uint32_t bounded = count < BUSTER_PP_DIAGNOSTIC_FIXITS ? count : BUSTER_PP_DIAGNOSTIC_FIXITS;
+    uint32_t kept = 0;
+    bool applicable = true;
+    for (uint32_t f = 0; f < bounded; f += 1)
+    {
+        PPDiagnosticFixIt fixit = fixits[f];
+        const uint32_t kind = fixit.range.pending;
+        const uint32_t first = fixit.range.begin;
+        const uint32_t last = fixit.range.end;
+        bool valid = fixit.text != NULL && pp_diagnostic_resolve_range(pp, &fixit.range, resolve);
+        const bool insertion = kind == PP_RANGE_INSERT_BEFORE || kind == PP_RANGE_INSERT_AFTER;
+        const bool tokens = kind == PP_RANGE_TOKENS || insertion;
+        if (valid && tokens)
+        {
+            const uint32_t before = first != 0 ? pp_history_at(pp, first - 1) : 0;
+            const uint32_t after = last + 1 < pp->output.count ? pp_history_at(pp, last + 1) : 0;
+            PPRangePlace begin = { fixit.range.begin, fixit.range.begin_origin };
+            PPRangePlace end = { fixit.range.end, fixit.range.end_origin };
+            uint32_t ignored = 0;
+            if (insertion)
+            {
+                const bool at_end = kind == PP_RANGE_INSERT_AFTER;
+                uint32_t moved_length = 0;
+                valid = pp_fixit_file_endpoint(pp, &begin, at_end ? after : before, at_end, &moved_length);
+                begin.location += moved_length;
+                end = begin;
+            }
+            else
+            {
+                valid = pp_fixit_file_endpoint(pp, &begin, before, false, &ignored) &&
+                        pp_fixit_file_endpoint(pp, &end, after, true, &fixit.range.end_length);
+            }
+            fixit.range.begin = begin.location;
+            fixit.range.end = end.location;
+            fixit.range.begin_origin = begin.origin;
+            fixit.range.end_origin = end.origin;
+        }
+        valid = valid && fixit.range.begin_origin == 0 && fixit.range.end_origin == 0;
+        const uint32_t begin_range = valid && fixit.range.begin != 0 ? pp_find_range(pp, fixit.range.begin) : BUSTER_PP_NONE;
+        const uint32_t end_range = valid && fixit.range.end != 0 ? pp_find_range(pp, fixit.range.end) : BUSTER_PP_NONE;
+        valid = valid && begin_range != BUSTER_PP_NONE && begin_range == end_range && pp->ranges[begin_range].file != BUSTER_PP_NONE &&
+                fixit.range.begin <= fixit.range.end && fixit.range.end - pp->ranges[end_range].base <= pp->ranges[end_range].length &&
+                fixit.range.end_length <= pp->ranges[end_range].length - (fixit.range.end - pp->ranges[end_range].base);
+        fixit.range.begin_origin = 0;
+        fixit.range.end_origin = 0;
+        result[kept] = fixit;
+        kept += valid ? 1 : 0;
+        applicable &= valid || kind == PP_RANGE_INSERT_AFTER;
+    }
+    return applicable ? kept : 0;
+}
+
+static void pp_diagnostic_resolve_ranges(Preprocessor* pp, bool resolve)
+{
+    pp->diagnostic_range_count = pp_diagnostic_resolve_range_array(pp, pp->diagnostic_ranges, pp->diagnostic_ranges, pp->diagnostic_range_count, resolve);
+    pp->diagnostic_fixit_count = pp_diagnostic_resolve_fixits(pp, pp->diagnostic_fixits, pp->diagnostic_fixits, pp->diagnostic_fixit_count, resolve);
 }
 
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_ranges_clear(Preprocessor* pp)
 {
     pp->diagnostic_range_count = 0;
+}
+
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_fixit_tokens(Preprocessor* pp, uint32_t first, uint32_t last, const char* text)
+{
+    if (pp->diagnostic_fixit_count < BUSTER_PP_DIAGNOSTIC_FIXITS && first <= last && text != NULL)
+    {
+        pp->diagnostic_fixits[pp->diagnostic_fixit_count++] = (PPDiagnosticFixIt)
+        {
+            .range = { .begin = first, .end = last, .pending = PP_RANGE_TOKENS },
+            .text = text,
+        };
+    }
+}
+
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_fixit_insert(Preprocessor* pp, uint32_t token, bool after, const char* text)
+{
+    if (pp->diagnostic_fixit_count < BUSTER_PP_DIAGNOSTIC_FIXITS && text != NULL)
+    {
+        pp->diagnostic_fixits[pp->diagnostic_fixit_count++] = (PPDiagnosticFixIt)
+        {
+            .range = { .begin = token, .end = token, .pending = after ? PP_RANGE_INSERT_AFTER : PP_RANGE_INSERT_BEFORE },
+            .text = text,
+        };
+    }
+}
+
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_fixit_characters(Preprocessor* pp, uint32_t location, uint32_t length, const char* text)
+{
+    if (pp->diagnostic_fixit_count < BUSTER_PP_DIAGNOSTIC_FIXITS && location != 0 && text != NULL)
+    {
+        pp->diagnostic_fixits[pp->diagnostic_fixit_count++] = (PPDiagnosticFixIt)
+        {
+            .range = { .begin = location, .end = location, .end_length = length },
+            .text = text,
+        };
+    }
+}
+
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_fixits_clear(Preprocessor* pp)
+{
+    pp->diagnostic_fixit_count = 0;
 }
 
 // The place clang's renderer compares the next diagnostic's with (pp_diagnostic_snippet): a diagnostic's, once it and
@@ -1111,6 +1383,125 @@ static void pp_diagnostic_includes(Preprocessor* pp, PPDiagnostic* diagnostic, u
     }
 }
 
+typedef struct PPScratchSnippet PPScratchSnippet;
+struct PPScratchSnippet
+{
+    const uint8_t* bytes;
+    uint32_t location;
+    uint32_t length;
+    uint32_t line;
+    uint32_t column;
+    uint32_t padding;
+};
+
+// A generated spelling is NUL-terminated inside a scratch chunk. Isolate its caret's physical line: neighboring
+// spellings in that chunk are unrelated source. Clang prepends one space before a destringized _Pragma's first line.
+static PPScratchSnippet pp_diagnostic_scratch_view(const Preprocessor* pp, const PPDiagnosticSource* note)
+{
+    PPScratchSnippet result = { 0 };
+    const uint32_t range = note->scratch != 0 ? pp_find_range(pp, note->scratch) : BUSTER_PP_NONE;
+    const bool same = range != BUSTER_PP_NONE && pp->ranges[range].file == BUSTER_PP_NONE &&
+                      note->location >= note->scratch && pp_find_range(pp, note->location) == range;
+    if (same)
+    {
+        const PPRange* source = &pp->ranges[range];
+        const uint32_t offset = note->scratch - source->base;
+        const uint8_t* bytes = source->bytes + offset;
+        const uint32_t available = source->length - offset;
+        const uint8_t* terminator = memchr(bytes, 0, available);
+        const uint32_t length = terminator != NULL ? (uint32_t)(terminator - bytes) : 0;
+        const uint32_t caret = note->location - note->scratch;
+        uint32_t start = 0;
+        uint32_t line = 1;
+        bool found = false;
+        while (terminator != NULL && !found && start <= caret && start <= length)
+        {
+            const uint8_t* lf = memchr(bytes + start, '\n', length - start);
+            const uint8_t* cr = memchr(bytes + start, '\r', length - start);
+            const uint8_t* end = lf == NULL ? cr : cr == NULL || lf < cr ? lf : cr;
+            const uint32_t stop = end != NULL ? (uint32_t)(end - bytes) : length;
+            found = caret <= stop;
+            if (found)
+            {
+                const uint32_t padding = note->pragma && start == 0 ? 1 : 0;
+                result = (PPScratchSnippet)
+                {
+                    .bytes = bytes + start,
+                    .location = note->scratch + start,
+                    .length = stop - start,
+                    .line = line,
+                    .column = caret - start + padding + 1,
+                    .padding = padding,
+                };
+            }
+            else
+            {
+                const bool pair = stop + 1 < length && (bytes[stop + 1] == '\n' || bytes[stop + 1] == '\r') && bytes[stop + 1] != bytes[stop];
+                start = stop + 1 + pair;
+                line += 1;
+            }
+        }
+    }
+    return result;
+}
+
+// Scratch-space line numbers depend on allocation order, so they remain local to each generated spelling. Their
+// excerpts, columns, character widths and range marks use the same renderer as real source lines.
+static void pp_diagnostic_scratch_snippet(Preprocessor* pp, PPDiagnostic* diagnostic, const PPDiagnosticSource* note,
+                                          const PPScratchSnippet* snippet, const PPDiagnosticRange* ranges, uint32_t range_count)
+{
+    const bool repeated = note->location == pp->diagnostic_caret_location && range_count == 0;
+    const uint32_t length = snippet->length + snippet->padding;
+    if (pp->options.carets && !repeated && snippet->bytes != NULL && length <= BUSTER_PP_SNIPPET_BYTES && snippet->column <= BUSTER_PP_SNIPPET_BYTES)
+    {
+        uint8_t* line = arena_push(diagnostic->arena, (uint64_t)length + 1, 1);
+        uint32_t* columns = arena_push_array(diagnostic->arena, (uint64_t)length + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        if (line != NULL && columns != NULL)
+        {
+            memset(line, ' ', snippet->padding);
+            memcpy(line + snippet->padding, snippet->bytes, snippet->length);
+            const uint32_t most = pp->options.caret_lines_given ? pp->options.caret_lines : BUSTER_PP_SNIPPET_LINES;
+            const uint32_t widest = pp_snippet_digits(snippet->line + most);
+            const uint32_t gutter = pp->options.no_line_numbers ? 0 : widest > BUSTER_PP_SNIPPET_GUTTER ? widest : BUSTER_PP_SNIPPET_GUTTER;
+            if (gutter != 0)
+            {
+                const uint32_t digits = pp_snippet_digits(snippet->line);
+                pp_diagnostic_append(diagnostic, "%*s%u | ", (int)(gutter + 1 > digits ? gutter + 1 - digits : 0), "", snippet->line);
+            }
+            const uint32_t width = pp_snippet_line(diagnostic, line, length, columns);
+            char* marks = arena_push(diagnostic->arena, (uint64_t)width + 2, 1);
+            uint32_t marked = 0;
+            for (uint32_t r = 0; marks != NULL && r < range_count; r += 1)
+            {
+                const PPDiagnosticRange* range = &ranges[r];
+                const bool on = range->begin >= snippet->location && range->end >= range->begin &&
+                                (uint64_t)range->end + range->end_length <= (uint64_t)snippet->location + snippet->length;
+                if (on)
+                {
+                    const PPSnippetLineRange part =
+                    {
+                        .start = range->begin - snippet->location + snippet->padding,
+                        .end = range->end - snippet->location + range->end_length + snippet->padding,
+                    };
+                    pp_snippet_highlight(&part, line, length, columns, marks, &marked);
+                }
+            }
+            if (marks != NULL)
+            {
+                const uint32_t caret = pp_snippet_containing_column(columns, snippet->column - 1);
+                memset(marks + marked, ' ', caret > marked ? caret - marked : 0);
+                marks[caret] = '^';
+                marked = caret + 1 > marked ? caret + 1 : marked;
+                if (gutter != 0)
+                {
+                    pp_diagnostic_append(diagnostic, "%*s| ", (int)(gutter + 2), "");
+                }
+                pp_diagnostic_append(diagnostic, "%.*s\n", (int)marked, marks);
+            }
+        }
+    }
+}
+
 static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments)
 {
     Scratch scratch = scratch_begin(0);
@@ -1141,9 +1532,10 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
         {
             // Forwarding alone is silent. If the substituted token is itself subsequently expanded, Clang also
             // shows the parameter through which the macro name arrived (CALL(F), where CALL(f) expands to f()), and
-            // so it does where a diagnostic's range spans more than the argument's one token (render_spans).
+            // so it does where a diagnostic's range spans more than the argument's one token (render_spans), or an
+            // edit gives the argument's context. Character ranges within one literal alone keep forwarding silent.
             const PPSubstitution* substitution = &pp->substitutions[index];
-            if (count != 0 || pp->render_spans || pp->diagnostic_arguments)
+            if (count != 0 || pp->render_spans || pp->diagnostic_arguments || pp->render_fixit_count != 0)
             {
                 notes[count++] = (PPDiagnosticSource)
                 {
@@ -1162,6 +1554,8 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
                 .location = location,
                 .origin = 0,
                 .column = start != 0 && location >= start && location - start <= UINT32_MAX - 2 ? location - start + 2 : 0,
+                .scratch = generated->location,
+                .pragma = generated->kind == PP_GENERATED_PRAGMA,
             };
             location = generated->anchor;
             origin = generated->expansion;
@@ -1175,6 +1569,7 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
             {
                 .location = location,
                 .origin = expansion->builtin == PP_BUILTIN_NONE ? origin : 0,
+                .scratch = expansion->builtin != PP_BUILTIN_NONE ? location : 0,
             };
             location = expansion->begin;
             origin = expansion->parent;
@@ -1207,11 +1602,16 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
     {
         mapped_count += pp_diagnostic_map_range(pp, &pp->render_ranges[r], ((uint64_t)1 << 32) | caret_range, &mapped[mapped_count]) ? 1 : 0;
     }
-    pp_diagnostic_snippet(pp, &diagnostic, location, severity == PP_SEVERITY_NOTE, mapped, mapped_count);
+    pp_diagnostic_snippet(pp, &diagnostic, location, severity == PP_SEVERITY_NOTE, mapped, mapped_count, pp->render_fixits, pp->render_fixit_count);
     for (uint32_t i = count; i > 0; i -= 1)
     {
         const PPDiagnosticSource note = notes[i - 1];
-        if (note.column != 0)
+        const PPScratchSnippet snippet = pp_diagnostic_scratch_view(pp, &note);
+        if (snippet.bytes != NULL)
+        {
+            pp_diagnostic_append(&diagnostic, "<scratch space>:%u:%u: ", snippet.line, snippet.column);
+        }
+        else if (note.column != 0)
         {
             pp_diagnostic_append(&diagnostic, "<scratch space>:1:%u: ", note.column);
         }
@@ -1228,15 +1628,22 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
         {
             pp_diagnostic_append(&diagnostic, "note: expanded from here\n");
         }
-        // The ranges mapped into the note's expansion, as spellings there (emitSingleMacroExpansion). A generated pragma's
-        // note is placed in scratch space, which shows no line here.
+        // The ranges mapped into the note's expansion or its generated spelling (emitSingleMacroExpansion).
         PPDiagnosticRange note_ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
         uint32_t note_range_count = 0;
-        for (uint32_t r = 0; note.origin != 0 && pp->render_ranges != NULL && r < pp->render_range_count && r < BUSTER_PP_DIAGNOSTIC_RANGES; r += 1)
+        const uint64_t scope = note.origin != 0 ? note.origin : snippet.bytes != NULL ? ((uint64_t)1 << 32) | pp_find_range(pp, note.location) : 0;
+        for (uint32_t r = 0; scope != 0 && pp->render_ranges != NULL && r < pp->render_range_count && r < BUSTER_PP_DIAGNOSTIC_RANGES; r += 1)
         {
-            note_range_count += pp_diagnostic_map_range(pp, &pp->render_ranges[r], note.origin, &note_ranges[note_range_count]) ? 1 : 0;
+            note_range_count += pp_diagnostic_map_range(pp, &pp->render_ranges[r], scope, &note_ranges[note_range_count]) ? 1 : 0;
         }
-        pp_diagnostic_snippet(pp, &diagnostic, note.column != 0 ? 0 : note.location, true, note_ranges, note_range_count);
+        if (snippet.bytes != NULL)
+        {
+            pp_diagnostic_scratch_snippet(pp, &diagnostic, &note, &snippet, note_ranges, note_range_count);
+        }
+        else
+        {
+            pp_diagnostic_snippet(pp, &diagnostic, note.location, true, note_ranges, note_range_count, NULL, 0);
+        }
         pp_diagnostic_snippet_done(pp, note.location, true);
     }
     pp_diagnostic_snippet_done(pp, location, severity == PP_SEVERITY_NOTE);
@@ -1254,11 +1661,36 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
         {
             pp_diagnostic_append(&diagnostic, "note: %s\n", note->message);
         }
-        pp_diagnostic_snippet(pp, &diagnostic, note->location, true, NULL, 0);
+        pp_diagnostic_snippet(pp, &diagnostic, note->location, true, note->ranges, note->range_count, note->fixits, note->fixit_count);
         pp_diagnostic_snippet_done(pp, note->location, true);
     }
     pp_diagnostic_flush(&diagnostic);
     scratch_end(scratch);
+}
+
+static bool pp_diagnostic_fixit_bytes(const PPDiagnosticFixIt* fixits, uint32_t count, uint64_t* bytes)
+{
+    bool valid = count <= BUSTER_PP_DIAGNOSTIC_FIXITS;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        valid = fixits[i].text != NULL && !__builtin_add_overflow(*bytes, (uint64_t)strlen(fixits[i].text) + 1u, bytes);
+    }
+    return valid;
+}
+
+// A queued diagnostic outlives its producer's scratch strings. Each hint owns its text in the same allocation as
+// the message, including notes' independent replacements. Resolution never asks for history from this lexical path.
+static uint32_t pp_diagnostic_own_fixits(Preprocessor* pp, PPDiagnosticFixIt* result, const PPDiagnosticFixIt* fixits, uint32_t count, char** next, bool resolve)
+{
+    const uint32_t kept = pp_diagnostic_resolve_fixits(pp, result, fixits, count, resolve);
+    for (uint32_t f = 0; f < kept; f += 1)
+    {
+        const uint64_t size = strlen(result[f].text) + 1u;
+        memcpy(*next, result[f].text, size);
+        result[f].text = *next;
+        *next += size;
+    }
+    return kept;
 }
 
 // A cold source-command queue, allocated only for diagnostics. Messages and the optional explicit note are owned;
@@ -1274,18 +1706,22 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
     const uint64_t note_bytes = note != NULL && note->message != NULL ? strlen(note->message) + 1u : 0;
     const uint32_t note_count = source_note_count + placed_note_count;
     uint64_t bytes = length >= 0 ? sizeof(PPDiagnosticRecord) + (uint64_t)(uint32_t)length + 1u + note_bytes + (uint64_t)note_count * sizeof(PPDiagnosticSourceNote) : 0;
-    bool valid = length >= 0 && (source_note_count == 0 || source_notes != NULL) && (placed_note_count == 0 || placed_notes != NULL);
+    bool valid = length >= 0 && note_count >= source_note_count && (source_note_count == 0 || source_notes != NULL) && (placed_note_count == 0 || placed_notes != NULL) &&
+                 pp_diagnostic_fixit_bytes(pp->diagnostic_fixits, pp->diagnostic_fixit_count, &bytes) &&
+                 (note == NULL || pp_diagnostic_fixit_bytes(note->fixits, note->fixit_count, &bytes));
     for (uint32_t i = 0; valid && i < source_note_count; i += 1)
     {
         valid = source_notes[i].token < pp->output.count && source_notes[i].message != NULL;
         if (valid)
         {
-            valid = !__builtin_add_overflow(bytes, (uint64_t)strlen(source_notes[i].message) + 1u, &bytes);
+            valid = !__builtin_add_overflow(bytes, (uint64_t)strlen(source_notes[i].message) + 1u, &bytes) &&
+                    pp_diagnostic_fixit_bytes(source_notes[i].fixits, source_notes[i].fixit_count, &bytes);
         }
     }
     for (uint32_t i = 0; valid && i < placed_note_count; i += 1)
     {
-        valid = placed_notes[i].message != NULL && !__builtin_add_overflow(bytes, (uint64_t)strlen(placed_notes[i].message) + 1u, &bytes);
+        valid = placed_notes[i].message != NULL && !__builtin_add_overflow(bytes, (uint64_t)strlen(placed_notes[i].message) + 1u, &bytes) &&
+                pp_diagnostic_fixit_bytes(placed_notes[i].fixits, placed_notes[i].fixit_count, &bytes);
     }
     bytes = valid ? bytes : 0;
     pp_diagnostic_resolve_ranges(pp, false);
@@ -1323,13 +1759,22 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
                 memcpy((char*)record->note_message, note->message, note_bytes);
             }
             char* next = message + length + 1 + note_bytes;
+            record->fixit_count = pp_diagnostic_own_fixits(pp, record->fixits, pp->diagnostic_fixits, pp->diagnostic_fixit_count, &next, false);
+            if (note != NULL)
+            {
+                record->note_range_count = pp_diagnostic_resolve_range_array(pp, record->note_ranges, note->ranges, note->range_count, false);
+                record->note_fixit_count = pp_diagnostic_own_fixits(pp, record->note_fixits, note->fixits, note->fixit_count, &next, false);
+            }
             for (uint32_t i = 0; i < source_note_count; i += 1)
             {
                 const uint32_t token = source_notes[i].token;
                 const uint64_t size = strlen(source_notes[i].message) + 1u;
-                owned_notes[i] = (PPDiagnosticSourceNote){ pp->output.locations[token], pp_history_at(pp, token), next };
+                const uint32_t location = pp->output.locations[token] + (source_notes[i].after_token ? pp_diagnostic_token_length(pp, token) : 0);
+                owned_notes[i] = (PPDiagnosticSourceNote){ location, pp_history_at(pp, token), next };
                 memcpy(next, source_notes[i].message, size);
                 next += size;
+                owned_notes[i].range_count = pp_diagnostic_resolve_range_array(pp, owned_notes[i].ranges, source_notes[i].ranges, source_notes[i].range_count, true);
+                owned_notes[i].fixit_count = pp_diagnostic_own_fixits(pp, owned_notes[i].fixits, source_notes[i].fixits, source_notes[i].fixit_count, &next, true);
             }
             for (uint32_t i = 0; i < placed_note_count; i += 1)
             {
@@ -1337,6 +1782,8 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
                 owned_notes[source_note_count + i] = (PPDiagnosticSourceNote){ placed_notes[i].location, placed_notes[i].origin, next };
                 memcpy(next, placed_notes[i].message, size);
                 next += size;
+                owned_notes[source_note_count + i].range_count = pp_diagnostic_resolve_range_array(pp, owned_notes[source_note_count + i].ranges, placed_notes[i].ranges, placed_notes[i].range_count, false);
+                owned_notes[source_note_count + i].fixit_count = pp_diagnostic_own_fixits(pp, owned_notes[source_note_count + i].fixits, placed_notes[i].fixits, placed_notes[i].fixit_count, &next, false);
             }
             if (pp->diagnostic_last != NULL)
             {
@@ -1508,6 +1955,22 @@ static void pp_render_message(Preprocessor* pp, PPSeverity severity, uint32_t lo
     va_end(arguments);
 }
 
+static void pp_render_attached_note(Preprocessor* pp, uint32_t location, uint32_t origin, const char* message,
+                                   const PPDiagnosticRange* ranges, uint32_t range_count, const PPDiagnosticFixIt* fixits, uint32_t fixit_count, bool resolve)
+{
+    PPDiagnosticRange resolved_ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
+    PPDiagnosticFixIt resolved_fixits[BUSTER_PP_DIAGNOSTIC_FIXITS];
+    pp->render_range_count = pp_diagnostic_resolve_range_array(pp, resolved_ranges, ranges, range_count, resolve);
+    pp->render_fixit_count = pp_diagnostic_resolve_fixits(pp, resolved_fixits, fixits, fixit_count, resolve);
+    pp->render_ranges = resolved_ranges;
+    pp->render_fixits = resolved_fixits;
+    pp_render_message(pp, PP_SEVERITY_NOTE, location, origin, NULL, "%s", message);
+    pp->render_ranges = NULL;
+    pp->render_range_count = 0;
+    pp->render_fixits = NULL;
+    pp->render_fixit_count = 0;
+}
+
 BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
 {
     if (pp->options.collect_diagnostics)
@@ -1548,14 +2011,20 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
                     owner->diagnostic_caret_note = pp->diagnostic_caret_note;
                     const bool owner_arguments = owner->diagnostic_arguments;
                     owner->diagnostic_arguments = record->arguments;
-                    const PPDiagnosticNote note = {
+                    PPDiagnosticNote note = {
                         .location = record->note_location,
                         .message = record->note_message,
                         .macro = record->note_macro,
+                        .range_count = record->note_range_count,
+                        .fixit_count = record->note_fixit_count,
                     };
+                    memcpy(note.ranges, record->note_ranges, sizeof(note.ranges));
+                    memcpy(note.fixits, record->note_fixits, sizeof(note.fixits));
                     owner->render_spans = record->spans;
                     owner->render_ranges = record->ranges;
                     owner->render_range_count = record->range_count;
+                    owner->render_fixits = record->fixits;
+                    owner->render_fixit_count = record->fixit_count;
                     owner->presumed_note_limit = record->line_notes;
                     pp_render_message(owner, severity, record->location, record->origin,
                                       record->note_message != NULL || record->note_macro != 0 ? &note : NULL, "%s", record->message);
@@ -1563,10 +2032,12 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
                     owner->render_spans = false;
                     owner->render_ranges = NULL;
                     owner->render_range_count = 0;
+                    owner->render_fixits = NULL;
+                    owner->render_fixit_count = 0;
                     for (uint32_t i = 0; i < record->source_note_count; i += 1)
                     {
                         const PPDiagnosticSourceNote* source = &record->source_notes[i];
-                        pp_render_message(owner, PP_SEVERITY_NOTE, source->location, source->origin, NULL, "%s", source->message);
+                        pp_render_attached_note(owner, source->location, source->origin, source->message, source->ranges, source->range_count, source->fixits, source->fixit_count, false);
                     }
                     pp->diagnostic_include_range = owner->diagnostic_include_range;
                     pp->diagnostic_caret_location = owner->diagnostic_caret_location;
@@ -1606,11 +2077,17 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
         else
         {
             pp_diagnostic_resolve_ranges(pp, false);
+            pp->render_spans = pp->diagnostic_spans;
             pp->render_ranges = pp->diagnostic_ranges;
             pp->render_range_count = pp->diagnostic_range_count;
+            pp->render_fixits = pp->diagnostic_fixits;
+            pp->render_fixit_count = pp->diagnostic_fixit_count;
             pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, note, format, arguments);
+            pp->render_spans = false;
             pp->render_ranges = NULL;
             pp->render_range_count = 0;
+            pp->render_fixits = NULL;
+            pp->render_fixit_count = 0;
         }
         va_end(arguments);
     }
@@ -1656,18 +2133,25 @@ static void pp_diagnose_source_location(Preprocessor* pp, PPSeverity severity, u
             pp->render_spans = pp->diagnostic_spans;
             pp->render_ranges = pp->diagnostic_ranges;
             pp->render_range_count = pp->diagnostic_range_count;
+            pp->render_fixits = pp->diagnostic_fixits;
+            pp->render_fixit_count = pp->diagnostic_fixit_count;
             pp_render_diagnostic(pp, severity, location, origin, NULL, format, arguments);
             pp->render_spans = false;
             pp->render_ranges = NULL;
             pp->render_range_count = 0;
+            pp->render_fixits = NULL;
+            pp->render_fixit_count = 0;
             for (uint32_t i = 0; notes != NULL && i < note_count; i += 1)
             {
                 const uint32_t at = notes[i].token;
-                pp_render_message(pp, PP_SEVERITY_NOTE, at < pp->output.count ? pp->output.locations[at] : 0, pp_history_at(pp, at), NULL, "%s", notes[i].message);
+                const uint32_t note_location = at < pp->output.count ? pp->output.locations[at] + (notes[i].after_token ? pp_diagnostic_token_length(pp, at) : 0) : 0;
+                pp_render_attached_note(pp, note_location, pp_history_at(pp, at), notes[i].message,
+                                        notes[i].ranges, notes[i].range_count, notes[i].fixits, notes[i].fixit_count, true);
             }
             for (uint32_t i = 0; placed != NULL && i < placed_count; i += 1)
             {
-                pp_render_message(pp, PP_SEVERITY_NOTE, placed[i].location, placed[i].origin, NULL, "%s", placed[i].message);
+                pp_render_attached_note(pp, placed[i].location, placed[i].origin, placed[i].message,
+                                        placed[i].ranges, placed[i].range_count, placed[i].fixits, placed[i].fixit_count, false);
             }
         }
     }
@@ -1824,6 +2308,25 @@ static uint32_t pp_spelling_offset_location(Preprocessor* pp, uint32_t location,
     return location;
 }
 
+// A character range within a token's spelling. An edit may follow argument substitutions back to their caller;
+// a macro body or generated spelling keeps its origin, so the ordinary fix-it resolver rejects that edit.
+static PPDiagnosticRange pp_diagnostic_offset_range(Preprocessor* pp, uint32_t base, uint32_t origin, uint32_t offset, uint32_t length, bool edit)
+{
+    PPRangePlace place = { base, origin };
+    for (uint32_t depth = 0; edit && pp_range_argument(place) && depth < BUSTER_PP_RANGE_DEPTH; depth += 1)
+    {
+        place = pp_range_spelling(pp, place);
+    }
+    return (PPDiagnosticRange)
+    {
+        .begin = base != 0 ? pp_spelling_offset_location(pp, base, offset) : 0,
+        .begin_origin = place.origin,
+        .end = base != 0 ? pp_spelling_offset_location(pp, base, offset + (length != 0 ? length - 1 : 0)) : 0,
+        .end_origin = place.origin,
+        .end_length = length != 0 ? 1 : 0,
+    };
+}
+
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_offset_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
                                                                                                            uint32_t position, const char* format, ...)
 {
@@ -1850,6 +2353,20 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 8, 9))) void pp_
     for (uint32_t i = 0; i < count; i += 1)
     {
         placed[i] = (PPDiagnosticSourceNote){ base != 0 ? pp_spelling_offset_location(pp, base, notes[i].offset) : 0, origin, notes[i].message };
+        if (notes[i].length != 0)
+        {
+            placed[i].ranges[0] = pp_diagnostic_offset_range(pp, base, origin, notes[i].offset, notes[i].length, false);
+            placed[i].range_count = 1;
+        }
+        if (notes[i].replacement != NULL)
+        {
+            placed[i].fixits[0] = (PPDiagnosticFixIt)
+            {
+                .range = pp_diagnostic_offset_range(pp, base, origin, notes[i].offset, notes[i].length, true),
+                .text = notes[i].replacement,
+            };
+            placed[i].fixit_count = 1;
+        }
     }
     va_list arguments;
     va_start(arguments, format);
@@ -1883,14 +2400,21 @@ static __attribute__((format(printf, 6, 7))) void pp_diagnose_notes(Preprocessor
         else
         {
             pp_diagnostic_resolve_ranges(pp, false);
+            pp->render_spans = pp->diagnostic_spans;
             pp->render_ranges = pp->diagnostic_ranges;
             pp->render_range_count = pp->diagnostic_range_count;
+            pp->render_fixits = pp->diagnostic_fixits;
+            pp->render_fixit_count = pp->diagnostic_fixit_count;
             pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, NULL, format, arguments);
+            pp->render_spans = false;
             pp->render_ranges = NULL;
             pp->render_range_count = 0;
+            pp->render_fixits = NULL;
+            pp->render_fixit_count = 0;
             for (uint32_t i = 0; i < note_count; i += 1)
             {
-                pp_render_message(pp, PP_SEVERITY_NOTE, notes[i].location, notes[i].origin, NULL, "%s", notes[i].message);
+                pp_render_attached_note(pp, notes[i].location, notes[i].origin, notes[i].message,
+                                        notes[i].ranges, notes[i].range_count, notes[i].fixits, notes[i].fixit_count, false);
             }
         }
         va_end(arguments);

@@ -17,8 +17,10 @@
 // compare-exchange's desired value in `c`, an optional use as a call's is. IR_MASKED_LOAD and IR_MASKED_STORE (#1840)
 // keep three values in `a,b,c`, their lanes in the flags and their alignment as a load's, all of which the rows' default
 // comparison and mutation take; so do IR_COMPRESS_STORE and IR_GATHER (#1840), a gather's scale as its alignment.
-// IR_FMA (#1840) keeps its three values in `a,b,c` and no metadata, as IR_SELECT does. IR_SCATTER (#1840) keeps its base
-// and index in `a,b` and its stored vector and mask in the extra array, its place in `c`, compared by value.
+// IR_FMA (#1840, #2806) keeps its three values in `a,b,c` and, on vectors, its float lane in the flags. The four
+// integer/float vector conversions keep the same lane metadata; the default comparison and mutation take it.
+// IR_SCATTER (#1840) keeps its base and index in `a,b` and its stored vector and mask in the extra array, its place
+// in `c`, compared by value.
 // IR_ASM_RESULT (#2144) keeps its parent and register in `a,b`, covered by the default comparison. Its body metadata
 // has no text input syntax, so source round trips still request asm helpers instead of body calls.
 _Static_assert(IR_OP_COUNT == 71, "audit the text round-trip oracle when adding an IR operation");

@@ -91,7 +91,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   --asm-definitions-only | --tier1-asm-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --quiet-roots-only | --unused-comparison-only |
   --float-precision-only | --reach-filter-only | --branch-truth-only |
-  --record-extensions-only | --auto-qualifiers-only |
+  --record-extensions-only | --auto-qualifiers-only | --invalid-records-only | --format-matches-only |
   --run-modes-only | --common-warnings-only | --missing-variable-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -174,6 +174,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--invalid-records-only` runs `c_check_invalid_record_driver_test.c` (#1447):
+  typed member and bit-field errors, invalid-record propagation, valid sibling
+  diagnostics, independent initializer errors, and preserved output after a
+  rejected compilation. `--format-matches-only` runs
+  `c_check_format_matches_driver_test.c` (#1447): reference contracts,
+  declaration visibility, body checking, malformed strings, source locations
+  and warning policy. Both use original runtime fixtures and compare complete
+  ordered Clang diagnostics in GNU17/C23 through one and three requested lanes
+  and deferred bodies.
   `--float-precision-only` runs `c_check_float_precision_driver_test.c` (#1875):
   `-Wimplicit-float-conversion`'s and `-Wliteral-range`'s floating comparisons
   against clang's complete output, with their controls and policies
@@ -343,7 +352,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   tested standard. This focused section supports sanitizer and in-process/child
   differential checks without running the unrelated recovery fixtures.
   `--malformed-calls-only` runs the ordinary and builtin type-first call recovery
-  cases in `tests/checker/parse-recovery/malformed-calls.*` (#2406), comparing
+  cases in `tests/checker/parse-recovery/malformed-calls/` (#2406), comparing
   complete GNU89/GNU17/C23 diagnostics and status, both readers, syntax/object
   output, warning policies, `-fno-builtin` and error limits. Mixed ordinary and
   attribute-led macro calls cover multiple rounds and repaired/rejected views;
@@ -380,12 +389,18 @@ unused-warning fixtures also check exact scope-completion tokens.
   `tests/driver/fp_contract.c` for float/double result bits, expression
   boundaries, option ordering, scoped pragmas and dynamic rounding. It covers
   both readers, object/direct output and strict Tier 1 without fallback,
-  with transition verification enabled). `--imaginary-bit-int-only` runs
+  with transition verification enabled). It also runs #2806's
+  `tests/ir/vectorize/float-convert.c` and `float-convert-main.c`: packed
+  FMA and all signed/unsigned same-width integer/float conversions, at
+  x86-64, x86-64-v3 and x86-64-v4, against Clang's scalar loops with the
+  same contraction policy. The full driver suite includes that check with
+  its loop-vectorization cases. `--imaginary-bit-int-only` runs
   `c_check_imaginary_bit_int_driver_test.c` (#2219):
-  `tests/driver/imaginary-bit-int/`'s diagnostics sources (constants in every
+  `tests/driver/imaginary-bit-int/diagnostics/`'s sources (constants in every
   spelling and constant context, refused suffixes, the complex `_BitInt` types
   in errors and failed static assertions' printing) in the standards
-  `cases.txt` names, by the shared default-warning harness, and its program
+  `catalog.tsv` names, by the shared default-warning harness, and the native
+  program catalog under `tests/driver/programs/imaginary-bit-int/`
   (arithmetic, comparisons, parts, casts, static and automatic initializers,
   calls, returns and `va_arg` of complex `_BitInt`s of 3 to 256 bits and
   `_Complex __int128`), whose output at Tier 0 and strict Tier 1, by both
@@ -417,7 +432,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   regions") and of the transitions ("Memoized transitions"), opt-in (the driver's `--check-transitions`) while they
   don't save a large fraction of `check-expressions`. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
   transition-*` lines, and the driver's `--verify` runs every hit's action too and fails on a difference.
-  `test-checker [--seed N] [--clang PATH] [--fixtures DIR] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--attested|--transitions]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--fixtures DIR] [--part K/N] [--program-initializers|--program-fixtures|--program-vectors|--program-library|--embed-initializers|--requests|--attested|--transitions]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
@@ -425,6 +440,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--part K/N` runs the K-th of N parts that the default run's sections and `check_test_programs`' programs are dealt
   to in turn (`CheckTestPart`); part 1 also runs the sections that share the run's type table and graph arenas.
   `--program-selection` selects the emission-selection, constant-if and constant-switch regressions alone.
+  `--program-fixtures` selects the constant-conversion, branch-condition and
+  implicit-int native catalogs alone, including their structural checks and
+  Clang comparisons. Like the other focused selections, it cannot be combined
+  with `--part`.
   Set `BUSTER_TEST_PROFILE_DIR` to an existing writable absolute directory when profiling the native checker
   oracles. `test-checker` leaves each executed `run` ELF at its original path under that directory, so a profiler
   can open it after the child exits. Set the variable in the profiler's launch environment when running the tests
@@ -914,6 +933,14 @@ runner stages input under the original logical filenames. Hardware and
 toolchain gates, temporary output paths and independent oracles remain in
 the specialized C check.
 
+The v2 `driver-programs` header has the same role columns and also accepts
+`@PATH` references relative to the selected fixture root, so two suites can
+share an existing source without copying it. Each component must be a simple
+filename; absolute paths, empty components, `.` and `..` are rejected. Every
+catalog row and referenced file is checked before callbacks begin. Local files
+that no row names fail the inventory check. The loader releases each case's
+input storage after its callback and releases the catalog when the suite ends.
+
 The default-warning driver sweeps read `tests/driver/warnings/SUITE/catalog.tsv`.
 Use `test-checker-driver --fixtures DIR` to select the root containing
 `driver/` and `checker/`. Each v2 catalog starts with
@@ -933,6 +960,31 @@ list. Lines beginning with `#` are comments. Add ordinary cases here in
 execution order. The default, condition and shift-count sweeps deal rows to
 the driver's parts. Generated matrices and diagnostic spelling comparisons
 run in their original C harnesses.
+
+The v3 warning format adds a ninth field immediately before NAME:
+
+```text
+ID    FILE.c    WARNINGS    ERRORS    NOTES    FLAGS    OPTIONS    COMPANIONS    NAME
+```
+
+COMPANIONS is `-` or up to four comma-separated adjacent `.h` files. Rows may
+share source and companion files. A row with companions may use the ordered
+option pair `-isystem @suite`; the runner resolves `@suite` to that catalog's
+directory under the selected fixture root. The entire inventory is validated
+before any row runs: missing files, duplicate IDs, repeated companions within
+a row, invalid flags or counts, unsafe paths, empty catalogs and unlisted files
+fail the suite. The 42 auto-qualifier policies use v2; the 44 record-extension
+policies use v3 for their system header. Their GNU17/C23 order and the eight
+imaginary-bit-int diagnostic policies are explicit rows. Call, expression and
+syntax warning cases also use v2 catalogs under `driver/warnings/`.
+
+The malformed-call sweep reads
+`checker/parse-recovery/malformed-calls/catalog.tsv` under the same root. Its
+header is `buster-fixtures v1 malformed-calls`; each row holds the numeric
+stable case ID, source filename, later-error count, accepted bit and language
+mask (GNU89=1, GNU17=2, GNU23=4). IDs are unique, and all source files and row
+metadata are validated before the existing dialect/policy checks run. The
+compiled tree probes continue to refer to their stable IDs.
 
 `test-checker`'s shared source fixtures (`check_test_sources`) are
 runtime data (#2053): `tests/checker/sources/` holds `catalog.tsv` and one file
@@ -963,8 +1015,10 @@ byte for byte when they moved (buster-performance's
 Each case `check_test_source` accepts also checks the reader's graph and
 enumerations (what its two paths' comparison reads: every node's columns and
 leaf, the arguments, the overload calls, the tokens' nodes and the enumeration
-records) against `tests/checker/source-digests.tsv`, from the repository's
-root, keyed by the case's name and its source's hash (#2924). The digests were
+records) against `checker/source-digests.tsv` under the selected fixture root,
+keyed by the case's name and its source's hash (#2924). Both checker commands
+reset their owned digest caches and resolve their paths when parsing a new
+run, including when a process reuses a command with another root. The digests were
 recorded where the reader's vector path and its scalar twin agreed. A case
 with no line passes: a new case, or an edited source (a new key), has no such
 agreement to record, and clang's acceptance and first error and the checker's
@@ -975,7 +1029,7 @@ FILE's lines unique, and put them after the table's three comment lines; the
 PR says what vouches for the changed graphs.
 
 The checker's typed streams are recorded the same way, in
-`tests/checker/stream-digests.tsv` (#2924, C12c-3): each source fixture's
+`checker/stream-digests.tsv` under that root (#2924, C12c-3): each source fixture's
 stream, keyed as above, and each comparison's reference stream (a generated
 graph's, a builtin or x86 graph's, the transitions' and the scheduler's), keyed
 by its site and the graph (`check_test_graph_key`: its nodes, columns, leaves,
@@ -985,6 +1039,21 @@ depend on the tests run before it (a part's against a whole run's). A case with
 no line passes, as above. A checker change that changes a recorded stream
 records again with `BUSTER_CHECK_RECORD_STREAM_DIGESTS=FILE`, every part and a
 whole run, a key with two digests `-`.
+
+Native source catalogs under `checker/constant-conversions` and
+`checker/branch-conditions` retain mandatory named cases for their specialized
+structural assertions. They also execute additional ordinary rows; their
+inventories are not capped at the original three and four programs. The
+`checker/programs/implicit-int` catalog holds the three original implicit-int
+programs. Each row runs in both strict C89 and GNU89 with the original native
+comparison harness. Editing or adding an ordinary program needs no host rebuild.
+
+The correctness inventory runs `tools/ci/runtime-fixtures.c` against one built
+compiler. It copies catalogs to temporary roots outside the checkout, mutates
+inputs and expectations, checks missing/duplicate/orphan/malformed cases, and
+adds ordinary rows. Successful additions and rejected mutations use that same
+binary throughout; root and digest checks therefore cover data changes without
+a rebuild.
 
 Thirteen test files' own source tables, 967 cases, are runtime data in the same
 format, a directory a suite under `tests/checker/`, which `check_test_suite`
@@ -1099,9 +1168,11 @@ index both a system header spells.
 library and declaration contracts, and query builtins.
 
 A table's comments are `#` lines of its catalog, above the cases they described.
-The other test files' tables stay C for now: they build their sources when they
-run, pair each case with data of their own, or pick cases by index (#2053 lists
-them). Outside the checker, Tier 1's mask IR (`tests/tier1/masks`,
+Generated source matrices, independent oracle functions, guarded setup and
+structural assertions remain in their C harnesses. Complete ordinary source
+programs, fixed output and per-case policies belong in runtime catalogs, including
+when a specialized check refers to a case by its stable name. Outside the checker,
+Tier 1's mask IR (`tests/tier1/masks`,
 [the selection guide](../tier1-selection.md)) and the IR parser's canonical
 fixtures (`tests/ir/catalog.tsv`, [the IR tools guide](ir-tools.md)) are runtime
 data too.
@@ -1384,7 +1455,7 @@ spellings, macro locations, comma groups, missing initializers, recovered types,
 later errors and accepted neighboring declarations are checked in GNU17 and
 C23, including preservation of output after a rejected unit. A C23 constexpr
 comma group guards the continuation flags. The source names and expected
-diagnostic counts come from the runtime `cases.txt` catalog.
+diagnostic counts come from the runtime `catalog.tsv`, with one row per dialect.
 The same catalog checks `_Atomic __auto_type` pointer initializers: exact
 placeholder and source-type spellings, nested and qualified pointers, typedefs,
 macro notes, comma declarators, recovered invalid uses, later errors and warning

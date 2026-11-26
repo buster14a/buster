@@ -17,6 +17,26 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The diagnostic fix-it ownership and insertion-line renderer, generated-spelling
+excerpts, macro edit-boundary mapping, declaration-time initializer macro
+visibility, header/directive repairs, Unicode-name correction metadata,
+range producers and original caret fixtures completing #2376 use
+the project default terms. Clang 23.1.4 at LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5` is an external behavioral oracle.
+No upstream implementation or test fixture was imported for this continuation;
+the existing Unicode width tables retain their separately recorded terms.
+
+The remaining checker-gap implementations for #1447 (`format_matches`
+contracts, non-VLA invalid-record recovery, segment-address-space atomic/asm
+accesses and hard UCN diagnostics in inactive preprocessor groups), their
+private test helpers and original runtime fixtures use the project default
+terms. LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Sema/SemaDeclAttr.cpp` and `clang/lib/Sema/SemaChecking.cpp` were
+consulted for attribute validation, format compatibility and diagnostic
+behavior. Clang 23.1.4 at that revision is the external diagnostic and
+generated-program oracle. No upstream implementation, fixture or generated
+data is imported by these changes.
+
 The `-Wconstant-logical-operand` warning facts, their constant/type-query and
 checked-graph producers, and the original `constant_logical_*.c` driver fixtures
 (#2900) use the project default terms. Clang 23.1.4, LLVM revision
@@ -367,6 +387,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/c_parser_binding_trace.c`, `src/buster/compiler/c_parser_bindings.c`, `src/buster/compiler/c_parser_bindings_test.c`, `src/buster/compiler/c_parser_bindings_benchmark.c` | Original parser-to-binding source-event adapter, declaration columns, scope fixtures, seeded source generator and source benchmark; Default. Existing project grammar, arenas and original binding benchmark helpers are reused. Clang is an external acceptance oracle. SQLite 3.53.4, Zig 0.14.1 libc and c-testsuite at `5c7275656d751de0e68b2d340a95b5681858ed07` are external validation inputs, read at run time and not incorporated; input identities are recorded in `docs/c-bindings.md`. |
 | `build.sh`, `.gitignore`, `.gitattributes`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
 | `.github/actions/vector-runtime/`, `tests/ci/vector-runtime.cjs`, and the request accounting in `tools/ci/vector-draw.sh` and `tests/ci/vector-draw.sh` | Original same-run artifact protocol glue, bounded REST reads, request ledgers and offline fixtures for #2309; Default. The runtime token and Results service contracts were read in actions/runner `8cfa1049f86781d141056082d73802d56cd2b433` and actions/toolkit `0c3a9c332b678ff1e776f93d728a4ad279803abe`, with exact source URLs in the action header. No runner/toolkit implementation, package or generated client is copied or vendored. JavaScript is confined to the Node action runtime that receives GitHub's artifact credentials. |
+| `tools/performance/dev.sh`, `paths.sh`, `function.py` and their profiling guide | Original developer tools, Default. GNU binutils, perf, LLVM tools and the optional [XED-to-XML](https://github.com/andreas-abel/XED-to-XML) Python binding run externally. The user-supplied [uops.info measurement XML](https://uops.info/xml.html) is external data. |
 | `CMakeLists.txt`, `CMakePresets.json`, `cmake/*.cmake`, `tools/ci/build_regression.c`, `tools/ci/setup-build-tools.sh`, `.github/workflows/build.yml` | Original CMake build description, presets, post-link/print/call-graph scripts, regression checks and tool staging for #1182; Default. They use CMake's and Ninja's documented interfaces; no CMake module or third-party build code is copied. CI downloads the official CMake 4.4.3 and Ninja 1.13.2 releases, verified by SHA-256, as external tools; they are not vendored. |
 | `tools/allcore/allcore.c`, `docs/commands/all-core.md` | Original all-core gauge for #2536's step 0: a cohort runner, CPU-wide cycle sampling read from the kernel's perf_event ring buffers, ELF symbol anchors of the stage clock, and the stage and whole-compile reductions; Default. Its runner and reductions adapt the measurement record's own first-party `allcore.c` ([buster-performance at `eaa710db`](https://github.com/buster14a/buster-performance/blob/eaa710db255e42520666aaea225b142aa74a2bde/docs/measurements/all-core-design-672-2026-11-12/scripts/tools/allcore.c), the same author and terms); the `perf_event_open` ABI and the ELF layouts are Linux's and System V's interfaces, from the system's headers. No external implementation is copied. |
 | `tools/codegen/split.c`, `tools/codegen/split_bitcode.cpp` | Original order-preserving partition of a unit's optimized module for parallel native generation; Default. They use LLVM's documented C API and, for the bitcode writer's use-list-order argument the C API lacks, its C++ `WriteBitcodeToFile`; the installed LLVM libraries are external build dependencies, not vendored, and no LLVM implementation is copied. |
@@ -609,6 +630,15 @@ it is not presented as a recovered original checkout identifier. Both the
 referenced interface and inspected implementation have the same MIT grant.
 
 ## Encoder, tools and other generated material
+
+The runtime-fixture follow-up (#3629) relocates original test literals and
+metadata from the compiler's checker, driver, preprocessor and IR parser tests
+at `8e4d32879e17b7d9548cad54257a2f8461328366` into `tests/`. The extracted sources,
+expected text and catalogs keep the project's `Apache-2.0 WITH LLVM-exception`
+terms. Host Clang 23.1.4 was used to dump the existing C literals for byte
+comparison, and remains an external test oracle. No upstream implementation,
+fixture or new external corpus was imported. Existing notices and provenance
+for other runtime fixtures remain unchanged.
 
 [PR #14](https://github.com/buster14a/buster/pull/14), introducing the
 encoder in `55f05ac`, explicitly records that no code was copied from

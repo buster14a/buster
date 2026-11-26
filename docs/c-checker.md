@@ -909,6 +909,23 @@ comma warnings are retained, the field and record are marked invalid, and
 later members and declarations still receive diagnostics (#2252). Ordinary
 references to the invalid field produce no extra error.
 
+Other invalid members recover independently too (#1447): a field of void,
+incomplete or function type, and a bit-field with a nonintegral type, negative
+or excessive width, or a named zero width. Their retained type, width and
+source locations give the specific diagnostic and an incomplete tag's
+forward-declaration note. The declarator reader continues through subsequent
+members, declarators and declarations. An invalid named field remains
+findable without secondary use errors; valid siblings still receive their
+ordinary conversion diagnostics. An invalid anonymous record contributes no
+promoted fields. Invalidity propagates through named record fields and arrays
+of those records, but omitting an invalid anonymous member does not invalidate
+its enclosing record. Initializers of invalid records still check their
+expressions and independent errors, while omitting the invalid aggregate's
+conversion and constant-initializer verdicts. The original sources in
+`tests/driver/invalid_records/` compare complete ordered diagnostics against
+Clang in GNU17 and C23, with one and three lanes and deferred body reading;
+a rejected object compilation must leave an existing output untouched.
+
 Differences left include statement expressions in rejected member bounds,
 and constant evaluation after a reference to an invalid field or a query of
 the invalid record's offsets. A warning inside a `sizeof` or `typeof`
@@ -5548,7 +5565,7 @@ arguments in normally closed calls, member callees, mismatched delimiters, and s
 nested calls, initializers or return expressions retain the existing recovery.
 
 `test-checker-driver --malformed-calls-only` reads the original runtime source
-and case catalog in `tests/checker/parse-recovery/malformed-calls.*`. It compares
+and case catalog in `tests/checker/parse-recovery/malformed-calls/`. It compares
 complete diagnostics and status with Clang in GNU89, GNU17 and C23, including
 warning promotion/suppression, `-fno-builtin` and error limits, through both
 readers and syntax/object output with one/three requested lanes and deferred
@@ -11208,19 +11225,35 @@ arguments against the function. The checker now gives these as clang does.
   `%gs:(%rax)`, the byte clang's `%gs:sym(%rip)` reaches). The atomic builtins
   that a direct plan takes take it too (their LOAD or SET, `lock xadd`, `xchg`,
   `lock cmpxchg`, a fetch's loop), from the object type's space or the pointer
-  argument's pointee's. Tier 1 falls back to
-  Tier 0 for such a function. The rest is refused by name ("a load or store in a
-  segment's address space", check_lower_segment_access, where a unit has such a
-  type at all: CheckLowerWriter.segments): an aggregate's copy past 8 of the
-  target's widest vector registers (as clang stops on), atomic
-  builtins of another plan (generic ones by pointer, `__atomic_clear`,
-  `__sync_lock_release`); and so are the accesses whose lvalue doesn't carry the
-  space: a vector's element, read or written (its type loses the vector's
-  space), and an asm statement's register output (stored through its address;
-  "an asm output in a segment's address space ... but a memory one"). Those and
-  the atomic builtins compiled without the override before #1447's segment work. A memory asm operand's address is
-  the template's, without the segment, as clang's is. Taking an address there is
-  compiled. Any other space's code is the default space's, as clang's.
+  argument's pointee's. Native 1-, 2-, 4- and 8-byte representation plans retain
+  each accessed pointer's space: the generic atomic builtins' desired, expected
+  and result buffers, and C11 compare-exchange's expected pointer, independently
+  of the atomic object's. A helper keeps its object's and expected pointer's
+  overrides in its instruction records; their pair is part of its signature,
+  including for dynamic orders, `__atomic_clear` and `__sync_lock_release`.
+  Its own frame and operand buffers stay in the default space. Tier 1 carries
+  the accesses its IR accepts and otherwise falls back to Tier 0
+  (ir_typed_segment_valid).
+
+  A vector element's access retains its vector's space even though its own
+  type loses it. An asm statement's register output stores through its original
+  lvalue's space, and a read/write output loads through the same space, in an
+  instruction row, an inline body or a helper; a flag output to an atomic object
+  keeps its atomic store. A memory asm operand passes its
+  offset to the template without adding a segment, as clang's does.
+  `tests/checker/programs/program-segments/` compares these native accesses
+  against clang, including independent expected/result spaces, aliases, helpers
+  of the same signature in different spaces, and asm register outputs.
+
+  The remaining boundaries are refused by name: a non-native atomic builtin's
+  access (including a 16-byte object or a library plan's pointer in a segment's
+  space, check_lower_segment_access); an asm output to a bit of a boolean vector
+  in a segment's space, which needs a vector read/insert/write; a non-flag asm
+  register output to an atomic object in a segment's space, which needs an
+  atomic store plan; an element of a
+  volatile vector; and an aggregate copy past 8 of the target's widest vector
+  registers (as clang stops on). Taking an address there is compiled. Any other
+  space's code is the default space's, as clang's.
 
   C23's spellings (`[[clang::address_space(1)]]` and the others) apply where
   a C23 type attribute does: after the specifiers or a pointer, to that type;
@@ -11507,9 +11540,36 @@ arguments against the function. The checker now gives these as clang does.
   (`check_program_emit_patchable`, both tiers' code) is the [object writer
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
-  The rest stay refused by name, where they apply: `format_matches` in either
-  syntax. Recognizing their
-  names does not supply their handlers.
+  `format_matches(archetype, index, "reference")` is retained in GNU and
+  scoped C23 syntax (#1447). Its first two arguments share `format`'s
+  archetype, parameter-index and string-parameter checks; its reference must
+  be a string literal, with parentheses and adjacent literal parts allowed.
+  Visible redeclarations inherit the contract; a changed explicit reference
+  is compared against the earlier declaration without changing diagnostics
+  for calls before it. New annotations retain inherited contracts for other
+  parameter indices or archetypes. A call checks each reference contract
+  before ordinary `format` argument checking, including when both attributes
+  annotate the same parameter. `c_check_format_matches.c` decomposes printf-family
+  references and call arguments into argument positions, exact conversion
+  widths, width/precision roles and privacy annotations. Literal scanning
+  uses masked byte batches and position ordering uses a stable radix pass.
+  Only attributed units allocate the contract table, and inherited copies
+  share its records. Changed references use the existing exceptional
+  redeclaration links so closed block scopes do not leak an annotation.
+
+  Comparisons preserve the specifier and reference-note locations through
+  concatenated and escaped strings. They diagnose incompatible conversions,
+  argument roles, sensitivity and arity, honor `-Wformat-signedness`, and
+  retain partial malformed-format comparisons where Clang does. Contradictory
+  repeated positions and mixed positional conventions drop the unusable
+  contract. An annotated function's format parameter supplies its reference
+  to ordinary printf-family argument checking in the body, including notes
+  back to the reference. Unknown forwarded parameters can receive a
+  `-Wmissing-format-attribute` suggestion under `-Wformat-nonliteral`; other
+  nonliteral arguments follow that warning's policy, and null arguments are
+  exempt. `tests/driver/format_matches/` compares complete diagnostics,
+  suppression, promotion, declaration visibility and deferred-body routes
+  against the pinned Clang oracle.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
   and C++'s `Owner`, `Pointer`, `contained_type` and

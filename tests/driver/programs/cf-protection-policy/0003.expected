@@ -1,0 +1,1 @@
+-fcf-protection=return	0	'nocf_check' attribute ignored	nocf_check is ignored under =return, as clang's

@@ -29,7 +29,8 @@ requirements. [Command index](README.md).
   control flow walked: wide vectors, machine rows (their templates placed by the
   emitter's claimed `Tier1RowPlacement`), realigned frames and by-value
   aggregates among them (#1284). Shapes it doesn't decode yet (dynamic frames,
-  variadic definitions, long doubles, indirect jumps to several labels) leave
+  variadic definitions, long doubles, indirect jumps to several labels and
+  opaque assembled asm spans) leave
   the code uncertified, by reason; `--tier1-report` counts `code_certified` and
   `code_uncertified`, and `test-checker-driver --executable`'s Tier 1 fixtures
   check those counts. `test-tier1-pipeline` corrupts certified functions'
@@ -55,8 +56,14 @@ requirements. [Command index](README.md).
   register), and ymm or zmm moves narrowed to xmm; each must be refused. Its
   asm body fixture's code is certified (#1839), and its masks' reloads after
   the body left out and the body's records changed are refused.
-  `test-checker-driver --executable`'s asm body fixtures check `--verify`'s
-  counts: every function with a body certified.
+  #2351's general-register body result is an ORIGINAL definition in its
+  physical register, followed by a checked copy before live-value restores;
+  the result fixture rejects a corrupted copy as well. Whole assembled units
+  are explicitly `opaque-asm`: their reserved records are replaced by bytes
+  after this proof, so emitted-code certification is unsupported while
+  allocation certification still runs. `test-checker-driver --executable`'s
+  asm body fixtures check `--verify`'s record-body counts, including goto exit
+  results and named labels.
   The carried-call-row fixture proves a value in both its
   register and row, then corrupts the owner, predecessor store and supplied
   assertions, with and without a frame pointer and through both emitter paths;
@@ -103,6 +110,19 @@ requirements. [Command index](README.md).
   load's displacement, base or destination, omitting a half, using the wrong
   VEX merge source, narrowing the store or relabeling the high half as a move
   must be refused.
+  The upper-vector fixtures (#3625, `tier1_upper_certificate_test.c`) certify
+  real allocations using registers 16 through 31 at 16, 32 and 64 bytes. They
+  corrupt full-width caller saves and restores, with and without a frame
+  pointer, and phi edge copies: narrowing either side, omitting both sides
+  of a save, aliasing a register through four bits, assigning register 32 or
+  using a VEX form with an upper register must be refused. The call proof
+  kills all 32 vector registers. A row scratch consistently renamed onto a
+  distinct live upper value must fail value-flow checking; placing an allocated
+  value in a reserved scratch register must fail the allocation certificate.
+  Row roles are bounded by each actual form's encoding. The decoder validates
+  the original records before VEX canonicalization, so normalization cannot
+  erase an illegal unused operand; a mutation of that operand checks this
+  boundary too.
 
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's
@@ -140,6 +160,32 @@ requirements. [Command index](README.md).
 - [The certificate guide](../../docs/tier1-certificate.md) records the trust
   boundary, supported forms, the CFG producer, why the checker is scalar and the
   emitted code's certificate, with what it doesn't decode yet.
+
+## Decoder scratch and register writes
+
+The emitted decoder keeps each node kernel's metadata before its counted scratch
+buffers (`Tier1CertEmittedKernel`, #1337). Resetting a kernel clears the metadata
+and restores its sentinels; the instruction, use and result arrays are left
+uninitialized outside their published prefixes. Every producer assigns complete
+elements before advancing the corresponding count. The reset also runs before
+call-step validation, so a refusal cannot expose an uninitialized kernel field.
+
+`tier1_cert_emitted_clobbers` compacts the written registers' location IDs from
+the effects' bitmasks. Its padded byte table preserves the previous order: each
+register number's GPR, vector and opmask locations, where present. It excludes
+rsp, ignores opmask reads, and admits xmm0–15 in narrow functions or zmm0–31 in
+wide ones. The compacted bytes are widened into bounded batches of at most 16
+locations; only the returned prefix is written. Frame clobbers still precede
+these register clobbers, with unchanged certificate IDs and chunk boundaries.
+
+`test-tier1-emit` checks frozen clobber lists for each resource bit, mixed and
+full masks, narrow/wide boundaries and partial output batches, with canaries
+around the written prefix. Its real call fixture regenerates kernels from two
+differently poisoned scratch buffers and compares their published contents.
+The existing call, frame, aggregate and wide-vector mutation tests continue to
+check the complete certificate. These checks establish correctness; #1337's
+decode/certify performance acceptance still requires the benchmark below on the
+9700X.
 
 ## Benchmark
 

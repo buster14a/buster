@@ -1,0 +1,7 @@
+buster-fixtures v2 driver-programs	program.c	counts.expected
+rules	rules.c	0001.expected
+wrapped	wrapped.c	0002.expected
+cfg-issue	@checker/cfg-pruning/issue.c	0003.expected
+cfg-runtime	@checker/cfg-pruning/runtime.c	0004.expected
+cfg-shapes	@checker/cfg-pruning/shapes.c	0005.expected
+cfg-tautologies	@checker/cfg-pruning/tautologies.c	0006.expected

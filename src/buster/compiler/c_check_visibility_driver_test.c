@@ -378,7 +378,9 @@ static void check_test_driver_multiversion_visibility(CheckTest* test, const cha
         "-fno-pic",
         "-fPIC",
     };
-    const char* source = "tests/driver/visibility_multiversion.c";
+    char source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/visibility_multiversion.c");
+    check_test_expect(test, located, "visibility multiversion: fixture path fits");
     char object[512];
     char program[512];
     char description[192];
@@ -388,7 +390,7 @@ static void check_test_driver_multiversion_visibility(CheckTest* test, const cha
     check_test_expect(test, room, "multiversion visibility: the symbol listings have room");
     snprintf(object, sizeof(object), "%s/multiversion-visibility.o", directory);
     snprintf(program, sizeof(program), "%s/multiversion-visibility", directory);
-    for (uint32_t o = 0; room && o < BUSTER_ARRAY_LENGTH(options); o += 1)
+    for (uint32_t o = 0; located && room && o < BUSTER_ARRAY_LENGTH(options); o += 1)
     {
         for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
         {
