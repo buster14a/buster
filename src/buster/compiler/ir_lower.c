@@ -2523,9 +2523,10 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
     const uint32_t block = body->block != BUSTER_TIER0_ASM_NO_BLOCK ? 1 : 0;
     const uint32_t passed = input->call_argument_counts[call];
     const uint32_t count = block + passed;
-    // Older single-result producers name only result. Normalize their descriptor here; every IR body has explicit
-    // masks, and the call's semantic type supplies that one result's width.
-    const uint32_t results = body->result_registers != 0 ? body->result_registers : body->result != 0 ? 1u << (body->result - 1u) : 0;
+    // Tier 0's asm goto uses eax as the call result without a register-output group. Give Tier 1 an explicit
+    // result register and mask, just as for older single-result producers that only name a primary register.
+    const uint8_t result = body->result != 0 ? body->result : result_type != IR_VOID ? X86_REGISTER_RAX + 1 : 0;
+    const uint32_t results = body->result_registers != 0 ? body->result_registers : result != 0 ? 1u << (result - 1u) : 0;
     const uint32_t wide = body->result_registers != 0 ? body->result_wide : result_type == IR_I64 || result_type == IR_F64 ? results : 0;
     for (uint32_t a = 0; a < passed; a += 1)
     {
@@ -2550,7 +2551,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
             .label_count = body->label_count,
             .locations = passed != 0 ? input->argument_locations + input->call_first[call] : 0,
             .passed = passed,
-            .result = body->result,
+            .result = result,
             .result_registers = results,
             .result_wide = wide,
         };

@@ -19282,7 +19282,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             uint8_t classes[BUSTER_CHECK_ASM_OPERANDS];
             uint8_t registers[BUSTER_CHECK_ASM_OPERANDS];
             uint32_t passed = 0;
-            uint32_t result_registers = jumps ? 1u << X86_REGISTER_RAX : 0;
+            uint32_t result_registers = 0;
             uint32_t result_wide = 0;
             for (uint32_t k = 0; plan->inline_passed && k < count; k += 1)
             {
@@ -19321,7 +19321,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .label_count = plan->presentation != NULL || plan->inline_unit ? 1 : plan->label_count,
                     .exits = plan->inline_exits,
                     .goto_labels = plan->inline_goto_labels,
-                    .result = returned != 0 ? (uint8_t)(check_asm_result_register(returned) + 1) : jumps ? X86_REGISTER_RAX + 1 : 0,
+                    .result = returned != 0 ? (uint8_t)(check_asm_result_register(returned) + 1) : 0,
                     .result_registers = result_registers,
                     .result_wide = result_wide,
                     .leaves = plan->inline_leaves,
