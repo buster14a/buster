@@ -8237,11 +8237,15 @@ static __attribute__((noinline)) Tier1SelectError tier1_select_cover_munch(const
 // `verify` false, the caller has verified the IR with `dominance` (tier1_select_plan_verified).
 // Marks `value` needed, and puts it on `pending` where it is new and the walk back has passed it (`passed`), to mark its
 // own values from there (tier1_select_need_values). `pending` has room for every node once, and one more.
-static uint32_t tier1_select_need(uint8_t* needed, uint32_t value, bool passed, uint32_t* pending, uint32_t pending_count)
+static uint32_t tier1_select_need(uint8_t* needed, uint32_t value, bool passed, uint32_t* pending, uint32_t pending_count, uint32_t* selected_uses)
 {
     const bool fresh = needed[value] == 0;
     needed[value] = 1;
     pending[pending_count] = value;
+    if (selected_uses != 0)
+    {
+        selected_uses[value] += 1;
+    }
     return pending_count + (fresh && passed);
 }
 
@@ -8256,7 +8260,7 @@ static uint32_t tier1_select_asm_skipped(const IrFunction* function, const Tier1
 // Marks needed the values a needed `node`'s pattern reads: a call's arguments and an indirect call's callee, or its
 // pattern's values. A value the walk back has passed (`walked`, or one past `node`, a later block's value that an
 // earlier block reads, #789) goes on `pending`.
-static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1SelectPattern* pattern, uint32_t node, bool walked, uint8_t* needed, uint32_t* pending, uint32_t pending_count)
+static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1SelectPattern* pattern, uint32_t node, bool walked, uint8_t* needed, uint32_t* pending, uint32_t pending_count, uint32_t* selected_uses)
 {
     // A row call's (#141) are its arguments too, and a body call's its register operands (#2144), past its block.
     if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW || pattern->rule == TIER1_RULE_ASM)
@@ -8265,17 +8269,17 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
         for (uint32_t argument = tier1_select_asm_skipped(function, pattern, &call); argument < call.argument_count; argument += 1)
         {
             const uint32_t value = function->extra[call.argument_first + argument];
-            pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
+            pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count, selected_uses);
         }
         if (function->op[node] == IR_CALL_INDIRECT)
         {
-            pending_count = tier1_select_need(needed, function->a[node], walked || function->a[node] > node, pending, pending_count);
+            pending_count = tier1_select_need(needed, function->a[node], walked || function->a[node] > node, pending, pending_count, selected_uses);
         }
         // A destination that is a pointer value (#2820), which the call's moves put in rdi.
         const uint32_t destination = pattern->rule == TIER1_RULE_CALL ? tier1_select_call_destination(function, node) : BUSTER_IR_NONE;
         if (destination != BUSTER_IR_NONE)
         {
-            pending_count = tier1_select_need(needed, destination, walked || destination > node, pending, pending_count);
+            pending_count = tier1_select_need(needed, destination, walked || destination > node, pending, pending_count, selected_uses);
         }
     }
     for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && pattern->rule != TIER1_RULE_ROW && pattern->rule != TIER1_RULE_ASM && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
@@ -8283,7 +8287,7 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
         const uint32_t value = pattern->values[operand];
         if (value != BUSTER_IR_NONE)
         {
-            pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
+            pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count, selected_uses);
         }
     }
     // A long double operand (#141), which the CFG consumer's records read from its object, no pattern's value: the IR's a
@@ -8295,10 +8299,77 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
         const bool used = (ir_value_mask(function, node) >> operand & 1) != 0 && value < function->instruction_count && function->type[value] == IR_F80;
         if (used)
         {
-            pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
+            pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count, selected_uses);
         }
     }
     return pending_count;
+}
+
+// Whether a shared stable frame leaf can need a selected-use census (#3644). Slots survive promotion even where no
+// address does; classify 64 operations at a time so those functions pay neither a count column's clear nor updates.
+static bool tier1_select_shared_frames(const IrFunction* function, const uint32_t* uses)
+{
+    const uint32_t count = function->instruction_count;
+    bool shared = false;
+    for (uint32_t first = 0; function->slot_count != 0 && !shared && first < count; first += 64)
+    {
+        const uint32_t left = count - first;
+        const __mmask64 active = left >= 64 ? ~(__mmask64)0 : (((__mmask64)1 << left) - 1);
+        const __m512i operations = _mm512_maskz_loadu_epi8(active, function->op + first);
+        uint64_t frames = _mm512_cmpeq_epi8_mask(operations, _mm512_set1_epi8(IR_STACK_ADDR)) & active;
+        for (; !shared && frames != 0; frames &= frames - 1)
+        {
+            const uint32_t node = first + (uint32_t)__builtin_ctzll(frames);
+            shared = uses[node] > 1 && tier1_select_stack_object(function, function->a[node]);
+        }
+    }
+    return shared;
+}
+
+// After memory folding, a frame leaf with several IR uses may have just one selected value use (#3644). Materialize
+// it at that use's existing copy or lea, rather than keeping every later scope's address live from the entry block.
+// The backward dependency walk counts selected operand occurrences, including calls and phi edges, once per kept
+// node. Only a stable, input-free frame leaf moves: no memory access, index computation or dynamic allocation does.
+// A raw single-use leaf already belongs to the cover's tree; leaving it there also preserves its subtree costs.
+static void tier1_select_sink_frame_addresses(const Tier1SelectForest* forest, const uint32_t* selected_uses, Tier1SelectPlan* plan)
+{
+    const IrFunction* function = forest->function;
+    const uint32_t count = function->instruction_count;
+    const uint32_t* const uses = forest->uses;
+    const uint32_t* const blocks = forest->blocks;
+    Tier1SelectPattern* const patterns = plan->patterns;
+    uint8_t* const covered = plan->covered;
+    for (uint32_t first = 0; selected_uses != 0 && first < count; first += 64)
+    {
+        const uint32_t left = count - first;
+        const __mmask64 active = left >= 64 ? ~(__mmask64)0 : (((__mmask64)1 << left) - 1);
+        const __m512i hidden = _mm512_maskz_loadu_epi8(active, covered + first);
+        uint64_t kept = _mm512_cmpeq_epi8_mask(hidden, _mm512_setzero_si512()) & active;
+        for (; kept != 0; kept &= kept - 1)
+        {
+            const uint32_t node = first + (uint32_t)__builtin_ctzll(kept);
+            Tier1SelectPattern* const pattern = &patterns[node];
+            const uint32_t source = pattern->values[0];
+            const bool copy = pattern->rule == TIER1_RULE_COPY;
+            const bool address = pattern->rule == TIER1_RULE_ADDRESS;
+            const bool whole = function->type[node] == IR_PTR || function->type[node] == IR_I64;
+            if ((copy || address) && whole && pattern->width == 8 && pattern->stack_object == BUSTER_IR_NONE && !pattern->rip &&
+                source < node && function->op[source] == IR_STACK_ADDR && uses[source] > 1 && selected_uses[source] == 1 &&
+                covered[source] == 0 && patterns[source].rule == TIER1_RULE_STACK_ADDRESS &&
+                (blocks[source] == 0 || blocks[source] == blocks[node]) && tier1_select_stack_object(function, function->a[source]))
+            {
+                // A plain copy keeps the input-free STACK_ADDRESS recipe, so spilling it can still rematerialize.
+                // An addressed use retains its index, scale and displacement and folds only the stable frame base.
+                pattern->rule = copy ? TIER1_RULE_STACK_ADDRESS : TIER1_RULE_ADDRESS;
+                pattern->immediate = copy ? patterns[source].immediate : pattern->immediate;
+                pattern->stack_object = copy ? BUSTER_IR_NONE : function->a[source];
+                pattern->values[0] = BUSTER_IR_NONE;
+                pattern->source_width = 0;
+                pattern->fold_count += 1;
+                covered[source] = 1;
+            }
+        }
+    }
 }
 
 // `costed` is true for both public entry points. Tests may set it false for the independent maximal-munch reference;
@@ -8583,6 +8654,13 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     if (error == TIER1_SELECT_OK)
     {
+        // The depth-level cursor is dead now. Reuse it for selected-use counts only where frame objects can need the
+        // refinement below; the existing dependency walk visits each retained pattern once, preserving duplicates.
+        uint32_t* const selected_uses = tier1_select_shared_frames(function, uses) ? positions : 0;
+        if (selected_uses != 0)
+        {
+            memset(selected_uses, 0, (uint64_t)count * sizeof(selected_uses[0]));
+        }
         // What the code computes, from the last node back: a node with an effect (a store, a call, a terminator, a
         // volatile load), a parameter, a phi and its operands, which its edges' moves read, a node nothing uses, which the
         // optimizer kept for a fault it may raise (a load or a division), and each value a computed node's pattern reads.
@@ -8601,6 +8679,10 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             {
                 const uint32_t value = ir_operand(function, node, p, blocks[node]).value;
                 needed[value] |= function->op[value] != IR_UNDEF ? 1 : 0;
+                if (selected_uses != 0)
+                {
+                    selected_uses[value] += 1;
+                }
             }
         }
         // On the bottom-up path, a node's pattern is made as the walk finds it needed (tier1_select_burs_pattern).
@@ -8617,7 +8699,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             }
             if (needed[node] != 0 && error == TIER1_SELECT_OK)
             {
-                pending_count = tier1_select_need_values(function, &plan.patterns[node], node, false, needed, pending, pending_count);
+                pending_count = tier1_select_need_values(function, &plan.patterns[node], node, false, needed, pending, pending_count, selected_uses);
             }
         }
         while (error == TIER1_SELECT_OK && pending_count != 0)
@@ -8629,11 +8711,15 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
                 error = TIER1_SELECT_ERROR_UNSUPPORTED;
                 failed_node = node;
             }
-            pending_count = error == TIER1_SELECT_OK ? tier1_select_need_values(function, &plan.patterns[node], node, true, needed, pending, pending_count) : pending_count;
+            pending_count = error == TIER1_SELECT_OK ? tier1_select_need_values(function, &plan.patterns[node], node, true, needed, pending, pending_count, selected_uses) : pending_count;
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
             plan.covered[node] = needed[node] ^ 1;
+        }
+        if (error == TIER1_SELECT_OK)
+        {
+            tier1_select_sink_frame_addresses(&forest, selected_uses, &plan);
         }
         for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
         {

@@ -79,7 +79,25 @@ patterns are:
   walk's block: the producer materializes every slot address in the preheader,
   which dominates every use, and the address is pure with a function-global
   offset. Memory operands can fold this leaf even when it has several users;
-  an escaping address still materializes. A direct symbol's address
+  an escaping address still materializes. After the cover is chosen, a stable
+  frame leaf with several raw IR uses but just one selected operand occurrence
+  can move into that user's full-width copy or address pattern (#3644,
+  `tier1_select_sink_frame_addresses`). The existing dependency walk counts
+  those occurrences, including call arguments, indirect callees, result
+  destinations and phi edges; duplicate operands count separately. The user
+  stays at its original node and keeps its index and displacement, while the
+  entry leaf becomes covered before liveness. A plain copy keeps the frame's
+  rematerialization recipe, and an input-free constant-offset frame address
+  has the same recipe with its addend. Multiple selected users retain their
+  shared address. Incoming overflow areas, dynamic allocations, narrow values
+  and non-entry cross-block leaves keep their original placement. This avoids
+  quadratic live memberships and intervals for initialized buffers in successive
+  scopes with early returns, without changing allocation limits or frame
+  lifetimes. `test-tier1-emit` checks actual selected CFG preparation at 1,536
+  and 3,072 scopes and certifies small shared, phi, indexed and dynamic cases;
+  `test-checker-driver` compiles 1,536 scopes strictly with rematerialization on
+  and off against a separate Clang helper and compact reference, checking all
+  bytes, callee writes and early exits. A direct symbol's address
   (`IR_SYMBOL_ADDR`) ends the walk the same way (#2573), from any block, since
   it reads no value either: the operand is rip-relative, the symbol plus the
   walked displacement, and the CFG consumer gives the access's one rip-relative
