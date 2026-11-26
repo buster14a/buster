@@ -3625,6 +3625,8 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
                 const uint32_t usize = ftype_size(cc, dr.type);
                 const uint32_t ualign = rf->packed ? 1u : ftype_align(cc, dr.type);
                 const uint32_t ubits = usize * 8u;
+                // #3577: wider than its type (a _Bool's is one bit) is the full pipeline's error.
+                if ((uint64_t)bw > (ftype_is_bool(dr.type) ? 1u : ubits)) { fast_cc_bail(cc, "a bit-field wider than its type"); break; }
                 if (bw == 0)
                 {
                     if (!rf->is_union)

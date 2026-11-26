@@ -322,7 +322,14 @@ call's constant amount past the object its destination points into) walks the
 destination's tokens as the full pipeline's `check_common_call_object` walks
 its expression, and reads where it points from the value: a local's or a
 global's array or address, or a register's sum of one with a constant, which
-keeps that place (`BUSTER_FVAL_LASTING_ADDRESS`) through a spill. One
+keeps that place (`BUSTER_FVAL_LASTING_ADDRESS`) through a spill. A sweep of
+the flags no probe had reached found four more, main's too: a bit-field wider
+than its type and an `inline` main (errors), a string longer than its array
+(`-Wexcess-initializers`), and a condition that is a parenthesized `==` with a
+modifiable left operand (`-Wparentheses-equality`), which a macro's grouping
+quiets: a `(` from a macro's body has data 1 (the `#define`'s loop marks it), so
+`if (IS1(x))` and sqlite's `ALWAYS(X)` stay direct, while one from a macro's
+argument (`ID((x == 1))`) leaves although the full pipeline is quiet. One
 gap is left: a loop's empty body (`for (...);`) is `-Wempty-body` only where the
 next statement is a block or is indented past the loop, as clang decides, and
 the direct path's tokens keep no columns, so it compiles such loops quietly as

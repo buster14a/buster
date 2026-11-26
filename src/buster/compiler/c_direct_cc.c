@@ -22,13 +22,18 @@
 
 // A hosted program's main must return int without GNU's extensions (#3592): clang refuses `void main(void)` in
 // -std=c99, c11, c17 and c23, at file scope or in a block, and only warns in GNU's modes (c_check_input.c's
-// check_input_main). The direct path leaves such a declaration to the full pipeline, freestanding or not.
-static void fast_cc_check_main(FastCCState* cc, uint32_t name_id, FastType type)
+// check_input_main). The direct path leaves such a declaration to the full pipeline, freestanding or not; and an inline
+// main, the full pipeline's error in any mode (#3577).
+static void fast_cc_check_main(FastCCState* cc, uint32_t name_id, FastType type, bool is_inline)
 {
     if (cc->pp->strict_iso && name_id != 0 && name_id == cc->id_main && ftype_is_func(type) &&
         cc->ctypes[type & BUSTER_FTYPE_CIDX_MASK].inner != (FastType)FTYPE_I32)
     {
         fast_cc_bail(cc, "main returns other than int without GNU's extensions");
+    }
+    if (is_inline && name_id != 0 && name_id == cc->id_main)
+    {
+        fast_cc_bail(cc, "an inline main");
     }
 }
 
@@ -1376,6 +1381,8 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
             ar->size = slen + 1u;
             ar->complete = 1u;
         }
+        // #3577: a string longer than its array (but for the null) is the full pipeline's -Wexcess-initializers.
+        if (slen > ar->size) { fast_cc_bail(cc, "a string initializer longer than its array"); return 0; }
         uint8_t* dst = NULL;
         const uint32_t off = fast_obj_alloc_section(cc->obj, sec, ar->size, align, &dst);
         if (dst != NULL)
@@ -1539,6 +1546,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                 const char* sp_s = fast_cc_parse_string_lit(cc, &slen);
                 const uint32_t asz = ftype_size(cc, cur_t);
                 const uint32_t cpy = slen < asz ? slen : asz;
+                if (slen > asz) { fast_cc_bail(cc, "a string initializer longer than its array"); break; }
                 if (cur_off + cpy <= buf->cap) { memcpy(buf->data + cur_off, sp_s, cpy); }
                 if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
             }
@@ -1662,6 +1670,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
             const char* sp_s = fast_cc_parse_string_lit(cc, &slen);
             const uint32_t asz = ftype_size(cc, elem_t);
             const uint32_t cpy = slen < asz ? slen : asz;
+            if (slen > asz) { fast_cc_bail(cc, "a string initializer longer than its array"); break; }
             if (elem_off + cpy <= buf->cap) { memcpy(buf->data + elem_off, sp_s, cpy); }
             if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
             continue;
@@ -7622,6 +7631,59 @@ static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCSt
     return pushed;
 }
 
+// #3577: whether the condition at tokens [START, END) of an if, a while, a do or a for is the full pipeline's
+// -Wparentheses-equality (check_common_parentheses_equality): it is one group (or groups in groups) whose outermost `(`
+// isn't a macro's (a macro's `(` has data 1, c_direct_lex.c's #define), around a comparison for equality whose left
+// operand may be a modifiable lvalue. Where the operand isn't plainly an rvalue (a literal, an enumerator, a call, a cast,
+// an operator's value, a const or array object), it may be one.
+static __attribute__((cold, noinline)) bool fast_cc_parentheses_equality(const FastCCState* cc, uint32_t start, uint32_t end)
+{
+    bool questioned = false;
+    if (end <= cc->tcount && end > start + 2u && cc->td[start] == 0 && fast_cc_group_end(cc, start) == end)
+    {
+        uint32_t s = start;
+        uint32_t e = end;
+        while (s + 2u < e && cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e && !fast_cc_is_type_start(cc, s + 1u))
+        {
+            s += 1u;
+            e -= 1u;
+        }
+        uint32_t precedence = 99u;
+        const uint32_t at = s < e ? fast_cc_loosest_operator(cc, s, e, &precedence) : UINT32_MAX;
+        if (s > start && at != UINT32_MAX && cc->tk[at] == FTOK_EQ)
+        {
+            // The left operand, but for its grouping parentheses.
+            uint32_t ls = s;
+            uint32_t le = at;
+            while (ls + 1u < le && cc->tk[ls] == FTOK_LPAREN && fast_cc_group_end(cc, ls) == le && !fast_cc_is_type_start(cc, ls + 1u))
+            {
+                ls += 1u;
+                le -= 1u;
+            }
+            uint32_t inner = 99u;
+            const uint32_t operated = ls < le ? fast_cc_loosest_operator(cc, ls, le, &inner) : UINT32_MAX;
+            const uint8_t first = ls < le ? cc->tk[ls] : FTOK_EOF;
+            const uint8_t last = ls < le ? cc->tk[le - 1u] : FTOK_EOF;
+            const uint32_t id = cc->td[ls];
+            const uint32_t si = first == FTOK_IDENT && le == ls + 1u && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+            const FastSym* sym = cc->syms + si;
+            const bool named_rvalue = si != 0 && (sym->kind == FSYM_ENUM_CONST || sym->kind == FSYM_FUNC ||
+                                                  ((sym->kind == FSYM_LOCAL || sym->kind == FSYM_GLOBAL) &&
+                                                   (ftype_is_array(sym->type) || ftype_is_const(sym->type))));
+            const bool literal = le == ls + 1u && (first == FTOK_INT_LIT || first == FTOK_INT_U32 || first == FTOK_INT_I64 ||
+                                                   first == FTOK_INT_U64 || first == FTOK_FLOAT_LIT || first == FTOK_FLOAT32 ||
+                                                   first == FTOK_FLOAT80 || first == FTOK_CHAR_LIT || first == FTOK_STR_LIT);
+            const bool prefixed = first == FTOK_PLUS || first == FTOK_MINUS || first == FTOK_BANG || first == FTOK_TILDE ||
+                                  first == FTOK_AMP || first == FTOK_INC || first == FTOK_DEC || first == FTOK_KW_SIZEOF ||
+                                  first == FTOK_KW_ALIGNOF || (first == FTOK_LPAREN && fast_cc_is_type_start(cc, ls + 1u));
+            const bool called = last == FTOK_RPAREN && first != FTOK_LPAREN;
+            const bool postfix_step = last == FTOK_INC || last == FTOK_DEC;
+            questioned = !(operated != UINT32_MAX || named_rvalue || literal || prefixed || called || postfix_step);
+        }
+    }
+    return questioned;
+}
+
 // The expression compiler's body, made twice (#3577): without the -Wunsequenced log (LOGGING false: fast_cc_expr, every
 // expression), and with it, for an expression compiled again without code (fast_cc_expr_logged).
 static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCState* cc, bool stop_at_comma, bool discard_result, bool is_branch,
@@ -8771,8 +8833,14 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
     }
     if (is_branch)
     {
-        // An assignment as a condition, outside parentheses, is -Wparentheses (#3577).
+        // An assignment as a condition, outside parentheses, is -Wparentheses (#3577); a parenthesized comparison for
+        // equality, -Wparentheses-equality (fast_cc_parentheses_equality, looked at where the condition starts with `(`).
         if (final_v.op == FTOK_ASSIGN) { fast_cc_bail(cc, "assignment as a condition"); return; }
+        if (cc->tk[ex.seq_start_pos] == FTOK_LPAREN && fast_cc_parentheses_equality(cc, ex.seq_start_pos, cc->pos))
+        {
+            fast_cc_bail(cc, "an equality comparison in extraneous parentheses as a condition");
+            return;
+        }
         cc->branch_constant = (uint8_t)((uint32_t)(final_v.kind == FVAL_IMM) * (BUSTER_FCONSTANT_FALSE + (uint32_t)(final_v.imm != 0)));
         fval_branch(&ex, &final_v, branch_on_true, branch_label);
     }
@@ -8884,6 +8952,8 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             ar->size = slen + 1u;
             ar->complete = 1u;
         }
+        // #3577: a string longer than its array (but for the null) is the full pipeline's -Wexcess-initializers.
+        if (slen > ar->size) { fast_cc_bail(cc, "a string initializer longer than its array"); return 0; }
         const int32_t off = fast_cc_alloc_local(cc, ar->size, al);
         const uint32_t ro_off = fast_obj_add_string_lit(cc->obj, sp, slen);
         const uint32_t cpy = (slen + 1u) < ar->size ? (slen + 1u) : ar->size;
@@ -9048,6 +9118,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                 const char* sp_s = fast_cc_parse_string_lit(cc, &slen);
                 const uint32_t asz = ftype_size(cc, cur_t);
                 const uint32_t cpy = slen < asz ? slen : asz;
+                if (slen > asz) { fast_cc_bail(cc, "a string initializer longer than its array"); break; }
                 const uint32_t ro = fast_obj_add_string_lit(cc->obj, sp_s, slen);
                 x86_lea_sym(cc->obj, FREG_R10, cc->obj->sec_sym_rodata_str, (int64_t)ro);
                 x86_emit_memcpy_inline(cc->obj, FREG_RBP, cur_off, FREG_R10, 0, cpy, FREG_RAX);
@@ -9133,6 +9204,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             const char* sp_s = fast_cc_parse_string_lit(cc, &slen);
             const uint32_t asz = ftype_size(cc, elem_t);
             const uint32_t cpy = slen < asz ? slen : asz;
+            if (slen > asz) { fast_cc_bail(cc, "a string initializer longer than its array"); break; }
             const uint32_t ro = fast_obj_add_string_lit(cc->obj, sp_s, slen);
             x86_lea_sym(cc->obj, FREG_R10, cc->obj->sec_sym_rodata_str, (int64_t)ro);
             x86_emit_memcpy_inline(cc->obj, FREG_RBP, elem_off, FREG_R10, 0, cpy, FREG_RAX);
@@ -11652,7 +11724,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     // against the file's and refuses.
                     if (ftype_is_func(dr.type))
                     {
-                        fast_cc_check_main(cc, dr.name_id, dr.type);
+                        fast_cc_check_main(cc, dr.name_id, dr.type, ds.is_inline);
                     }
                     const uint32_t seen = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                     const uint8_t kind = ftype_is_func(dr.type) ? (uint8_t)FSYM_FUNC : (uint8_t)FSYM_GLOBAL;
@@ -12175,7 +12247,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
 
             if (!ds.is_typedef)
             {
-                fast_cc_check_main(cc, dr.name_id, dr.type);
+                fast_cc_check_main(cc, dr.name_id, dr.type, ds.is_inline);
             }
             if (alias != NULL && (ds.is_static || ds.is_inline || join.label != NULL))
             {

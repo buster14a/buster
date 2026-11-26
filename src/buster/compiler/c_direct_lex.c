@@ -5036,6 +5036,12 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
         const FastTok bt = body[i];
         has_ops = has_ops || bt.kind == FTOK_HASH || bt.kind == FTOK_HASHHASH;
         body_bad |= (uint32_t)(bt.kind == FTOK_IDENT) & (uint32_t)(bt.data == va_opt_id);
+        // #3577: a macro's `(` says it is one (its data 1; the file's are 0), for -Wparentheses-equality, which a
+        // macro's grouping quiets.
+        if (bt.kind == FTOK_LPAREN)
+        {
+            body[i] = fast_tok_make(FTOK_LPAREN, bt.flags, bt.extra, 1u);
+        }
         if (is_func && (bt.kind == FTOK_IDENT || (bt.kind >= 64u && bt.kind < 126u)))
         {
             uint16_t extra = 0;

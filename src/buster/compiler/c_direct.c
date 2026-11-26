@@ -4526,6 +4526,14 @@ static int c_direct_unit_tests(void)
         "    memcpy(b, s, k); strcpy(b, \"abc\"); memcpy(r.c, s, 8); memcpy(g + 6, s, 2); if (0) { memcpy(b, s, 8); }\n"
         "    return b[0] + x + r.x;\n"
         "}\n",
+        // 20. What the bit-field, string initializer and -Wparentheses-equality checks leave alone: bit-fields as wide as
+        // their types, a string that fills its array but for the null, a macro's grouped comparison, a constant's on the
+        // left, a parenthesized `!=`, `!` of one.
+        "struct W { _Bool b : 1; int a : 32; };\nchar fit[3] = \"abc\";\n#define IS1(v) ((v) == 1)\n#define ALWAYS(X) (X)\n"
+        "int conditions(struct W* w, int x) {\n"
+        "    if (IS1(x)) { return 1; } if (ALWAYS(x == 2)) { return 2; } if ((3 == x)) { return 3; } if ((x != 4)) { return 4; }\n"
+        "    if (!(x == 5)) { return 5; } return w->a + w->b + fit[0];\n"
+        "}\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4701,6 +4709,20 @@ static int c_direct_unit_tests(void)
         "void bcopy(const void*, void*, unsigned long);\nvoid f(const char* s) { char b[4]; bcopy(s, b, 8); (void)b; }\n",
         "void* memcpy(void*, const void*, unsigned long);\nstatic inline void f(const char* s) { char b[4]; memcpy(b, s, 8); (void)b; }\n"
         "int main(void) { return 0; }\n",
+        // A bit-field wider than its type, an int's or a _Bool's; a string longer than its array, at file scope, in a
+        // block and as a member's; an inline main (errors and -Wexcess-initializers).
+        "struct S { int a : 33; };\nint f(struct S* s) { return s->a; }\n",
+        "struct S { _Bool b : 2; };\nint f(struct S* s) { return s->b; }\n",
+        "char s[2] = \"abc\";\n",
+        "int f(void) { char s[2] = \"abc\"; return s[0]; }\n",
+        "struct T { char s[2]; int n; };\nstruct T t = { \"abc\", 1 };\n",
+        "inline int main(void) { return 0; }\n",
+        // -Wparentheses-equality: an if's and a while's condition a parenthesized comparison for equality, a member's
+        // and a dereference's.
+        "int f(int x) { if ((x == 1)) { return 1; } return 0; }\n",
+        "int f(int x) { while ((x == 1)) { x += 1; } return x; }\n",
+        "struct S { int a; };\nint f(struct S* s, int* p) { if ((s->a == 1)) { return 1; } return *p; }\n",
+        "int f(int* p) { do { p += 1; } while (((*p == 1))); return 0; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
