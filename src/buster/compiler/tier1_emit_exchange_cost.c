@@ -131,6 +131,13 @@ static bool tier1_emit_exchange_cost(const Tier1SelectPlan* plan, const Tier1Emi
     const uint64_t mark = scratch->length;
     const IrFunction* function = plan->function;
     const Tier1Allocation* allocation = &cfg->allocation;
+    // Diagnostic-only filter: zero traces every function; another value matches its instruction count.
+    const char* trace_env = getenv("BUSTER_TIER1_EXCHANGE_TRACE");
+    const uint32_t trace_nodes = trace_env != 0 ? (uint32_t)strtoul(trace_env, 0, 0) : 0;
+    const bool trace = trace_env != 0 && (trace_nodes == 0 || trace_nodes == function->instruction_count);
+    uint32_t trace_sequence_mask = 0;
+    uint32_t trace_fixed_mask = 0;
+    uint32_t trace_asm_mask = 0;
     for (uint32_t r = 0; r < 16; r += 1)
     {
         permutation[r] = (uint8_t)r;
@@ -139,20 +146,35 @@ static bool tier1_emit_exchange_cost(const Tier1SelectPlan* plan, const Tier1Emi
     for (uint32_t k = 0; k < input->sequence_count; k += 1)
     {
         forbidden |= input->sequence_registers[k];
+        trace_sequence_mask |= input->sequence_registers[k];
+        if (trace)
+        {
+            fprintf(stderr, "EXCHANGE sequence instructions=%u index=%u position=%u registers=%x\n", function->instruction_count, k, input->sequences[k], input->sequence_registers[k]);
+        }
     }
     for (uint32_t f = 0; f < input->fixed.count; f += 1)
     {
         forbidden |= input->fixed.classes[f] == BUSTER_TIER1_ALLOCATE_GPR ? input->fixed.registers[f] : 0;
+        trace_fixed_mask |= input->fixed.classes[f] == BUSTER_TIER1_ALLOCATE_GPR ? input->fixed.registers[f] : 0;
     }
     for (uint32_t node = 0; node < function->instruction_count; node += 1)
     {
         if (!plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_ASM)
         {
             forbidden |= tier1_select_node_fixed(function, &plan->patterns[node]);
+            trace_asm_mask |= tier1_select_node_fixed(function, &plan->patterns[node]);
+            if (trace)
+            {
+                fprintf(stderr, "EXCHANGE asm instructions=%u node=%u body=%" PRIu64 " touched=%x\n", function->instruction_count, node, plan->patterns[node].immediate, tier1_select_node_fixed(function, &plan->patterns[node]));
+            }
         }
     }
     const uint32_t callee = emitted->callee_registers & input->registers[BUSTER_TIER1_ALLOCATE_GPR];
     uint32_t preserved = tier1_emit_cfg_callee_used(cfg, callee) & ~forbidden;
+    if (trace)
+    {
+        fprintf(stderr, "EXCHANGE masks instructions=%u blocks=%u pool=%x callee=%x used=%x sequences=%x fixed=%x asm=%x forbidden=%x hints=%u\n", function->instruction_count, input->block_count, input->registers[BUSTER_TIER1_ALLOCATE_GPR], callee, tier1_emit_cfg_callee_used(cfg, callee), trace_sequence_mask, trace_fixed_mask, trace_asm_mask, forbidden, cfg->intervals.hints != 0);
+    }
     uint32_t incoming = 0;
     uint32_t entry_sources[BUSTER_ABI_INTEGER_ARGUMENTS];
     uint32_t entry_destinations[BUSTER_ABI_INTEGER_ARGUMENTS];
@@ -171,6 +193,10 @@ static bool tier1_emit_exchange_cost(const Tier1SelectPlan* plan, const Tier1Emi
                 uint8_t kind = 0;
                 supported = entry_count < BUSTER_ABI_INTEGER_ARGUMENTS && tier1_cfg_location(cfg, value, 0, &location, &kind) &&
                             kind == BUSTER_TIER1_ALLOCATE_REGISTER && location < 16;
+                if (trace)
+                {
+                    fprintf(stderr, "EXCHANGE entry instructions=%u node=%u value=%u abi=%u location=%u kind=%u supported=%u\n", function->instruction_count, node, value, tier1_select_parameter_registers[place.index], location, kind, supported);
+                }
                 if (supported)
                 {
                     const uint32_t reg = tier1_select_parameter_registers[place.index];
@@ -182,9 +208,14 @@ static bool tier1_emit_exchange_cost(const Tier1SelectPlan* plan, const Tier1Emi
             }
         }
     }
+    const uint32_t trace_incoming_raw = incoming;
     incoming &= input->registers[BUSTER_TIER1_ALLOCATE_GPR] & ~callee & ~forbidden;
     const uint32_t capacity = emitted->prepared.call_count;
     supported = supported && incoming != 0 && preserved != 0 && capacity != 0;
+    if (trace)
+    {
+        fprintf(stderr, "EXCHANGE eligibility instructions=%u incoming_raw=%x incoming=%x preserved=%x entry_count=%u capacity=%u supported=%u\n", function->instruction_count, trace_incoming_raw, incoming, preserved, entry_count, capacity, supported);
+    }
     Tier1EmitExchangeCall* calls = supported ? ir_allocate(scratch, (uint64_t)capacity + 1, sizeof(Tier1EmitExchangeCall), &ok) : 0;
     uint32_t* live = supported && ok ? ir_allocate(scratch, (uint64_t)capacity + 1, sizeof(uint32_t), &ok) : 0;
     uint32_t count = 0;
@@ -219,6 +250,11 @@ static bool tier1_emit_exchange_cost(const Tier1SelectPlan* plan, const Tier1Emi
                         const bool callee_argument = indirect && argument == call->argument_count;
                         const bool pointer_argument = pointer && argument == call->argument_count + indirect;
                         supported = supported && (argument < call->argument_count || callee_argument || pointer_argument);
+                        if (trace && !supported)
+                        {
+                            const uint32_t source = plan->effective_use_values[u];
+                            fprintf(stderr, "EXCHANGE unsupported instructions=%u call_index=%u node=%u position=%u symbol=%u argument=%u/%u source_node=%u op=%s rule=%u value=%u location=%u kind=%u indirect=%u pointer=%u sources=%u\n", function->instruction_count, count, node, target->position, function->a[node], argument, call->argument_count, source, ir_op_names[function->op[source]], plan->patterns[source].rule, value, location, kind, indirect, pointer, target->count);
+                        }
                         if (supported)
                         {
                             target->source[target->count] = location;
@@ -232,6 +268,10 @@ static bool tier1_emit_exchange_cost(const Tier1SelectPlan* plan, const Tier1Emi
                 count += 1;
             }
         }
+    }
+    if (trace)
+    {
+        fprintf(stderr, "EXCHANGE calls instructions=%u count=%u supported=%u ok=%u\n", function->instruction_count, count, supported, ok);
     }
     // A fragment contributes precisely at calls whose definition phase it covers, except its own call result.
     for (uint32_t i = 0; supported && ok && i < cfg->intervals.count; i += 1)
@@ -277,11 +317,39 @@ static bool tier1_emit_exchange_cost(const Tier1SelectPlan* plan, const Tier1Emi
                     int64_t candidate_score = 0;
                     ok = tier1_emit_exchange_score(calls, live, count, callee, entry_sources, entry_destinations, entry_count, entry_moves,
                                                   candidate, scratch, &admissible, &candidate_score);
+                    if (trace)
+                    {
+                        fprintf(stderr, "EXCHANGE pair instructions=%u caller=%u callee=%u selected=%u subset=1 ok=%u admissible=%u score=%" PRId64 " prior=%" PRId64 "\n", function->instruction_count, caller, saved, selected, ok, admissible, candidate_score, score);
+                        for (uint32_t k = 0; ok && !admissible && k < count; k += 1)
+                        {
+                            uint32_t moves = 0;
+                            const bool resolved = tier1_emit_exchange_moves(calls[k].source, calls[k].destination, calls[k].count, candidate, scratch, &moves);
+                            const uint32_t before = (uint32_t)__builtin_popcount(live[k] & ~callee);
+                            const uint32_t after = (uint32_t)__builtin_popcount(tier1_emit_exchange_mask(live[k], candidate) & ~callee);
+                            const int64_t saving = 2 * ((int64_t)before - after) + (int64_t)calls[k].moves - moves;
+                            if (!resolved || after > before || saving < 0)
+                            {
+                                fprintf(stderr, "EXCHANGE call-veto instructions=%u caller=%u callee=%u call_index=%u node=%u position=%u live=%x before=%u after=%u moves_before=%u moves_after=%u saving=%" PRId64 " resolved=%u\n", function->instruction_count, caller, saved, k, calls[k].node, calls[k].position, live[k], before, after, calls[k].moves, moves, saving, resolved);
+                                break;
+                            }
+                        }
+                    }
                     if (ok && admissible && candidate_score > best)
                     {
                         best = candidate_score;
                         chosen_caller = caller;
                         chosen_callee = saved;
+                    }
+                }
+                else if (trace)
+                {
+                    for (uint32_t k = 0; k < count; k += 1)
+                    {
+                        if ((live[k] & (1u << saved)) != 0 && (live[k] & (1u << caller)) == 0)
+                        {
+                            fprintf(stderr, "EXCHANGE subset-veto instructions=%u caller=%u callee=%u selected=%u call_index=%u node=%u position=%u live=%x\n", function->instruction_count, caller, saved, selected, k, calls[k].node, calls[k].position, live[k]);
+                            break;
+                        }
                     }
                 }
             }
