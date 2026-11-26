@@ -361,7 +361,11 @@ binds a macro without the directive reader, so it leaves to that reader a name
 defined before (whose redefinition is compared), a builtin's, and in the
 predefines a `__STDC` macro or `__FLT_EVAL_METHOD__` (the full pipeline's own,
 which no `#undef` removes quietly), and keeps the text after the name that a
-later redefinition compares.
+later redefinition compares. A predefines file (`--predefines`) doesn't define
+`__FLT_EVAL_METHOD__` (clang's `-dM` leaves the builtin out), so the direct path
+defines it after either predefines, from the value the full pipeline takes
+(`pp_predefines_eval_method`); without it `#ifdef __FLT_EVAL_METHOD__` took the
+other branch and its `#undef` was quiet.
 `returns_twice` (a function's), `format_arg(N)` (a prototyped function's whose
 parameter N and value point to a character type) and `may_alias` (anything's)
 are taken as the full pipeline takes them, where musl's `<setjmp.h>`,

@@ -185,7 +185,9 @@ int c_direct_try_compile(const CDirectRequest* request)
         request->mark_stage(request->clock_context, request->stage_setup);
     }
 
-    // 1. Predefines (their __STDC macros are builtins, #3577; a macro's text stays readable to the end)
+    // 1. Predefines (their __STDC macros are builtins, #3577; a macro's text stays readable to the end), then
+    // __FLT_EVAL_METHOD__, the full pipeline's builtin after either: a --predefines file doesn't define it (clang's -dM
+    // leaves it out), where `#ifdef __FLT_EVAL_METHOD__` took the other branch and its #undef was quiet (#3577).
     if (ok)
     {
         pp->in_predefines = true;
@@ -197,19 +199,19 @@ int c_direct_try_compile(const CDirectRequest* request)
         else if (request->predefines_text != NULL && request->predefines_length > 0)
         {
             ok = fast_pp_run_buffer(pp, "<predefines>", request->predefines_text, request->predefines_length);
-            char* eval_buf = ok ? (char*)fast_arena_alloc(&arena, 64u, 16) : NULL;
-            if (eval_buf != NULL)
+        }
+        char* eval_buf = ok ? (char*)fast_arena_alloc(&arena, 64u, 16) : NULL;
+        if (eval_buf != NULL)
+        {
+            const int elen = snprintf(eval_buf, 64u, "#define __FLT_EVAL_METHOD__ %u\n", request->flt_eval_method);
+            if (elen > 0)
             {
-                const int elen = snprintf(eval_buf, 64u, "#define __FLT_EVAL_METHOD__ %u\n", request->flt_eval_method);
-                if (elen > 0)
-                {
-                    ok = fast_pp_run_buffer(pp, "<predefines>", eval_buf, (uint64_t)elen);
-                }
+                ok = fast_pp_run_buffer(pp, "<predefines>", eval_buf, (uint64_t)elen);
             }
-            else
-            {
-                ok = false;
-            }
+        }
+        else
+        {
+            ok = false;
         }
         pp->in_predefines = false;
     }
@@ -393,6 +395,7 @@ struct CDirectTestMode
     bool no_gnu_keywords;
     bool trigraphs;
     uint8_t raw_strings;
+    const char* predefines_path; // a predefines file (--predefines) instead of the minimal text
 };
 
 static bool c_direct_test_compile_source_with(const char* source, const char* obj_path, int expected_status, const char* const* directories,
@@ -451,9 +454,10 @@ static bool c_direct_test_compile_source_with(const char* source, const char* ob
     const CDirectRequest req = {
         .input_path = src_path,
         .output_path = obj_path,
-        .predefines_text = minimal_predefs,
-        .predefines_length = (uint32_t)(sizeof(minimal_predefs) - 1u),
+        .predefines_text = mode.predefines_path == NULL ? minimal_predefs : NULL,
+        .predefines_length = mode.predefines_path == NULL ? (uint32_t)(sizeof(minimal_predefs) - 1u) : 0u,
         .flt_eval_method = 0,
+        .predefines_path = mode.predefines_path,
         .directories = directories,
         .directory_system = system_directories,
         .directory_count = directory_count <= 8u ? directory_count : 0u,
@@ -5122,6 +5126,39 @@ static int c_direct_unit_tests(void)
     else
     {
         fprintf(stderr, "test-direct: FAIL a decimal macro defined again\n");
+        failed += 1u;
+    }
+
+    // #3577: with a predefines file (--predefines), which doesn't define it, __FLT_EVAL_METHOD__ is still the full
+    // pipeline's builtin: defined, of the request's value, and neither undefined nor defined again quietly.
+    char predefs_path[128];
+    snprintf(predefs_path, sizeof(predefs_path), "/tmp/buster_direct_predefs_%d.h", (int)getpid());
+    FILE* predefs_file = fopen(predefs_path, "wb");
+    bool predefs_ok = predefs_file != NULL;
+    if (predefs_ok)
+    {
+        static const char predefs[] = "#define __x86_64__ 1\n#define __LP64__ 1\n#define __STDC__ 1\n#define __STDC_VERSION__ 201710L\n";
+        predefs_ok = fwrite(predefs, 1, sizeof(predefs) - 1u, predefs_file) == sizeof(predefs) - 1u;
+        predefs_ok = fclose(predefs_file) == 0 && predefs_ok;
+    }
+    const CDirectTestMode file_mode = { .predefines_path = predefs_path };
+    static const int32_t expected_eval[] = { 1, 0 };
+    predefs_ok = predefs_ok &&
+                 c_direct_test_compile_source_with("#ifdef __FLT_EVAL_METHOD__\nconst int v[] = { 1, __FLT_EVAL_METHOD__ };\n#else\n"
+                                                   "const int v[] = { 2, 2 };\n#endif\n" BUSTER_DIRECT_TEST_TAIL,
+                                                   obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_eval, sizeof(expected_eval), file_mode);
+    predefs_ok = predefs_ok && c_direct_test_compile_mode("#undef __FLT_EVAL_METHOD__\nint f(void) { return 0; }\n" BUSTER_DIRECT_TEST_TAIL,
+                                                          obj_path, 1, NULL, NULL, file_mode);
+    predefs_ok = predefs_ok && c_direct_test_compile_mode("#define __FLT_EVAL_METHOD__ 0\nint f(void) { return 0; }\n" BUSTER_DIRECT_TEST_TAIL,
+                                                          obj_path, 1, NULL, NULL, file_mode);
+    unlink(predefs_path);
+    if (predefs_ok)
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL __FLT_EVAL_METHOD__ with a predefines file\n");
         failed += 1u;
     }
 

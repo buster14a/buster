@@ -54,7 +54,7 @@ struct CDirectRequest
     const char* output_path;         // NULL -> default <basename>.o in current directory
     const char* predefines_text;     // built-in predefines buffer (when predefines_path == NULL)
     uint32_t predefines_length;
-    uint32_t flt_eval_method;
+    uint32_t flt_eval_method;        // the builtin __FLT_EVAL_METHOD__'s value, with either predefines (#3577)
     const char* predefines_path;     // optional --predefines FILE path
     const char* const* directories;
     const uint8_t* directory_system;

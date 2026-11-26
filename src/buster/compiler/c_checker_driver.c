@@ -16517,6 +16517,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             {
                 direct_ready = pp_build_predefines(&options, &scratch, &predef_buf, &predef_len, &flt_eval_method);
             }
+            else
+            {
+                // --predefines: the builtin __FLT_EVAL_METHOD__ the file doesn't define (#3577).
+                flt_eval_method = pp_predefines_eval_method(&options);
+            }
             direct_dependencies = (CheckDriverDirectDependencies){
                 .options = &options.dependencies,
                 .source = path,
