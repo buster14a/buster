@@ -343,6 +343,11 @@ the independent fixture issued one `FST ST(0)` every 2.00 cycles and one
 `FXCH ST(i)` every 0.50 cycles, exchanging occupied stack registers.
 [Measurement record](https://github.com/buster14a/buster-performance/blob/53e3d8d61b7edd0efcf8a033da10d6dcff7c8703/docs/measurements/x87-register-transfers-1387-2026-11-24/register-costs.txt).
 
+[#2806](https://github.com/buster14a/buster/issues/2806) adds 40 measured register rows. The ten packed FMA forms have
+4 cycles of latency and the 30 signed and unsigned conversions have 3 cycles. All issued at 0.5 cycles per instruction
+on the Ryzen 7 9700X. The [measurement record](https://github.com/buster14a/buster-performance/tree/9799f023d1467831095141b0fb5ab3ed4f8d199d/docs/measurements/packed-numeric-costs-2806-2026-11-26)
+contains the exact forms, values and qualification.
+
 What the rows say, a few families (cycles; derived values in italics):
 
 | Family | Latency | Throughput | Macro-ops |

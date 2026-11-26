@@ -160,10 +160,11 @@ struct CheckProgramCode
     uint64_t* label_forwards;
     uint32_t label_forward_count;
     // With CheckProgramLanes.assembly (-S, #1362): each TEXT atom's records as the emission encoded them, indexed by
-    // AtomId (assembly_code_count entries), in the emission's output arena; a TEXT atom no body made (an inline assembly
-    // unit's, a multiversioned function's resolver) has none. Null without -S.
+    // AtomId (assembly_code_count entries), in the emission's output arena; source assembly, TLS helpers and multiversion
+    // resolvers retain their records and byte offsets too. Null without -S.
     AssemblyCode* assembly_code;
     uint32_t assembly_code_count;
+    AtomId assembly_cfi_atom;
 };
 
 #include "c_check_program_cpu_dispatch.c"
@@ -1117,11 +1118,6 @@ struct CheckProgramLanes
     CheckHelperReport helper_report;
     // --helper-forms' families (CheckProgramOptions.helper_forms): each one's operations take their helpers.
     uint32_t helper_forms;
-    // How many of the lanes' arenas, from lane 0's, an emission may have reserved (check_program_lanes_use): the ones
-    // check_program_lanes_release releases. Reading the others' would touch every page of the 98 KB they take, which a
-    // driver keeps in .bss so that a compile touches only those it uses (#652).
-    uint32_t arenas_used;
-    CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
     // --deferred-lowering (a test option, #2536's step 2.2c.3): a lowering that reads none of the controls' totals
     // (CheckLowerShared.deferred), on one lane, without --tier1: the objects are the same. A test's first room for its
     // writer's calls and arguments, which each part's fit grows (CheckLowerShared.deferred_call_room): 0 for the bound.
@@ -1133,10 +1129,18 @@ struct CheckProgramLanes
     // A caller's bodies' loop (#2536's step 2.2c.4, part 2): run by each part's lowering on one lane, before it lowers, and
     // whole before the lanes or a lowering that reads the controls' totals. None (no `run`) without --windowed-loop.
     CheckEmitLoop loop;
+    // How many of the lanes' arenas, from lane 0's, an emission may have reserved (check_program_lanes_use): the ones
+    // check_program_lanes_release releases. Keep their large array after every control field (#2886), so the driver
+    // needs only the first page until an emission uses an arena. Reading unused arenas would touch their pages, which
+    // the driver keeps in .bss so a compile touches only those it uses (#652).
+    uint32_t arenas_used;
+    CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
 };
 
+_Static_assert(offsetof(CheckProgramLanes, arenas) <= BUSTER_ARENA_PAGE_BYTES, "the driver's lane controls fit in its first page");
+
 // Whether --tier1's tables are built (check_program_emit_timed), once per process.
-static bool check_tier1_ready = false;
+static BUSTER_START_DATA bool check_tier1_ready = false;
 
 // Defined in c_check_tier1.c, after Tier 1's modules: a body's code by Tier 1's pipeline on `lane`'s arenas, from its
 // typed stream `function` whose result has the typed class `result_class` (check_program_result_class), its records,
@@ -3860,6 +3864,17 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
         }
         mapped[a] = valid ? link_add_atom(&result->link, class, source->atoms.alignment_log2[a], size, copy, 0) : 0;
         valid = mapped[a] != 0;
+        if (valid && result->assembly_code != NULL && a < unit->record_span_count)
+        {
+            const AsmRecordSpan* span = &unit->record_spans[a];
+            valid = mapped[a] < result->assembly_code_count;
+            if (valid)
+            {
+                result->assembly_code[mapped[a]].records = span->records;
+                result->assembly_code[mapped[a]].offsets = span->offsets;
+                result->assembly_code[mapped[a]].count = span->count;
+            }
+        }
         if (valid && atoms != 0 && sections != 0)
         {
             atoms[*section_count] = mapped[a];
@@ -4281,7 +4296,7 @@ static bool check_program_emit_tls_symbols(Link* link, const CheckProgram* progr
 // in symbol order, and its symbol in `frame_symbols`: the CFA at rsp + 16 after the sub, at rsp + 8 again for the ret;
 // `*frame_count` how many. Returns false with `code`'s status and reason set.
 static bool check_program_emit_tls_atoms(CheckProgramCode* code, const CheckProgram* program, const uint8_t* models, const SymbolId* symbols, SymbolId tls_get_addr,
-                                         UnwindFunction* frames, SymbolId* frame_symbols, uint32_t* frame_count, Arena* bytes)
+                                         UnwindFunction* frames, SymbolId* frame_symbols, uint32_t* frame_count, Arena* bytes, Arena* output)
 {
     static const uint8_t general[] = { 0x48, 0x83, 0xec, 0x08, 0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0, 0x48, 0x83, 0xc4, 0x08, 0xc3 };
     static const uint8_t local[] = { 0x48, 0x83, 0xec, 0x08, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0x48, 0x8d, 0x80, 0, 0, 0, 0, 0x48, 0x83, 0xc4, 0x08, 0xc3 };
@@ -4302,6 +4317,58 @@ static bool check_program_emit_tls_atoms(CheckProgramCode* code, const CheckProg
             if (valid)
             {
                 link->symbols.source[symbols[v]] = BUSTER_LINK_SOURCE_PROGRAM;
+            }
+            if (valid && code->assembly_code != NULL)
+            {
+                // Keep the selected instructions for -S. The general-dynamic ABI's redundant data16/rex prefixes
+                // remain byte gaps between these records, so reassembly retains the exact 16-byte relaxation window.
+                const uint32_t count = own ? 6 : 5;
+                X86Instruction* records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, count);
+                uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+                valid = records != NULL && offsets != NULL && atom < code->assembly_code_count;
+                if (valid)
+                {
+                    const X86Instruction add = {
+                        .form = X86_FORM_ADD_RM64_IMM8,
+                        .rm = X86_REGISTER_RSP,
+                        .immediate = 8,
+                    };
+                    const X86Instruction ret = {
+                        .form = X86_FORM_RET,
+                    };
+                    records[0] = (X86Instruction){
+                        .form = X86_FORM_SUB_RM64_IMM8,
+                        .rm = X86_REGISTER_RSP,
+                        .immediate = 8,
+                    };
+                    records[1] = (X86Instruction){
+                        .form = X86_FORM_LEA_R64_M | BUSTER_X86_FORM_FIXUP,
+                        .reg = X86_REGISTER_RDI,
+                        .mode = BUSTER_X86_MEMORY_RIP,
+                    };
+                    records[2] = (X86Instruction){
+                        .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP,
+                    };
+                    records[3] = own ? (X86Instruction){
+                        .form = X86_FORM_LEA_R64_M | BUSTER_X86_FORM_FIXUP,
+                        .reg = X86_REGISTER_RAX,
+                        .rm = X86_REGISTER_RAX,
+                        .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_DISP32,
+                    } : add;
+                    records[4] = own ? add : ret;
+                    if (own)
+                    {
+                        records[5] = ret;
+                    }
+                    static const uint32_t general_offsets[] = { 0, 5, 15, 20, 24 };
+                    static const uint32_t local_offsets[] = { 0, 4, 11, 16, 23, 27 };
+                    memcpy(offsets, own ? local_offsets : general_offsets, count * sizeof(uint32_t));
+                    code->assembly_code[atom] = (AssemblyCode){
+                        .records = records,
+                        .offsets = offsets,
+                        .count = count,
+                    };
+                }
             }
             EmissionFrameRow* rows = valid && frames != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, EmissionFrameRow, 2) : NULL;
             valid = valid && (frames == NULL || rows != NULL);
@@ -4516,6 +4583,52 @@ static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCod
             .endbr = endbr != 0 ? prefix + 1 : 0,
         };
     }
+    return valid;
+}
+
+// The legacy multiversion resolvers emit selected machine bytes directly. Recover only their bounded instruction
+// records before object construction; symbols and fixups still come from the emission's Link, never a disassembly
+// of an object. Ordinary C, inline assembly and TLS retain their original selected records instead.
+static bool check_program_emit_keep_resolvers(CheckProgramCode* code, AtomId first, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    const uint32_t end = code->link.atoms.count;
+    bool valid = first == end || x86_disassembler_initialize();
+    for (AtomId atom = first; valid && atom < end; atom += 1)
+    {
+        if (code->link.atoms.class[atom] == BUSTER_LINK_CLASS_TEXT)
+        {
+            const uint64_t size = code->link.atoms.size[atom];
+            X86Decoded* decoded = size <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, X86Decoded, size) : NULL;
+            const X86DecodeResult result = decoded != NULL ? x86_disassemble(code->link.atoms.bytes[atom], size, decoded, size) :
+                                                           (X86DecodeResult){ .status = X86_DECODE_OUTPUT_FULL };
+            valid = result.status == X86_DECODE_OK && result.consumed == size && atom < code->assembly_code_count;
+            X86Instruction* records = valid ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, result.count) : NULL;
+            uint32_t* offsets = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, result.count) : NULL;
+            valid = valid && records != NULL && offsets != NULL;
+            for (uint32_t r = 0; valid && r < result.count; r += 1)
+            {
+                valid = decoded[r].address32 == 0;
+                records[r] = decoded[r].instruction;
+                offsets[r] = decoded[r].offset;
+            }
+            if (valid)
+            {
+                code->assembly_code[atom] = (AssemblyCode){
+                    .records = records,
+                    .offsets = offsets,
+                    .count = (uint32_t)result.count,
+                };
+            }
+            arena_pop_to(scratch, mark);
+        }
+    }
+    if (!valid)
+    {
+        code->status = CHECK_PROGRAM_BACKEND;
+        code->reason = "a multiversion resolver's assembly records couldn't be retained";
+    }
+    arena_pop_to(scratch, mark);
     return valid;
 }
 
@@ -6214,6 +6327,19 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     result->unit_temporary_count = 0;
     valid = valid && (sectioned_atoms == 0 || (result->unit_atoms != 0 && result->unit_sections != 0)) &&
             (unit_symbols == 0 || result->unit_temporary != 0);
+    // -S's records, by atom, including the full assembler's code/data fragments published before ordinary bodies.
+    const bool keep_records = valid && lanes != NULL && lanes->assembly;
+    result->assembly_code_count = keep_records ? result->link.atoms.capacity : 0;
+    result->assembly_code = keep_records ? BUSTER_ARENA_PUSH_ARRAY(output, AssemblyCode, result->assembly_code_count) : NULL;
+    if (keep_records && result->assembly_code == NULL)
+    {
+        result->status = CHECK_PROGRAM_RESOURCE;
+        valid = false;
+    }
+    else if (keep_records)
+    {
+        memset(result->assembly_code, 0, (uint64_t)result->assembly_code_count * sizeof(AssemblyCode));
+    }
     // The file-scope assembly's atoms, symbols and fixups (check_program_asm_plan_file), before the functions', as clang's
     // assembly output has a module's asm first: each atom in its section in -c's object (CheckProgramCode.asm_sections).
     result->asm_atoms = valid && file_atoms != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, file_atoms) : 0;
@@ -6252,19 +6378,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     uint32_t labels = 0;
     CheckEmitBody helper_body;
-    // -S's records (#1362), by atom: room for every atom the link can hold, each copied as its atom is added below.
-    const bool keep_records = valid && lanes != NULL && lanes->assembly;
-    result->assembly_code_count = keep_records ? result->link.atoms.capacity : 0;
-    result->assembly_code = keep_records ? BUSTER_ARENA_PUSH_ARRAY(output, AssemblyCode, result->assembly_code_count) : NULL;
-    if (keep_records && result->assembly_code == NULL)
-    {
-        result->status = CHECK_PROGRAM_RESOURCE;
-        valid = false;
-    }
-    else if (keep_records)
-    {
-        memset(result->assembly_code, 0, (uint64_t)result->assembly_code_count * sizeof(AssemblyCode));
-    }
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
     {
         const bool source_body = b < count;
@@ -6454,8 +6567,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 valid = check_program_emit_patchable_entry(result, program, b, atom, bytes);
             }
-            // -S prints the sled's bytes before the body's instruction records. Templates have no records here.
-            if (valid && keep_records && !assembly && !body->windowed && atom < result->assembly_code_count)
+            // -S prints the sled's bytes before the body's instruction records. Record-based inline helpers and naked
+            // bodies use the same sized records and symbolic references as ordinary generated code.
+            if (valid && keep_records && !body->windowed && atom < result->assembly_code_count)
             {
                 valid = check_program_emit_keep_records(&result->assembly_code[atom], code, body->sled, body->prefix, body->endbr, output);
                 result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
@@ -6553,6 +6667,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     // cpu_dispatch's resolvers, and cpu_specific's versions' other names at their code (#1447).
+    const AtomId resolver_first = result->link.atoms.count;
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_atoms(result, program, bytes));
     // Multiversioning by target strings' resolvers, and target_clones' other names at their bodies (#1838).
     const uint64_t target_first = frames - tls_frames - target_frames;
@@ -6560,6 +6675,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     valid = valid && (target_frames == 0 || target_frame_symbols != 0);
     valid = valid && (program->target_group_count == 0 ||
                       check_program_target_atoms(result, program, target_frames != 0 ? run.frames + target_first : NULL, target_frame_symbols, bytes));
+    valid = valid && (!keep_records || check_program_emit_keep_resolvers(result, resolver_first, output, scratch));
     // The thread-locals' accessors of position-independent code (#2101), with their frames in the room after the
     // resolvers'.
     const uint64_t tls_first = frames - tls_frames;
@@ -6568,7 +6684,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint32_t tls_frame_count = 0;
     valid = valid && (tls_symbols == NULL ||
                       check_program_emit_tls_atoms(result, program, shared.tls_models, tls_symbols, result->lowered.runtime_symbols[CHECK_LOWER_RUNTIME_TLS_GET_ADDR],
-                                                   tls_frames != 0 ? run.frames + tls_first : NULL, tls_frame_symbols, &tls_frame_count, bytes));
+                                                   tls_frames != 0 ? run.frames + tls_first : NULL, tls_frame_symbols, &tls_frame_count, bytes, output));
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
@@ -6603,7 +6719,35 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         for (uint32_t f = 0; valid && f < kept; f += 1)
         {
             valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, frame_symbols[f], 0) != 0;
+            if (valid && keep_records)
+            {
+                const SymbolId symbol = frame_symbols[f];
+                const AtomId body_atom = result->link.symbols.atom[symbol];
+                const UnwindFunction* function = &run.frames[f];
+                const bool program_rows = function->open == BUSTER_UNWIND_ROWS;
+                const uint32_t row_count = program_rows ? function->row_count : unwind_function_rows(function, NULL, 0);
+                EmissionFrameRow* rows = row_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, EmissionFrameRow, row_count) : NULL;
+                valid = body_atom != 0 && body_atom < result->assembly_code_count && (row_count == 0 || rows != NULL);
+                if (valid)
+                {
+                    if (program_rows && row_count != 0)
+                    {
+                        memcpy(rows, function->rows, (uint64_t)row_count * sizeof(*rows));
+                    }
+                    else if (!program_rows)
+                    {
+                        valid = unwind_function_rows(function, rows, row_count) == row_count;
+                    }
+                    AssemblyCode* code = &result->assembly_code[body_atom];
+                    code->frame_rows = rows;
+                    code->frame_count = row_count;
+                    code->frame_offset = (uint32_t)result->link.symbols.value[symbol];
+                    code->frame_size = function->size;
+                    code->frame_enabled = true;
+                }
+            }
         }
+        result->assembly_cfi_atom = valid && keep_records ? atom : 0;
     }
     check_clock_mark(stage_clock, CHECK_STAGE_UNWIND);
     // -fcf-protection's note (#3570), in an object's link alone: an executable's linker (bind.c, import.c) writes none.

@@ -181,7 +181,7 @@ static void check_test_program_asm_kinds(CheckTest* test)
 // XMM input, the fences and pause of no operand, a locked xadd of a `+` register and a `+` memory operand, a matching
 // input converted to its output's type, a constant, and a clobber of a register the records don't write. Each other one
 // is an asm body in its caller (#1839, check_asm_inline_code): fixed registers (cpuid's, whose inputs are its call's
-// arguments, whose body runs cpuid and stores its four outputs through their addresses, and which touches rbx; rdtsc's; a shift's count
+// arguments, whose body returns its four outputs in registers, and which touches rbx; rdtsc's; a shift's count
 // in cl), a literal register (`%%rsp`, read), a syntax switch, more records than a row takes, an x87 operand, a form
 // x86_semantics.c doesn't cover (ldmxcsr), an explicit register variable, and a register class narrower than the sixteen
 // (Q's), a branch to a numeric label (a branch of the body), a named label (#1839: the body's label, at the record
@@ -283,12 +283,11 @@ static void check_test_program_asm_placement(CheckTest* test)
             }
             if (right && s == PLACED)
             {
-                // cpuid's body (#1839): its inputs are its call's arguments, which Tier 0 moves into eax and ecx, so it starts
-                // at cpuid; then each output's address from the block into the store register, and its store, but eax's: the
-                // first output is its call row's result (#2144).
+                // cpuid's body (#1839): its inputs are its call's arguments, moved into eax and ecx. All four outputs
+                // come back in their registers (#2144), so its body is just cpuid, without output-address loads or stores.
                 const X86Instruction* records = plan->inline_records;
-                right = plan->inline_passed && plan->inline_count == 7 && plan->inline_result == 1 && records[0].form == X86_FORM_CPUID &&
-                        records[1].rm == BUSTER_TIER0_ASM_BLOCK && records[2].form == X86_FORM_MOV_RM32_R32 && records[2].reg == X86_REGISTER_RBX &&
+                right = plan->inline_passed && plan->inline_count == 1 && plan->inline_result == 1 && records[0].form == X86_FORM_CPUID &&
+                        plan->places[0].returned && plan->places[1].returned && plan->places[2].returned && plan->places[3].returned &&
                         (plan->inline_touched & (1u << X86_REGISTER_RBX | 1u << X86_REGISTER_RDX)) == (1u << X86_REGISTER_RBX | 1u << X86_REGISTER_RDX) &&
                         (plan->inline_touched & (1u << X86_REGISTER_RSP | 1u << X86_REGISTER_RBP | 1u << X86_REGISTER_R15)) == 0;
             }

@@ -102,9 +102,10 @@ struct IrMemoryEntry
 typedef struct IrMemoryUndo IrMemoryUndo;
 struct IrMemoryUndo
 {
-    // The key whose entry it restores, or BUSTER_IR_NONE for the counter.
+    // An access's old entry, or BUSTER_IR_NONE for a write/marker. A class other than BUSTER_IR_NONE has one count to
+    // subtract; with a key, it is a store and its family's count is subtracted too. Loads only restore the entry.
     uint32_t key;
-    uint32_t* counter;
+    uint32_t class;
     IrMemoryEntry entry;
 };
 
@@ -114,7 +115,18 @@ struct IrMemoryFrame
     uint32_t block;
     uint32_t child;
     uint32_t mark;
+    uint32_t epochs[2];
     bool entered;
+    bool restore;
+};
+
+// The last non-clear block on a dominator path, including the block itself, for each memory kind. RPO ranks increase
+// along that path, so a predecessor's barrier rank above idom[B]'s means B's incoming path may write that memory.
+typedef struct IrMemoryBarrier IrMemoryBarrier;
+struct IrMemoryBarrier
+{
+    uint32_t general;
+    uint32_t slots;
 };
 
 typedef struct IrMemoryWork IrMemoryWork;
@@ -132,13 +144,12 @@ struct IrMemoryWork
     uint32_t* slot_private;
     uint32_t* slot_volatile;
     // The events (the reachable blocks' accesses, writes and lifetime markers), with each block's first, and the accesses
-    // (plain loads and stores) among them, in instruction order; the walk's undo records they need at most.
+    // (plain loads and stores) among them, in instruction order. Each event needs at most one walk undo record.
     uint32_t* events;
     uint32_t event_count;
     uint32_t* event_first;
     uint32_t* accesses;
     uint32_t access_count;
-    uint64_t undo_bound;
     // By access: its address, class (0 general memory, 1 + s private slot s), family, key and hash.
     uint32_t* roots;
     uint32_t* indices;
@@ -430,14 +441,7 @@ static void ir_memory_escapes_vector(IrMemoryWork* m)
     }
 }
 
-// An event's undo records in the walk: three for a store (its class's and family's counts and its key's entry), one for
-// any other.
-static uint32_t ir_memory_undos(uint32_t kind)
-{
-    return kind == BUSTER_IR_MEMORY_STORE ? 3u : 1u;
-}
-
-// The events and accesses, each block's first event, every slot's first IR_STACK_ADDR and the undo bound; a volatile
+// The events and accesses, each block's first event and every slot's first IR_STACK_ADDR; a volatile
 // slot's access becomes a write. The fallback past the gathers' reach.
 static void ir_memory_events_scalar(IrMemoryWork* m)
 {
@@ -463,7 +467,6 @@ static void ir_memory_events_scalar(IrMemoryWork* m)
         {
             m->events[m->event_count] = i;
             m->event_count += 1;
-            m->undo_bound += ir_memory_undos(kind);
         }
         if (reachable && (kind == BUSTER_IR_MEMORY_LOAD || kind == BUSTER_IR_MEMORY_STORE))
         {
@@ -500,13 +503,11 @@ static void ir_memory_events_vector(IrMemoryWork* m)
         const __mmask16 event = reachable & _mm512_cmpge_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LOAD)) &
                                 _mm512_cmple_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LIFETIME));
         const __mmask16 access = reachable & _mm512_cmple_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_STORE)) & _mm512_cmpge_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LOAD));
-        const __mmask16 store = access & _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_STORE));
         const __m512i index = _mm512_add_epi32(_mm512_set1_epi32((int)first), lanes);
         _mm512_mask_compressstoreu_epi32(m->events + m->event_count, event, index);
         _mm512_mask_compressstoreu_epi32(m->accesses + m->access_count, access, index);
         m->event_count += (uint32_t)__builtin_popcount(event);
         m->access_count += (uint32_t)__builtin_popcount(access);
-        m->undo_bound += (uint64_t)__builtin_popcount(event) + 2u * (uint64_t)__builtin_popcount(store);
         uint32_t slots = valid & _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_SLOT));
         while (slots != 0)
         {
@@ -858,64 +859,92 @@ static void ir_memory_dirty(IrMemoryWork* m)
 // block, which D dominates, and passes through P and through each block between P and D on the dominator tree, entering
 // each by a clear path: the greatest fixed point of these equations, from all clear, over the blocks with another
 // predecessor than D (`joins`, in reverse postorder) until it holds; a block whose only predecessor is D is clear.
-// Shared by both versions: the blocks are few.
+// A path's last barrier (a dirty block or a non-clear entry) replaces the walk from every predecessor up to D. The
+// barrier's RPO rank must not exceed D's: D's own writes are already in the inherited state. Each sweep updates these
+// summaries after the block's clear bits, with its idom already visited. A back edge may read the previous sweep's
+// summary, which can only delay losing a clear bit. Once no bit changes, all summaries and equations agree.
 static bool ir_memory_clear(IrMemoryWork* m, Arena* scratch)
 {
     const IrOptimizeWork* work = m->ir;
     const Dominators* d = &work->dominators;
+    const uint32_t reachable = d->reachable_count;
+    const uint32_t blocks = work->function->block_count;
+    const uint32_t* const rpo = d->rpo;
+    const uint32_t* const ranks = d->rpo_index;
+    const uint32_t* const idoms = d->idom;
+    const uint32_t* const offsets = work->cfg.predecessor_offsets;
+    const uint32_t* const predecessors = work->cfg.predecessors;
+    const uint8_t* const dirty = m->dirty;
+    uint8_t* const clear = m->clear;
     bool ok = true;
-    uint32_t* joins = ir_memory_push(scratch, d->reachable_count, sizeof(uint32_t), &ok);
+    uint32_t* joins = ir_memory_push(scratch, reachable, sizeof(uint32_t), &ok);
+    IrMemoryBarrier* barriers = ir_memory_push(scratch, blocks, sizeof(IrMemoryBarrier), &ok);
     uint32_t join_count = 0;
-    for (uint32_t b = 0; b < work->function->block_count; b += 1)
+    if (ok && reachable != 0)
     {
-        m->clear[b] = 3;
+        memset(clear, 3, blocks);
+        barriers[rpo[0]] = (IrMemoryBarrier){ 0 };
     }
     // Without a back edge into a join, reverse postorder has every block a join's equation reads before it: one pass.
     bool cyclic = false;
-    for (uint32_t r = 1; ok && r < d->reachable_count; r += 1)
+    for (uint32_t r = 1; ok && r < reachable; r += 1)
     {
-        const uint32_t block = d->rpo[r];
+        const uint32_t block = rpo[r];
+        const uint32_t idom = idoms[block];
+        const IrMemoryBarrier parent = barriers[idom];
+        barriers[block] = (IrMemoryBarrier){
+            .general = (dirty[block] & 1u) != 0 ? r : parent.general,
+            .slots = (dirty[block] & 2u) != 0 ? r : parent.slots,
+        };
         bool join = false;
-        for (uint32_t edge = work->cfg.predecessor_offsets[block]; edge < work->cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+        const uint32_t end = offsets[(uint64_t)block + 1];
+        for (uint32_t edge = offsets[block]; edge < end; edge += 1)
         {
-            const uint32_t predecessor = work->cfg.predecessors[edge];
-            const bool reachable = d->rpo_index[predecessor] != BUSTER_DOMINATOR_NONE;
-            join = join || (predecessor != d->idom[block] && reachable);
-            cyclic = cyclic || (reachable && d->rpo_index[predecessor] >= r);
+            const uint32_t predecessor = predecessors[edge];
+            const uint32_t rank = ranks[predecessor];
+            const bool live = rank != BUSTER_DOMINATOR_NONE;
+            join = join || (predecessor != idom && live);
+            cyclic = cyclic || (live && rank >= r);
         }
-        joins[join_count] = block;
+        joins[join_count] = r;
         join_count += join;
     }
-    bool changed = ok;
+    bool changed = ok && join_count != 0;
     while (changed)
     {
         changed = false;
-        for (uint32_t k = 0; k < join_count; k += 1)
+        uint32_t k = 0;
+        for (uint32_t r = 1; r < reachable; r += 1)
         {
-            const uint32_t block = joins[k];
-            const uint32_t idom = d->idom[block];
-            uint8_t value = 3;
-            for (uint32_t edge = work->cfg.predecessor_offsets[block]; value != 0 && edge < work->cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+            const uint32_t block = rpo[r];
+            const uint32_t idom = idoms[block];
+            if (k < join_count && joins[k] == r)
             {
-                uint32_t y = work->cfg.predecessors[edge];
-                while (value != 0 && d->rpo_index[y] != BUSTER_DOMINATOR_NONE && y != idom)
+                const uint32_t limit = ranks[idom];
+                const uint32_t end = offsets[(uint64_t)block + 1];
+                uint8_t value = 3;
+                for (uint32_t edge = offsets[block]; value != 0 && edge < end; edge += 1)
                 {
-                    value &= (uint8_t)(~m->dirty[y] & m->clear[y]);
-                    y = d->idom[y];
+                    const uint32_t predecessor = predecessors[edge];
+                    if (ranks[predecessor] != BUSTER_DOMINATOR_NONE && predecessor != idom)
+                    {
+                        const IrMemoryBarrier barrier = barriers[predecessor];
+                        value &= (uint8_t)((barrier.general <= limit ? 1u : 0u) | (barrier.slots <= limit ? 2u : 0u));
+                    }
                 }
+                changed = changed || (cyclic && value != clear[block]);
+                clear[block] = value;
+                k += 1;
             }
-            changed = changed || (cyclic && value != m->clear[block]);
-            m->clear[block] = value;
+            const uint8_t blocked = (uint8_t)(dirty[block] | (uint8_t)~clear[block]);
+            const IrMemoryBarrier parent = barriers[idom];
+            barriers[block] = (IrMemoryBarrier){
+                .general = (blocked & 1u) != 0 ? r : parent.general,
+                .slots = (blocked & 2u) != 0 ? r : parent.slots,
+            };
         }
     }
     return ok;
-}
-
-static void ir_memory_count(IrMemoryUndo* undo, uint32_t* undo_count, uint32_t* counter, uint32_t value)
-{
-    undo[*undo_count] = (IrMemoryUndo){ .key = BUSTER_IR_NONE, .counter = counter, .entry = { .value = *counter } };
-    *undo_count += 1;
-    *counter = value;
 }
 
 // On x86-64 a wider integer's low bytes start at its address. If the preceding event is a plain store, it is also
@@ -947,13 +976,27 @@ static uint32_t ir_memory_narrow_load(const IrMemoryWork* m, uint32_t load, uint
 // and no write of its class came since but its own family's stores, which don't meet its bytes unless another key of
 // its family does (then none came since); otherwise it enters itself. Entering a block that isn't clear for a kind
 // takes a new epoch of that kind. Leaving a subtree undoes its entries and counts. A load of a block SCCP found
-// unreachable takes nothing. Shared by both versions. Returns the loads forwarded.
+// unreachable takes nothing. A store's one undo record restores its entry and subtracts its two count increments;
+// epochs belong to the frame. The root and its final-child chain need no undo: after their subtrees no sibling or
+// ancestor needs the old state. Earlier children, and all descendants of a restoring frame, still restore it.
+// Shared by both versions. Returns the loads forwarded.
 static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t* class_counts, uint32_t* family_counts, IrMemoryUndo* undo, IrMemoryFrame* frames,
                                const uint32_t* access_first)
 {
     IrOptimizeWork* work = m->ir;
     const IrFunction* f = work->function;
     const Dominators* d = &work->dominators;
+    // These columns and their sizes are fixed during the walk. Only the entries, counts and optimizer forwards change.
+    const uint32_t* const tree_offsets = d->tree_offsets;
+    const uint32_t* const tree_children = d->tree_children;
+    const uint32_t* const event_first = m->event_first;
+    const uint32_t* const events = m->events;
+    const uint32_t* const info = m->info;
+    const uint32_t* const keys = m->keys;
+    const uint32_t* const families = m->families;
+    const uint32_t* const classes = m->classes;
+    const uint32_t* const key_families = m->key_families;
+    const uint8_t* const key_overlapped = m->key_overlapped;
     uint32_t epochs[2] = { 0, 0 };
     uint32_t next_epoch = 1;
     uint32_t undo_count = 0;
@@ -966,50 +1009,56 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
         if (!frame->entered)
         {
             const uint32_t block = frame->block;
+            const bool restore = frame->restore;
             frame->entered = true;
             frame->mark = undo_count;
-            frame->child = d->tree_offsets[block];
+            frame->child = tree_offsets[block];
+            frame->epochs[0] = epochs[0];
+            frame->epochs[1] = epochs[1];
             for (uint32_t kind = 0; kind < 2; kind += 1)
             {
                 if (((m->clear[block] >> kind) & 1u) == 0)
                 {
-                    ir_memory_count(undo, &undo_count, &epochs[kind], next_epoch);
+                    epochs[kind] = next_epoch;
                     next_epoch += 1;
                 }
             }
             const bool executable = work->blocks[block] != 0;
             uint32_t k = access_first[block];
-            const uint32_t first = m->event_first[block];
-            for (uint32_t event = first; event < m->event_first[(uint64_t)block + 1]; event += 1)
+            const uint32_t first = event_first[block];
+            const uint32_t end = event_first[(uint64_t)block + 1];
+            for (uint32_t event = first; event < end; event += 1)
             {
-                const uint32_t i = m->events[event];
-                const uint32_t kind = m->info[i] & BUSTER_IR_MEMORY_KIND;
-                if (kind == BUSTER_IR_MEMORY_WRITE)
+                const uint32_t i = events[event];
+                const uint32_t kind = info[i] & BUSTER_IR_MEMORY_KIND;
+                if (kind == BUSTER_IR_MEMORY_WRITE || kind == BUSTER_IR_MEMORY_LIFETIME)
                 {
-                    ir_memory_count(undo, &undo_count, &class_counts[0], class_counts[0] + 1);
-                }
-                else if (kind == BUSTER_IR_MEMORY_LIFETIME)
-                {
-                    const uint32_t class = m->slot_private[f->a[i]] != 0 ? 1 + f->a[i] : 0;
-                    ir_memory_count(undo, &undo_count, &class_counts[class], class_counts[class] + 1);
+                    const uint32_t class = kind == BUSTER_IR_MEMORY_LIFETIME && m->slot_private[f->a[i]] != 0 ? 1 + f->a[i] : 0;
+                    if (restore)
+                    {
+                        undo[undo_count].key = BUSTER_IR_NONE;
+                        undo[undo_count].class = class;
+                        undo_count += 1;
+                    }
+                    class_counts[class] += 1;
                 }
                 else if (kind == BUSTER_IR_MEMORY_LOAD || kind == BUSTER_IR_MEMORY_STORE)
                 {
-                    const uint32_t key = m->keys[k];
-                    const uint32_t family = m->families[k];
-                    const uint32_t class = m->classes[k];
+                    const uint32_t key = keys[k];
+                    const uint32_t family = families[k];
+                    const uint32_t class = classes[k];
                     const uint32_t epoch = epochs[class != 0];
                     if (kind == BUSTER_IR_MEMORY_STORE)
                     {
-                        ir_memory_count(undo, &undo_count, &class_counts[class], class_counts[class] + 1);
-                        ir_memory_count(undo, &undo_count, &family_counts[family], family_counts[family] + 1);
+                        class_counts[class] += 1;
+                        family_counts[family] += 1;
                     }
                     const IrMemoryEntry entry = entries[key];
                     bool taken = kind == BUSTER_IR_MEMORY_LOAD && executable && entry.epoch == epoch;
                     if (taken)
                     {
                         const uint32_t writes = class_counts[class] - entry.class_count;
-                        taken = m->key_overlapped[key] != 0 ? writes == 0 : writes == family_counts[family] - entry.family_count;
+                        taken = key_overlapped[key] != 0 ? writes == 0 : writes == family_counts[family] - entry.family_count;
                     }
                     uint32_t value = taken ? entry.value : i;
                     if (!taken)
@@ -1020,10 +1069,17 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
                         }
                         else if (executable && event != first && (f->type[i] == IR_I8 || f->type[i] == IR_I16))
                         {
-                            value = ir_memory_narrow_load(m, i, k, m->events[event - 1]);
+                            value = ir_memory_narrow_load(m, i, k, events[event - 1]);
                         }
-                        undo[undo_count] = (IrMemoryUndo){ .key = key, .entry = entry };
-                        undo_count += 1;
+                        if (restore)
+                        {
+                            undo[undo_count] = (IrMemoryUndo){
+                                .key = key,
+                                .class = kind == BUSTER_IR_MEMORY_STORE ? class : BUSTER_IR_NONE,
+                                .entry = entry,
+                            };
+                            undo_count += 1;
+                        }
                         entries[key] = (IrMemoryEntry){
                             .value = value,
                             .class_count = class_counts[class],
@@ -1040,9 +1096,13 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
                 }
             }
         }
-        if (frame->child < d->tree_offsets[(uint64_t)frame->block + 1])
+        const uint32_t child_end = tree_offsets[(uint64_t)frame->block + 1];
+        if (frame->child < child_end)
         {
-            frames[depth] = (IrMemoryFrame){ .block = d->tree_children[frame->child] };
+            frames[depth] = (IrMemoryFrame){
+                .block = tree_children[frame->child],
+                .restore = frame->restore || frame->child + 1 < child_end,
+            };
             frame->child += 1;
             depth += 1;
         }
@@ -1051,16 +1111,24 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
             while (undo_count > frame->mark)
             {
                 undo_count -= 1;
-                const IrMemoryUndo record = undo[undo_count];
-                if (record.key != BUSTER_IR_NONE)
+                const IrMemoryUndo* record = &undo[undo_count];
+                const uint32_t key = record->key;
+                const uint32_t class = record->class;
+                if (key != BUSTER_IR_NONE)
                 {
-                    entries[record.key] = record.entry;
+                    entries[key] = record->entry;
+                    if (class != BUSTER_IR_NONE)
+                    {
+                        family_counts[key_families[key]] -= 1;
+                    }
                 }
-                else
+                if (class != BUSTER_IR_NONE)
                 {
-                    *record.counter = record.entry.value;
+                    class_counts[class] -= 1;
                 }
             }
+            epochs[0] = frame->epochs[0];
+            epochs[1] = frame->epochs[1];
             depth -= 1;
         }
     }
@@ -1090,7 +1158,7 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* f
     // AVX-512's gather indices are signed dwords, and the constants' and addresses' gathers double theirs: larger value
     // spaces take the scalar phases.
     const bool scalar = n >= (UINT32_C(1) << 30) || f->address_count >= (UINT32_C(1) << 30);
-    IrMemoryWork m = { .ir = work, .undo_bound = (uint64_t)f->block_count * 2 };
+    IrMemoryWork m = { .ir = work };
     m.info = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
     m.follow = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
     m.derived = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
@@ -1244,13 +1312,13 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* f
     IrMemoryEntry* entries = ir_memory_push(scratch, m.key_count, sizeof(IrMemoryEntry), &ok);
     uint32_t* class_counts = ir_allocate(scratch, (uint64_t)f->slot_count + 1, sizeof(uint32_t), &ok);
     uint32_t* family_counts = ir_allocate(scratch, m.family_count, sizeof(uint32_t), &ok);
-    IrMemoryUndo* undo = ir_memory_push(scratch, m.undo_bound, sizeof(IrMemoryUndo), &ok);
+    IrMemoryUndo* undo = ir_memory_push(scratch, m.event_count, sizeof(IrMemoryUndo), &ok);
     IrMemoryFrame* frames = ir_memory_push(scratch, f->block_count, sizeof(IrMemoryFrame), &ok);
     if (ok && live)
     {
         for (uint32_t key = 0; key < m.key_count; key += 1)
         {
-            entries[key].epoch = UINT32_MAX;
+            entries[key] = (IrMemoryEntry){ .epoch = UINT32_MAX };
         }
         ir_memory_dirty(&m);
         ok = ir_memory_clear(&m, scratch);

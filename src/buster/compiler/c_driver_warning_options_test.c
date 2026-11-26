@@ -180,7 +180,6 @@ static void cc_compat_warning_capabilities(CCCompatibilityTest* test)
         "conversion",
         "sign-conversion",
         "missing-prototypes",
-        "missing-variable-declarations",
         "strict-prototypes",
         "undef",
         "cast-qual",

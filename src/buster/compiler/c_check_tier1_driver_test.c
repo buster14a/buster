@@ -1857,6 +1857,54 @@ static bool check_test_tier1_frame_copies(const char* object, const char* name, 
     return count != 0;
 }
 
+// #3644: an external C helper checks every initialized byte, changes the returned byte and counts the scopes visited.
+// Clang's compact loop and the two strict Tier 1 builds of 1,536 separate scopes must all satisfy its independent
+// arithmetic model, including early returns on both sides of byte, liveness-group and scope-count boundaries.
+static void check_test_driver_tier1_frame_scopes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[PATH_MAX];
+    char main_source[PATH_MAX];
+    char main_object[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/driver/tier1_frame_scopes.c", check_test_fixture_root);
+    snprintf(main_source, sizeof(main_source), "%s/driver/tier1_frame_scopes_main.c", check_test_fixture_root);
+    snprintf(main_object, sizeof(main_object), "%s/tier1-frame-scopes-main.o", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-frame-scopes-clang", directory);
+    char* main_arguments[] = { (char*)clang, "-std=c17", "-O2", "-Wall", "-Wextra", "-Werror", "-c", main_source, "-o", main_object, NULL };
+    char* text = NULL;
+    const bool main_built = check_test_driver_spawn(main_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    char* reference_arguments[] = { (char*)clang, "-std=c17", "-O2", "-DBUSTER_FRAME_REFERENCE", source, main_object, "-o", reference, NULL };
+    const bool referenced = main_built && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's compact frame-scope oracle checks every byte, mutation and early return");
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        char object[512];
+        char program[512];
+        snprintf(object, sizeof(object), "%s/tier1-frame-scopes-%u.o", directory, rematerialize);
+        snprintf(program, sizeof(program), "%s/tier1-frame-scopes-%u", directory, rematerialize);
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, source, "", object, rematerialize != 0, false, true, false, "--tier1-strict", &build);
+        check_test_expect(test, compiled && build.code_certified == 1 && build.code_uncertified == 0,
+                          "1,536 initialized buffer scopes compile strictly at Tier 1 and certify with either rematerialization policy");
+        char* link_arguments[] = { (char*)clang, object, main_object, "-o", program, NULL };
+        text = NULL;
+        const bool linked = compiled && check_test_driver_spawn(link_arguments, &text) == 0;
+        free(text);
+        char actual[256] = { 0 };
+        check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                          "strict Tier 1's 1,536 buffer scopes preserve the external callee's complete observations and writes");
+        unlink(object);
+        unlink(program);
+    }
+    unlink(main_object);
+    unlink(reference);
+}
+
 // #3149's fixture (check_test_tier1_frame_source), compiled by --tier1 --verify with and without rematerialization, into
 // an executable and into an object that cc links: each prints clang's build's output, and every function's code is
 // certified. With rematerialization each function under test recomputes its array's address at rsp by rsp's register
@@ -1940,6 +1988,7 @@ static void check_test_driver_tier1_frame(CheckTest* test, const char* clang, co
     }
     unlink(source);
     unlink(reference);
+    check_test_driver_tier1_frame_scopes(test, clang, executable, directory);
 }
 
 // #1395: the same target must produce the same object regardless of the compiler host's kernel path. The address
@@ -4217,6 +4266,114 @@ static const char check_test_tier1_asm_source[] =
     "    return 0;\n"
     "}\n";
 
+// #2144's register results, including several in one body and mixed GPR/XMM classes, run at both tiers against
+// Clang. Simple kernels must have no frame traffic; the pressure kernel must spill, exercising the same result
+// transfer while other values live in spill slots. Both always_inline wrappers are spliced twice into their caller,
+// including one whose last result is immediately returned, with the pre- and postallocation schedulers as well.
+static void check_test_driver_tier1_asm_results(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    char program[512];
+    char object[512];
+    snprintf(source, sizeof(source), "%s/driver/asm-body-results.c", check_test_fixture_root);
+    snprintf(reference, sizeof(reference), "%s/asm-results-clang", directory);
+    snprintf(program, sizeof(program), "%s/asm-results-buster", directory);
+    snprintf(object, sizeof(object), "%s/asm-results.o", directory);
+    const bool available = access(source, R_OK) == 0;
+    char* reference_arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, source, NULL };
+    char* text = NULL;
+    const bool referenced = available && check_test_driver_spawn(reference_arguments, &text) == 0;
+    if (!referenced && text != NULL)
+    {
+        fprintf(stderr, "%s", text);
+    }
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "asm register results: Clang's external fixture builds and runs");
+    static const struct {
+        bool tier1;
+        bool rematerialize;
+        const char* schedule;
+    } variants[] = {
+        { false, false, NULL },
+        { true, false, NULL },
+        { true, true, NULL },
+        { true, true, "--tier1-schedule=post" },
+        { true, true, "--tier1-schedule=pre" },
+    };
+    for (uint32_t v = 0; ran && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+    {
+        bool compiled;
+        if (variants[v].tier1)
+        {
+            CheckTestTier1Build build;
+            compiled = check_test_tier1_build(executable, source, "", program, variants[v].rematerialize, false, false, false, variants[v].schedule, &build);
+            // Twelve required functions (the eleven noinline kernels and main), plus any separately emitted
+            // always_inline bodies: every emitted function has to receive the code certificate.
+            check_test_expect(test, compiled && build.code_certified >= 12 && build.code_uncertified == 0,
+                              "asm register results: every Tier 1 function is certified");
+        }
+        else
+        {
+            char* arguments[] = { (char*)executable, "--verify", "-o", program, source, NULL };
+            char* diagnostic = NULL;
+            compiled = check_test_driver_spawn(arguments, &diagnostic) == 0;
+            if (!compiled && diagnostic != NULL)
+            {
+                fprintf(stderr, "%s", diagnostic);
+            }
+            free(diagnostic);
+        }
+        char actual[4096] = { 0 };
+        char message[256];
+        snprintf(message, sizeof(message), "asm register results: Tier %u, rematerialize %u, schedule %s agrees with Clang", variants[v].tier1 ? 1u : 0u,
+                 variants[v].rematerialize ? 1u : 0u, variants[v].schedule != NULL ? variants[v].schedule : "none");
+        check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0, message);
+        unlink(program);
+    }
+    const bool decoder_ready = x86_disassembler_initialize();
+    check_test_expect(test, decoder_ready, "asm register results: object decoder initializes");
+    static const char* const register_only[] = {
+        "asm_result_shift",
+        "asm_result_swap",
+        "asm_result_cpuid",
+        "asm_result_floating",
+        "asm_result_mixed",
+        "asm_result_flags",
+        "asm_result_flag_value",
+    };
+    if (ran && decoder_ready)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, source, "", object, true, false, true, false, NULL, &build);
+        for (uint32_t kernel = 0; kernel < BUSTER_ARRAY_LENGTH(register_only) + 1; kernel += 1)
+        {
+            const bool pressure = kernel == BUSTER_ARRAY_LENGTH(register_only);
+            const char* name = pressure ? "asm_result_pressure" : register_only[kernel];
+            X86Decoded records[2048];
+            uint32_t offsets[2048];
+            uint32_t types[2048];
+            uint32_t relocations = 0;
+            const uint32_t decoded = compiled ? check_test_tier1_function(object, name, records, BUSTER_ARRAY_LENGTH(records), offsets, types, &relocations) : 0;
+            uint32_t frame_accesses = 0;
+            for (uint32_t r = 0; r < decoded; r += 1)
+            {
+                const X86Instruction* record = &records[r].instruction;
+                const bool memory = (record->mode & BUSTER_X86_MODE_MEMORY) != 0 && (record->mode & BUSTER_X86_MODE_BASE) != 0;
+                const bool address = record->form == X86_FORM_LEA_R64_M || record->form == X86_FORM_LEA_R32_M;
+                frame_accesses += memory && !address && (record->rm == X86_REGISTER_RSP || record->rm == X86_REGISTER_RBP);
+            }
+            char message[256];
+            snprintf(message, sizeof(message), "asm register results: %s has %u frame accesses", name, frame_accesses);
+            check_test_expect(test, compiled && decoded != 0 && (pressure ? frame_accesses != 0 : frame_accesses == 0), message);
+        }
+        unlink(object);
+    }
+    unlink(reference);
+}
+
 // The asm bodies' fixture (#1839) compiled by --tier1 --verify into an executable by each path, with and without
 // rematerialization, with no function refused: it must print what clang -O0's build prints. Its -c object's
 // tier1_cpuid holds its cpuid among its own records, with no call, and pushes rbx in its prologue.
@@ -4285,8 +4442,8 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
                  calls, pushed ? "pushed" : "not pushed");
         check_test_expect(test, compiled && decoded != 0 && cpuids == 2 && calls == 0 && pushed, message);
         // tier1_mulq's operands are its body call's arguments, moved into rax and their register (#2144), and its loop's
-        // values keep out of rax, rcx and rdx: of its frame stores, only the outputs' addresses into the operand block
-        // are left, none of an input's and none of a save's.
+        // values keep out of rax, rcx and rdx. Both outputs return in registers too: no operand-block addresses or
+        // values and no call saves remain in its frame stores.
         const uint32_t mulq_decoded = compiled ? check_test_tier1_function(object, "tier1_mulq", records, 512, offsets, types, &relocations) : 0;
         uint32_t muls = 0;
         uint32_t frame_stores = 0;
@@ -4298,11 +4455,12 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
             frame_stores += memory && record->form == X86_FORM_MOV_RM64_R64 && (record->rm == X86_REGISTER_RSP || record->rm == X86_REGISTER_RBP);
         }
         snprintf(message, sizeof(message), "asm bodies (%s path, --tier1): tier1_mulq holds %u mul and %u frame stores", path != 0 ? "scalar" : "vector", muls, frame_stores);
-        check_test_expect(test, compiled && mulq_decoded != 0 && muls == 1 && frame_stores <= 2, message);
+        check_test_expect(test, compiled && mulq_decoded != 0 && muls == 1 && frame_stores == 0, message);
         unlink(object);
     }
     unlink(unit);
     unlink(reference);
+    check_test_driver_tier1_asm_results(test, clang, executable, directory);
 }
 
 // The asm bodies' opmask fixture (#1839): two masks live across a template that writes k1 to k7, its clobbers, in a
@@ -7102,6 +7260,119 @@ static void check_test_driver_tier1_floating_vectorize(CheckTest* test, const ch
     }
 }
 
+// #2755: every loop in the subject object vectorizes, and +unroll must take exactly that many main loops. Clang alone
+// compiles the harness, so a scalar harness loop cannot satisfy the pass counts. Its protected pages and overlap
+// trials check both the unrolled vector body and the vectorizer's masked/scalar tails and guarded scalar fallback.
+static void check_test_driver_tier1_unroll_vector(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const targets[] = {
+        "x86-64",
+        "x86-64-v3",
+        "x86-64-v4",
+    };
+    const char* unit = "tests/driver/tier1-unroll-vector.c";
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(targets); t += 1)
+    {
+        const bool reductions = t == 2;
+        const uint64_t kernels = reductions ? 9 : 2;
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(targets[t], strlen(targets[t]), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        char march[64];
+        char harness[512];
+        char reference_object[512];
+        char reference[512];
+        char object[512];
+        char program[512];
+        snprintf(march, sizeof(march), "-march=%s", targets[t]);
+        snprintf(harness, sizeof(harness), "%s/tier1-unroll-vector-harness-%u.o", directory, t);
+        snprintf(reference_object, sizeof(reference_object), "%s/tier1-unroll-vector-clang-%u.o", directory, t);
+        snprintf(reference, sizeof(reference), "%s/tier1-unroll-vector-clang-%u", directory, t);
+        snprintf(object, sizeof(object), "%s/tier1-unroll-vector-%u.o", directory, t);
+        snprintf(program, sizeof(program), "%s/tier1-unroll-vector-%u", directory, t);
+        bool referenced = true;
+        for (uint32_t part = 0; referenced && part < 2; part += 1)
+        {
+            char* arguments[12] = { (char*)clang, "-O0", "-march=x86-64", "-fno-strict-aliasing", "-c", "-o", part == 0 ? harness : reference_object, (char*)unit };
+            uint32_t count = 8;
+            if (part != 0)
+            {
+                arguments[count++] = "-DBUSTER_UNROLL_VECTOR_KERNELS";
+            }
+            if (reductions)
+            {
+                arguments[count++] = "-DBUSTER_UNROLL_VECTOR_REDUCTIONS";
+            }
+            arguments[count] = NULL;
+            char* text = NULL;
+            referenced = check_test_driver_spawn(arguments, &text) == 0;
+            free(text);
+        }
+        char* reference_arguments[] = { (char*)clang, "-o", reference, harness, reference_object, NULL };
+        char* text = NULL;
+        referenced = referenced && check_test_driver_spawn(reference_arguments, &text) == 0;
+        free(text);
+        char expected[256] = { 0 };
+        const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+        check_test_expect(test, ran, "clang's guarded vector-unroll kernels and harness run");
+        for (uint32_t enabled = 0; ran && enabled < 2; enabled += 1)
+        {
+            char* arguments[16] = {
+                (char*)executable,
+                "--tier1",
+                enabled != 0 ? "--tier1-passes=+vectorize,+unroll" : "--tier1-passes=+vectorize,-unroll",
+                "--tier1-strict",
+                "--tier1-report",
+                "--verify",
+                march,
+                "-DBUSTER_UNROLL_VECTOR_KERNELS",
+                "-c",
+                "-o",
+                object,
+                (char*)unit,
+            };
+            uint32_t count = 12;
+            if (reductions)
+            {
+                arguments[count++] = "-DBUSTER_UNROLL_VECTOR_REDUCTIONS";
+            }
+            arguments[count] = NULL;
+            text = NULL;
+            const bool built = check_test_driver_spawn(arguments, &text) == 0;
+            uint64_t internal = UINT64_MAX;
+            uint64_t fallbacks = UINT64_MAX;
+            uint64_t vectorized = UINT64_MAX;
+            const uint64_t unrolled = check_test_tier1_unroll_field(text, "unrolled");
+            const uint64_t split = check_test_tier1_unroll_field(text, "reductions");
+            const bool clean = built && check_test_tier1_field(text, "internal_failures", &internal) && internal == 0 &&
+                               check_test_tier1_field(text, "fallbacks", &fallbacks) && fallbacks == 0 &&
+                               check_test_tier1_vectorize_field(text, "vectorized", &vectorized) && vectorized == kernels;
+            const bool counts = unrolled == (enabled != 0 ? kernels : 0) && split == (enabled != 0 && reductions ? 7 : 0);
+            char message[256];
+            snprintf(message, sizeof(message), "the %s kernels all vectorize and %s unroll their vector main loops: vectorized=%llu unrolled=%llu reductions=%llu", targets[t],
+                     enabled != 0 ? "do" : "do not", (unsigned long long)vectorized, (unsigned long long)unrolled, (unsigned long long)split);
+            check_test_expect(test, clean && counts, message);
+            if ((!clean || !counts) && text != NULL)
+            {
+                fprintf(stderr, "vector-unroll report (%s, unroll %u):\n%s\n", targets[t], enabled, text);
+            }
+            free(text);
+            char* link[] = { (char*)clang, "-o", program, harness, object, NULL };
+            text = NULL;
+            const bool linked = built && check_test_driver_spawn(link, &text) == 0;
+            free(text);
+            char actual[256] = { 0 };
+            snprintf(message, sizeof(message), "the %s vector-unroll kernels match clang at protected page edges and overlapping arrays (unroll %u)", targets[t], enabled);
+            check_test_expect(test, linked && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
+            unlink(program);
+            unlink(object);
+        }
+        unlink(reference);
+        unlink(reference_object);
+        unlink(harness);
+    }
+}
+
 // #1282's inlining: the unit's always_inline functions of internal linkage expanded into their callers by --tier1, the
 // x86 intrinsics' wrappers above all, whose vectors pass and return by value: their byte-wise copies into fresh slots,
 // split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
@@ -7268,6 +7539,7 @@ static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, c
     check_test_driver_tier1_vector_copies(test, clang, executable, directory);
     check_test_driver_tier1_vectorize(test, clang, executable, directory);
     check_test_driver_tier1_floating_vectorize(test, clang, executable, directory);
+    check_test_driver_tier1_unroll_vector(test, clang, executable, directory);
 }
 
 // #2541 step 2's classes and dead functions: an external definition (expanded at its calls, its code kept), a weak one

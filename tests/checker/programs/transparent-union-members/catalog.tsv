@@ -1,0 +1,7 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+# Cross-calls with Clang for the first member's exact payload in registers, byval and named variadic stack slots.
+transparent-union-wide-members	transparent-union-wide-members.c	-	transparent-union-wide-members
+transparent-union-packed-wide-members	transparent-union-packed-wide-members.c	-	transparent-union-packed-wide-members
+transparent-union-atomic-members	transparent-union-atomic-members.c	-	transparent-union-atomic-members
+transparent-union-atomic-vectors	transparent-union-atomic-vectors.c	-	transparent-union-atomic-vectors

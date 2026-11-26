@@ -120,6 +120,18 @@ Two cost rules keep a branch or move a select:
   or appends a missing width once to a private copy. In both orientations the
   accumulator waits only for the operation. A binding of the repurposed arm
   row becomes unavailable.
+  A diamond whose two arms compute `s op x` and `s op y` can instead select
+  `x` or `y` and apply the common operation once (#2932). This two-arm fold
+  accepts i8, i16, i32 and i64 addition, OR and XOR with the common operand
+  on either side; subtraction requires `s` on the left in both arms. Both
+  results must be private to that join's phi. After row ordering, the later
+  arm row becomes the select, the phi becomes the common operation, and
+  ordinary dead-code removal drops the earlier arm operation. Reusing the
+  later row keeps both differing operands available without allocating a
+  new row or requiring an identity constant. Its old debug binding and
+  region become unavailable. When the condition, `x` and `y` are independent
+  of `s`, the accumulator's recurrence then contains only the common
+  operation, including when a floating comparison controls the select.
 
 A converted head whose single-predecessor chain climbs to a conditional branch
 may now be an outer region's arm (a nested `?:`, `||` inside `&&`). In that

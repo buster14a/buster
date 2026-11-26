@@ -23,6 +23,8 @@
 //   setcc; and where the loop's accumulator recurs through a select's values by an operation (a conditional scale by
 //   ==, `c = p[i] == t ? c * 3 : c + 1`, whose two arms #2932's fold can't make one operation), its truth value
 //   instead, no cmov of the parity flag; the oracle checks all of them on unordered operands too;
+// - #2932's integer and floating equality loops, `if (p[i] == t) c += 5; else c += 1`: exactly one arithmetic
+//   operation on the returned accumulator's loop-carried dependency, with no select on that dependency;
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
@@ -518,6 +520,40 @@ __attribute__((noinline)) long patterns_float_equal_count(const double* p, int n
     return c;
 }
 
+__attribute__((noinline)) unsigned patterns_pair_integer(const int* p, int n, int t, unsigned initial)
+{
+    unsigned c = initial;
+    for (int i = 0; i < n; i += 1)
+    {
+        if (p[i] == t)
+        {
+            c += 5;
+        }
+        else
+        {
+            c += 1;
+        }
+    }
+    return c;
+}
+
+__attribute__((noinline)) unsigned long patterns_pair_float(const double* p, int n, double t, unsigned long initial)
+{
+    unsigned long c = initial;
+    for (int i = 0; i < n; i += 1)
+    {
+        if (p[i] == t)
+        {
+            c += 5;
+        }
+        else
+        {
+            c += 1;
+        }
+    }
+    return c;
+}
+
 __attribute__((noinline)) int patterns_float_last_unequal(const float* p, int n, float t)
 {
     int last = -1;
@@ -623,6 +659,8 @@ int patterns_float_equal(double a, double b, int x, int y);
 long patterns_float_unequal(float a, float b, long x);
 long patterns_float_equal_sum(const double* p, int n, double t, long x, long y);
 long patterns_float_equal_count(const double* p, int n, double t);
+unsigned patterns_pair_integer(const int* p, int n, int t, unsigned initial);
+unsigned long patterns_pair_float(const double* p, int n, double t, unsigned long initial);
 int patterns_float_last_unequal(const float* p, int n, float t);
 struct patterns_state
 {
@@ -1073,9 +1111,34 @@ int main(void)
         valid = patterns_sum(summed, n) == sum && valid;
         sum += n < 8 && summed[n] > 128 ? summed[n] : 0;
     }
+    const unsigned long initial[] = { 0, 1, ~7ul, ~0ul };
+    for (unsigned seed = 0; seed < sizeof(initial) / sizeof(initial[0]); seed += 1)
+    {
+        for (unsigned target = 0; target < sizeof(summed) / sizeof(summed[0]); target += 1)
+        {
+            unsigned expected = (unsigned)initial[seed];
+            for (int n = -1; n <= 8; n += 1)
+            {
+                valid = patterns_pair_integer(n > 0 ? summed : NULL, n, summed[target], (unsigned)initial[seed]) == expected && valid;
+                expected += n >= 0 && n < 8 ? (summed[n] == summed[target] ? 5u : 1u) : 0;
+            }
+        }
+    }
     // #2791's floating selects, on NaN, zeros of both signs and infinities among the operands.
     const double reals[] = { -__builtin_inf(), -2.5, -0.0, 0.0, 1.0, 2.5, __builtin_inf(), __builtin_nan(""), -__builtin_nan("") };
     const int real_count = (int)(sizeof(reals) / sizeof(reals[0]));
+    for (unsigned seed = 0; seed < sizeof(initial) / sizeof(initial[0]); seed += 1)
+    {
+        for (int target = 0; target < real_count; target += 1)
+        {
+            unsigned long expected = initial[seed];
+            for (int n = -1; n <= real_count; n += 1)
+            {
+                valid = patterns_pair_float(n > 0 ? reals : NULL, n, reals[target], initial[seed]) == expected && valid;
+                expected += n >= 0 && n < real_count ? (reals[n] == reals[target] ? 5ul : 1ul) : 0;
+            }
+        }
+    }
     for (int i = 0; i < real_count; i += 1)
     {
         for (int j = 0; j < real_count; j += 1)
@@ -1255,6 +1318,7 @@ typedef enum PatternsKind
     PATTERNS_SELECT,
     PATTERNS_FLOAT_EQUAL,
     PATTERNS_FLOAT_RECURRENT,
+    PATTERNS_PAIR,
     PATTERNS_WHOLE,
     PATTERNS_CLEARED,
     PATTERNS_GSUB,
@@ -1295,6 +1359,8 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_float_unequal", PATTERNS_FLOAT_EQUAL },
     { "patterns_float_equal_sum", PATTERNS_FLOAT_EQUAL },
     { "patterns_float_equal_count", PATTERNS_FLOAT_RECURRENT },
+    { "patterns_pair_integer", PATTERNS_PAIR },
+    { "patterns_pair_float", PATTERNS_PAIR },
     { "patterns_float_last_unequal", PATTERNS_FLOAT_EQUAL },
     { "patterns_whole_literal", PATTERNS_WHOLE },
     { "patterns_whole_declaration", PATTERNS_WHOLE },
@@ -1333,6 +1399,298 @@ struct PatternsBody
 static bool patterns_memory(const char* operand)
 {
     return strchr(operand, '(') != NULL;
+}
+
+#define BUSTER_PATTERNS_REGISTERS 16u
+
+// Register aliases name one carried value: a zeroing mov to eax and an add to rax belong to the same chain.
+static unsigned patterns_register(const char* text, size_t length)
+{
+    static const char* const names[BUSTER_PATTERNS_REGISTERS][5] = {
+        { "rax", "eax", "ax", "al", "ah" },
+        { "rcx", "ecx", "cx", "cl", "ch" },
+        { "rdx", "edx", "dx", "dl", "dh" },
+        { "rbx", "ebx", "bx", "bl", "bh" },
+        { "rsp", "esp", "sp", "spl", "" },
+        { "rbp", "ebp", "bp", "bpl", "" },
+        { "rsi", "esi", "si", "sil", "" },
+        { "rdi", "edi", "di", "dil", "" },
+        { "r8", "r8d", "r8w", "r8b", "" },
+        { "r9", "r9d", "r9w", "r9b", "" },
+        { "r10", "r10d", "r10w", "r10b", "" },
+        { "r11", "r11d", "r11w", "r11b", "" },
+        { "r12", "r12d", "r12w", "r12b", "" },
+        { "r13", "r13d", "r13w", "r13b", "" },
+        { "r14", "r14d", "r14w", "r14b", "" },
+        { "r15", "r15d", "r15w", "r15b", "" },
+    };
+    unsigned result = BUSTER_PATTERNS_REGISTERS;
+    for (unsigned r = 0; length > 1 && text[0] == '%' && r < BUSTER_PATTERNS_REGISTERS; r += 1)
+    {
+        for (unsigned alias = 0; alias < 5; alias += 1)
+        {
+            if (strlen(names[r][alias]) == length - 1 && memcmp(text + 1, names[r][alias], length - 1) == 0)
+            {
+                result = r;
+            }
+        }
+    }
+    return result;
+}
+
+typedef struct PatternsDependency PatternsDependency;
+struct PatternsDependency
+{
+    // Zero means independent; one is the accumulator at the loop's entry, before any operation.
+    unsigned depth;
+    bool selected;
+};
+
+static PatternsDependency patterns_dependency_merge(PatternsDependency a, PatternsDependency b)
+{
+    return (PatternsDependency){ .depth = a.depth > b.depth ? a.depth : b.depth, .selected = a.selected || b.selected };
+}
+
+static PatternsDependency patterns_dependency_sources(const char* text, size_t length, const PatternsDependency* registers)
+{
+    PatternsDependency value = { 0 };
+    for (size_t i = 0; i < length; i += 1)
+    {
+        if (text[i] == '%')
+        {
+            size_t end = i + 1;
+            while (end < length && ((text[end] >= 'a' && text[end] <= 'z') || (text[end] >= '0' && text[end] <= '9')))
+            {
+                end += 1;
+            }
+            const unsigned r = patterns_register(text + i, end - i);
+            if (r < BUSTER_PATTERNS_REGISTERS)
+            {
+                value = patterns_dependency_merge(value, registers[r]);
+            }
+            i = end - 1;
+        }
+    }
+    return value;
+}
+
+// The two fixtures have one small scalar loop. Track its accumulator through register copies, lea, integer
+// arithmetic and selections, independently of the compiler's IR and selector. Loads produce unrelated inputs;
+// spilling the accumulator or an unrecognized GPR operation refuses the shape instead of losing its dependency.
+static bool patterns_dependency_step(const PatternsInstruction* instruction, PatternsDependency* registers, PatternsDependency* flags)
+{
+    const char* operation = instruction->operation;
+    const char* operands = instruction->operands;
+    const char* comma = strrchr(operands, ',');
+    const char* destination = comma != NULL ? comma + 1 : operands;
+    const unsigned target = patterns_register(destination, strlen(destination));
+    const size_t source_length = comma != NULL ? (size_t)(comma - operands) : 0;
+    PatternsDependency value = patterns_dependency_sources(operands, source_length, registers);
+    bool valid = true;
+    if ((strncmp(operation, "cmp", 3) == 0 && strlen(operation) <= 4) ||
+        (strncmp(operation, "test", 4) == 0 && strlen(operation) <= 5) || strstr(operation, "comis") != NULL)
+    {
+        *flags = patterns_dependency_sources(operands, strlen(operands), registers);
+    }
+    else if (target < BUSTER_PATTERNS_REGISTERS)
+    {
+        bool arithmetic = false;
+        bool sets_flags = false;
+        if (strncmp(operation, "mov", 3) == 0)
+        {
+            if (patterns_memory(operands))
+            {
+                valid = value.depth == 0;
+                value = (PatternsDependency){ 0 };
+            }
+            arithmetic = strncmp(operation, "movz", 4) == 0 || strncmp(operation, "movs", 4) == 0;
+        }
+        else if (strncmp(operation, "lea", 3) == 0)
+        {
+            arithmetic = true;
+        }
+        else if (strncmp(operation, "cmov", 4) == 0 || strncmp(operation, "set", 3) == 0)
+        {
+            value = patterns_dependency_merge(patterns_dependency_merge(value, registers[target]), *flags);
+            value.selected = value.selected || value.depth != 0;
+            arithmetic = true;
+        }
+        else if (strncmp(operation, "add", 3) == 0 || strncmp(operation, "sub", 3) == 0 || strncmp(operation, "xor", 3) == 0 ||
+                 strncmp(operation, "and", 3) == 0 || strncmp(operation, "or", 2) == 0 || strncmp(operation, "inc", 3) == 0 ||
+                 strncmp(operation, "dec", 3) == 0 || strncmp(operation, "neg", 3) == 0 || strncmp(operation, "not", 3) == 0 ||
+                 strncmp(operation, "shl", 3) == 0 || strncmp(operation, "sal", 3) == 0 || strncmp(operation, "shr", 3) == 0 ||
+                 strncmp(operation, "sar", 3) == 0 || (strncmp(operation, "imul", 4) == 0 && comma != NULL))
+        {
+            const bool zero = (strncmp(operation, "xor", 3) == 0 || strncmp(operation, "sub", 3) == 0) && patterns_register(operands, source_length) == target;
+            const bool three = strncmp(operation, "imul", 4) == 0 && strchr(operands, ',') != comma && !patterns_memory(operands);
+            value = zero ? (PatternsDependency){ 0 } : three ? value : patterns_dependency_merge(value, registers[target]);
+            arithmetic = true;
+            sets_flags = strncmp(operation, "not", 3) != 0;
+        }
+        else
+        {
+            valid = false;
+        }
+        value.depth += arithmetic && value.depth != 0;
+        registers[target] = value;
+        if (sets_flags)
+        {
+            *flags = value;
+        }
+    }
+    else
+    {
+        const bool vector = strncmp(destination, "%xmm", 4) == 0 || strncmp(destination, "%ymm", 4) == 0 || strncmp(destination, "%zmm", 4) == 0;
+        valid = operation[0] == 'j' || strncmp(operation, "nop", 3) == 0 || strcmp(operation, "vzeroupper") == 0 ||
+                (vector && value.depth == 0 && (strncmp(operation, "mov", 3) == 0 || strncmp(operation, "vmov", 4) == 0));
+    }
+    return valid;
+}
+
+static unsigned patterns_branch_target(const PatternsBody* body, const PatternsInstruction* instruction)
+{
+    unsigned target = body->count;
+    if (instruction->operation[0] == 'j' && instruction->operands[0] != '*')
+    {
+        const unsigned long long address = strtoull(instruction->operands, NULL, 16);
+        for (unsigned i = 0; i < body->count; i += 1)
+        {
+            target = body->instructions[i].address == address ? i : target;
+        }
+    }
+    return target;
+}
+
+static bool patterns_pair_chain(const PatternsBody* body)
+{
+    unsigned first = body->count;
+    unsigned last = body->count;
+    unsigned backedges = 0;
+    for (unsigned i = 0; i < body->count; i += 1)
+    {
+        const unsigned target = patterns_branch_target(body, &body->instructions[i]);
+        if (target <= i)
+        {
+            first = target;
+            last = i;
+            backedges += 1;
+        }
+    }
+    bool valid = backedges == 1 && first < last;
+    unsigned exit = last + 1;
+    unsigned exits = 0;
+    for (unsigned i = first; valid && i < last; i += 1)
+    {
+        const PatternsInstruction* instruction = &body->instructions[i];
+        if (instruction->operation[0] == 'j')
+        {
+            const unsigned target = patterns_branch_target(body, instruction);
+            valid = strcmp(instruction->operation, "jmp") != 0 && target > last && target < body->count;
+            exit = target;
+            exits += 1;
+        }
+    }
+    valid = valid && exits == (unsigned)(strcmp(body->instructions[last].operation, "jmp") == 0);
+    // Follow the exit to its return, then trace its register copies backward. Only the ABI's result register is
+    // fixed; the accumulator may live in any GPR, with copies at the loop edge or in the epilogue.
+    unsigned epilogue[BUSTER_PATTERNS_INSTRUCTIONS];
+    unsigned count = 0;
+    unsigned at = exit;
+    while (valid && at < body->count && count < BUSTER_PATTERNS_INSTRUCTIONS && strcmp(body->instructions[at].operation, "ret") != 0)
+    {
+        const PatternsInstruction* instruction = &body->instructions[at];
+        epilogue[count++] = at;
+        if (instruction->operation[0] == 'j')
+        {
+            at = patterns_branch_target(body, instruction);
+            valid = strcmp(instruction->operation, "jmp") == 0 && at > last;
+        }
+        else
+        {
+            at += 1;
+        }
+    }
+    valid = valid && at < body->count && strcmp(body->instructions[at].operation, "ret") == 0;
+    unsigned accumulator = 0;
+    for (unsigned i = count; valid && i > 0; i -= 1)
+    {
+        const PatternsInstruction* instruction = &body->instructions[epilogue[i - 1]];
+        const char* comma = strrchr(instruction->operands, ',');
+        const char* destination = comma != NULL ? comma + 1 : instruction->operands;
+        const unsigned target = patterns_register(destination, strlen(destination));
+        const char* operation = instruction->operation;
+        valid = strcmp(operation, "mov") == 0 || strncmp(operation, "nop", 3) == 0 || strcmp(operation, "jmp") == 0 ||
+                strcmp(operation, "pop") == 0 ||
+                (target == 4 && instruction->operands[0] == '$' && (strcmp(operation, "add") == 0 || strcmp(operation, "sub") == 0));
+        if (valid && target == accumulator)
+        {
+            accumulator = comma != NULL && strcmp(instruction->operation, "mov") == 0 ?
+                          patterns_register(instruction->operands, (size_t)(comma - instruction->operands)) : BUSTER_PATTERNS_REGISTERS;
+            valid = accumulator < BUSTER_PATTERNS_REGISTERS;
+        }
+    }
+    PatternsDependency registers[BUSTER_PATTERNS_REGISTERS] = { 0 };
+    PatternsDependency flags = { 0 };
+    if (valid)
+    {
+        registers[accumulator].depth = 1;
+        for (unsigned i = first; valid && i <= last; i += 1)
+        {
+            valid = patterns_dependency_step(&body->instructions[i], registers, &flags);
+        }
+        valid = valid && registers[accumulator].depth == 2 && !registers[accumulator].selected;
+    }
+    return valid;
+}
+
+// The historical add/lea followed by cmov must fail even though it computes the right values. The passing shape
+// carries r10 through a copied temporary and returns it through rax, so the check cannot assume accumulator = rax.
+static bool patterns_pair_self_test(void)
+{
+    PatternsBody body = {
+        .instructions = {
+            { .address = 0, .operation = "cmp", .operands = "%edx,(%rdi)" },
+            { .address = 1, .operation = "mov", .operands = "$0x1,%r8d" },
+            { .address = 2, .operation = "mov", .operands = "$0x5,%r9d" },
+            { .address = 3, .operation = "cmove", .operands = "%r9,%r8" },
+            { .address = 4, .operation = "mov", .operands = "%r10,%rax" },
+            { .address = 5, .operation = "add", .operands = "%r8,%rax" },
+            { .address = 6, .operation = "mov", .operands = "%rax,%r10" },
+            { .address = 7, .operation = "add", .operands = "$0x4,%rdi" },
+            { .address = 8, .operation = "sub", .operands = "$0x1,%esi" },
+            { .address = 9, .operation = "jne", .operands = "0" },
+            { .address = 10, .operation = "mov", .operands = "%r10,%rax" },
+            { .address = 11, .operation = "ret" },
+        },
+        .count = 12,
+    };
+    bool valid = patterns_pair_chain(&body);
+    const PatternsInstruction constant = body.instructions[1];
+    body.instructions[1] = (PatternsInstruction){ .address = 1, .operation = "mov", .operands = "(%r10),%r8d" };
+    valid = !patterns_pair_chain(&body) && valid;
+    body.instructions[1] = constant;
+    const PatternsInstruction advance = body.instructions[7];
+    body.instructions[7] = (PatternsInstruction){ .address = 7, .operation = "cqto" };
+    valid = !patterns_pair_chain(&body) && valid;
+    body.instructions[7] = advance;
+    body.instructions[11] = (PatternsInstruction){ .address = 11, .operation = "xchg", .operands = "%rax,%r10" };
+    body.instructions[12] = (PatternsInstruction){ .address = 12, .operation = "ret" };
+    body.count = 13;
+    valid = !patterns_pair_chain(&body) && valid;
+    body.instructions[11] = (PatternsInstruction){ .address = 11, .operation = "ret" };
+    body.count = 12;
+    body.instructions[1] = (PatternsInstruction){ .address = 1, .operation = "lea", .operands = "0x5(%r10),%r9" };
+    body.instructions[2] = (PatternsInstruction){ .address = 2, .operation = "add", .operands = "$0x1,%r10" };
+    body.instructions[3] = (PatternsInstruction){ .address = 3, .operation = "cmp", .operands = "%edx,(%rdi)" };
+    body.instructions[4] = (PatternsInstruction){ .address = 4, .operation = "cmove", .operands = "%r9,%r10" };
+    body.instructions[5] = (PatternsInstruction){ .address = 5, .operation = "nop" };
+    body.instructions[6] = (PatternsInstruction){ .address = 6, .operation = "nop" };
+    valid = !patterns_pair_chain(&body) && valid;
+    if (!valid)
+    {
+        fprintf(stderr, "patterns two-arm dependency checker self-test failed\n");
+    }
+    return valid;
 }
 
 static bool patterns_shape(const PatternsFunction* function, const PatternsBody* body)
@@ -1433,6 +1791,9 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_FLOAT_RECURRENT:
         valid = valid && sets >= 2 && moves >= 1 && parity == 0;
         break;
+    case PATTERNS_PAIR:
+        valid = valid && patterns_pair_chain(body);
+        break;
     case PATTERNS_WHOLE:
         valid = valid && zeros == 0;
         break;
@@ -1510,6 +1871,7 @@ int main(int argc, char** argv)
     {
         fprintf(stderr, "usage: %s BUSTER_COMPILER CLANG (from the repository root)\n", argv[0]);
     }
+    valid = patterns_pair_self_test() && valid;
     char directory[] = "/tmp/buster-patterns-XXXXXX";
     const bool created = valid && mkdtemp(directory) != NULL;
     valid = valid && created;
@@ -1531,10 +1893,11 @@ int main(int argc, char** argv)
     for (unsigned scalar = 0; valid && scalar < 2; scalar += 1)
     {
         // Fresh outputs: an unsuccessful command must never reuse the preceding path's files.
+        // Pin the existing baseline output target: #2932's check is of a scalar recurrence, before vectorization.
         unlink(subject);
         unlink(program);
         unlink(assembly);
-        char* compile[] = { argv[1], "--tier1", "--tier1-strict", "--verify", "--lanes", "1", "--tier1-report", "-std=gnu17", "-DBUSTER_TIER1_PATTERNS_SUBJECT", "-c", source, "-o", subject, scalar ? "--scalar" : NULL, NULL };
+        char* compile[] = { argv[1], "--tier1", "--tier1-strict", "--verify", "--lanes", "1", "--tier1-report", "-march=x86-64", "-std=gnu17", "-DBUSTER_TIER1_PATTERNS_SUBJECT", "-c", source, "-o", subject, scalar ? "--scalar" : NULL, NULL };
         char* link[] = { argv[2], oracle, subject, "-o", program, NULL };
         char* execute[] = { program, NULL };
         char* disassemble[] = { "objdump", "-d", "--no-show-raw-insn", subject, NULL };

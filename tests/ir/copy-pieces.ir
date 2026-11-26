@@ -1,0 +1,17 @@
+function (ptr) -> void {
+  slot $0 size=48 align=8 type=void flags=0x01
+b0:
+  %0 = param.ptr 0
+  %1 = stack_addr.ptr $0
+  %2 = load.i64 %1 align=8 copy_piece
+  %3 = store.void %0, %2 align=1 copy_piece
+  %4 = address.ptr %1 offset=8
+  %5 = address.ptr %0 offset=8
+  %6 = load.i64 %4 align=8 volatile copy_piece
+  %7 = store.void %5, %6 align=1 copy_piece
+  %8 = address.ptr %1 offset=16
+  %9 = address.ptr %0 offset=16
+  %10 = load.v4i32 %8 align=8 copy_piece
+  %11 = store.void %9, %10 align=1 copy_piece
+  %12 = ret.void
+}

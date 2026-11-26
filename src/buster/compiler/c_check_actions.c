@@ -369,6 +369,7 @@ struct CheckConversion
 
 typedef struct CheckAction CheckAction;
 typedef struct CheckVectorMember CheckVectorMember;
+typedef struct CheckVectorCall CheckVectorCall;
 struct CheckConstValues;
 
 // What an action read of its source position (#1050): each tag whose completion it asked about, with the answer (bit i of
@@ -395,12 +396,19 @@ struct CheckAction
     // IdentId for MEMBER/ARROW; opaque node identity for a newly produced evaluation fault.
     uint32_t member;
     uint32_t node;
+    // Zero selects the direct, nullable vector_member. Otherwise vector_members borrows this many sorted records,
+    // kept live and unchanged through the action/batch; only an extended-vector arrow searches them (#2278).
+    uint32_t vector_member_count;
     const CheckValue* arguments;
     uint32_t argument_count;
     // Optional argument-conversion output with argument_count writable records. Required for CALL with arguments.
     CheckConversion* argument_conversions;
     CheckContext context;
-    const CheckVectorMember* vector_member;
+    union
+    {
+        const CheckVectorMember* vector_member;
+        const CheckVectorCall* vector_members;
+    };
     // Optional: where the action records the answers it read of the source position, which only the checker's memoized
     // transitions ask for (c_check_transitions.c). Null records nothing.
     CheckActionGuards* guards;

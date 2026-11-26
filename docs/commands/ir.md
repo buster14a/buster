@@ -65,6 +65,11 @@ against the existing scalar interpreter: unsigned fractions between -1 and
 0 truncate to zero, and nonfinite or out-of-range lanes report
 `INTERPRETER_ARITHMETIC` before a following store.
 
+The asm-result fixtures (#2144) separately check every GPR/XMM primary and
+secondary scalar width, the result/touched masks, and rejection of duplicate,
+mistyped, cross-block or invalid-parent `IR_ASM_RESULT` projections. Both the
+full and lowered verifier paths must agree and restore scratch.
+
 `./build/compiler test-ir-lowering [--seed N] [--count N]` lowers generated
 typed programs through both paths, compares every column and verifies each
 function. A test-only executor with explicit call frames compares results and
@@ -76,7 +81,9 @@ whose IR the executor runs as its ABI records say. Targeted fixtures exercise
 conditional joins, entry-zero backedges, narrow shifts, wide pointer scales,
 objects' slots, `COPY` of every size from 1 to 256, labels and computed gotos
 (one, and two through the dispatch block), a variadic definition's frame, a struct by value's records, guarded source tails
-and transactional failures. A loop whose `?:` joins carry a U64 and an I32 at
+and transactional failures. Asm register-result fixtures check mixed GPR/XMM
+outputs, legacy single-result normalization, and rejection of malformed bundles
+or branches entering their projections and stores. A loop whose `?:` joins carry a U64 and an I32 at
 one depth (#1189), and the same loop in a statement expression under a pending
 U64, whose slot then crosses the backedge, must lower to a depth slot per depth
 and type, each reached by one type alone, compute what C does, and promote to no

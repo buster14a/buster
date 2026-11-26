@@ -1131,7 +1131,37 @@ static bool check_test_program_daz(void)
     "typedef union __attribute__((transparent_union,packed)){struct external_gr g;}ExternalGK;"                                                                     \
     "typedef union __attribute__((transparent_union,aligned(16))){struct external_ge e;}ExternalGE;"
 
+// Wide transparent members keep their exact vector payload inside a larger object (#1844), including LLVM's
+// 24/40/48/56-byte values. Packed unions exercise an alignment change with no increase in object size.
+#define BUSTER_CHECK_TEST_TRANSPARENT_WIDE_UNIONS \
+    "typedef unsigned char external_twide16 __attribute__((vector_size(16)));" \
+    "typedef unsigned char external_twide32 __attribute__((vector_size(32)));" \
+    "typedef unsigned char external_twide64 __attribute__((vector_size(64)));" \
+    "struct external_twide32_member{external_twide32 v;};struct external_twide64_member{external_twide64 v;};" \
+    "union __attribute__((packed)) external_twide24_member{external_twide16 v;unsigned char bytes[24];};" \
+    "union __attribute__((packed)) external_twide40_member{external_twide16 v;unsigned char bytes[40];};" \
+    "union __attribute__((packed)) external_twide48_member{external_twide16 v;unsigned char bytes[48];};" \
+    "union __attribute__((packed)) external_twide56_member{external_twide16 v;unsigned char bytes[56];};" \
+    "typedef union __attribute__((transparent_union,aligned(128))){struct external_twide32_member a,b;}ExternalTWide32;" \
+    "typedef union __attribute__((transparent_union,aligned(128))){struct external_twide64_member a,b;}ExternalTWide64;" \
+    "typedef union __attribute__((transparent_union,aligned(128))){union external_twide24_member a,b;}ExternalTWide24;" \
+    "typedef union __attribute__((transparent_union,aligned(128))){union external_twide40_member a,b;}ExternalTWide40;" \
+    "typedef union __attribute__((transparent_union,aligned(128))){union external_twide48_member a,b;}ExternalTWide48;" \
+    "typedef union __attribute__((transparent_union,aligned(128))){union external_twide56_member a,b;}ExternalTWide56;" \
+    "typedef union __attribute__((transparent_union,packed,aligned(2))){struct external_twide32_member a,b;}ExternalTPacked32;" \
+    "typedef union __attribute__((transparent_union,packed,aligned(2))){struct external_twide64_member a,b;}ExternalTPacked64;"
+
+// Atomic transparent members pass as uncounted values, whose spills occupy the value's slot, not the union's.
+#define BUSTER_CHECK_TEST_TRANSPARENT_ATOMIC_UNIONS \
+    "typedef union __attribute__((transparent_union,aligned(32))){_Atomic char a,b;}ExternalTAtomicChar;" \
+    "typedef union __attribute__((transparent_union,aligned(32))){_Atomic long a,b;}ExternalTAtomicLong;" \
+    "typedef union __attribute__((transparent_union,aligned(32))){_Atomic double a,b;}ExternalTAtomicDouble;" \
+    "typedef union __attribute__((transparent_union,aligned(32))){_Atomic long double a,b;}ExternalTAtomicExtended;" \
+    "typedef union __attribute__((transparent_union,aligned(32))){_Atomic __int128 a,b;}ExternalTAtomicWide;"
+
 // The program every checked object and its oracle are linked with: it runs both on the same inputs.
+#include "c_check_program_transparent_late_harness.c"
+
 static const char check_test_program_harness[] =
     "#include <stdio.h>\n"
     "#include <fenv.h>\n"
@@ -1282,6 +1312,7 @@ static const char check_test_program_harness[] =
     // functions read the register a short, an unsigned short and a _Bool arrive in as 32 bits, as clang's caller
     // extends them. The _apply functions call a program's through a pointer, and _variadic reads the unions with va_arg.
     BUSTER_CHECK_TEST_TRANSPARENT_UNIONS
+    BUSTER_CHECK_TEST_TRANSPARENT_LATE
     "static unsigned long external_tw(ExternalTW w){return (unsigned long)w.s.a+(unsigned long)(w.s.b&0xffff)*7;}"
     "unsigned long external_transparent(int k,ExternalTF f,ExternalTS s,ExternalTP p,ExternalTQ q,ExternalTD d,ExternalTW w,ExternalTA a,ExternalTB b){"
     "unsigned long bits;__builtin_memcpy(&bits,&q,8);unsigned long h=external_fold((unsigned long)k,(unsigned long)(f.q.a+f.q.b*3+s.s*5));"
@@ -1383,6 +1414,34 @@ static const char check_test_program_harness[] =
     "unsigned long external_transparent_late_apply(unsigned long(*f)(long,long,long,long,long,long,double,double,double,double,double,double,double,double,"
     "ExternalTF,ExternalTS,ExternalTP,ExternalTD,ExternalTW,ExternalTA,ExternalTB),int n){struct external_ip ip={n,7};"
     "return f(1,2,3,4,5,n,0.5,1,2,3,4,5,6,n*0.5,ip,(short)-n,(long)n*9,(long)n*3,(__int128)n*5,ip,(struct external_big){n,n,n});}\n"
+    // Wide members and the exact prefixes of their own-slot unions, in registers, byval slots and named variadic slots.
+    BUSTER_CHECK_TEST_TRANSPARENT_WIDE_UNIONS
+    "static void external_tmember_fill(void*p,unsigned bytes,int n){unsigned char*q=p;for(unsigned i=0;i<bytes;i++)q[i]=(unsigned char)((unsigned)n*7+i*13+3);}\n"
+    "static unsigned long external_tmember_fold(unsigned long h,const void*p,unsigned bytes){const unsigned char*q=p;for(unsigned i=0;i<bytes;i++)h=external_fold(h,q[i]);return h;}\n"
+    "unsigned long external_transparent_wide(long k,ExternalTWide32 a,ExternalTWide64 b,ExternalTWide24 c,ExternalTWide40 d,ExternalTWide48 e,ExternalTWide56 f,long z){unsigned long h=(unsigned long)k;h=external_tmember_fold(h,&a,32);h=external_tmember_fold(h,&b,64);h=external_tmember_fold(h,&c,24);h=external_tmember_fold(h,&d,40);h=external_tmember_fold(h,&e,48);h=external_tmember_fold(h,&f,56);return external_fold(h,(unsigned long)z);}\n"
+    "unsigned long external_transparent_wide_stack(long l0,long l1,long l2,long l3,long l4,long l5,double d0,double d1,double d2,double d3,double d4,double d5,double d6,double d7,ExternalTWide32 a,ExternalTWide64 b,ExternalTWide24 c,ExternalTWide40 d,ExternalTWide48 e,ExternalTWide56 f,long z){return external_transparent_wide(l0+l1*3+l2*5+l3*7+l4*9+l5*11+(long)(d0+d1+d2+d3+d4+d5+d6+d7*3),a,b,c,d,e,f,z);}\n"
+    "unsigned long external_transparent_wide_named(ExternalTWide32 a,ExternalTWide64 b,ExternalTWide24 c,ExternalTWide40 d,ExternalTWide48 e,ExternalTWide56 f,long z,...){va_list ap;va_start(ap,z);long x=va_arg(ap,long);double y=va_arg(ap,double);va_end(ap);return external_transparent_wide(x+(long)(y*4),a,b,c,d,e,f,z);}\n"
+    "unsigned long external_transparent_wide_apply(unsigned long(*r)(long,ExternalTWide32,ExternalTWide64,ExternalTWide24,ExternalTWide40,ExternalTWide48,ExternalTWide56,long),unsigned long(*s)(long,long,long,long,long,long,double,double,double,double,double,double,double,double,ExternalTWide32,ExternalTWide64,ExternalTWide24,ExternalTWide40,ExternalTWide48,ExternalTWide56,long),unsigned long(*v)(ExternalTWide32,ExternalTWide64,ExternalTWide24,ExternalTWide40,ExternalTWide48,ExternalTWide56,long,...),int n){struct external_twide32_member s32;external_tmember_fill(&s32,32,n+0);ExternalTWide32 a={.a=s32};struct external_twide64_member s64;external_tmember_fill(&s64,64,n+1);ExternalTWide64 b={.a=s64};union external_twide24_member s24;external_tmember_fill(&s24,24,n+2);ExternalTWide24 c={.a=s24};union external_twide40_member s40;external_tmember_fill(&s40,40,n+3);ExternalTWide40 d={.a=s40};union external_twide48_member s48;external_tmember_fill(&s48,48,n+4);ExternalTWide48 e={.a=s48};union external_twide56_member s56;external_tmember_fill(&s56,56,n+5);ExternalTWide56 f={.a=s56};return r(1,s32,s64,s24,s40,s48,s56,n*3L)^r(2,a,b,c,d,e,f,n*5L)^s(1,2,3,4,5,n,0.5,1,2,3,4,5,6,n*0.5,a,b,c,d,e,f,n*7L)^v(a,b,c,d,e,f,n*9L,n*11L,n*0.25);}\n"
+    "unsigned long external_transparent_packed(ExternalTPacked32 a,ExternalTPacked64 b,long z){return external_tmember_fold(external_tmember_fold((unsigned long)z,&a,32),&b,64);}\n"
+    "unsigned long external_transparent_packed_apply(unsigned long(*f)(ExternalTPacked32,ExternalTPacked64,long),int n){struct external_twide32_member a;struct external_twide64_member b;external_tmember_fill(&a,32,n);external_tmember_fill(&b,64,n+1);ExternalTPacked32 x={.a=a};ExternalTPacked64 y={.a=b};return f(a,b,n*3L)^f(x,y,n*5L);}\n"
+    BUSTER_CHECK_TEST_TRANSPARENT_ATOMIC_UNIONS
+    "unsigned long external_transparent_atomic(ExternalTAtomicChar s,ExternalTAtomicLong a,ExternalTAtomicDouble b,ExternalTAtomicExtended c,ExternalTAtomicWide d,long z){unsigned long h=(unsigned long)z;h=external_tmember_fold(h,&s,1);h=external_tmember_fold(h,&a,8);h=external_tmember_fold(h,&b,8);h=external_tmember_fold(h,&c,10);h=external_tmember_fold(h,&d,16);return h;}\n"
+    "unsigned long external_transparent_atomic_stack(long l0,long l1,long l2,long l3,long l4,long l5,double d0,double d1,double d2,double d3,double d4,double d5,double d6,double d7,ExternalTAtomicChar s,ExternalTAtomicLong a,ExternalTAtomicDouble b,ExternalTAtomicExtended c,ExternalTAtomicWide d,long z){return external_transparent_atomic(s,a,b,c,d,z)+external_fold((unsigned long)(l0+l1*3+l2*5+l3*7+l4*9+l5*11),(unsigned long)(long)(d0+d1+d2+d3+d4+d5+d6+d7*3));}\n"
+    "unsigned long external_transparent_atomic_apply(unsigned long(*f)(ExternalTAtomicChar,ExternalTAtomicLong,ExternalTAtomicDouble,ExternalTAtomicExtended,ExternalTAtomicWide,long),unsigned long(*g)(long,long,long,long,long,long,double,double,double,double,double,double,double,double,ExternalTAtomicChar,ExternalTAtomicLong,ExternalTAtomicDouble,ExternalTAtomicExtended,ExternalTAtomicWide,long),int n){__int128 w=(__int128)(((unsigned __int128)(unsigned long)n<<64)|(unsigned)(n*5+1));ExternalTAtomicChar s={.a=(char)n};ExternalTAtomicLong a={.a=n*3L};ExternalTAtomicDouble b={.a=n*0.5};ExternalTAtomicExtended c={.a=(long double)n*0.25L};ExternalTAtomicWide d={.a=w};return f((char)n,n*3L,n*0.5,(long double)n*0.25L,w,n*7L)^f(s,a,b,c,d,n*9L)^g(1,2,3,4,5,n,0.5,1,2,3,4,5,6,n*0.5,s,a,b,c,d,n*11L);}\n"
+    "\n#if defined(__AVX__)\n\n"
+    "typedef union __attribute__((transparent_union,aligned(128))){_Atomic external_twide32 a,b;}ExternalTAtomic32;\n"
+    "unsigned long external_transparent_atomic32(ExternalTAtomic32 a,long z){return external_tmember_fold((unsigned long)z,&a,32);}\n"
+    "unsigned long external_transparent_atomic32_stack(long l0,long l1,long l2,long l3,long l4,long l5,double d0,double d1,double d2,double d3,double d4,double d5,double d6,double d7,ExternalTAtomic32 a,long z){return external_transparent_atomic32(a,z)+external_fold((unsigned long)(l0+l1*3+l2*5+l3*7+l4*9+l5*11),(unsigned long)(long)(d0+d1+d2+d3+d4+d5+d6+d7*3));}\n"
+    "unsigned long external_transparent_atomic32_named(ExternalTAtomic32 a,long z,...){va_list ap;va_start(ap,z);long x=va_arg(ap,long);double y=va_arg(ap,double);va_end(ap);return external_transparent_atomic32(a,z)+external_fold((unsigned long)x,(unsigned long)(long)(y*4));}\n"
+    "unsigned long external_transparent_atomic32_apply(unsigned long(*f)(ExternalTAtomic32,long),unsigned long(*g)(long,long,long,long,long,long,double,double,double,double,double,double,double,double,ExternalTAtomic32,long),unsigned long(*v)(ExternalTAtomic32,long,...),int n){external_twide32 x;external_tmember_fill(&x,32,n);ExternalTAtomic32 a={.a=x};return f(x,n*3L)^f(a,n*5L)^g(1,2,3,4,5,n,0.5,1,2,3,4,5,6,n*0.5,a,n*7L)^v(a,n*9L,n*11L,n*0.25);}\n"
+    "\n#endif\n\n"
+    "\n#if defined(__AVX512F__)\n\n"
+    "typedef union __attribute__((transparent_union,aligned(128))){_Atomic external_twide64 a,b;}ExternalTAtomic64;\n"
+    "unsigned long external_transparent_atomic64(ExternalTAtomic64 a,long z){return external_tmember_fold((unsigned long)z,&a,64);}\n"
+    "unsigned long external_transparent_atomic64_stack(long l0,long l1,long l2,long l3,long l4,long l5,double d0,double d1,double d2,double d3,double d4,double d5,double d6,double d7,ExternalTAtomic64 a,long z){return external_transparent_atomic64(a,z)+external_fold((unsigned long)(l0+l1*3+l2*5+l3*7+l4*9+l5*11),(unsigned long)(long)(d0+d1+d2+d3+d4+d5+d6+d7*3));}\n"
+    "unsigned long external_transparent_atomic64_named(ExternalTAtomic64 a,long z,...){va_list ap;va_start(ap,z);long x=va_arg(ap,long);double y=va_arg(ap,double);va_end(ap);return external_transparent_atomic64(a,z)+external_fold((unsigned long)x,(unsigned long)(long)(y*4));}\n"
+    "unsigned long external_transparent_atomic64_apply(unsigned long(*f)(ExternalTAtomic64,long),unsigned long(*g)(long,long,long,long,long,long,double,double,double,double,double,double,double,double,ExternalTAtomic64,long),unsigned long(*v)(ExternalTAtomic64,long,...),int n){external_twide64 x;external_tmember_fill(&x,64,n);ExternalTAtomic64 a={.a=x};return f(x,n*3L)^f(a,n*5L)^g(1,2,3,4,5,n,0.5,1,2,3,4,5,6,n*0.5,a,n*7L)^v(a,n*9L,n*11L,n*0.25);}\n"
+    "\n#endif\n\n"
     "int main(void) { for (int repeat=0;repeat<3;repeat++) for (int n=-3;n<=19;n++) {\n"
     "int a=tested(n), b=oracle_tested(n); if(a!=b) { fprintf(stderr,\"n=%d repeat=%d ours=%d oracle=%d\\n\",n,repeat,a,b); return 1; } }\n"
     "if(terminal_probe){int p=fork();if(p<0)return 2;if(!p){struct rlimit r={0,0};setrlimit(RLIMIT_CORE,&r);terminal_probe();_exit(91);}\n"
@@ -3100,8 +3159,9 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                 {
                     writes += program.controls[i].kind == CHECK_CONTROL_INITIALIZE;
                 }
-                check_test_expect(test, program.reference_count == references && writes == initializations,
-                                  "checked body preserves exact live reference and ordered initializer counts");
+                snprintf(description, sizeof(description), "%s: live references %u/%u, ordered initializers %u/%u", name,
+                         program.reference_count, references, writes, initializations);
+                check_test_expect(test, program.reference_count == references && writes == initializations, description);
                 {
                     const uint64_t output_mark = output.length;
                     const uint64_t scratch_mark = scratch.length;
@@ -3592,6 +3652,7 @@ static void check_test_program_sparse_switches(CheckTest* test)
 #include "c_check_program_x86_rest_test.c"
 #include "c_check_program_amx_test.c"
 #include "c_check_program_transparent_test.c"
+#include "c_check_program_transparent_members_test.c"
 #include "c_check_program_union_cast_test.c"
 #include "c_check_program_alias_test.c"
 #include "c_check_program_vector_builtins_test.c"
@@ -4329,6 +4390,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_x86_rest(test, clang);
         check_test_program_amx(test, clang);
         check_test_program_transparent(test, clang);
+        check_test_program_transparent_members(test, clang);
         check_test_program_union_casts(test, clang);
         check_test_program_aliases(test, clang);
         check_test_program_vector_builtins(test, clang);

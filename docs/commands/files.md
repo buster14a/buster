@@ -31,7 +31,17 @@ diagnostics must also be those it gives with a cache of its own, with as many
 errors and warnings, and nothing may be written to stderr while the cache is
 filled.
 
-Then every check runs again on each lane count with the shared table's ids
+The fresh-cache comparisons replay every unit after all units have populated
+the reference cache and the lane and id-order comparisons have finished, using
+the original expansion-starts option; the initial
+runs enable that option for line markers. The warm replay also records the
+prepared files each unit entered, so the unused-file count needs no additional
+compile. Its bitmap grows if a later unit adds records, including computed
+includes. Equal ordinary-id token streams compare as whole columns; a
+difference still reports the original first differing token, and opaque ids
+still compare by spelling (#2658).
+
+Every check also runs on each lane count with the shared table's ids
 handed out in another order (#153: ids are opaque, and nothing may depend on
 their order), as `test-preprocessor --id-order` does for its cases. Before the
 walk fills the cache, the table is primed with 17 to 47 names no file has, then

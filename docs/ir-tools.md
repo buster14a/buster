@@ -102,7 +102,9 @@ IDs, separated by commas. Compare instructions add a predicate (`eq`, `ne`,
 `param` takes its parameter index; `stack_addr` a slot; `symbol_addr` a symbol.
 `address` takes `%base + %index * SCALE offset=DISPLACEMENT`, with the index
 term optional. Loads and stores carry `align=N`, optional `volatile` and, for an atomic access (#1059), `atomic ORDER`
-(a fence's order names).
+(a fence's order names). After any segment name, `copy_piece` carries the
+nonsemantic local-copy selection hint (#2818). The parser, printer and
+interpreter preserve the ordinary access semantics of that flag.
 Calls take `@SYMBOL(%ARGS) fixed=(TYPES) variadic=0|1`; indirect calls use
 `%TARGET` instead. A phi lists `[%VALUE, bPREDECESSOR]` pairs. Branches name
 blocks, conditional branches take `%CONDITION, bTRUE, bFALSE`, and switches

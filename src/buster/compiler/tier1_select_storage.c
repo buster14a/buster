@@ -106,7 +106,7 @@ static void tier1_select_sign_request(const IrFunction* function, const uint16_t
         const uint32_t op = function->op[source];
         const uint32_t a = function->a[source];
         const uint32_t b = function->b[source];
-        const bool load = op == IR_LOAD && function->flags[source] == 0;
+        const bool load = op == IR_LOAD && (function->flags[source] & ~BUSTER_IR_COPY_PIECE) == 0;
         const bool extend = op == IR_SEXT && (function->type[a] == IR_I8 || function->type[a] == IR_I16);
         if (load || extend)
         {

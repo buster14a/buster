@@ -251,7 +251,8 @@ static bool check_input_cleanup_deduced(CheckInputReader* reader, uint32_t decla
             const TypeId function_type = type_strip_aligned(reader->types, reader->declared_types[cleanup->function]);
             uint32_t parameters = 0;
             const TypeId* parameter_types = type_parameters(reader->types, function_type, &parameters);
-            check_input_cleanup_alignment(reader, cleanup->argument, cleanup->function, parameter_types[0], type);
+            // Clang checks alignment when it first handles the attribute, before deduction, while the variable's type
+            // is incomplete. The later deduction rechecks assignment compatibility alone (#1844).
             valid = check_input_cleanup_parameter(reader, parameter_types[0], type);
             if (!valid)
             {

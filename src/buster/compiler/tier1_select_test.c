@@ -5511,6 +5511,7 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
 #include "buster/compiler/tier1_float_select_test.c"
 #include "buster/compiler/tier1_float_blend_test.c"
 #include "buster/compiler/tier1_packed_float_test.c"
+#include "buster/compiler/tier1_copy_select_test.c"
 #endif
 #include "buster/compiler/tier1_select_burs_test.c"
 
@@ -5558,6 +5559,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_intrinsics(&test);
             tier1_select_test_lane_forms(&test);
             tier1_select_test_sse_vectors(&test);
+            tier1_copy_select_tests(&test);
             tier1_select_test_memory_plans(&test);
             tier1_select_test_barrier_scan(&test);
             tier1_select_test_load_barriers(&test);
