@@ -1061,6 +1061,18 @@ static IrError ir_sroa_construct_view(const IrFunction* f, const IrSroaWork* wor
         total += work->constructions[k].instructions - 1;
         constants += work->constructions[k].constants;
     }
+    // The remapper emits one descriptor per call instruction. Valid IR may share a descriptor between calls, so
+    // the input table's length is not the output capacity. Functions without calls need no additional scan.
+    uint32_t calls = 0;
+    for (uint64_t first = 0; f->call_count != 0 && first < f->instruction_count; first += 64)
+    {
+        const uint32_t count = f->instruction_count - first < 64 ? (uint32_t)(f->instruction_count - first) : 64;
+        const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i ops = _mm512_maskz_loadu_epi8(active, f->op + first);
+        const __mmask64 selected = _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_CALL)) |
+                                   _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_CALL_INDIRECT));
+        calls += (uint32_t)__builtin_popcountll(selected);
+    }
     const uint64_t extras = (uint64_t)f->extra_count + ir_unroll_extra_words(f, 0, f->instruction_count);
     const uint64_t vectors = (uint64_t)f->vector_constant_count + 1;
     IrError error = total < UINT32_MAX && constants <= UINT32_MAX && extras <= UINT32_MAX && vectors <= UINT32_MAX ? IR_OK : IR_ERROR_LIMIT;
@@ -1080,7 +1092,7 @@ static IrError ir_sroa_construct_view(const IrFunction* f, const IrSroaWork* wor
         view.c = ir_allocate(scratch, total, 4, &ok);
         view.block_offsets = ir_allocate(scratch, (uint64_t)f->block_count + 1, 4, &ok);
         view.extra = ir_allocate(scratch, extras, 4, &ok);
-        view.calls = ir_allocate(scratch, f->call_count, sizeof(IrCall), &ok);
+        view.calls = ir_allocate(scratch, calls, sizeof(IrCall), &ok);
         view.constants = ir_allocate(scratch, constants, sizeof(IrConstant), &ok);
         view.vector_constants = ir_allocate(scratch, vectors, sizeof(IrSimdValue), &ok);
         view.vector_constant_count = (uint32_t)vectors;

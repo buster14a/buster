@@ -810,6 +810,124 @@ static void ir_inline_test_constructed(IrInlineTest* test, Arena* input, Arena* 
     }
 }
 
+// Call descriptors may be shared: three instructions can name the same one-entry table. Expansion emits a descriptor
+// per instruction, so it must count instructions rather than reuse that table's size. Three descriptors cross the
+// old allocation's 64-byte alignment into its following constants; the scalar stored at p + 48 keeps that observable.
+static void ir_inline_test_constructed_shared_calls(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    static const char caller_text[] =
+        "function (ptr) -> void {\n"
+        "  slot $0 size=16 align=16 type=void flags=0x01\n"
+        "b0:\n"
+        "  %0 = param.ptr 0\n"
+        "  %1 = const.i64 0x00000000000000000123456789abcdef\n"
+        "  %2 = stack_addr.ptr $0\n"
+        "  %3 = load.i64 %0 align=1\n"
+        "  %4 = store.void %2, %3 align=1\n"
+        "  %5 = const.i64 0x0000000000000000fedcba9876543210\n"
+        "  %6 = address.ptr %2 offset=8\n"
+        "  %7 = store.void %6, %5 align=1\n"
+        "  %8 = load.v4i32 %2 align=16\n"
+        "  %9 = call.void @2(%0) fixed=(ptr) variadic=0\n"
+        "  %10 = call.void @2(%0) fixed=(ptr) variadic=0\n"
+        "  %11 = call.void @2(%0) fixed=(ptr) variadic=0\n"
+        "  %12 = address.ptr %0 offset=48\n"
+        "  %13 = store.void %12, %1 align=1 volatile\n"
+        "  %14 = address.ptr %0 offset=64\n"
+        "  %15 = store.void %14, %8 align=1\n"
+        "  %16 = ret.void\n"
+        "}\n";
+    static const char callee_text[] =
+        "function (ptr) -> void {\n"
+        "b0:\n"
+        "  %0 = param.ptr 0\n"
+        "  %1 = load.i64 %0 align=1 volatile\n"
+        "  %2 = const.i64 0x00000000000000000000000000000001\n"
+        "  %3 = add.i64 %1, %2\n"
+        "  %4 = store.void %0, %3 align=1 volatile\n"
+        "  %5 = address.ptr %0 offset=8\n"
+        "  %6 = load.i64 %5 align=1 volatile\n"
+        "  %7 = const.i64 0x00000000000000000000000000000008\n"
+        "  %8 = shl.i64 %6, %7\n"
+        "  %9 = const.i64 0x000000000000000000000000000000ff\n"
+        "  %10 = and.i64 %3, %9\n"
+        "  %11 = or.i64 %8, %10\n"
+        "  %12 = store.void %5, %11 align=1 volatile\n"
+        "  %13 = ret.void\n"
+        "}\n";
+    IrFunction functions[2] = { 0 };
+    if (ir_inline_simd_parse(test, caller_text, input, scratch, &functions[0]) && ir_inline_simd_parse(test, callee_text, input, scratch, &functions[1]))
+    {
+        functions[0].b[10] = functions[0].b[9];
+        functions[0].b[11] = functions[0].b[9];
+        functions[0].call_count = 1;
+        ir_inline_test_expect(test, ir_verify(&functions[0], scratch, NULL).error == IR_OK, "three calls sharing one descriptor are valid input IR");
+        IrSroaOptions options = ir_sroa_options();
+        options.simd = true;
+        options.flagged = true;
+        options.construct = true;
+        IrSroaResult split = { 0 };
+        const IrCheck check = ir_optimize_sroa(&functions[0], output, scratch, options, &split);
+        IrFunction promoted = { 0 };
+        const IrCheck promotion = check.error == IR_OK ? ssa_ir_promote(&split.function, twin, scratch, &promoted) : check;
+        const bool transformed = check.error == IR_OK && promotion.error == IR_OK;
+        ir_inline_test_expect(test, transformed, "runtime construction allocates complete metadata for shared-descriptor calls");
+        if (transformed)
+        {
+            ir_inline_test_expect(test, split.assembled == 1 && promoted.slot_count == 0 && split.function.call_count == 3 && promoted.call_count == 3 &&
+                                      ir_inline_simd_count(&split.function, IR_CALL) == 3 && ir_inline_simd_count(&promoted, IR_CALL) == 3 &&
+                                      ir_verify(&split.function, scratch, NULL).error == IR_OK && ir_verify(&promoted, scratch, NULL).error == IR_OK,
+                                  "construction keeps all three calls with valid expanded descriptors");
+            IrInlineTest values = { .random = 3642 };
+            for (uint32_t trial = 0; trial < 6; trial += 1)
+            {
+                uint8_t seed[128];
+                for (uint32_t i = 0; i < sizeof(seed); i += 1)
+                {
+                    seed[i] = trial == 0 ? 0 : trial == 1 ? 0xff : trial == 2 ? (uint8_t)(0x80 + i * 13) : (uint8_t)ir_inline_test_random(&values);
+                }
+                uint8_t expected[192];
+                memcpy(expected, seed, 128);
+                memset(expected + 128, 0x5a, 64);
+                uint64_t counter = 0;
+                uint64_t trace = 0;
+                memcpy(&counter, seed, 8);
+                memcpy(&trace, seed + 8, 8);
+                for (uint32_t call = 0; call < 3; call += 1)
+                {
+                    counter += 1;
+                    trace = (trace << 8) | (counter & 0xff);
+                }
+                const uint64_t guard = UINT64_C(0x0123456789abcdef);
+                const uint64_t lane = BUSTER_IR_INLINE_CONSTRUCT_REPLACEMENT;
+                memcpy(expected, &counter, 8);
+                memcpy(expected + 8, &trace, 8);
+                memcpy(expected + 48, &guard, 8);
+                memcpy(expected + 64, seed, 8);
+                memcpy(expected + 72, &lane, 8);
+                uint8_t bytes[192];
+                ir_inline_test_expect(test, ir_inline_simd_run(functions, 2, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
+                                      "shared calls' input has the independently expected bytes and effect trace");
+                const IrFunction split_functions[2] = {
+                    split.function,
+                    functions[1],
+                };
+                ir_inline_test_expect(test, ir_inline_simd_run(split_functions, 2, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
+                                      "construction preserves shared calls, vector bytes, scalar constants and effect trace");
+                const IrFunction promoted_functions[2] = {
+                    promoted,
+                    functions[1],
+                };
+                ir_inline_test_expect(test, ir_inline_simd_run(promoted_functions, 2, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
+                                      "promotion preserves shared calls' bytes and effect trace");
+            }
+        }
+        arena_pop_to(twin, 0);
+        arena_pop_to(output, 0);
+    }
+    arena_pop_to(input, 0);
+}
+
 static void ir_inline_test_simd(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     ir_inline_test_by_value(test, input, output, twin, scratch);
@@ -817,4 +935,5 @@ static void ir_inline_test_simd(IrInlineTest* test, Arena* input, Arena* output,
     ir_inline_test_permute2(test, input, output, twin, scratch);
     ir_inline_test_assembled(test, input, output, twin, scratch);
     ir_inline_test_constructed(test, input, output, twin, scratch);
+    ir_inline_test_constructed_shared_calls(test, input, output, twin, scratch);
 }
