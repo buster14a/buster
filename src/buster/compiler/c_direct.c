@@ -3588,6 +3588,9 @@ struct CDirectTestFlagsSeen
     int last;
 };
 
+// MemorySanitizer can't see what uninstrumented code passes, so the functions are only compiled there, and the callees
+// left out.
+#if !__has_feature(memory_sanitizer)
 static CDirectTestFlagsSeen c_direct_test_flags_seen;
 
 static int c_direct_test_flags_bool(bool value, int last)
@@ -3622,6 +3625,7 @@ static int c_direct_test_flags_stack(bool b0, bool b1, bool b2, bool b3, bool b4
     c_direct_test_flags_seen = (CDirectTestFlagsSeen){ .bits = bits, .last = last };
     return 0;
 }
+#endif
 
 // The callee is passed as an integer: every function pointer type goes in a register as one does.
 typedef int (*CDirectTestFlags)(uintptr_t callee, long x, double d, int a, int b);
