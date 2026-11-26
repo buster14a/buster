@@ -2111,6 +2111,8 @@ struct Tier0RecordSpec
 // STORE and SET share RETURN's otherwise unused variant number.
 #define BUSTER_TIER0_VARIANT_ATOMIC 30
 #define BUSTER_TIER0_VARIANT_WIDE_SCALE 31
+// A VECTOR LOAD, unary X86 row and SET sharing the row's register (#2815).
+#define BUSTER_TIER0_VARIANT_VECTOR_REGISTER 31
 #define BUSTER_TIER0_VARIANT_CONVERT_HOME 16
 // A compare's alone, so they share their numbers with a store's INDEX_CONST to OFFSET_HOME.
 #define BUSTER_TIER0_VARIANT_FLAGS 21
@@ -3759,8 +3761,8 @@ static void tier0_define_templates(void)
         tier0_end(BUSTER_TYPED_JUMP_VALUE, class, BUSTER_TIER0_VARIANT_PLAIN, 0);
     }
     // Vectors: every entry tier0_emit_vector's, as the memory classes' are, but DISCARD and JUMP_VALUE, whose values stay
-    // in their slots; and the machine operations of every result class. Each is its key's plain variant alone: no
-    // constant, local or address fuses into one.
+    // in their slots; and the machine operations of every result class. A unary row can share a register with its
+    // adjacent LOAD and SET (tier0_operation_effects).
     static const uint8_t vector_kinds[] = {
         BUSTER_TYPED_CONST, BUSTER_TYPED_DUP, BUSTER_TYPED_LOAD, BUSTER_TYPED_STORE, BUSTER_TYPED_SET, BUSTER_TYPED_LOCAL, BUSTER_TYPED_STORE_LOCAL,
         BUSTER_TYPED_SET_LOCAL,
@@ -3802,6 +3804,9 @@ static void tier0_define_templates(void)
             tier0_defer(BUSTER_TYPED_X86, class, BUSTER_TIER0_VARIANT_PLAIN);
         }
     }
+    tier0_defer(BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TIER0_VARIANT_VECTOR_REGISTER);
+    tier0_defer(BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TIER0_VARIANT_VECTOR_REGISTER);
+    tier0_defer(BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TIER0_VARIANT_VECTOR_REGISTER);
 }
 
 // Whether the form choice may take inc and dec for add and sub of 1 and -1 (BUSTER_X86_CONTEXT_INC_DEC, which the
@@ -4239,16 +4244,22 @@ static bool tier0_takes_last(const Tier0Function* function, uint32_t i)
     return tier0_shapes[kind].last == BUSTER_TIER0_STACK_OPERAND && !(kind == BUSTER_TYPED_RETURN && function->classes[i] == BUSTER_TYPED_CLASS_VOID);
 }
 
-// The X86 entries' effects, from their rows' operands and results, in place of the shape's that phase 1 gives them (one
-// push of their class): a pass of its own, made after P1 over a function with vectors alone, so that the others' fusion
-// has no look for the kind. No X86 entry absorbs or is absorbed: their keys have no
-// fused variants.
+static __m512i tier0_bytes_at(const uint8_t* column, int64_t first, uint32_t count);
+
+// Replace the X86 entries' stack effects from P1 with their rows' actual effects. Mark a unary vector row between a
+// matching LOAD and SET so all three can use VECTOR(0). Each entry keeps its own effect and memory access. A branch
+// entering at the row or SET needs the ordinary slot, as does a piece wider than the target's register.
 static __attribute__((noinline)) void tier0_operation_effects(const Tier0Function* function, Tier0Entries* entries)
 {
-    for (uint32_t i = 0; i < function->count; i += 1)
+    const uint32_t count = function->count;
+    const uint32_t width = function->vector_bytes == 0 ? 64 : function->vector_bytes;
+    for (uint32_t first = 0; first < count; first += 64)
     {
-        if (function->kinds[i] == BUSTER_TYPED_X86)
+        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+        const uint64_t rows = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_X86));
+        for (uint64_t left = rows; left != 0; left &= left - 1)
         {
+            const uint32_t i = first + (uint32_t)__builtin_ctzll(left);
             const Tier0Operation* operation = &function->operations[function->values[i]];
             int32_t counts[3] = { 0, 0, 0 };
             for (uint32_t j = 0; j < operation->operand_count; j += 1)
@@ -4258,6 +4269,16 @@ static __attribute__((noinline)) void tier0_operation_effects(const Tier0Functio
             counts[tier0_stack(function->classes[i])] += 1;
             entries->integer_effects[i] = (int8_t)counts[1];
             entries->floating_effects[i] = (int8_t)counts[2];
+            // Validation has matched the LOAD and SET widths and classes to this row's input and output.
+            if (operation->operand_count == 1 && tier0_class_vector(operation->operand_classes[0]) && tier0_class_vector(operation->result_class) &&
+                operation->operand_bytes[0] <= width && operation->result_bytes <= width && i != 0 && i + 1 < count &&
+                function->kinds[i - 1] == BUSTER_TYPED_LOAD && function->kinds[i + 1] == BUSTER_TYPED_SET &&
+                !tier0_label(entries->labels, i) && !tier0_label(entries->labels, i + 1))
+            {
+                entries->variants[i - 1] = BUSTER_TIER0_VARIANT_VECTOR_REGISTER;
+                entries->variants[i] = BUSTER_TIER0_VARIANT_VECTOR_REGISTER;
+                entries->variants[i + 1] = BUSTER_TIER0_VARIANT_VECTOR_REGISTER;
+            }
         }
     }
 }
@@ -8258,6 +8279,20 @@ static bool tier0_vector_zero(const Tier0Function* function, uint64_t k)
 
 #include "tier0_vector_baseline.inc"
 
+// A deep stack window may spill or fill registers between adjacent entries. Its slots already carry the value
+// across those transitions. Otherwise a unary vector row's VECTOR(0) is the first free floating register at all three entries.
+static bool tier0_vector_in_register(const Tier0Entries* entries, uint32_t i)
+{
+    bool direct = entries->variants[i] == BUSTER_TIER0_VARIANT_VECTOR_REGISTER;
+    if (direct && entries->deep != NULL)
+    {
+        const uint32_t kind = entries->key_kinds[i];
+        const uint32_t load = kind == BUSTER_TYPED_LOAD ? i : kind == BUSTER_TYPED_X86 ? i - 1 : i - 2;
+        direct = (entries->deep[load] | entries->deep[load + 1] | entries->deep[load + 2]) == 0;
+    }
+    return direct;
+}
+
 // A VECTOR entry's records (tier0_vector_entry's but X86's), its value through zmm16 (BUSTER_TIER0_VECTOR_SCRATCH), with
 // d the entry's integer depth:
 //   - CONST: zeros by vpxord and a store into slot d; any other constant, its words up to its bytes stored into slot d as
@@ -8274,7 +8309,14 @@ static void tier0_emit_vector_value(const Tier0Function* function, const Tier0En
     const uint32_t depth = entries->depths[i];
     const uint64_t value = function->values[i];
     const uint8_t scratch = BUSTER_TIER0_VECTOR_SCRATCH;
-    if (function->vector_bytes != 0 && (kind != BUSTER_TYPED_CONST || tier0_vector_zero(function, value)))
+    if (tier0_vector_in_register(entries, i))
+    {
+        const bool load = kind == BUSTER_TYPED_LOAD;
+        const uint32_t form = load ? tier0_vector_target_load(function, (uint32_t)value) : tier0_vector_target_store(function, (uint32_t)value);
+        const uint8_t base = tier0_integer_depths[depth - (load ? 1 : 2)];
+        tier0_put(writer, tier0_instruction(form, entries->floating_depths[i], base, BUSTER_X86_MEMORY_BASE, 0, 0));
+    }
+    else if (function->vector_bytes != 0 && (kind != BUSTER_TYPED_CONST || tier0_vector_zero(function, value)))
     {
         tier0_emit_vector_baseline(function, entries, frame, homes, i, writer);
     }
@@ -8341,7 +8383,11 @@ static uint32_t tier0_count_vector_value(const Tier0Function* function, const Ti
     const uint32_t kind = entries->key_kinds[i];
     const uint64_t value = function->values[i];
     uint32_t count = kind == BUSTER_TYPED_STORE ? 3 : 2;
-    if (kind == BUSTER_TYPED_CONST && !tier0_vector_zero(function, value))
+    if (tier0_vector_in_register(entries, i))
+    {
+        count = 1;
+    }
+    else if (kind == BUSTER_TYPED_CONST && !tier0_vector_zero(function, value))
     {
         count = 0;
         for (uint32_t w = 0; w < tier0_vector_words(function, value); w += 1)
@@ -8349,7 +8395,7 @@ static uint32_t tier0_count_vector_value(const Tier0Function* function, const Ti
             count += tier0_vector_word_fits(function, value, w) ? 1 : 2;
         }
     }
-    if (function->vector_bytes != 0 && (kind != BUSTER_TYPED_CONST || tier0_vector_zero(function, value)))
+    else if (function->vector_bytes != 0)
     {
         const uint32_t bytes = tier0_vector_baseline_copy_bytes(function, kind, value);
         const uint32_t chunks = (bytes + function->vector_bytes - 1) / function->vector_bytes;
@@ -8937,9 +8983,10 @@ static uint32_t tier0_count_operation_masks(const Tier0Operation* operation, con
 // unspecified bytes past the value (#556's review); the row's records with their roles placed
 // (tier0_operation_placement, and its masks' by tier0_operation_mask_plan in a function with masks, around which
 // tier0_emit_operation_masks saves and loads back the masks the records would overwrite); and a VECTOR result stored
-// whole from VECTOR(0) into its slot.
+// whole from VECTOR(0) into its slot. For a register-resident piece the adjacent LOAD and SET supply both moves.
 static void tier0_emit_operation(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
 {
+    const bool in_register = tier0_vector_in_register(entries, i);
     const Tier0Operation* operation = &function->operations[function->values[i]];
     Tier0Placement placement = tier0_operation_placement(operation, entries->depths[i], entries->floating_depths[i]);
     Tier0MaskPlan plan;
@@ -8951,18 +8998,21 @@ static void tier0_emit_operation(const Tier0Function* function, const Tier0Entri
         tier0_operation_mask_place(operation, &plan, &placement);
         tier0_emit_operation_masks(operation, frame, &plan, true, writer);
     }
-    for (uint32_t j = 0; j < operation->operand_count; j += 1)
+    if (!in_register)
     {
-        if (tier0_class_vector(operation->operand_classes[j]))
+        for (uint32_t j = 0; j < operation->operand_count; j += 1)
         {
-            tier0_put(writer, tier0_vector_slot(tier0_vector_target_load(function, operation->operand_bytes[j]), frame, placement.operands[j], (uint8_t)(placement.vector + j)));
+            if (tier0_class_vector(operation->operand_classes[j]))
+            {
+                tier0_put(writer, tier0_vector_slot(tier0_vector_target_load(function, operation->operand_bytes[j]), frame, placement.operands[j], (uint8_t)(placement.vector + j)));
+            }
         }
     }
     for (uint32_t r = 0; r < operation->record_count; r += 1)
     {
         tier0_put(writer, tier0_operation_place(operation->records[r], &placement));
     }
-    if (tier0_class_vector(operation->result_class))
+    if (!in_register && tier0_class_vector(operation->result_class))
     {
         tier0_put(writer, tier0_vector_slot(tier0_vector_target_store(function, function->vector_bytes == 0 ? 64 : operation->result_bytes), frame, (uint32_t)placement.result_depth, placement.vector));
     }
@@ -8975,11 +9025,16 @@ static void tier0_emit_operation(const Tier0Function* function, const Tier0Entri
 // How many records tier0_emit_operation writes for entry i (tier0_count_deferred's).
 static uint32_t tier0_count_operation(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
 {
+    const bool in_register = tier0_vector_in_register(entries, i);
     const Tier0Operation* operation = &function->operations[function->values[i]];
-    uint32_t count = operation->record_count + (tier0_class_vector(operation->result_class) ? 1u : 0u);
-    for (uint32_t j = 0; j < operation->operand_count; j += 1)
+    uint32_t count = operation->record_count;
+    if (!in_register)
     {
-        count += tier0_class_vector(operation->operand_classes[j]) ? 1 : 0;
+        count += tier0_class_vector(operation->result_class) ? 1 : 0;
+        for (uint32_t j = 0; j < operation->operand_count; j += 1)
+        {
+            count += tier0_class_vector(operation->operand_classes[j]) ? 1 : 0;
+        }
     }
     if (entries->mask_depths != 0)
     {
