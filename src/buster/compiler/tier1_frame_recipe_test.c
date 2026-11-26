@@ -122,7 +122,7 @@ static bool tier1_frame_recipe_function(Tier1EmitTest* test, uint32_t mode, Tier
             const uint32_t displaced = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, base, BUSTER_IR_NONE, k);
             addresses[k] = tier1_select_test_append(function, &next, IR_PTRTOINT, IR_I64, displaced, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
-        if (mode == 2)
+        if (mode != 0)
         {
             const uint32_t bytes = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_append(function, &next, IR_ALLOCA, IR_PTR, bytes, BUSTER_IR_NONE, BUSTER_IR_NONE);
