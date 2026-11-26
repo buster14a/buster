@@ -3263,19 +3263,109 @@ static void tier1_cfg_problem_registers(const Tier1CfgInput* input, Tier1Allocat
     intervals->clobber_count = input->clobber_count;
 }
 
+// The private guarded variants: a merged interval must not give a several-predecessor join the preceding handler's
+// convention. The stricter alternative permits no internal basic-block boundary. Endpoints belong to separate ranges.
+static bool tier1_cfg_interval_crosses_join(const Tier1CfgInput* input, uint32_t start, uint32_t end, bool single_block)
+{
+    uint32_t first = 0;
+    uint32_t past = input->block_count;
+    while (first < past)
+    {
+        const uint32_t middle = first + (past - first) / 2;
+        first = input->block_starts[middle] <= start ? middle + 1 : first;
+        past = input->block_starts[middle] <= start ? past : middle;
+    }
+    bool joined = false;
+    for (uint32_t b = first; !joined && b < input->block_count && input->block_starts[b] < end; b += 1)
+    {
+        joined = single_block || input->predecessor_offsets[b + 1] - input->predecessor_offsets[b] > 1;
+    }
+    return joined;
+}
+
+// A nonrecomputable interval that crosses a clobber takes a preserved register where one is free (#2610). This is
+// an avoidance, not a restriction: a bound definition keeps its incoming register, and pressure may keep that same
+// register beyond the definition. Only intervals with both clobbered and preserved choices need a decision. Sixteen
+// masks at a time identify them; each remaining interval locates its first strict interior clobber by halving the
+// sorted positions. The prepared avoidance column belongs to both problems, so copy it only for an actual addition.
+static bool tier1_cfg_clobber_avoidance(const Tier1CfgInput* input, Arena* output, Tier1AllocationInput* intervals)
+{
+    const uint32_t experiment = tier1_measure_experiment();
+    const uint32_t count = intervals->count;
+    const __m512i table = _mm512_setr_epi32(input->clobber_registers[0], input->clobber_registers[1], input->clobber_registers[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    const __m512i zero = _mm512_setzero_si512();
+    uint32_t* avoided = 0;
+    bool ok = true;
+    for (uint32_t i = 0; ok && input->clobber_count != 0 && i < count; i += 16)
+    {
+        const uint32_t left = count - i;
+        const __mmask16 lanes = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+        const __m512i classes = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, intervals->classes + i));
+        const __m512i clobbered = _mm512_permutexvar_epi32(classes, table);
+        const __m512i allowed = _mm512_maskz_loadu_epi32(lanes, intervals->allowed_registers + i);
+        const __m128i recipes = intervals->rematerializable != 0 ? _mm_maskz_loadu_epi8(lanes, intervals->rematerializable + i) : _mm_setzero_si128();
+        uint32_t candidates = lanes & _mm_cmpeq_epi8_mask(recipes, _mm_setzero_si128()) &
+                              _mm512_cmpneq_epi32_mask(_mm512_and_si512(allowed, clobbered), zero) &
+                              _mm512_cmpneq_epi32_mask(_mm512_andnot_si512(clobbered, allowed), zero);
+        for (; ok && candidates != 0; candidates &= candidates - 1)
+        {
+            const uint32_t interval = i + (uint32_t)__builtin_ctz(candidates);
+            const uint32_t start = intervals->starts[interval];
+            uint32_t first = 0;
+            uint32_t past = input->clobber_count;
+            while (first < past)
+            {
+                const uint32_t middle = first + (past - first) / 2;
+                first = input->clobbers[middle] <= start ? middle + 1 : first;
+                past = input->clobbers[middle] <= start ? past : middle;
+            }
+            const uint32_t later = (experiment & 8u) != 0 ? 1u : 0u;
+            if (first + later < input->clobber_count && input->clobbers[first + later] < intervals->ends[interval] &&
+                ((experiment & 48u) == 0 || !tier1_cfg_interval_crosses_join(input, start, intervals->ends[interval], (experiment & 32u) != 0)))
+            {
+                if (avoided == 0)
+                {
+                    avoided = arena_push_array(output, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+                    ok = avoided != 0;
+                    if (ok && intervals->avoided_registers != 0)
+                    {
+                        memcpy(avoided, intervals->avoided_registers, (uint64_t)count * 4);
+                    }
+                    else if (ok)
+                    {
+                        memset(avoided, 0, (uint64_t)count * 4);
+                    }
+                }
+                if (ok)
+                {
+                    avoided[interval] |= input->clobber_registers[intervals->classes[interval]];
+                }
+            }
+        }
+    }
+    intervals->avoided_registers = avoided != 0 ? avoided : intervals->avoided_registers;
+    return ok;
+}
+
 // One assignment (3. above) over the prepared intervals, for `input`'s registers and `column`, the registers each
 // interval may take: null for the prepared column, the input the preparation was given; else tier1_cfg_column's for
 // another problem over the same values. Failure leaves the result unchanged; tier1_allocate restores the output arena.
 static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, const uint32_t* column, Arena* output, Tier1CfgAllocation* result)
 {
+    const uint64_t saved = output->length;
     Tier1CfgAllocation candidate = prepared->candidate;
     candidate.intervals.allowed_registers = column != 0 ? column : candidate.intervals.allowed_registers;
     tier1_cfg_problem_registers(input, &candidate.intervals);
-    const Tier1AllocationError allocated = tier1_allocate(&candidate.intervals, output, &candidate.allocation);
+    const bool ready = (tier1_measure_experiment() & 2u) == 0 || tier1_cfg_clobber_avoidance(input, output, &candidate.intervals);
+    const Tier1AllocationError allocated = ready ? tier1_allocate(&candidate.intervals, output, &candidate.allocation) : TIER1_ALLOCATION_CAPACITY;
     const Tier1CfgError error = allocated == TIER1_ALLOCATION_OK ? TIER1_CFG_OK : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
     if (error == TIER1_CFG_OK)
     {
         *result = candidate;
+    }
+    else
+    {
+        arena_pop_to(output, saved);
     }
     return error;
 }
@@ -3925,21 +4015,29 @@ static __attribute__((unused)) bool tier1_cfg_taken(Tier1CfgError error, const T
 // prepared one). `*taken` says whether the verdict was taken, `*constraint` what it is.
 static Tier1CfgError tier1_cfg_assign_verdict(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, const uint32_t* column, const Tier1CfgInput* other, const uint32_t* other_column, Arena* output, Tier1CfgAllocation* result, bool* taken, bool* constraint)
 {
+    const uint64_t saved = output->length;
     Tier1CfgAllocation candidate = prepared->candidate;
     Tier1AllocationVerdict verdict = {
         .allowed_registers = other_column != 0 ? other_column : candidate.intervals.allowed_registers,
+        .avoided_registers = candidate.intervals.avoided_registers,
     };
     candidate.intervals.allowed_registers = column != 0 ? column : candidate.intervals.allowed_registers;
     tier1_cfg_problem_registers(input, &candidate.intervals);
     for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
     {
         verdict.registers[c] = other->registers[c];
+        verdict.clobber_registers[c] = other->clobber_registers[c];
     }
-    const Tier1AllocationError allocated = tier1_allocate_verdict(&candidate.intervals, output, &verdict, &candidate.allocation);
+    const bool ready = (tier1_measure_experiment() & 2u) == 0 || tier1_cfg_clobber_avoidance(input, output, &candidate.intervals);
+    const Tier1AllocationError allocated = ready ? tier1_allocate_verdict(&candidate.intervals, output, &verdict, &candidate.allocation) : TIER1_ALLOCATION_CAPACITY;
     const Tier1CfgError error = allocated == TIER1_ALLOCATION_OK ? TIER1_CFG_OK : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
     if (error == TIER1_CFG_OK)
     {
         *result = candidate;
+    }
+    else
+    {
+        arena_pop_to(output, saved);
     }
     *taken = verdict.taken;
     *constraint = verdict.constraint;
@@ -4138,7 +4236,7 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
     same = same && tier1_cfg_same_column(a->hint_values, b->hint_values, count * 4) && tier1_cfg_same_column(a->hint_intervals, b->hint_intervals, count * 4) &&
            tier1_cfg_same_column(a->alternate_intervals, b->alternate_intervals, count * 4) && tier1_cfg_same_column(a->continuation_intervals, b->continuation_intervals, count * 4) &&
            tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count) &&
-           tier1_cfg_same_column(a->register_hints, b->register_hints, count);
+           tier1_cfg_same_column(a->register_hints, b->register_hints, count) && tier1_cfg_same_column(a->avoided_registers, b->avoided_registers, count * 4);
     differs = same || differs != 0 ? differs : 3;
     same = same && tier1_cfg_same_column(a->use_offsets, b->use_offsets, (count + 1) * 4) && a->use_positions == b->use_positions && a->use_required == b->use_required;
     differs = same || differs != 0 ? differs : 4;

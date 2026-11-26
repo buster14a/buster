@@ -22,6 +22,9 @@
 #if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 #include "worker_budget.c"
 #include "c_check_tier1_outcome.c"
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+#include <sys/file.h>
+#endif
 
 // The class constant CFStrings point to (#148), clang's global of this name.
 static const char check_program_cfstring_class_name[] = "__CFConstantStringClassReference";
@@ -663,6 +666,9 @@ struct CheckTier1Lane
     Arena* summaries;
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172), which the emission sets for each body.
     uint8_t schedule;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    bool measure_kinds;
+#endif
     // --tier1-passes='s turned passes (BUSTER_CHECK_TIER1_PASS_*, #139), which the emission sets for each body: its own
     // pipeline and the summaries it builds for the unit's callers (c_check_tier1_inline.c) run the same passes.
     uint16_t passes;
@@ -731,6 +737,10 @@ typedef struct CheckTier1Counts CheckTier1Counts;
 struct CheckTier1Counts
 {
     uint32_t records;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    // Owned by the same lane arena as the published EmittedCode; exported before that arena is retired.
+    uint8_t* measure_kinds;
+#endif
     uint32_t spill_stores;
     uint32_t spill_loads;
     uint32_t call_stores;
@@ -1479,6 +1489,9 @@ struct CheckEmitRun
     // With --tier1, each body's complete outcome and its published code's counts (zero on refusal).
     CheckTier1Outcome* tier1_outcomes;
     CheckTier1Counts* tier1_counts;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const char* measure_kinds_path;
+#endif
     const uint8_t* vectorize_volatile;
     // Loop store motion's symbols (#3309, check_program_store_motion_symbols), `access_count` of them, or null.
     const uint32_t* symbol_bytes;
@@ -2394,6 +2407,9 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     // The summaries this lane builds live in its lane state's arena of the run (#2541): another lane may read them.
     lane->tier1->summaries = run->tier1_inline != NULL && run->tier1_inline->arenas != NULL ? &run->tier1_inline->arenas[2 * (lane - run->lane_states)] : NULL;
     lane->tier1->schedule = run->lanes->tier1_schedule;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    lane->tier1->measure_kinds = run->measure_kinds_path != NULL;
+#endif
     lane->tier1->passes = run->lanes->tier1_passes;
     lane->tier1->vectorize_volatile = run->vectorize_volatile;
     lane->tier1->symbol_bytes = run->symbol_bytes;
@@ -4652,6 +4668,60 @@ static bool check_program_emit_return(WorkerBudgetLease* leases, uint32_t count)
     return result;
 }
 
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+// Private measurement export, after the unit is valid and before lane storage is retired. The original #1189 kinds
+// format and classifier are unchanged. flock serializes complete units even when several units append concurrently.
+static bool check_program_emit_measure_kinds(const CheckEmitRun* run, const CheckProgramCode* result, uint32_t count)
+{
+    FILE* stream = fopen(run->measure_kinds_path, "a");
+    const bool locked = stream != NULL && flock(fileno(stream), LOCK_EX) == 0;
+    bool valid = locked;
+    for (uint32_t b = 0; valid && b < count; b += 1)
+    {
+        const CheckTier1Outcome outcome = run->tier1_outcomes[b];
+        const bool compiled = outcome.category == CHECK_TIER1_SUCCESS;
+        const CheckTier1Counts* counts = &run->tier1_counts[b];
+        const uint32_t records = compiled ? counts->records : 0;
+        const SymbolId symbol = run->program->object_symbols[run->program->bodies[b].object];
+        const NameId name = symbol < result->link.symbols.count ? result->link.symbols.name[symbol] : 0;
+        valid = name != 0 && (!compiled || (counts->measure_kinds != NULL && records == run->codes[b].count));
+        uint32_t stores = 0;
+        uint32_t loads = 0;
+        uint32_t moves = 0;
+        for (uint32_t r = 0; valid && r < records; r += 1)
+        {
+            const uint8_t kind = counts->measure_kinds[r];
+            valid = kind != 0 && strchr("SLTUCReapfrjnhxtu", kind) != NULL;
+            stores += kind == 'T';
+            loads += kind == 'U';
+            moves += kind == 'e';
+        }
+        if (valid && compiled)
+        {
+            valid = fprintf(stream, "%.*s\t", (int)result->link.names.length[name], (const char*)result->link.names.bytes[name]) >= 0;
+            valid = valid && fwrite(counts->measure_kinds, 1, records, stream) == records && fputc('\n', stream) != EOF;
+        }
+        if (valid)
+        {
+            fprintf(stderr, "tier1-kind-outcome\t%.*s\tcategory=%s\tstage=%s\tcause=%s\terror=%u\temission_error=%u\tfallback=%u\trecords=%u\ttags=%u\tT=%u\tU=%u\te=%u\n",
+                    (int)result->link.names.length[name], (const char*)result->link.names.bytes[name], check_tier1_category_names[outcome.category],
+                    check_tier1_stage_names[outcome.stage], check_tier1_cause_names[outcome.cause], outcome.error, outcome.emission_error,
+                    outcome.fallback, records, compiled ? records : 0, stores, loads, moves);
+        }
+    }
+    // Flush while holding the lock; otherwise fclose could append a buffered tail after the next unit acquires it.
+    const bool flushed = stream != NULL && fflush(stream) == 0;
+    const bool unlocked = !locked || flock(fileno(stream), LOCK_UN) == 0;
+    const bool closed = stream != NULL && fclose(stream) == 0;
+    valid = valid && flushed && unlocked && closed;
+    if (!valid)
+    {
+        fprintf(stderr, "tier1-kind-error: could not publish complete bounded origin tags to %s\n", run->measure_kinds_path);
+    }
+    return valid;
+}
+#endif
+
 // The emission (check_program_emit_lanes'), each step's time charged to `stage_clock`. With `binding`, an executable's
 // link bound to the C runtime; with `kept`, a link kept for a link of several units (c_checker_units.c), which binds its
 // every program symbol as an executable's does: neither leaves a function without code (#2541 step 2's dead functions).
@@ -4783,6 +4853,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const bool tier1 = valid && count != 0 && lanes != NULL && lanes->tier1;
     run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Outcome, count) : 0;
     run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    run.measure_kinds_path = tier1 ? getenv("BUSTER_TIER1_KINDS") : NULL;
+    run.measure_kinds_path = run.measure_kinds_path != NULL && run.measure_kinds_path[0] != 0 ? run.measure_kinds_path : NULL;
+#endif
     const bool vectorize = tier1 && (lanes->tier1_passes & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0;
     // Loop store motion (#3309): the unit's distinct objects, and the bodies with a volatile expression, which keep
     // every access (the typed stream's indirect accesses have no flag for it, #2805). A unit that lists no symbol
@@ -6980,6 +7054,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             lanes->tier1_report.store_motion[k] += compiled ? counts->store_motion[k] : 0;
         }
     }
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    if (valid && run.measure_kinds_path != NULL)
+    {
+        valid = check_program_emit_measure_kinds(&run, result, count);
+    }
+#endif
     if (!valid)
     {
         const CheckProgramStatus status = result->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : result->status;

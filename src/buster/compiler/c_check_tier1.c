@@ -1185,6 +1185,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .dominators = &analysis.dominators,
             .certify = certify,
             .sources = sources,
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            .measure_kinds = lane->measure_kinds,
+#endif
         };
         uint32_t node = BUSTER_IR_NONE;
         Tier1EmitError error = tier1_emit_function_cfg(&plan, &analysis.cfg, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
@@ -1214,6 +1217,15 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const uint64_t mark = output->length;
     const Tier1SelectCode* selected = &emitted.code;
     X86Instruction* records = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)selected->count + 1) : 0;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    uint8_t* measure_kinds = stage == CHECK_TIER1_COMPILED && lane->measure_kinds ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)selected->count + 1) : NULL;
+    if (stage == CHECK_TIER1_COMPILED && lane->measure_kinds && (measure_kinds == NULL || emitted.measure_kinds == NULL))
+    {
+        arena_pop_to(output, mark);
+        outcome = check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0);
+        stage = outcome.stage;
+    }
+#endif
     uint32_t* branches = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
     uint32_t* targets = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
     LinkReference* references = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)emitted.reference_count + 1) : 0;
@@ -1255,6 +1267,12 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         if (selected->count != 0)
         {
             memcpy(records, selected->records, (uint64_t)selected->count * sizeof(X86Instruction));
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            if (measure_kinds != NULL)
+            {
+                memcpy(measure_kinds, emitted.measure_kinds, selected->count);
+            }
+#endif
         }
         if (selected->branch_count != 0)
         {
@@ -1276,6 +1294,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         }
         *counts = (CheckTier1Counts){
             .records = selected->count,
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            .measure_kinds = measure_kinds,
+#endif
             .spill_stores = emitted.spill_stores,
             .spill_loads = emitted.spill_loads,
             .call_stores = emitted.call_stores,
@@ -1326,6 +1347,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             const uint32_t anchors[2] = { emitted.body_record, epilogue };
             const CheckTier1ScheduleCode schedule = {
                 .records = records,
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+                .measure_kinds = measure_kinds,
+#endif
                 .count = selected->count,
                 .branches = branches,
                 .targets = targets,
