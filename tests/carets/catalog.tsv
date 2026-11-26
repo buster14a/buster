@@ -67,6 +67,15 @@ fixits-initializers-eager	fixits-initializers.c	-	-std=gnu17 -fsyntax-only -Wuni
 fixits-initializers-header	fixits-initializers-header.c	-	-std=gnu17 -fsyntax-only -Wuninitialized	included macro definitions choose pointer and Boolean initializers
 fixits-initializers-prelude	fixits-initializers-prelude.c	-	-std=gnu17 -fsyntax-only -Wuninitialized -DNULL=0 -Dfalse=0	prelude macro state and push-pop restoration survive deferred replay
 fixits-ignored	fixits-ignored.c	-	-fsyntax-only	ignored warnings do not attach their hints to later diagnostics
+fixits-includes	fixits-includes.c	-	-fsyntax-only -I .	header corrections retain editable delimiters and caller arguments
+fixits-includes-preprocessed	fixits-includes.c	-	-E -o /dev/null -I .	header corrections and generated excerpts under preprocessing alone
+fixits-includes-no-carets	fixits-includes.c	-	-fsyntax-only -I . -fno-caret-diagnostics	header repairs leave diagnostics without carets unchanged
+fixits-directives	fixits-directives.c	-	-std=gnu23 -E -o /dev/null	extra directive tokens receive line-comment insertions where editable
+fixits-directives-quiet	fixits-directives.c	-	-std=gnu23 -w -E -o /dev/null	suppressed directive repairs do not reach later errors
+fixits-directives-c90	fixits-directives.c	-	-std=c90 -E -o /dev/null	strict C90 suppresses line-comment repairs
+fixits-directives-gnu90	fixits-directives.c	-	-std=gnu90 -E -o /dev/null	GNU C90 permits line-comment repairs
+fixits-unicode-names	fixits-unicode-names.c	-	-std=gnu23 -E -o /dev/null	named escape corrections own canonical note text and editable argument ranges
+fixits-unicode-offsets	fixits-unicode-offsets.c	-	-std=gnu23 -fsyntax-only	unevaluated strings retain named escape note ranges and repairs
 ranges-extra-warnings	ranges-extra-warnings.c	-	-fsyntax-only	unused operands, array bounds and returned local ranges
 # Generated spellings and macro expansion notes.
 scratch-pastes	scratch-pastes.c	-	-fsyntax-only	pasted tokens and their operand ranges through nested and forwarded expansions

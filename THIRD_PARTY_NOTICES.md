@@ -19,7 +19,8 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 The diagnostic fix-it ownership and insertion-line renderer, generated-spelling
 excerpts, macro edit-boundary mapping, declaration-time initializer macro
-visibility, range producers and original caret fixtures completing #2376 use
+visibility, header/directive repairs, Unicode-name correction metadata,
+range producers and original caret fixtures completing #2376 use
 the project default terms. Clang 23.1.4 at LLVM revision
 `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5` is an external behavioral oracle.
 No upstream implementation or test fixture was imported for this continuation;

@@ -2868,12 +2868,37 @@ static __attribute__((noinline, cold)) void pp_diagnose_named_ucn_name(Preproces
 {
     UnicodeNameDiagnosis diagnosis;
     unicode_name_diagnose(name, length, true, &diagnosis);
+    const uint32_t origin = pp->diagnostic_origin;
+    const PPDiagnosticRange range = pp_diagnostic_offset_range(pp, location, origin, offset, length, false);
     PPDiagnosticSourceNote notes[BUSTER_UNICODE_NAME_NOTES];
     for (uint32_t n = 0; n < diagnosis.note_count; n += 1)
     {
-        notes[n] = (PPDiagnosticSourceNote){ pp_spelling_offset_location(pp, location, offset + diagnosis.notes[n].offset), pp->diagnostic_origin, diagnosis.notes[n].message };
+        notes[n] = (PPDiagnosticSourceNote){ pp_spelling_offset_location(pp, location, offset + diagnosis.notes[n].offset), origin, diagnosis.notes[n].message };
+        if (diagnosis.notes[n].replacement[0] != 0)
+        {
+            notes[n].ranges[0] = range;
+            notes[n].range_count = 1;
+            notes[n].fixits[0] = (PPDiagnosticFixIt)
+            {
+                .range = pp_diagnostic_offset_range(pp, location, origin, offset, length, true),
+                .text = diagnosis.notes[n].replacement,
+            };
+            notes[n].fixit_count = 1;
+        }
     }
+    const uint32_t saved_ranges = pp->diagnostic_range_count;
+    const bool saved_spans = pp->diagnostic_spans;
+    const bool saved_arguments = pp->diagnostic_arguments;
+    if (saved_ranges < BUSTER_PP_DIAGNOSTIC_RANGES)
+    {
+        pp->diagnostic_ranges[pp->diagnostic_range_count++] = range;
+    }
+    pp->diagnostic_spans = true;
+    pp->diagnostic_arguments = false;
     pp_diagnose_notes(pp, PP_SEVERITY_ERROR, pp_spelling_offset_location(pp, location, offset), notes, diagnosis.note_count, "%s", diagnosis.error);
+    pp->diagnostic_range_count = saved_ranges;
+    pp->diagnostic_spans = saved_spans;
+    pp->diagnostic_arguments = saved_arguments;
 }
 
 // The error clang gives of a UCN's character below U+00A0, at `location`, outside a literal and before C23 in one
@@ -2972,15 +2997,30 @@ static __attribute__((noinline, cold)) void pp_diagnose_named_ucn(Preprocessor* 
             UnicodeNameDiagnosis diagnosis;
             unicode_name_diagnose(name, shown, false, &diagnosis);
             const uint32_t location = base + (uint32_t)start;
+            const PPDiagnosticRange range = pp_diagnostic_offset_range(pp, location, 0, 0, (uint32_t)length, false);
+            const uint32_t saved_ranges = pp->diagnostic_range_count;
+            if (saved_ranges < BUSTER_PP_DIAGNOSTIC_RANGES)
+            {
+                pp->diagnostic_ranges[pp->diagnostic_range_count++] = range;
+            }
             if (diagnosis.note_count != 0)
             {
-                const PPDiagnosticNote note = { .location = location, .message = diagnosis.notes[0].message };
+                const PPDiagnosticNote note =
+                {
+                    .location = location,
+                    .message = diagnosis.notes[0].message,
+                    .ranges = { range },
+                    .range_count = 1,
+                    .fixits = { { .range = range, .text = diagnosis.notes[0].replacement } },
+                    .fixit_count = diagnosis.notes[0].replacement[0] != 0 ? 1 : 0,
+                };
                 pp_diagnose_note(pp, PP_SEVERITY_ERROR, location, &note, "%s", diagnosis.error);
             }
             else
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, location, "%s", diagnosis.error);
             }
+            pp->diagnostic_range_count = saved_ranges;
             found = diagnosis.loose;
             code_point = diagnosis.loose_code_point;
         }
@@ -9820,6 +9860,19 @@ static void pp_report_macro_name(Preprocessor* pp, const PPFileData* data, uint3
     }
 }
 
+// Clang's CheckEndOfDirective comments out extra file tokens when the language accepts line comments. Macro
+// expansions have no such edit, even where the extra token was an argument; an ignored warning keeps no hint.
+static __attribute__((noinline, cold)) void pp_diagnose_extra_tokens(Preprocessor* pp, uint32_t location, const char* directive)
+{
+    const uint32_t saved_fixits = pp->diagnostic_fixit_count;
+    if (pp->diagnostic_origin == 0 && (pp->options.language.standard >= 1999 || pp->options.language.gnu))
+    {
+        pp_diagnostic_fixit_characters(pp, location, 0, "//");
+    }
+    pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, location, "extra tokens at end of #%s directive", directive);
+    pp->diagnostic_fixit_count = saved_fixits;
+}
+
 // The conditional directives (C 6.10.2), at directive d. Their structure is reported at the directive's name and
 // extra tokens at the first of them, where clang reports them, and in clang's order.
 static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind)
@@ -9846,7 +9899,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             }
             else if (hash + 3 < end)
             {
-                pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", kind == PP_DIRECTIVE_IFDEF ? "ifdef" : "ifndef");
+                pp_diagnose_extra_tokens(pp, pp_token_location(pp, context, data, hash + 3), kind == PP_DIRECTIVE_IFDEF ? "ifdef" : "ifndef");
             }
             const bool defined = named && pp_is_defined(pp, data->values[hash + 2]);
             if (defined)
@@ -9890,7 +9943,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
                 }
                 else if (hash + 3 < end)
                 {
-                    pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", pp_conditional_name(kind));
+                    pp_diagnose_extra_tokens(pp, pp_token_location(pp, context, data, hash + 3), pp_conditional_name(kind));
                 }
                 const bool defined = named && pp_is_defined(pp, data->values[hash + 2]);
                 pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_ELIFDEF ? defined : !defined));
@@ -9904,7 +9957,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             const bool extra = hash + 2 < end && !(open && group->taken && group->skipping);
             if (extra && !entering)
             {
-                pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #else directive");
+                pp_diagnose_extra_tokens(pp, pp_token_location(pp, context, data, hash + 2), "else");
             }
             if (!open)
             {
@@ -9919,7 +9972,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
                 }
                 if (extra && entering)
                 {
-                    pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #else directive");
+                    pp_diagnose_extra_tokens(pp, pp_token_location(pp, context, data, hash + 2), "else");
                 }
                 group->seen_else = true;
                 if (group->taken)
@@ -9934,7 +9987,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
         case PP_DIRECTIVE_ENDIF:
             if (hash + 2 < end)
             {
-                pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #endif directive");
+                pp_diagnose_extra_tokens(pp, pp_token_location(pp, context, data, hash + 2), "endif");
             }
             if (!open)
             {
@@ -9955,12 +10008,18 @@ static bool pp_alphanumeric(uint8_t c)
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
 }
 
-// The file a #include, #include_next or #import (`kind`) at `location` in the context's file names, written at
 // A header name's highlighted range (#2376), clang's FilenameRange: the name written at `location` as it was, from its
-// '"' or '<' to its closing one on the same line, as characters; none for a name a macro made (`origin`).
-static void pp_diagnostic_header_range(Preprocessor* pp, uint32_t location, uint32_t origin)
+// '"' or '<' to its closing one on the same line, as characters. Forwarded arguments keep their written name; a macro
+// body or generated name has no editable spelling. Returns the character count, or zero without a written range.
+static uint32_t pp_diagnostic_header_length(const Preprocessor* pp, uint32_t location, uint32_t origin)
 {
-    const uint32_t range = location != 0 && origin == 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    PPRangePlace place = { location, origin };
+    for (uint32_t depth = 0; pp_range_argument(place) && depth < BUSTER_PP_RANGE_DEPTH; depth += 1)
+    {
+        place = pp_range_spelling(pp, place);
+    }
+    const uint32_t range = location != 0 && place.origin == 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    uint32_t result = 0;
     if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
     {
         const uint8_t* bytes = pp->ranges[range].bytes;
@@ -9975,11 +10034,77 @@ static void pp_diagnostic_header_range(Preprocessor* pp, uint32_t location, uint
         }
         if (closer != 0 && end < length && bytes[end] == closer)
         {
-            pp_diagnostic_range_characters(pp, location, end + 1 - start);
+            result = end + 1 - start;
         }
+    }
+    return result;
+}
+
+static uint32_t pp_diagnostic_header_range(Preprocessor* pp, uint32_t location, uint32_t origin)
+{
+    const uint32_t length = pp_diagnostic_header_length(pp, location, origin);
+    if (length != 0 && pp->diagnostic_range_count < BUSTER_PP_DIAGNOSTIC_RANGES)
+    {
+        pp->diagnostic_ranges[pp->diagnostic_range_count++] = (PPDiagnosticRange)
+        {
+            .begin = location,
+            .begin_origin = origin,
+            .end = location,
+            .end_origin = origin,
+            .end_length = length,
+        };
+    }
+    return length;
+}
+
+// An include recovery replaces the complete written header name, delimiters included. Its scratch text lives through
+// publication or collection; the diagnostic owns the latter's copy. A macro body's spelling is never replaced.
+static __attribute__((noinline, cold)) void pp_diagnostic_header_fixit(Preprocessor* pp, uint32_t location, uint32_t origin, const uint8_t* name, uint32_t length, bool angled, Arena* arena)
+{
+    const uint32_t removed = pp_diagnostic_header_length(pp, location, origin);
+    pp_diagnostic_range_characters(pp, location, removed);
+    char* text = removed != 0 ? arena_push(arena, (uint64_t)length + 3, 1) : NULL;
+    if (text != NULL)
+    {
+        text[0] = angled ? '<' : '"';
+        memcpy(text + 1, name, length);
+        text[length + 1] = angled ? '>' : '"';
+        text[length + 2] = 0;
+        pp_diagnostic_fixit_characters(pp, location, removed, text);
     }
 }
 
+// An angled name assembled from a macro's body is a generated header token in Clang. Retain its spelling only when a
+// diagnostic needs it, with the original first token's history as its parent. A name written in a forwarded argument
+// keeps that argument's editable source instead. Repeated diagnostics for this include share the generated spelling.
+static __attribute__((noinline, cold)) PPSource pp_diagnostic_header_source(Preprocessor* pp, PPSource source, const uint8_t* name, uint32_t length, bool angled)
+{
+    const uint32_t kind = source.origin & ~BUSTER_PP_ORIGIN_INDEX;
+    const uint32_t index = (source.origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+    const bool generated = kind == BUSTER_PP_ORIGIN_GENERATED && pp->generated[index].kind == PP_GENERATED_HEADER;
+    if (angled && source.origin != 0 && !generated && pp_diagnostic_header_length(pp, source.location, source.origin) == 0 && !pp->fatal)
+    {
+        Scratch scratch = scratch_begin(0);
+        uint8_t* text = arena_push(scratch.arena, (uint64_t)length + 2, 1);
+        if (text != NULL)
+        {
+            text[0] = '<';
+            memcpy(text + 1, name, length);
+            text[length + 1] = '>';
+            const uint32_t location = pp_scratch_clean(pp, text, length + 2);
+            const uint32_t origin = location != 0 ? pp_history_generated(pp, PP_GENERATED_HEADER, location, source.location, NULL, 0) : 0;
+            if (origin != 0)
+            {
+                pp->generated[(origin & BUSTER_PP_ORIGIN_INDEX) - 1].expansion = source.origin;
+                source = (PPSource){ location, origin };
+            }
+        }
+        scratch_end(scratch);
+    }
+    return source;
+}
+
+// The file a #include, #include_next or #import (`kind`) at `location` in the context's file names, written at
 // `name_location` (with `name_origin`, the history of a name a macro made): entered, unless #import read it. As
 // clang's HandleHeaderIncludeOrImport goes: an empty name is an error; a name that ends in a space or a dot is
 // nonportable; an #include in an assume_nonnull or arc_cf_code_audited region is an error, which ends the region. A
@@ -9992,6 +10117,7 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
 {
     const uint32_t saved_origin = pp->diagnostic_origin;
     pp->diagnostic_origin = name_origin;
+    PPSource diagnosis = { name_location, name_origin };
     uint32_t file = BUSTER_PP_NONE;
     uint32_t found_in = BUSTER_PP_NONE;
     if (BUSTER_UNLIKELY(pp->options.dump_includes) && length != 0)
@@ -10007,7 +10133,9 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
     {
         if (name[length - 1] == ' ' || name[length - 1] == '.')
         {
-            pp_diagnose_group(pp, PP_WARNING_NONPORTABLE_INCLUDE_PATH, name_location, "non-portable path to file '%.*s'; specified path contains trailing %s", (int)length, (const char*)name,
+            diagnosis = pp_diagnostic_header_source(pp, diagnosis, name, length, angled);
+            pp->diagnostic_origin = diagnosis.origin;
+            pp_diagnose_group(pp, PP_WARNING_NONPORTABLE_INCLUDE_PATH, diagnosis.location, "non-portable path to file '%.*s'; specified path contains trailing %s", (int)length, (const char*)name,
                         name[length - 1] == ' ' ? "whitespace" : "dot");
         }
         pp->diagnostic_origin = 0;
@@ -10019,17 +10147,25 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
                 pp->region_locations[region] = 0;
             }
         }
-        pp->diagnostic_origin = name_origin;
+        pp->diagnostic_origin = diagnosis.origin;
         const bool next = kind == PP_DIRECTIVE_INCLUDE_NEXT && pp->include_depth != 0;
-        file = pp_find_include(pp, name, length, angled, next, context->file, context->search_index, &found_in, name_location);
+        file = pp_find_include(pp, name, length, angled, next, context->file, context->search_index, &found_in, diagnosis.location);
+        if (file == BUSTER_PP_NONE && !pp->fatal)
+        {
+            diagnosis = pp_diagnostic_header_source(pp, diagnosis, name, length, angled);
+            pp->diagnostic_origin = diagnosis.origin;
+        }
         if (file == BUSTER_PP_NONE && angled && !pp->fatal)
         {
-            file = pp_find_include(pp, name, length, false, next, context->file, context->search_index, &found_in, name_location);
+            file = pp_find_include(pp, name, length, false, next, context->file, context->search_index, &found_in, diagnosis.location);
             if (file != BUSTER_PP_NONE)
             {
-                pp_diagnostic_header_range(pp, name_location, name_origin);
-                pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "'%.*s' file not found with <angled> include; use \"quotes\" instead", (int)length, (const char*)name);
+                Scratch scratch = scratch_begin(0);
+                pp_diagnostic_header_fixit(pp, diagnosis.location, diagnosis.origin, name, length, false, scratch.arena);
+                pp_diagnose(pp, PP_SEVERITY_ERROR, diagnosis.location, "'%.*s' file not found with <angled> include; use \"quotes\" instead", (int)length, (const char*)name);
+                pp_diagnostic_fixits_clear(pp);
                 pp_diagnostic_ranges_clear(pp);
+                scratch_end(scratch);
             }
         }
         uint32_t first = 0;
@@ -10044,17 +10180,24 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
         }
         if (file == BUSTER_PP_NONE && last - first != length && !pp->fatal)
         {
-            file = pp_find_include(pp, name + first, last - first, angled, next, context->file, context->search_index, &found_in, name_location);
+            file = pp_find_include(pp, name + first, last - first, angled, next, context->file, context->search_index, &found_in, diagnosis.location);
             if (file != BUSTER_PP_NONE)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "'%.*s' file not found, did you mean '%.*s'?", (int)length, (const char*)name, (int)(last - first),
+                Scratch scratch = scratch_begin(0);
+                pp_diagnostic_header_fixit(pp, diagnosis.location, diagnosis.origin, name + first, last - first, angled, scratch.arena);
+                pp_diagnose(pp, PP_SEVERITY_ERROR, diagnosis.location, "'%.*s' file not found, did you mean '%.*s'?", (int)length, (const char*)name, (int)(last - first),
                             (const char*)name + first);
+                pp_diagnostic_fixits_clear(pp);
+                pp_diagnostic_ranges_clear(pp);
+                scratch_end(scratch);
             }
         }
         if (file == BUSTER_PP_NONE && !pp->fatal)
         {
-            pp_diagnostic_header_range(pp, name_location, name_origin);
-            pp_diagnose(pp, PP_SEVERITY_FATAL, name_location, "'%.*s' file not found", (int)length, (const char*)name);
+            const bool arguments = pp->diagnostic_arguments;
+            pp->diagnostic_arguments |= pp_diagnostic_header_range(pp, diagnosis.location, diagnosis.origin) != 0 && diagnosis.origin != 0;
+            pp_diagnose(pp, PP_SEVERITY_FATAL, diagnosis.location, "'%.*s' file not found", (int)length, (const char*)name);
+            pp->diagnostic_arguments = arguments;
             pp_diagnostic_ranges_clear(pp);
         }
     }
@@ -10144,7 +10287,7 @@ static void pp_finish_include(Preprocessor* pp)
         if (extra)
         {
             pp->diagnostic_origin = extra_origin;
-            pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, extra_location, "extra tokens at end of #%s directive", pp_include_name(capture.directive_kind));
+            pp_diagnose_extra_tokens(pp, extra_location, pp_include_name(capture.directive_kind));
         }
         pp->diagnostic_origin = saved_origin;
         pp_include_file(pp, context, capture.directive_kind, name, length, angled, capture.location, name_location, name_origin);
@@ -10257,7 +10400,7 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
         const uint64_t next = pp_skip_blanks(&lexer, stop);
         if (next < data->length && data->bytes[next] != '\n' && data->bytes[next] != '\r')
         {
-            pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, base + (uint32_t)next, "extra tokens at end of #%s directive", pp_include_name(kind));
+            pp_diagnose_extra_tokens(pp, base + (uint32_t)next, pp_include_name(kind));
         }
         // The file goes on past the line as clang lexes it (pp_resume_after), before the header is entered.
         uint32_t relex;
@@ -10617,7 +10760,11 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     }
     if (valid && !marker && begin + 2 < stop)
     {
-        pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, location, "extra tokens at end of #line directive");
+        const PPToken extra = pp_stack_token(tokens, begin + 2);
+        const uint32_t saved_origin = pp->diagnostic_origin;
+        pp->diagnostic_origin = extra.origin;
+        pp_diagnose_extra_tokens(pp, extra.location, "line");
+        pp->diagnostic_origin = saved_origin;
     }
     if (!valid && !name_reported && !flags_reported)
     {
@@ -11225,7 +11372,11 @@ static void pp_ident(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, u
     {
         if (begin + 1 < end)
         {
-            pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, tokens->locations[begin + 1], "extra tokens at end of #ident directive");
+            const PPToken extra = pp_stack_token(tokens, begin + 1);
+            const uint32_t saved_origin = pp->diagnostic_origin;
+            pp->diagnostic_origin = extra.origin;
+            pp_diagnose_extra_tokens(pp, extra.location, "ident");
+            pp->diagnostic_origin = saved_origin;
         }
         pp_emit_pragma(pp, tokens, begin, begin + 1, C_NAME_IDENT, location, false);
     }
@@ -11352,7 +11503,25 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
         {
             if (begin < end)
             {
-                pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, generated ? tokens->locations[begin] : location, "extra tokens at end of #pragma once directive");
+                const PPToken extra = pp_stack_token(tokens, begin);
+                const uint32_t saved_fixits = pp->diagnostic_fixit_count;
+                const uint32_t before_origin = pp->diagnostic_origin;
+                pp->diagnostic_origin = extra.origin;
+                if (generated && (pp->options.language.standard >= 1999 || pp->options.language.gnu))
+                {
+                    PPRangePlace place = { extra.location, extra.origin };
+                    for (uint32_t depth = 0; place.origin != 0 && depth < BUSTER_PP_RANGE_DEPTH; depth += 1)
+                    {
+                        place = pp_range_expansion(pp, place, true);
+                    }
+                    if (place.origin == 0)
+                    {
+                        pp_diagnostic_fixit_characters(pp, place.location, 0, "//");
+                    }
+                }
+                pp_diagnose_extra_tokens(pp, extra.location, "pragma once");
+                pp->diagnostic_origin = before_origin;
+                pp->diagnostic_fixit_count = saved_fixits;
             }
             if (file != BUSTER_PP_NONE && file != pp->main_file)
             {
@@ -11360,7 +11529,8 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             }
             else
             {
-                pp_diagnose_group(pp, PP_WARNING_PRAGMA_ONCE_OUTSIDE_HEADER, diagnostic_location, "#pragma once in main file");
+                const uint32_t once_location = names_begin < operands ? names->locations[names_begin] : diagnostic_location;
+                pp_diagnose_group(pp, PP_WARNING_PRAGMA_ONCE_OUTSIDE_HEADER, once_location, "#pragma once in main file");
             }
         } break;
         case PP_PRAGMA_QUIET:
@@ -11643,7 +11813,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
                     pp_reserved_macro_name(pp, data, name, name_location, false);
                     if (hash + 3 < end)
                     {
-                        pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_define_location(pp, data, base, hash + 3, end), "extra tokens at end of #undef directive");
+                        pp_diagnose_extra_tokens(pp, pp_define_location(pp, data, base, hash + 3, end), "undef");
                     }
                     const PPMacroId previous = pp->macro_of[name];
                     if (previous != 0 && pp->macros[previous].unused != 0)
@@ -11725,7 +11895,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
         case PP_DIRECTIVE_UNKNOWN:
             if (!pp->options.assembly)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid preprocessing directive");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, hash + 1 < end ? pp_token_location(pp, context, data, hash + 1) : location, "invalid preprocessing directive");
             }
             break;
     }

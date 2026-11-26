@@ -1536,6 +1536,7 @@ typedef enum PPGeneratedKind
     PP_GENERATED_PASTE,
     PP_GENERATED_STRING,
     PP_GENERATED_PRAGMA,
+    PP_GENERATED_HEADER,
 } PPGeneratedKind;
 
 typedef struct PPGenerated PPGenerated;
@@ -2204,6 +2205,8 @@ struct PPOffsetNote
 {
     uint32_t offset;
     const char* message;
+    uint32_t length;
+    const char* replacement;
 };
 
 typedef struct PPDiagnosticNote PPDiagnosticNote;

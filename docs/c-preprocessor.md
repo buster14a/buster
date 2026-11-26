@@ -2134,7 +2134,10 @@ ranges a diagnostic's producer gives it, mapped through the expansion history
 as clang maps them. Primary and attached-note fix-its own their replacement
 text through collection and publication, and contribute removal ranges and
 insertion lines. Generated spellings have scratch-space excerpts; a paste
-retains its replacement-list endpoints for the macro note's range.
+retains its replacement-list endpoints for the macro note's range. A computed
+angled header records its generated spelling only on a diagnostic path.
+Named Unicode escape corrections keep their suggestion text through the same
+ownership path, including character-offset notes in unevaluated strings.
 
 The renderer assembles one diagnostic, its include stack and all expansion or
 definition notes in a 2 KiB stack buffer, growing into temporary scratch only

@@ -605,10 +605,15 @@ t.c:3:2: warning: hi [-W#warnings]
   declaration note does. Hints are never printed with carets disabled.
   Caller-written macro arguments remain editable, and complete expansion
   boundaries map to their invocations. An interior replacement-list token
-  has no editable caller occurrence and its hint is omitted.
+  has no editable caller occurrence and its hint is omitted. Header repairs
+  replace editable names with their delimiters; trailing directive tokens
+  receive line-comment insertions only in language modes permitting them.
+  Named Unicode escapes retain canonical suggestion text for independent
+  correction-note ranges and edits, including unevaluated strings.
 - **Generated spellings.** Pasted tokens, stringification, builtin strings and
   `_Pragma` notes show their scratch spelling, with the generated token's
-  ranges. `_Pragma` keeps its leading space and diagnostic byte offset.
+  ranges. Computed angled headers record a generated spelling only when a
+  diagnostic needs it. `_Pragma` keeps its leading space and diagnostic byte offset.
   Paste records retain both replacement-list operands, including the ends
   of a chain, so the macro note highlights the whole paste. Scratch line
   numbers identify generated buffers and are allocation-dependent; they
@@ -675,7 +680,9 @@ found; independent primary and note fix-its, inserted parentheses and
 operators, replacements and removals, multiline snippets, macro invocation
 boundaries and caller arguments, const declaration notes, generated scratch
 spellings, and declaration-visible `NULL`/`false` macro state for initializer
-suggestions. The preprocessor's private ownership regression mutates producer
+suggestions; repaired header names, directive-token comments across C90 and
+GNU modes, and named Unicode escape corrections on attached notes. The
+preprocessor's private ownership regression mutates producer
 scratch after collection, and checks immediate and queued rendering, disabled
 carets, suppressed warnings and hint isolation. Parser hints retain the completed
 type boundary for missing `sizeof` and alignment parentheses. The other oracle
