@@ -4489,6 +4489,10 @@ static int c_direct_unit_tests(void)
         "_Static_assert(sizeof(struct In) == 8 && _Alignof(struct In) == 4 && sizeof(struct X) == 12 && sizeof(struct P) == 11, \"nested\");\n"
         "_Static_assert(sizeof(struct A) == 5 && __builtin_offsetof(struct A, x) == 1, \"anonymous\");\n"
         "int laid(struct P* p, struct X* x) { return p->sub.x + p->anon.s + x->i.x; }\n",
+        // 14. Constant indices the full pipeline's -Warray-bounds leaves alone: the end's address, `5[a]`, a member's
+        // array (a trailing one or not), a string's terminator, a dead branch's and sizeof's.
+        "struct S { int arr[2]; int n; int d[1]; };\nint a[3];\n"
+        "int bounded(struct S* s) { int* e = &a[3]; return *e + 2[a] + s->arr[5] + s->d[4] + \"abc\"[3] + (0 ? a[7] : 1) + (int)sizeof(a[9]); }\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4601,6 +4605,15 @@ static int c_direct_unit_tests(void)
         "struct __attribute__((packed)) P { char c; int i; };\nunsigned long f(struct P* p) { return sizeof(&p->i); }\n",
         "struct Q { char c; int i __attribute__((packed)); };\nint* f(struct Q* q) { return &q->i; }\n",
         "struct __attribute__((packed, aligned(4))) Q { char c; int j; };\nint* f(struct Q* q) { return &q->j; }\n",
+        // -Warray-bounds: a constant index past a named array's end (its end too, but under `&`), before its start, past
+        // a row's or a string literal's, in parentheses.
+        "int a[3];\nint f(void) { return a[3]; }\n",
+        "int a[3];\nint* f(void) { return &a[4]; }\n",
+        "int f(void) { int a[3] = { 0 }; return a[-1]; }\n",
+        "int b[2][3];\nint f(void) { return b[1][5]; }\n",
+        "int b[2][3];\nint* f(void) { return b[2]; }\n",
+        "int f(void) { return \"abc\"[5]; }\n",
+        "int a[3];\nint f(void) { return (a)[5]; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

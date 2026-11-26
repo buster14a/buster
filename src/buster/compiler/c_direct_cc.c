@@ -6138,6 +6138,51 @@ static __attribute__((cold, noinline)) void fast_expr_decided_logic(FastExprCtx*
       ((uint32_t)(v).is_lvalue & (uint32_t)(((v).type & BUSTER_FTYPE_VOL) != 0))) & \
      (uint32_t)(((v).marks & BUSTER_FVAL_MARK_UNUSED_RESULT) == 0))
 
+// #3577: whether a constant index past a complete array's bounds, at the subscript whose `[` is at LBRACKET (cc->pos is
+// past its `]`), is the full pipeline's -Warray-bounds: an array a name gives (in parentheses, or a row of one, `b[2][0]`)
+// or a string literal's, not a member's (`s->arr[5]` is quiet there, a trailing one's or not). ONE_PAST_ADDRESSED: the
+// index is the array's count and `&` takes the subscript whole, its end's address, quiet too.
+static __attribute__((cold, noinline)) bool fast_cc_array_index_questioned(const FastCCState* cc, uint32_t lbracket, bool one_past_addressed)
+{
+    const uint8_t next = cc->pos < cc->tcount ? cc->tk[cc->pos] : FTOK_EOF;
+    const bool whole = next != FTOK_LBRACKET && next != FTOK_DOT && next != FTOK_ARROW && next != FTOK_LPAREN && next != FTOK_INC && next != FTOK_DEC;
+    // The base's last token, past any `]`s of earlier subscripts (a row) and `)`s around it, to its first.
+    uint32_t at = lbracket;
+    bool found = false;
+    bool member = false;
+    for (uint32_t steps = 0; !found && at > 0 && steps < 64u; steps += 1)
+    {
+        at -= 1u;
+        const uint8_t t = cc->tk[at];
+        if (t == FTOK_RBRACKET || t == FTOK_RPAREN)
+        {
+            // Back to its opening bracket; a `)` closes a group around the base, whose last token is before it.
+            uint32_t depth = 0;
+            uint32_t q = at + 1u;
+            while (q > 0)
+            {
+                q -= 1u;
+                const uint8_t u = cc->tk[q];
+                depth += (uint32_t)(u == FTOK_RBRACKET) | (uint32_t)(u == FTOK_RPAREN);
+                depth -= (uint32_t)(u == FTOK_LBRACKET) | (uint32_t)(u == FTOK_LPAREN);
+                if (depth == 0) { break; }
+            }
+            at = t == FTOK_RPAREN ? at : q;
+            if (t == FTOK_RPAREN)
+            {
+                // `(a)[5]`: the group's last token is the base's.
+                continue;
+            }
+        }
+        else
+        {
+            found = true;
+            member = t == FTOK_IDENT && at > 0 && (cc->tk[at - 1u] == FTOK_DOT || cc->tk[at - 1u] == FTOK_ARROW);
+        }
+    }
+    return !(one_past_addressed && whole) && !(found && member);
+}
+
 static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* ops, uint32_t* osp_ptr)
 {
     FastCCState* cc = ex->cc;
@@ -7443,7 +7488,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
         if (k == FTOK_LBRACKET)
         {
             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-            ops[osp++] = (FastExprOp){ .op = FEOP_SUBSCRIPT, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+            ops[osp++] = (FastExprOp){ .op = FEOP_SUBSCRIPT, .lbl0 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -7468,14 +7513,17 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             }
             if (osp == 0 || ops[osp - 1u].op != FEOP_SUBSCRIPT) { break; }
             osp -= 1u;
+            const uint32_t lbracket = ops[osp].lbl0;
             cc->pos += 1u;
             if (ex.vsp < 2u) { fast_cc_bail(cc, "subscript stack"); break; }
             FastVal idx_v = ex.vstack[--ex.vsp];
             FastVal base_v = ex.vstack[--ex.vsp];
             // Support C commutative `i[a]`!
+            bool reversed = false;
             if (!ftype_is_ptr(ftype_decay(cc, base_v.type)) && ftype_is_ptr(ftype_decay(cc, idx_v.type)))
             {
                 FastVal tmp = base_v; base_v = idx_v; idx_v = tmp;
+                reversed = true;
             }
             const FastType bt = ftype_decay(cc, base_v.type);
             if (!ftype_is_ptr(bt)) { fast_cc_bail(cc, "subscript non-pointer"); break; }
@@ -7497,6 +7545,20 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             // Zero-instruction constant-index folding for local/global arrays & pointer offsets!
             if (idx_v.kind == FVAL_IMM)
             {
+                // #3577: a constant index out of a complete array's bounds (one past is its end, but as `&`'s whole
+                // operand) is the full pipeline's -Warray-bounds where the array is a named object's or a string
+                // literal's; `5[a]` and a member's array are quiet there (fast_cc_array_index_questioned).
+                if (ftype_is_array(base_v.type) && !reversed)
+                {
+                    const FastComplexType* at = cc->ctypes + (base_v.type & BUSTER_FTYPE_CIDX_MASK);
+                    const uint64_t index = (uint64_t)idx_v.imm;
+                    if (at->complete != 0 && index >= (uint64_t)at->count &&
+                        fast_cc_array_index_questioned(cc, lbracket, index == (uint64_t)at->count && osp != 0 && ops[osp - 1u].op == FEOP_ADDR))
+                    {
+                        fast_cc_bail(cc, "an array index out of its bounds");
+                        break;
+                    }
+                }
                 const int64_t boff = idx_v.imm * (int64_t)esz;
                 if (ftype_is_array(base_v.type) && base_v.kind == FVAL_LOCAL && boff >= INT32_MIN && boff <= INT32_MAX)
                 {
