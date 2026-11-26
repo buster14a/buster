@@ -1,0 +1,18 @@
+struct Record { int member; } record;
+enum Choice { FIRST } choice;
+union Variant { int member; } variant;
+struct Initialized { int member; } initialized_record = { 0 };
+enum InitializedChoice { SECOND } initialized_choice = SECOND;
+struct Record another_record;
+enum Choice another_choice;
+typedef int Number;
+Number alias;
+__typeof__(int) type_of;
+_Atomic(int) atomic_specifier;
+_Atomic int atomic_qualifier;
+const _Atomic(int) qualified_atomic;
+_Alignas(16) unsigned aligned;
+__attribute__((aligned(16))) volatile int attributed;
+__extension__ int extended;
+unsigned long int comma_first, *comma_second;
+_Thread_local int threaded;

@@ -2986,8 +2986,40 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
+// A hard rejected initializer leaves no variable definition for FinalizeDeclaration's missing-extern warning (#2222).
+// Keep the reader's published prefix immutable; only a diagnostic recovery with rejected candidates copies the view.
+static bool check_driver_missing_variable_filter(CheckWarningEvents* view, const uint8_t* invalid, uint32_t tokens, Arena* arena)
+{
+    bool valid = true;
+    bool rejected = false;
+    const uint32_t count = view->count;
+    const CheckWarningEvent* const events = view->events;
+    for (uint32_t i = 0; invalid != NULL && !rejected && i < count; i += 1)
+    {
+        rejected = events[i].kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS &&
+                   events[i].completion_kind != CHECK_WARNING_COMPLETE_TU_END && events[i].token < tokens && invalid[events[i].token] != 0;
+    }
+    if (rejected)
+    {
+        CheckWarningEvent* kept = BUSTER_ARENA_PUSH_ARRAY(arena, CheckWarningEvent, count);
+        valid = kept != NULL;
+        uint32_t total = 0;
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            const CheckWarningEvent* event = events + i;
+            const bool remove = event->kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS &&
+                                event->completion_kind != CHECK_WARNING_COMPLETE_TU_END && event->token < tokens && invalid[event->token] != 0;
+            kept[total] = *event;
+            total += !remove;
+        }
+        view->events = valid ? kept : events;
+        view->count = valid ? total : count;
+    }
+    return valid;
+}
+
 // The class of a reader's warning event for check_driver_unit_end_split: 0 published where it stands, 1 a tentative
-// definition's (#2238's array, #2168's const object), 2 an unused file-scope declaration's, 3 an unused block-scope
+// definition's (#2238's array, #2222's missing extern declaration, #2168's const object), 2 an unused file-scope declaration's, 3 an unused block-scope
 // typedef's (#2264), which clang gives after those, under their gate, in its source locations' order, where a macro
 // expansion's location comes after every file location: 4 one a macro wrote.
 static uint32_t check_driver_unit_end_class(const Parser* parser, const Preprocessor* pp, const CheckWarningEvent* event)
@@ -2997,7 +3029,8 @@ static uint32_t check_driver_unit_end_class(const Parser* parser, const Preproce
     const bool typedefs = event->kind == CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF;
     const uint32_t source = typedefs && event->token < parser->tokens.count ? parse_source_index(&parser->tokens, event->token) : BUSTER_PP_NONE;
     const bool macro = source < pp->output.count && pp->output.flags != NULL && (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
-    const bool tentative = event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY || (event->kind == CHECK_WARNING_EVENT_DEFAULT_CONST_INIT && unit_end);
+    const bool tentative = event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY ||
+                           ((event->kind == CHECK_WARNING_EVENT_DEFAULT_CONST_INIT || event->kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS) && unit_end);
     return tentative ? 1u : unused ? 2u : typedefs ? (macro ? 4u : 3u) : 0u;
 }
 
@@ -14012,6 +14045,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     const uint32_t counted_end = additional_count;
                     uint32_t* rejected_initializer_roots = NULL;
                     const uint8_t* invalid_initializer_nodes = NULL;
+                    const uint8_t* invalid_variable_definitions = NULL;
                     if (!expression_valid || repairing || initializers.status != CHECK_INIT_OK)
                     {
                         CheckInitDiagnostic earlier = { 0 };
@@ -14029,6 +14063,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                                                                      output_arena, scratch, &warnings);
                         rejected_initializer_roots = diagnosed ? earlier.rejected_roots : NULL;
                         invalid_initializer_nodes = diagnosed ? earlier.invalid_nodes : NULL;
+                        invalid_variable_definitions = diagnosed ? earlier.invalid_variable_definitions : NULL;
                         if (!storage || initializers.status == CHECK_INIT_RESOURCE)
                         {
                             earlier.status = CHECK_INIT_RESOURCE;
@@ -14292,6 +14327,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 }
                             }
                         }
+                    }
+                    if (!check_driver_missing_variable_filter(&input.warning_events, invalid_variable_definitions, input.token_count, output_arena))
+                    {
+                        check_common_exhausted(pp);
                     }
                     const CheckWarningEvents initializer_warning_view = initializer_context ? check_warning_view(&initializer_warnings) : (CheckWarningEvents){ 0 };
                     uint32_t promoted_token = BUSTER_CHECK_NONE;

@@ -92,7 +92,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --quiet-roots-only | --unused-comparison-only |
   --float-precision-only | --reach-filter-only | --branch-truth-only |
   --record-extensions-only | --auto-qualifiers-only |
-  --run-modes-only | --common-warnings-only] [--in-process] [--clang-server PATH]
+  --run-modes-only | --common-warnings-only | --missing-variable-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; a generated unit of about 180,000 tokens as
@@ -1395,3 +1395,32 @@ policy, `-Werror` and `-w`, through both kernels and requested lane counts;
 promoted errors must preserve existing output. This is the bit-precise
 subscope of #1392. Boolean-valued `int` expressions and typedef-sugar spelling
 remain separate work; this change does not advertise complete parity.
+
+## Missing variable declarations (#2222)
+
+`-Wmissing-variable-declarations` diagnoses a file-scope definition with external
+linkage when no non-defining declaration precedes that definition. A block's
+`extern` declaration counts too. Initialized objects warn after their initializer's
+semantic diagnostics and before queued runtime warnings. Tentative objects warn at
+the unit's end, in their first tentative definition's order, at their last tentative
+definition's name. A later `extern` alone does not suppress an earlier definition.
+The attached note points to the written type specifier, including a record or enum
+body's opening keyword and the type inside `_Atomic(T)`.
+
+The reader retains this warning's declaration metadata only when command-line
+policy or a source pragma can enable it. Its cold pass selects accepted object
+declarations from the binding stream in masked 64-event blocks and joins them by
+canonical object identity. Two temporary token-indexed `uint32_t` columns retain
+the first extern declaration and the accepted binding handle; they remain private
+to this reader and its existing tentative-definition pass. Ordinary compilations
+allocate neither column. Failed initializer checking can return a separate sparse-use
+byte mask to suppress invalid definitions while retaining warnings after nonconstant
+initializers and recoverable pointer/integer conversions.
+
+`test-checker-driver --missing-variable-only --in-process` runs the original
+`tests/driver/warnings/missing-variable/` catalog through the shared warning harness.
+It compares complete Clang diagnostics and exit status, source-policy changes,
+system headers, macro notes, syntax/object modes and requested lane counts, including
+preservation of an existing output after rejection. The suite also runs in the
+ordinary checker-driver inventory. Clang is an external oracle; no implementation
+or fixture was imported.
