@@ -1464,7 +1464,31 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `vselect m, op(a, b), w` of an `add`, `sub`, `mul`, shift, floating operation or `lane_op` only the select reads, at its lanes (#1840) | `MASKED_BINARY` | the operation's EVEX form under `k`: `vpaddd x{k}, a, b` merging into `w`, which `x` takes first by a `vmovdqa64` unless it holds it (xmm15 keeping an operand that move would overwrite), or `vpaddd x{k}{z}, a, b` where `w` is a zero vector |
 | the same at other lanes ([the SIMD IR guide](ir-simd.md)'s "Lanes") | `BINARY`, `COMPARE`, `SELECT` | the lanes' forms (`tier1_select_lane_forms`, `_compares`, `_blends`): `vpaddb` to `vpaddq`, `vpsubb` to `vpsubq`, `vpmullw`, `vpmullq`, `vpsllvw` to `vpsllvq`, `vpsrlv*`, `vpsrav*`, `vaddps` to `vdivpd`; `vpcmp[u]b` to `vpcmp[u]q`, `vcmpps` and `vcmppd` (the rows' EQ_OQ, NEQ_UQ, LT_OS, LE_OS, GT_OS and GE_OS); `vpblendmb` to `vpblendmq` |
 | `load`, `store` | `TIER1_RULE_FLOAT_LOAD`, `_STORE` and their `_ADDRESS` folds | `vmovdqu32` at the width, the address folded as a floating value's |
+| paired local COPY's `load v4i32` (#2818) | `TIER1_RULE_FLOAT_LOAD` or `_ADDRESS`, `source_width = 8` | `movsd`, `movhps` at an SSE target; `vmovsd`, `vmovhps` at an AVX target, followed by the copy's ordinary 16-byte store |
 | `phi` | `TIER1_RULE_PHI` | none: its edges' moves |
+
+A paired local copy's marked load (`BUSTER_IR_COPY_PIECE`) reads two 8-byte
+halves so each can forward from a field store that built the local. The second
+load merges into the first's register. Both loads remain within one selected
+node, whose intrinsic cost is two; they never fold into another instruction's
+wide memory operand. Unpaired scalar pieces retain their ordinary folds because
+the provenance flag is not an access effect.
+
+The ordinary vector allocation class names xmm0 through xmm14, with xmm15
+reserved for scratch. VEX therefore suffices for both loads even at an AVX-512
+target, uses shorter encodings than EVEX, and uses the existing measured Zen 5
+rows. The destination store keeps its target's normal vector form. No new EVEX
+cost estimate or hardware measurement is required for these forms.
+
+`tier1_emit_cfg_kernel` resolves the frame base and displacement before
+expanding the node, so both load records use the final frame address, at offsets
+0 and 8. Selection leaves a symbol address in a register for a marked load;
+it does not create two relocations in a node whose symbol-reference handoff
+admits one. Displacement addition is checked before either half is emitted.
+`test-tier1-select` checks all low-register carriers, SSE/AVX/AVX-512 targets,
+indexed addresses and guard-page boundaries against byte copies, along with
+selection's metadata and scalar-fold behavior. The emitted-code certificate
+checks both halves through the same frame-aware regeneration as other nodes.
 
 A masked operation (`tier1_select_masked_binary`) has four values: the
 operation's two operands, the mask and the passthrough `w` (`values[3]`, the

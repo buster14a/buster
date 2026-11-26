@@ -153,8 +153,10 @@ typedef enum Tier1SelectRule
     // values[1], `operation` its index among them (IR_FADD's order: `scale` is a folded address's), the right operand
     // from memory where it folds a load (FLOAT_LOAD_OPERAND, values[1] and values[2] the address's base and index). A
     // negation, xorps of the sign bit, which the scratch general register moves into the vector class's scratch
-    // register. A load and a store as the integer ones, the store's value in values[2], each one movss or movsd, which stays its node's last record (the CFG consumer patches a frame object's
-    // base and offset into it). A comparison's truth value, `condition` its IR predicate (EQ to GE): clear the general
+    // register. A load and a store as the integer ones, the store's value in values[2], each one movss or movsd. A
+    // paired COPY's 16-byte load has source_width 8 and reads its halves by movsd and movhps, or their VEX forms.
+    // The CFG consumer resolves a frame object's base and offset before expansion. A comparison's truth value,
+    // `condition` its IR predicate (EQ to GE): clear the general
     // result, ucomis and setcc, and for == and != the parity flag's setcc and their and or or, since unordered sets ZF. A branch
     // on one, < and <= with its operands swapped, `condition` the unsigned condition (UGT, UGE, or their negations ULE and
     // ULT) whose jump reads ucomis's flags: ja and jae are false for unordered operands, and jbe and jb, !(a > b) and
@@ -3229,8 +3231,8 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x == source ? mask : source));
         break;
     }
-    // One movss or movsd each, the node's last record, which the CFG consumer's frame-object patch rewrites; a masked
-    // load's or store's (#1840, `condition` nonzero) its own.
+    // A scalar or whole-vector move, a paired COPY's two 8-byte loads (#2818, source_width 8), or a masked load's or
+    // store's (#1840, `condition` nonzero). The CFG consumer resolves a frame object's address before expansion.
     case TIER1_RULE_FLOAT_LOAD:
     case TIER1_RULE_FLOAT_STORE:
         if (holes->condition != 0)
@@ -3251,8 +3253,32 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         X86Instruction record = holes->memory;
         record.reg = destination & 15;
-        record.form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load;
-        tier1_select_append(&result, record);
+        if (width == 16 && holes->source_width == 8)
+        {
+            // The allocation's vector locations name xmm0..15 (bit 4 is the class). At every AVX target the VEX
+            // forms are sufficient, smaller than EVEX and already measured; the second reads the first's low half.
+            // Each half can forward from an 8-byte store that built the local. A whole 16-byte load cannot.
+            int32_t high = 0;
+            const bool valid = destination < 32 && !__builtin_add_overflow(record.displacement, 8, &high);
+            if (valid)
+            {
+                record.form = holes->sse ? X86_FORM_MOVSD_X_XM64 : X86_FORM_VMOVSD_X_M64;
+                tier1_select_append(&result, record);
+                record.form = holes->sse ? X86_FORM_MOVHPS_X_M64 : X86_FORM_VMOVHPS_X_X_M64;
+                record.vvvv = holes->sse ? 0 : record.reg;
+                record.displacement = high;
+                tier1_select_append(&result, record);
+            }
+            else
+            {
+                result.overflowed = true;
+            }
+        }
+        else
+        {
+            record.form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load;
+            tier1_select_append(&result, record);
+        }
         break;
     }
     case TIER1_RULE_FLOAT_STORE_ADDRESS:
@@ -5338,12 +5364,19 @@ static bool tier1_select_tree_child(const Tier1SelectForest* forest, uint32_t pa
 
 // A load moves into its consumer's memory operand: its only use, in its block, past nodes that neither write memory, call,
 // fence nor load (no barrier between them: the last before the consumer the load itself, a barrier of its own), and itself
-// neither volatile nor atomic.
+// neither volatile nor atomic. COPY provenance is not an access effect, but a paired vector copy must retain its two
+// narrow loads rather than fold into a consumer's wide memory operand.
 static inline __attribute__((always_inline)) bool tier1_select_load_folds(const Tier1SelectForest* forest, uint32_t consumer, uint32_t load)
 {
     const IrFunction* function = forest->function;
-    return load != BUSTER_IR_NONE && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, consumer, load) &&
-           forest->barriers[consumer] <= load + 1;
+    bool foldable = false;
+    if (load != BUSTER_IR_NONE && function->op[load] == IR_LOAD)
+    {
+        const uint32_t flags = function->flags[load];
+        foldable = (flags & ~BUSTER_IR_COPY_PIECE) == 0 && ((flags & BUSTER_IR_COPY_PIECE) == 0 || function->type[load] != IR_V4I32) &&
+                   tier1_select_tree_child(forest, consumer, load) && forest->barriers[consumer] <= load + 1;
+    }
+    return foldable;
 }
 
 static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, uint32_t value, Tier1SelectPattern* pattern)
@@ -6972,13 +7005,16 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     else if (class_width != 0 && (op == IR_LOAD || op == IR_STORE))
     {
         const bool store = op == IR_STORE;
+        const bool halves = !store && type == IR_V4I32 && function->flags[node] == BUSTER_IR_COPY_PIECE;
         base.rule = store ? TIER1_RULE_FLOAT_STORE : TIER1_RULE_FLOAT_LOAD;
         base.width = (uint8_t)class_width;
+        base.source_width = halves ? 8 : 0;
         base.values[0] = a;
         base.values[2] = store ? b : BUSTER_IR_NONE;
-        base.intrinsic_cost = 1;
+        base.intrinsic_cost = halves ? 2 : 1;
         Tier1SelectPattern folded = base;
-        const bool walked = tier1_select_memory(forest, node, a, &folded, 0);
+        const bool walked = tier1_select_memory(forest, node, a, &folded, 0) &&
+                            (!halves || (!folded.rip && folded.displacement <= INT32_MAX - 8));
         // Through a frame object the folded address stands alone, as an integer's does.
         if (!walked || folded.stack_object == BUSTER_IR_NONE)
         {

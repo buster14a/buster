@@ -1118,6 +1118,10 @@ static void ir_parse_instruction(IrParseState* state)
                     {
                         row.flags = (uint8_t)(row.flags | BUSTER_IR_SEGMENT_SS << BUSTER_IR_SEGMENT_SHIFT);
                     }
+                    if (ir_parse_word(state, "copy_piece"))
+                    {
+                        row.flags = (uint8_t)(row.flags | BUSTER_IR_COPY_PIECE);
+                    }
                 }
             } break;
         }

@@ -457,7 +457,7 @@ static uint32_t ir_if_convert_cost(const IrIfConvertWork* work, uint32_t i, uint
 {
     const IrFunction* const f = work->function;
     const uint32_t op = f->op[i];
-    const bool load = op == IR_LOAD && f->flags[i] == 0;
+    const bool load = op == IR_LOAD && (f->flags[i] & ~BUSTER_IR_COPY_PIECE) == 0;
     uint32_t cost = op == IR_CONST ? 0 : load ? 1 : ir_if_convert_costs[op] != 0 ? ir_if_convert_costs[op] : BUSTER_IR_IF_CONVERT_UNSAFE;
     bool safe = cost != BUSTER_IR_IF_CONVERT_UNSAFE && ir_if_convert_value_type(f->type[i]) && (f->flags[i] == 0 || load);
     const uint32_t mask = ir_value_mask(f, i);
@@ -824,7 +824,7 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
         const uint32_t r = rows[k];
         const uint32_t op = f->op[r];
         uint32_t representative = BUSTER_IR_NONE;
-        if (ir_if_convert_numbered[op] != 0 && (op != IR_LOAD || f->flags[r] == 0))
+        if (ir_if_convert_numbered[op] != 0 && (op != IR_LOAD || (f->flags[r] & ~BUSTER_IR_COPY_PIECE) == 0))
         {
             for (uint32_t j = k; j > 0 && representative == BUSTER_IR_NONE; j -= 1)
             {

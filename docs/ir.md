@@ -88,7 +88,7 @@ processed immediately.
 | --- | ---: | --- |
 | `op` | u8 | `IrOp`; below 64, for one-register byte tables |
 | `type` | u8 | Result type; `void` instructions cannot be value operands |
-| `flags` | u8 | Currently `BUSTER_IR_VOLATILE` on loads/stores |
+| `flags` | u8 | Opcode-specific metadata; accesses carry volatile, atomic/order, segment and `COPY_PIECE` bits |
 | `alignment_log2` | u8 | Load/store alignment as a power of two, 0 through 31 |
 | `a`, `b`, `c` | 3 × u32 | Value IDs or opcode-specific indices |
 
@@ -439,6 +439,18 @@ the same or apart, so loading each piece before storing it reads the source's
 bytes either way, overlapping pieces too; a partial overlap would need every load
 first. The pieces' alignment is unknown (`alignment_log2` 0), as a typed `LOAD`'s
 is.
+
+Nonvolatile copies larger than 32 bytes from a local mark their pieces with
+`BUSTER_IR_COPY_PIECE` (bit 7, #2818). It is an ordinary-access hint outside
+`BUSTER_IR_OBSERVABLE`, so scalar replacement, promotion and ordinary load
+folds still see the original accesses. After those passes, `ir_copy_pair`
+combines eligible adjacent i64 pairs into a `v4i32` load/store. The mark is
+not an alias promise: the pairer proves the current addresses equal or apart,
+including when forwarding connected pieces from different original copies.
+Selection reads a marked 16-byte load as two 8-byte halves and emits one
+16-byte store, preserving forwarding from the stores that built the local.
+Volatile copies keep unmarked, nonoverlapping scalar pieces; their access
+count and width do not change.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
 operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`, and

@@ -866,6 +866,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #endif
 #if BUSTER_BACKEND_CONSUMER
 #include "buster/compiler/ir.c"
+#include "buster/compiler/ir_copy_pair.c"
 #include "buster/compiler/ir_simd_typed.c"
 #include "buster/compiler/ir_lower.c"
 #include "buster/compiler/ssa_ir.c"

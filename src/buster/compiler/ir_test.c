@@ -2515,6 +2515,7 @@ static void ir_test_switch_collision_family(IrTestTally* tally, Arena* memory, A
 #include "ir_simd_model_test.c"
 #include "ir_simd_execute.c"
 #include "ir_simd_test.c"
+#include "ir_copy_pair_test.c"
 
 static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
 {
@@ -2670,6 +2671,7 @@ static int run_ir_tests(int argc, char** argv)
             ir_test_switch(&tally, &memory, &scratch);
             ir_test_switch_collision_family(&tally, &memory, &scratch);
             ir_test_calls_memory(&tally, &memory, &scratch);
+            ir_copy_pair_tests(&tally, &memory, &scratch);
             ir_test_labels(&tally, &memory, &scratch);
             ir_test_label_lists(&tally, &memory, &scratch);
             ir_test_aggregates(&tally, &memory, &scratch);

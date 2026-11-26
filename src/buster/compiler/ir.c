@@ -46,7 +46,12 @@
 #define BUSTER_IR_SEGMENT_FS 1u
 #define BUSTER_IR_SEGMENT_GS 2u
 #define BUSTER_IR_SEGMENT_SS 3u
-#define BUSTER_IR_ACCESS_FLAGS (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_ORDER | BUSTER_IR_SEGMENT)
+// A piece of a local COPY larger than 32 bytes (#2818), retained through promotion as an ordinary access. This is a
+// selection hint, not a no-alias promise: the late pairer proves the current source/destination ranges separately,
+// since forwarding and inlining can combine pieces from different original copies. A marked V4I32 load reads two
+// 8-byte halves so stores that built the local can forward into it; its store still writes 16 bytes at once.
+#define BUSTER_IR_COPY_PIECE (1u << 7)
+#define BUSTER_IR_ACCESS_FLAGS (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_ORDER | BUSTER_IR_SEGMENT | BUSTER_IR_COPY_PIECE)
 // The accesses every pass keeps as they are and where they are: a volatile one, an atomic one and one in a segment.
 #define BUSTER_IR_OBSERVABLE (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_SEGMENT)
 // An IR_STACK_SAVE's flag (#1847): the function's frame address, __builtin_frame_address(0), rather than rsp: its frame
@@ -2746,7 +2751,7 @@ static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t firs
     const __mmask16 valid_b = (use_b | address) & ~over_b;
     const __mmask16 valid_c = use_c & ~over_c;
     const __mmask16 memory = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE));
-    bad |= memory & (_mm512_test_epi32_mask(flags, _mm512_set1_epi32(~BUSTER_IR_VOLATILE)) | _mm512_cmpgt_epu32_mask(align, _mm512_set1_epi32(31)));
+    bad |= memory & (_mm512_test_epi32_mask(flags, _mm512_set1_epi32(~(BUSTER_IR_VOLATILE | BUSTER_IR_COPY_PIECE))) | _mm512_cmpgt_epu32_mask(align, _mm512_set1_epi32(31)));
     bad |= ~memory & (_mm512_test_epi32_mask(flags, none) | _mm512_test_epi32_mask(align, none));
     // The 128 types that end with the batch's own: all of a function of at most 128 instructions.
     const uint32_t base = first + count > 2 * 64 ? first + count - 2 * 64 : 0;
@@ -4130,6 +4135,10 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             if (segment != 0)
                             {
                                 fprintf(output, " %s", segment == BUSTER_IR_SEGMENT_FS ? "fs" : segment == BUSTER_IR_SEGMENT_GS ? "gs" : "ss");
+                            }
+                            if ((f->flags[i] & BUSTER_IR_COPY_PIECE) != 0)
+                            {
+                                fprintf(output, " copy_piece");
                             }
                         }
                     } break;
