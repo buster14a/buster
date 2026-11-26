@@ -326,18 +326,7 @@ static bool check_test_driver_run_in_process(char* const* arguments, char** text
                             dup2(stdout_capture ? capture : discard, STDOUT_FILENO) >= 0 && dup2(stdout_capture ? discard : capture, STDERR_FILENO) >= 0;
     if (redirected)
     {
-#if !BUSTER_ARENA_REGIONS
-        // The production source command snapshots these unchanged limits once before it reserves any arena.
-        // Match that setup for this command alone: later tests may change a limit before their next run or fork.
-        // Plain tests keep their unfixed policy: fixing it also enables a process-wide address-space reservation,
-        // which a later fork would inherit even after these fields were restored. Sanitizers disable that region.
-        const ArenaLimits saved_limits = arena_limits;
-        arena_limits_fix();
-#endif
         result = main_source_command_reusable(count, (char**)arguments);
-#if !BUSTER_ARENA_REGIONS
-        arena_limits = saved_limits;
-#endif
     }
     fflush(NULL);
     const bool restored = saved_output >= 0 && saved_errors >= 0 && dup2(saved_output, STDOUT_FILENO) >= 0 && dup2(saved_errors, STDERR_FILENO) >= 0;
