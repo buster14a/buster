@@ -64,6 +64,31 @@ absolute()
     esac
 }
 
+# Sets the variable $1 to the microseconds since the epoch. Bash writes $EPOCHREALTIME's seconds and microseconds (six
+# digits) apart by the locale's decimal point, a comma in es_ES, so they are its digits alone. This is the script's only
+# reader of $EPOCHREALTIME, as .github/workflows/build.yml checks, with now() under such locales.
+now()
+{
+    printf -v "$1" %s "${EPOCHREALTIME//[!0-9]/}"
+}
+
+# Optional receipts for tools/performance/dev.sh. The caller supplies a new results
+# directory. Sample phases in this process so tree and publication waits are visible.
+timings="${BUSTER_BUILD_TIMINGS_DIR:-}"
+phase()
+{
+    [ -n "$timings" ] || return 0
+    local end
+    now end
+    printf '%s\t%d\n' "$1" "$((end - phase_start))" >> "$timings/phases.tsv"
+    phase_start=$end
+}
+if [ -n "$timings" ]; then
+    timings="$(absolute "$timings")"
+    printf 'phase\telapsed_us\n' > "$timings/phases.tsv"
+    now phase_start
+fi
+
 command=build
 case "${1-}" in
     build|test|clean|configure|print-sources|print-compile-flags|print-sanitizer-flags|print-host-flags|print-output|check-call-graph|lexer-variant|lexer-variant-assembly|shifts)
@@ -255,14 +280,6 @@ cores()
     echo "${#seen[@]}"
 }
 
-# Sets the variable $1 to the microseconds since the epoch. Bash writes $EPOCHREALTIME's seconds and microseconds (six
-# digits) apart by the locale's decimal point, a comma in es_ES, so they are its digits alone. This is the script's only
-# reader of $EPOCHREALTIME, as .github/workflows/build.yml checks, with now() under such locales.
-now()
-{
-    printf -v "$1" %s "${EPOCHREALTIME//[!0-9]/}"
-}
-
 case "$command" in
     print-sources|print-compile-flags|print-sanitizer-flags|print-host-flags)
         [ "${#arguments[@]}" -eq 0 ] || die "$command takes no arguments"
@@ -351,6 +368,12 @@ if [ "${BUSTER_PGO:-0}" = 1 ]; then
     configurations=Release
     default_config=Release
 fi
+# An instrumented tree keeps its own incremental state and compile flags.
+case "${BUSTER_CLANG_TIMING:-off}" in
+    off) ;;
+    trace|report|both) variant="$variant-clang-$BUSTER_CLANG_TIMING" ;;
+    *) die "BUSTER_CLANG_TIMING must be off, trace, report or both" ;;
+esac
 tree="$root/build/cmake/$variant"
 binary="$tree/$config/compiler"
 
@@ -373,6 +396,7 @@ hold()
 # command on one tree holds shared as long as it holds the tree's and clean --all exclusively; the tree's,
 # build/cmake/VARIANT.lock, which its builds and cleans hold in turn; and build/.publish.lock, around a publication or a
 # clean of the published files. So clean --all removes no tree a command is using, nor a lock file one has open.
+phase setup
 mkdir -p "$root/build"
 exec {trees}> "$root/build/.trees.lock"
 if [ "$command" = clean ] && [ "$clean_all" = 1 ]; then
@@ -386,6 +410,7 @@ hold "$trees" -s "a clean --all to end"
 mkdir -p "$root/build/cmake"
 exec {lock}> "$tree.lock"
 hold "$lock" -x "another build or clean of ${tree#"$root/"}"
+phase tree-lock
 
 if [ "$command" = clean ]; then
     # Explicit cleaning: --config removes that configuration's outputs in this settings' tree; else, the whole tree.
@@ -431,6 +456,9 @@ configure_arguments=(
     "-DBUSTER_SHIFTS=$shift_bytes"
     "-DBUSTER_CHECKER_PLACEMENTS=$checker_placements"
 )
+if [ "${BUSTER_CLANG_TIMING:-off}" != off ]; then
+    configure_arguments+=("-DBUSTER_CLANG_TIMING=$BUSTER_CLANG_TIMING")
+fi
 clang_version="$("$clang" --version)"
 toolchain="clang $clang ($(realpath "$clang")): ${clang_version%%$'\n'*}"
 tools="$(command -v nm llvm-nm llvm-split llvm-objcopy readelf llvm-readelf wild mold ld.lld ld.bfd | tr '\n' ' ' || true)"
@@ -465,6 +493,7 @@ if [ "$command" = configure ] || [ ! -f "$stamp" ] || [ ! -f "$tree/build.ninja"
     run "$cmake" "${configure_arguments[@]}" >&2
     printf '%s\n' "$wanted" > "$stamp"
 fi
+phase configure
 [ "$command" != configure ] || exit 0
 
 if [ -z "$jobs" ]; then
@@ -487,8 +516,25 @@ build()
     now start
     run "$cmake" "${options[@]}" >&2
     now end
+    phase ninja
     # Ninja appends a line for each command it ran; when it rewrites its log to compact it, the report is skipped.
     if [ -f "$log" ] && { [ -z "$inode" ] || [ "$(stat -c %i "$log")" = "$inode" ]; }; then
+        if [ -n "$timings" ]; then
+            # One row per command, even for a split with many outputs and absolute-path aliases.
+            tail -c "+$((offset + 1))" "$log" | awk -F '\t' 'BEGIN { OFS="\t"; print "start_ms","end_ms","elapsed_ms","output" }
+                NF >= 5 && !seen[$1,$2,$5]++ { print $1,$2,$2-$1,$4 }' > "$timings/edges.tsv"
+            if [[ "${BUSTER_CLANG_TIMING:-off}" = trace || "${BUSTER_CLANG_TIMING:-off}" = both ]]; then
+                local target trace
+                while IFS=$'\t' read -r _ _ _ target; do
+                    [[ "$target" = *.o && "$target" != /* ]] || continue
+                    trace="${target%.o}.json"
+                    if [ -f "$tree/$trace" ]; then
+                        mkdir -p -- "$timings/traces/${trace%/*}"
+                        cp -- "$tree/$trace" "$timings/traces/$trace"
+                    fi
+                done < "$timings/edges.tsv"
+            fi
+        fi
         tail -c "+$((offset + 1))" "$log" | awk -F '\t' -v total="$((end - start))" -v config="$config" '
             $4 ~ /\.c\.o$/ { name = $4; sub(/^.*\//, "", name); sub(/\.o$/, "", name); count += !(name in time); time[name] = $2 - $1 }
             END {
@@ -503,7 +549,10 @@ build()
                 }
                 print line
             }' >&2
+    elif [ -n "$timings" ]; then
+        echo "build.sh: no per-edge receipt: Ninja removed or compacted its log during this build" >&2
     fi
+    phase receipts
 }
 
 # Publishes the configuration's executable as build/compiler, a hard link to it (or a copy where the file system has
@@ -554,7 +603,9 @@ self_stage()
 
 case "$command" in
     build|test|lexer-variant|shifts)
+        phase prepare
         self_stage
+        phase previous-stage
         ;;
 esac
 case "$command" in
@@ -562,11 +613,13 @@ case "$command" in
         if [ "${#targets[@]}" -eq 0 ]; then
             build
             publish
+            phase publish
         else
             build "${targets[@]}"
             for target in "${targets[@]}"; do
                 if [ "$target" = compiler ] || [ "$target" = all ]; then
                     publish
+                    phase publish
                     break
                 fi
             done
