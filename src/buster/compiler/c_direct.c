@@ -4491,6 +4491,9 @@ static int c_direct_unit_tests(void)
         // -Wundefined-internal of a static function a dead branch alone calls (#3592's without code): a use all the same.
         "static int sf(void);\nint f(void) { return 0 ? sf() : 1; }\n",
         "static int sf(void);\nint f(void) { if (0) { (void)sf(); } return 1; }\n",
+        // A floating constant an integer type can't hold, whose conversion is undefined, in the fold as in the program.
+        "int f(void) { return (int)1e20; }\n",
+        "unsigned f(void) { return (unsigned)-1.5; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

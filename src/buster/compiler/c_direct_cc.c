@@ -2770,10 +2770,19 @@ static BUSTER_DIRECT_HOT void fval_convert(FastExprCtx* ex, FastVal* v, FastType
             v->type = dst_u;
             return;
         }
-        uint64_t x = dst_bool ? (d != 0.0 ? 1u : 0u) :
-                     ftype_is_signed(cc, dst_u) ? (uint64_t)(int64_t)d : (uint64_t)d;
+        // #3577: a value the integer type can't hold (NaN, or out of int64_t's or uint64_t's range) is undefined, here as
+        // in the program; the full pipeline compiles it its own way, so the unit leaves (as fsc_convert's fold does).
+        const bool to_signed = ftype_is_signed(cc, dst_u);
+        const bool in_range = d == d && (to_signed ? (d >= -9223372036854775808.0 && d < 9223372036854775808.0) :
+                                                     (d > -1.0 && d < 18446744073709551616.0));
+        if (!dst_bool && !in_range)
+        {
+            fast_cc_bail(cc, "floating constant out of the integer's range");
+            d = 0.0;
+        }
+        uint64_t x = dst_bool ? (d != 0.0 ? 1u : 0u) : to_signed ? (uint64_t)(int64_t)d : (uint64_t)d;
         const uint32_t dsz = ftype_size(cc, dst_u);
-        const bool dsgn = ftype_is_signed(cc, dst_u);
+        const bool dsgn = to_signed;
         if (!dst_bool && dsz == 1u) { x = dsgn ? (uint64_t)(int64_t)(int8_t)x : (x & 0xffu); }
         else if (!dst_bool && dsz == 2u) { x = dsgn ? (uint64_t)(int64_t)(int16_t)x : (x & 0xffffu); }
         else if (!dst_bool && dsz == 4u) { x = dsgn ? (uint64_t)(int64_t)(int32_t)x : (x & 0xffffffffu); }
