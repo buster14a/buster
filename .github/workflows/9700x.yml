@@ -3,7 +3,7 @@
 # Temporary evidence PR only. Do not merge: this workflow publishes no qualification context.
 # The production PR keeps its ordinary CI. This branch builds only the instrumented definition
 # candidate; the immutable baseline product is referenced below. No native hardware job is present.
-name: Issue 2553 definition candidate compiler product
+name: Issue 2553 definition v2 candidate compiler product
 
 on:
   pull_request:
@@ -24,14 +24,14 @@ env:
   BUSTER_BASELINE_ARTIFACT: tier1-kinds-2553-products-45791795852-1
   BUSTER_BASELINE_COMPILER_SHA256: 4c281f7892e112744b7a4f433db63b8cbba2ca379e5511025087684701f0fefa
   BUSTER_CANDIDATE_REVISION: 8e4d32879e17b7d9548cad54257a2f8461328366
-  BUSTER_MEASUREMENT_REVISION: 44f2a6d2e238c93a0d99d2e8f9644b289ded20fc
+  BUSTER_MEASUREMENT_REVISION: 0bd0c6a02633502e213150a50de0b15c0e28c9e4
   BUSTER_MEASUREMENT_PATCH: docs/measurements/tier1-dispatch-latch-2553-2026-11-26/scripts/kinds-main-8e4d3287.patch
   BUSTER_MEASUREMENT_SHA256: 6d6a015f4e0bb0a082d377d05c48bb1082604b3e8d6f8fb58ebd51d0461605c1
   BUSTER_SNAPSHOT_PATCH: docs/measurements/tier1-dispatch-latch-2553-2026-11-26/scripts/snapshot-after-tags.patch
   BUSTER_SNAPSHOT_SHA256: 3b452cf9c9040e3acf1aaa15889e43d8b26ae96b7687062b6fa367a79bd3fe24
-  BUSTER_MODEL_REVISION: 44f2a6d2e238c93a0d99d2e8f9644b289ded20fc
-  BUSTER_MODEL_PATCH: docs/measurements/tier1-dispatch-latch-2553-2026-11-26/experiments/definition/definition-hints.patch
-  BUSTER_MODEL_SHA256: dac68a83e6697b1186b822ddb8bcb75c47651caa42d880864f7b5424b91bd438
+  BUSTER_MODEL_REVISION: 0bd0c6a02633502e213150a50de0b15c0e28c9e4
+  BUSTER_MODEL_PATCH: docs/measurements/tier1-dispatch-latch-2553-2026-11-26/experiments/definition-v2/definition-hints.patch
+  BUSTER_MODEL_SHA256: 8d87718046ee258b1a8705873547ba0f3dbad9a333bef9f82330e2010e06dbc3
   BUSTER_HOST_ARCH: vector
   BUSTER_SANITIZER: none
   BUSTER_DEBUG_INFO: '0'
@@ -46,7 +46,7 @@ env:
 
 jobs:
   products:
-    name: Build the definition candidate Release compiler on a hosted runner
+    name: Build the definition v2 candidate Release compiler on a hosted runner
     if: >-
       github.repository_id == '1421805693' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
@@ -68,7 +68,7 @@ jobs:
           set -euo pipefail
           [[ "$BUSTER_MODEL_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BUSTER_MODEL_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          record="$RUNNER_TEMP/tier1-definition-candidate-product"
+          record="$RUNNER_TEMP/tier1-definition-v2-candidate-product"
           mkdir -p "$record"
           {
               printf 'workflow_revision\t%s\n' "$(git rev-parse HEAD)"
@@ -91,10 +91,10 @@ jobs:
           lscpu > "$record/cpu.txt"
           cc -O0 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 \
               -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c \
-              -o "$RUNNER_TEMP/tier1-definition-probe"
+              -o "$RUNNER_TEMP/tier1-definition-v2-probe"
           # Diagnostic only: BUSTER_BAKE=0 keeps the target compiler from running on this builder.
           status=0
-          "$RUNNER_TEMP/tier1-definition-probe" | tee "$record/vector-probe.tsv" || status=$?
+          "$RUNNER_TEMP/tier1-definition-v2-probe" | tee "$record/vector-probe.tsv" || status=$?
           printf 'vector_probe_exit\t%s\n' "$status" >> "$record/identity.tsv"
 
       - name: Restore and verify pinned inputs for this single hosted job
@@ -105,7 +105,7 @@ jobs:
       - name: Install the pinned Clang 23.1.4 toolchain
         run: |
           set -euo pipefail
-          bash tools/ci/setup-hosted.sh 2>&1 | tee "$RUNNER_TEMP/tier1-definition-candidate-product/setup.log"
+          bash tools/ci/setup-hosted.sh 2>&1 | tee "$RUNNER_TEMP/tier1-definition-v2-candidate-product/setup.log"
 
       - name: Check out the exact candidate source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -117,10 +117,10 @@ jobs:
       - name: Verify the three patches and record the toolchain
         run: |
           set -euo pipefail
-          record="$RUNNER_TEMP/tier1-definition-candidate-product"
+          record="$RUNNER_TEMP/tier1-definition-v2-candidate-product"
           patch="$RUNNER_TEMP/tier1-kinds-2553.patch"
           capture_patch="$RUNNER_TEMP/tier1-cfg-snapshot-2553.patch"
-          model_patch="$RUNNER_TEMP/tier1-definition-model-2553.patch"
+          model_patch="$RUNNER_TEMP/tier1-definition-v2-model-2553.patch"
           curl --fail --location --silent --show-error --retry 2 --connect-timeout 15 --max-time 120 \
               "https://raw.githubusercontent.com/buster14a/buster-performance/$BUSTER_MEASUREMENT_REVISION/$BUSTER_MEASUREMENT_PATCH" \
               -o "$patch"
@@ -141,10 +141,10 @@ jobs:
       - name: Build the candidate with tags, snapshot and definition model
         run: |
           set -euo pipefail
-          record="$RUNNER_TEMP/tier1-definition-candidate-product"
+          record="$RUNNER_TEMP/tier1-definition-v2-candidate-product"
           patch="$RUNNER_TEMP/tier1-kinds-2553.patch"
           capture_patch="$RUNNER_TEMP/tier1-cfg-snapshot-2553.patch"
-          model_patch="$RUNNER_TEMP/tier1-definition-model-2553.patch"
+          model_patch="$RUNNER_TEMP/tier1-definition-v2-model-2553.patch"
           product="$record/candidate"
           mkdir -p "$product"
           cd "$GITHUB_WORKSPACE/measurement-candidate"
@@ -188,7 +188,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: tier1-definition-2553-candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/tier1-definition-candidate-product
+          name: tier1-definition-v2-2553-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tier1-definition-v2-candidate-product
           if-no-files-found: warn
           retention-days: 7
