@@ -61,6 +61,11 @@ requirements. [Command index](README.md).
   A register-class aggregate's fields stay in registers (#3311: SROA's
   widening, and the function's own scalar parameters and result; the [IR optimization
   guide](ir-optimization.md#register-class-aggregates-in-registers-3311)).
+  Fully defined private integer vector constructors also stay in registers
+  at AVX512F/BW/DQ/VL output targets (#3641), including distinct runtime
+  lanes, mixed constants and zero tails, in ordinary and inlined C bodies.
+  The [construction proof and regressions](ir-optimization.md#vectors-assembled-in-memory-1344-3641)
+  describe the supported shapes and conservative memory fallback.
   The convention's rarer aggregate shapes are taken; those of vectors still
   refuse explicitly ([the Tier 1 guide](../../docs/tier1.md)'s list). AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,

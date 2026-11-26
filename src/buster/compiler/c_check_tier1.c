@@ -30,6 +30,14 @@ _Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTE
                "Tier 1 reads Tier 0's access column");
 _Static_assert(BUSTER_TIER1_EMIT_LITERAL == BUSTER_EMITTED_LITERAL, "Tier 1's literals' targets are the emitted code's (#2744)");
 
+// #3641's runtime vector construction uses the existing EVEX lane inserts, splats and width changes. Preserve the
+// memory construction at narrower output targets, where those operations would introduce a selection refusal.
+static bool check_tier1_vector_construction(uint64_t features)
+{
+    const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL);
+    return (features & required) == required;
+}
+
 // The emitter's nested cause domains, indexed by Tier1EmitCause. The public emitter error wraps these; the outcome
 // keeps the nested cause and error too, and the full table is regression-tested below (test-check-lanes).
 static const CheckTier1Cause check_tier1_emission_causes[] = {
@@ -982,12 +990,17 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             lowered_verified = false;
         }
     }
-    if (stage == CHECK_TIER1_COMPILED && !own && !sroa && ((!expanding && lowered.parameter_passed != 0) || scalar_arguments != 0))
+    // #3641: a non-inlined body's vector literals need the same construction pass as an expanded body. The source's
+    // vector flag excludes COPY's synthetic vector pieces, and functions without slots have no private construction.
+    const bool vector_construction = check_tier1_vector_construction(target->features);
+    const bool vector_slots = function->vectors && lowered.slot_count != 0 && ir_function_has_vectors(&lowered);
+    if (stage == CHECK_TIER1_COMPILED && !own && !sroa && ((!expanding && (lowered.parameter_passed != 0 || (vector_construction && vector_slots))) || scalar_arguments != 0))
     {
         IrSroaOptions options = ir_sroa_options();
         options.simd = true;
         options.flagged = true;
         options.widen = true;
+        options.construct = vector_construction;
         IrSroaResult split = { 0 };
         const IrCheck check = ir_optimize_sroa(&lowered, &lane->steps[5], scratch, options, &split);
         const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
@@ -1011,6 +1024,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         options.simd = true;
         options.flagged = true;
         options.widen = true;
+        options.construct = vector_construction;
         IrSroaResult split = { 0 };
         const IrCheck check = ir_optimize_sroa(&lowered, &lane->steps[8], scratch, options, &split);
         const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;

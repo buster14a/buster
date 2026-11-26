@@ -747,6 +747,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         options.simd = true;
         options.flagged = true;
         options.widen = true;
+        options.construct = check_tier1_vector_construction(target->features);
         IrSroaResult split = { 0 };
         const IrCheck check = ir_optimize_sroa(&current, &lane->steps[5], scratch, options, &split);
         if (check.error == IR_OK && (split.split_slots != 0 || split.assembled != 0 || split.widened_slots != 0))
