@@ -911,7 +911,8 @@ static int run_ir_parse_tests(int argc, char** argv)
             ir_parse_test_catalog(&test, &source, &output, &scratch);
             for (uint32_t op = IR_CONST; op < IR_OP_COUNT; op += 1)
             {
-                ir_parse_test_expect(&test, test.operations[op], "canonical fixture coverage omitted an opcode");
+                // Asm body descriptors have diagnostic text only; a valid result projection cannot occur in text input.
+                ir_parse_test_expect(&test, test.operations[op] || op == IR_ASM_RESULT, "canonical fixture coverage omitted an opcode");
             }
             for (uint32_t type = IR_VOID; type < IR_TYPE_COUNT; type += 1)
             {

@@ -125,6 +125,8 @@ struct FilesTestRun
     uint64_t shared_found;
     uint64_t stderr_bytes;
     bool failed;
+    // Prepared records that no unit entered, counted during the reference's warm-cache replay.
+    uint32_t unused;
     FilesTestUnit* units;
     uint32_t unit_count;
 };
@@ -343,6 +345,27 @@ static bool files_test_same_value(const InternTable* x, const InternTable* y, bo
     return named ? files_test_same_id(x, y, opaque, a, b) : a == b;
 }
 
+// The recorded streams, including run status and diagnostics counts, and their first differing token. Equal ids can
+// compare as whole columns; a difference keeps the original token scan for the diagnostic's exact position. Opaque
+// ids still compare through their spellings, since their numbers intentionally differ between the two tables.
+static bool files_test_same_stream(const FilesTestUnit* a, const FilesTestUnit* b, const InternTable* x, const InternTable* y, bool opaque, uint32_t* at)
+{
+    const uint32_t count = a->count;
+    const uint32_t other_count = b->count;
+    const bool columns = !opaque && count == other_count && (count == 0 ||
+                         (memcmp(a->kinds, b->kinds, count) == 0 && memcmp(a->flags, b->flags, count) == 0 &&
+                          memcmp(a->values, b->values, (uint64_t)count * sizeof(uint32_t)) == 0 &&
+                          memcmp(a->locations, b->locations, (uint64_t)count * sizeof(uint32_t)) == 0));
+    uint32_t i = columns ? count : 0;
+    while (i < count && i < other_count && a->kinds[i] == b->kinds[i] && a->flags[i] == b->flags[i] && a->locations[i] == b->locations[i] &&
+           files_test_same_value(x, y, opaque, a->kinds[i], a->values[i], b->values[i]))
+    {
+        i += 1;
+    }
+    *at = i;
+    return a->ran == b->ran && a->errors == b->errors && a->warnings == b->warnings && i == count && i == other_count;
+}
+
 // Are two records' prepared fields the same, byte for byte? With `opaque`, but for their ids: each identifier's value and
 // the guard, ids of the records' tables (x and y), are compared by files_test_same_id.
 static bool files_test_same_record(const PPFileData* a, const PPFileData* b, const InternTable* x, const InternTable* y, bool opaque)
@@ -387,7 +410,7 @@ static bool files_test_same_text(const FilesTestWork* work, const char* unit, co
                                  size_t b_length)
 {
     const bool result = a_length == b_length && (a_length == 0 || memcmp(a, b, a_length) == 0);
-    if (!result)
+    if (!result && !pp_test_quiet)
     {
         size_t at = 0;
         while (at < a_length && at < b_length && a[at] == b[at])
@@ -449,12 +472,7 @@ static bool files_test_same(const FilesTestWork* work, const FilesTestRun* refer
         const FilesTestUnit* a = &reference->units[u];
         const FilesTestUnit* b = &other->units[u];
         uint32_t i = 0;
-        while (i < a->count && i < b->count && a->kinds[i] == b->kinds[i] && a->flags[i] == b->flags[i] && a->locations[i] == b->locations[i] &&
-               files_test_same_value(x, y, opaque, a->kinds[i], a->values[i], b->values[i]))
-        {
-            i += 1;
-        }
-        const bool streams = a->ran == b->ran && a->errors == b->errors && a->warnings == b->warnings && i == a->count && i == b->count;
+        const bool streams = files_test_same_stream(a, b, x, y, opaque, &i);
         if (!streams)
         {
             printf("%s: %s's stream differs %s at token %u of %u/%u (errors %u/%u, warnings %u/%u)\n", work->name, work->units[u], how, i, b->count, a->count, b->errors,
@@ -498,13 +516,210 @@ static bool files_test_same_names(const FilesTestWork* work, const FilesTestRun*
     return result;
 }
 
+// Records the prepared files that a unit entered. Warm replays normally add no record, but grow the bitmap if they
+// do, so files found by a computed include are accounted for at the cache's final record count too.
+static bool files_test_mark_used(const PPFileData* datas, uint32_t data_count, uint32_t record_count, uint8_t** used, uint32_t* used_count)
+{
+    bool result = true;
+    if (record_count > *used_count)
+    {
+        uint8_t* grown = realloc(*used, (size_t)record_count);
+        result = grown != 0;
+        if (result)
+        {
+            memset(grown + *used_count, 0, (size_t)record_count - *used_count);
+            *used = grown;
+            *used_count = record_count;
+        }
+    }
+    uint8_t* marked = *used;
+    for (uint32_t d = 0; result && d < data_count; d += 1)
+    {
+        const uint32_t record = datas[d].record;
+        if (record < record_count && datas[d].prepared)
+        {
+            marked[record] = 1;
+        }
+    }
+    return result;
+}
+
+static uint32_t files_test_unused(const PPFileData* records, const uint8_t* used, uint32_t count)
+{
+    uint32_t unused = 0;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        unused += records[r].prepared && used[r] == 0;
+    }
+    return unused;
+}
+
+// Negative controls for the comparisons themselves: each column, outcome and diagnostic must still matter after
+// comparing equal columns in bulk, and a warm replay's used-file marks must survive growth and exclude unprepared data.
+static bool files_test_comparisons(void)
+{
+    enum { tokens = 65 };
+    uint8_t kinds[2][tokens];
+    uint8_t flags[2][tokens];
+    uint32_t values[2][tokens];
+    uint32_t locations[2][tokens];
+    InternTable tables[2] = { 0 };
+    bool result = intern_initialize(&tables[0]) && intern_initialize(&tables[1]);
+    const char alpha[] = "files_compare_alpha";
+    const char beta[] = "files_compare_beta";
+    IdentId ids[2][2] = { 0 };
+    if (result)
+    {
+        ids[0][0] = intern_find_or_add(&tables[0], (const uint8_t*)alpha, sizeof(alpha) - 1);
+        ids[0][1] = intern_find_or_add(&tables[0], (const uint8_t*)beta, sizeof(beta) - 1);
+        ids[1][1] = intern_find_or_add(&tables[1], (const uint8_t*)beta, sizeof(beta) - 1);
+        ids[1][0] = intern_find_or_add(&tables[1], (const uint8_t*)alpha, sizeof(alpha) - 1);
+        result = ids[0][0] != 0 && ids[0][1] != 0 && ids[1][0] != 0 && ids[1][1] != 0 && ids[0][0] != ids[1][0];
+    }
+    const FilesTestUnit a = {
+        .kinds = kinds[0],
+        .flags = flags[0],
+        .values = values[0],
+        .locations = locations[0],
+        .count = tokens,
+        .errors = 2,
+        .warnings = 3,
+        .ran = true,
+    };
+    FilesTestUnit b = a;
+    b.kinds = kinds[1];
+    b.flags = flags[1];
+    b.values = values[1];
+    b.locations = locations[1];
+    const uint32_t places[] = { 0, 1, 2, 15, 16, 63, 64 };
+    for (uint32_t opaque = 0; result && opaque < 2; opaque += 1)
+    {
+        for (uint32_t t = 0; t < tokens; t += 1)
+        {
+            kinds[0][t] = kinds[1][t] = t % 3 == 0 ? C_TOKEN_RAW_IDENTIFIER : t % 3 == 1 ? BUSTER_PP_KIND_KEYWORD : C_TOKEN_NUMERIC_CONSTANT;
+            flags[0][t] = flags[1][t] = (uint8_t)(t & 1);
+            values[0][t] = t % 3 == 0 ? ids[0][0] : t % 3 == 1 ? C_NAME_INT : 1000 + t;
+            values[1][t] = t % 3 == 0 ? ids[opaque][0] : values[0][t];
+            locations[0][t] = locations[1][t] = 2000 + t;
+        }
+        uint32_t at = 0;
+        result = files_test_same_stream(&a, &b, &tables[0], &tables[opaque], opaque != 0, &at) && at == tokens;
+        for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(places); p += 1)
+        {
+            const uint32_t t = places[p];
+            kinds[1][t] ^= 1;
+            result &= !files_test_same_stream(&a, &b, &tables[0], &tables[opaque], opaque != 0, &at) && at == t;
+            kinds[1][t] ^= 1;
+            flags[1][t] ^= 1;
+            result &= !files_test_same_stream(&a, &b, &tables[0], &tables[opaque], opaque != 0, &at) && at == t;
+            flags[1][t] ^= 1;
+            const uint32_t value = values[1][t];
+            values[1][t] = t % 3 == 0 ? ids[opaque][1] : value + 1;
+            result &= !files_test_same_stream(&a, &b, &tables[0], &tables[opaque], opaque != 0, &at) && at == t;
+            values[1][t] = value;
+            locations[1][t] ^= 1;
+            result &= !files_test_same_stream(&a, &b, &tables[0], &tables[opaque], opaque != 0, &at) && at == t;
+            locations[1][t] ^= 1;
+        }
+        flags[1][1] ^= 1;
+        locations[1][64] ^= 1;
+        result &= !files_test_same_stream(&a, &b, &tables[0], &tables[opaque], opaque != 0, &at) && at == 1;
+        flags[1][1] ^= 1;
+        locations[1][64] ^= 1;
+        b.ran = false;
+        result &= !files_test_same_stream(&a, &b, &tables[0], &tables[opaque], opaque != 0, &at) && at == tokens;
+        b.ran = true;
+        b.errors += 1;
+        result &= !files_test_same_stream(&a, &b, &tables[0], &tables[opaque], opaque != 0, &at) && at == tokens;
+        b.errors -= 1;
+        b.warnings += 1;
+        result &= !files_test_same_stream(&a, &b, &tables[0], &tables[opaque], opaque != 0, &at) && at == tokens;
+        b.warnings -= 1;
+        b.count -= 1;
+        result &= !files_test_same_stream(&a, &b, &tables[0], &tables[opaque], opaque != 0, &at) && at == tokens - 1;
+        b.count += 1;
+    }
+    const FilesTestUnit empty = { 0 };
+    uint32_t at = 1;
+    result &= files_test_same_stream(&empty, &empty, &tables[0], &tables[0], false, &at) && at == 0;
+    intern_release(&tables[1]);
+    intern_release(&tables[0]);
+    const FilesTestWork work = { .name = "comparison controls" };
+    const char diagnostic[] = "original diagnostic\n";
+    char changed[sizeof(diagnostic)];
+    memcpy(changed, diagnostic, sizeof(diagnostic));
+    const bool quiet = pp_test_quiet;
+    pp_test_quiet = true;
+    result &= files_test_same_text(&work, "unit", "diagnostics", "control", diagnostic, sizeof(diagnostic) - 1, changed, sizeof(changed) - 1);
+    changed[0] ^= 1;
+    result &= !files_test_same_text(&work, "unit", "diagnostics", "control", diagnostic, sizeof(diagnostic) - 1, changed, sizeof(changed) - 1);
+    changed[0] ^= 1;
+    result &= !files_test_same_text(&work, "unit", "diagnostics", "control", diagnostic, sizeof(diagnostic) - 1, changed, sizeof(changed) - 2);
+    pp_test_quiet = quiet;
+    const PPFileData records[] = {
+        { .prepared = true },
+        { .prepared = true },
+        { .prepared = false },
+        { .prepared = true },
+        { .prepared = true },
+    };
+    const PPFileData first[] = {
+        {
+            .record = 0,
+            .prepared = true,
+        },
+        {
+            .record = 1,
+            .prepared = false,
+        },
+        {
+            .record = BUSTER_PP_NONE,
+            .prepared = true,
+        },
+    };
+    const PPFileData later[] = {
+        {
+            .record = 3,
+            .prepared = true,
+        },
+        {
+            .record = 4,
+            .prepared = true,
+        },
+    };
+    uint8_t* used = 0;
+    uint32_t used_count = 0;
+    const bool marked = files_test_mark_used(first, BUSTER_ARRAY_LENGTH(first), 3, &used, &used_count) &&
+                        files_test_mark_used(later, BUSTER_ARRAY_LENGTH(later), BUSTER_ARRAY_LENGTH(records), &used, &used_count);
+    result &= marked;
+    if (marked)
+    {
+        result &= used_count == BUSTER_ARRAY_LENGTH(records) && files_test_unused(records, used, used_count) == 1;
+        used[0] = 0;
+        result &= files_test_unused(records, used, used_count) == 2;
+        used[0] = 1;
+        used[1] = 1;
+        result &= files_test_unused(records, used, used_count) == 0;
+    }
+    free(used);
+    if (!result)
+    {
+        printf("comparisons: a stream, diagnostic or used-file corruption escaped its check\n");
+    }
+    return result;
+}
+
 // Each of the work's units with a cache of its own, against the same unit with the reference run's cache: the same
-// spellings, errors, warnings and diagnostics.
-static bool files_test_alone(const FilesTestWork* work, const FilesTestRun* reference)
+// spellings, errors, warnings and diagnostics. Keep this warm-cache replay after all units populated the shared cache,
+// with the work's original expansion-starts option; the first recorded runs enable that option for line markers.
+// Its live preprocessors also mark the used records, which otherwise needed another identical warm replay.
+static bool files_test_alone(const FilesTestWork* work, FilesTestRun* reference)
 {
     static Preprocessor alone;
     static Preprocessor cached;
     static InternTable alone_table;
+    uint8_t* used = 0;
+    uint32_t used_count = 0;
     bool result = true;
     for (uint32_t u = 0; u < work->unit_count; u += 1)
     {
@@ -516,9 +731,9 @@ static bool files_test_alone(const FilesTestWork* work, const FilesTestRun* refe
         options.diagnostics = streams[0];
         bool same = streams[0] != 0 && streams[1] != 0 && intern_initialize(&alone_table) && pp_initialize(&alone, &options, &alone_table);
         const bool alone_ran = same && pp_run(&alone, work->units[u]);
-        options.files = (FileCache*)&reference->cache;
+        options.files = &reference->cache;
         options.diagnostics = streams[1];
-        same = same && pp_initialize(&cached, &options, (InternTable*)&reference->table);
+        same = same && pp_initialize(&cached, &options, &reference->table);
         const bool cached_ran = same && pp_run(&cached, work->units[u]);
         PPSpellings ours = { 0 };
         PPSpellings theirs = { 0 };
@@ -531,6 +746,8 @@ static bool files_test_alone(const FilesTestWork* work, const FilesTestRun* refe
         }
         arena_release(&ours.arena);
         arena_release(&theirs.arena);
+        const bool marked = files_test_mark_used(cached.datas, cached.data_count, reference->cache.record_count, &used, &used_count);
+        same = same && marked;
         pp_release(&alone);
         pp_release(&cached);
         intern_release(&alone_table);
@@ -543,6 +760,8 @@ static bool files_test_alone(const FilesTestWork* work, const FilesTestRun* refe
         free(texts[1]);
         result = result && same;
     }
+    reference->unused = files_test_unused(reference->cache.records, used, used_count);
+    free(used);
     return result;
 }
 
@@ -617,51 +836,6 @@ static bool files_test_work(const FilesTestWork* work, const uint32_t* lanes, ui
     {
         printf("%s: the walk wrote %lu bytes to stderr\n", work->name, (unsigned long)reference->stderr_bytes);
     }
-    return result;
-}
-
-// The records the walk prepared that no unit entered: counted through units run again with the reference's cache, each
-// record a unit prepares marked. The walk's records come first: a unit may add others after them (the predefines'
-// file, a computed include's), which aren't counted.
-static uint32_t files_test_unused(const FilesTestWork* work, FilesTestRun* reference)
-{
-    static Preprocessor unit;
-    const uint32_t walked = reference->cache.record_count;
-    uint8_t* used = calloc((size_t)walked + 1, 1);
-    uint32_t result = 0;
-    // The units' diagnostics, which files_test_run compared, go to memory unread.
-    char* text = 0;
-    size_t length = 0;
-    FILE* diagnostics = open_memstream(&text, &length);
-    PPOptions options = work->options;
-    options.files = &reference->cache;
-    options.diagnostics = diagnostics;
-    for (uint32_t u = 0; used != 0 && diagnostics != 0 && u < work->unit_count; u += 1)
-    {
-        if (pp_initialize(&unit, &options, &reference->table))
-        {
-            pp_run(&unit, work->units[u]);
-            for (uint32_t d = 0; d < unit.data_count; d += 1)
-            {
-                const uint32_t record = unit.datas[d].record;
-                if (record < walked && unit.datas[d].prepared)
-                {
-                    used[record] = 1;
-                }
-            }
-        }
-        pp_release(&unit);
-    }
-    for (uint32_t r = 0; used != 0 && r < walked; r += 1)
-    {
-        result += reference->cache.records[r].prepared && used[r] == 0;
-    }
-    if (diagnostics != 0)
-    {
-        fclose(diagnostics);
-    }
-    free(text);
-    free(used);
     return result;
 }
 
@@ -772,7 +946,7 @@ static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32
     {
         // 13 files: the units, then a.h (reached as a.h, sub/../a.h and link.h), sys1.h, b.h, unused.h, hard.h (c.h,
         // which main1's computed include names), once.h, guarded.h and I1's next.h, then I2's, then I3's.
-        const uint32_t unused = files_test_unused(&work, &reference);
+        const uint32_t unused = reference.unused;
         const bool counts = reference.prepared == 13 && reference.rounds == 4 && reference.absent == 2 && unused == 1;
         // After the walk, main1 opens only c.h (its computed include), and the others open nothing; main3 reports nope.h,
         // main1 and main2 warn in b.h, and main2 about NEXT2.
@@ -1806,7 +1980,7 @@ static bool files_test_files(const PPOptions* options, const char* const* files,
     }
     else if (result)
     {
-        const uint32_t unused = files_test_unused(&work, &reference);
+        const uint32_t unused = reference.unused;
         uint64_t opens = 0;
         uint64_t tokens = 0;
         for (uint32_t u = 0; u < count; u += 1)
@@ -2006,6 +2180,7 @@ static int run_files_tests(int argument_count, char** arguments)
     }
     if (passed_all && file_count == 0)
     {
+        passed_all &= files_test_comparisons();
         passed_all &= files_test_sources(directory);
         for (uint32_t way = 0; way < 4; way += 1)
         {

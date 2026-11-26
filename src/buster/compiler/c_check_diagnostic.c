@@ -248,6 +248,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_FORMAT_NONLITERAL] = { "-Wformat-nonliteral", "-Wformat=2", "format string is not a string literal" },
     [CHECK_WARNING_ID_FORMAT_ZERO_LENGTH] = { "-Wformat-zero-length", "-Wformat", "format string is empty" },
     [CHECK_WARNING_ID_MISSING_FORMAT_ATTRIBUTE] = { "-Wmissing-format-attribute", "-Wformat-nonliteral", "function may benefit from a format attribute" },
+    [CHECK_WARNING_ID_MISSING_VARIABLE_DECLARATIONS] = { "-Wmissing-variable-declarations", NULL, "no previous extern declaration for non-static variable" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

@@ -268,7 +268,6 @@ static const char* const pp_warning_unimplemented[] =
     "float-equal",
     "implicit-fallthrough",
     "missing-prototypes",
-    "missing-variable-declarations",
     "nested-externs",
     "pointer-arith",
     "redundant-decls",

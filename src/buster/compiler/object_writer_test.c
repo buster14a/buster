@@ -13,8 +13,8 @@
 //     for what the programs don't have) and a link without atoms, each unit's object built in memory with and without
 //     function sections, and again over bytes set to BUSTER_OBJECT_TEST_POISON, which must come out the same
 //     (object_build writes every byte). object_view_open reads each one back and checks the rules every object keeps:
-//     the header's fixed fields (EI_OSABI ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC or a section has
-//     SHF_GNU_RETAIN), section headers
+//     the header's fixed fields (EI_OSABI ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC or STB_GNU_UNIQUE,
+//     or a section has SHF_GNU_RETAIN), section headers
 //     and contents inside the file, aligned and apart, names in .shstrtab, one symbol table with its locals before
 //     sh_info, symbols inside their sections, extended indices exactly where st_shndx is SHN_XINDEX, and relocation
 //     sections tied to the symbol table and a section with contents, in offset order, against a symbol, over zero
@@ -506,7 +506,7 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
         }
     }
 
-    // Each symbol: locals before sh_info and globals and weaks from it, a name inside .strtab, and a section index that
+    // Each symbol: locals before sh_info and globals, weaks and uniques from it, a name inside .strtab, and a section index that
     // is reserved or names a section, through .symtab_shndx exactly when st_shndx is SHN_XINDEX.
     if (valid)
     {
@@ -527,7 +527,7 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
         // Reserved by st_shndx itself: an index read from .symtab_shndx can be any number, SHN_COMMON's among them.
         const bool extended = symbol->st_shndx == SHN_XINDEX;
         const bool reserved = !extended && (section == SHN_UNDEF || section == SHN_ABS || section == SHN_COMMON);
-        bool symbol_valid = i < first_global ? binding == STB_LOCAL : binding == STB_GLOBAL || binding == STB_WEAK;
+        bool symbol_valid = i < first_global ? binding == STB_LOCAL : binding == STB_GLOBAL || binding == STB_WEAK || binding == STB_GNU_UNIQUE;
         symbol_valid = symbol_valid && object_view_string(view->symbol_names, view->symbol_names_size, symbol->st_name) != 0 && (symbol->st_other & ~3u) == 0;
         symbol_valid = symbol_valid && extended == (view->extended_indices != 0 && view->extended_indices[i] != 0) &&
                        (!extended || view->extended_indices[i] >= SHN_LORESERVE);
@@ -549,22 +549,23 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
                      symbol->st_shndx, (unsigned long long)section, (unsigned long long)symbol->st_value, (unsigned long long)symbol->st_size);
         }
     }
-    // EI_OSABI: ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC or a section has SHF_GNU_RETAIN, as GNU as and
+    // EI_OSABI: ELFOSABI_GNU for STT_GNU_IFUNC, STB_GNU_UNIQUE or SHF_GNU_RETAIN, as GNU as and
     // LLVM mark it.
     bool ifunc = false;
+    bool unique = false;
     for (uint64_t i = 1; valid && i < view->symbol_count; i += 1)
     {
         ifunc = ifunc || ELF64_ST_TYPE(view->symbols[i].st_info) == STT_GNU_IFUNC;
+        unique = unique || ELF64_ST_BIND(view->symbols[i].st_info) == STB_GNU_UNIQUE;
     }
     bool retained = false;
     for (uint64_t i = 1; valid && i < view->section_count; i += 1)
     {
         retained = retained || (view->sections[i].sh_flags & SHF_GNU_RETAIN) != 0;
     }
-    if (valid && header->e_ident[EI_OSABI] != (ifunc || retained ? ELFOSABI_GNU : ELFOSABI_SYSV))
+    if (valid && header->e_ident[EI_OSABI] != (ifunc || unique || retained ? ELFOSABI_GNU : ELFOSABI_SYSV))
     {
-        snprintf(error, error_size, "EI_OSABI is %u, and the object has %s STT_GNU_IFUNC symbol and %s SHF_GNU_RETAIN section", header->e_ident[EI_OSABI],
-                 ifunc ? "an" : "no", retained ? "an" : "no");
+        snprintf(error, error_size, "EI_OSABI is %u, with IFUNC=%u, UNIQUE=%u, RETAIN=%u", header->e_ident[EI_OSABI], ifunc, unique, retained);
         valid = false;
     }
 
@@ -1382,6 +1383,7 @@ static const ObjectTestName readelf_bindings[] = {
     { "LOCAL", STB_LOCAL },
     { "GLOBAL", STB_GLOBAL },
     { "WEAK", STB_WEAK },
+    { "UNIQUE", STB_GNU_UNIQUE },
 };
 
 static const ObjectTestName readelf_visibilities[] = {
@@ -3179,7 +3181,9 @@ static bool object_test_same_section_identity(const ObjectView* a, uint64_t i, c
     const uint64_t b_data = b_section->sh_type == SHT_RELA ? b_section->sh_info : j;
     const bool a_ordered = a_data < a->section_count && (a->sections[a_data].sh_flags & SHF_LINK_ORDER) != 0;
     const bool b_ordered = b_data < b->section_count && (b->sections[b_data].sh_flags & SHF_LINK_ORDER) != 0;
-    bool same = a_section->sh_type == b_section->sh_type &&
+    bool same = a_section->sh_type == b_section->sh_type && a_section->sh_flags == b_section->sh_flags && a_section->sh_entsize == b_section->sh_entsize &&
+                a_data < a->section_count && b_data < b->section_count && a->sections[a_data].sh_type == b->sections[b_data].sh_type &&
+                a->sections[a_data].sh_flags == b->sections[b_data].sh_flags && a->sections[a_data].sh_entsize == b->sections[b_data].sh_entsize &&
                 object_test_same_string(object_view_section_name(a, i), object_view_section_name(b, j)) &&
                 object_test_same_string(object_test_section_group(a, i), object_test_section_group(b, j)) &&
                 a_ordered == b_ordered;
@@ -3196,24 +3200,45 @@ static bool object_test_same_section_identity(const ObjectView* a, uint64_t i, c
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
+// A named symbol defined in the section (the data section for relocations): the first when `name` is null, otherwise
+// that exact name. Such a definition identifies equal descriptors even when two writers order their sections apart.
+static const char* object_test_section_anchor(const ObjectView* view, uint64_t index, const char* name)
+{
+    const uint64_t data = view->sections[index].sh_type == SHT_RELA ? view->sections[index].sh_info : index;
+    const char* result = NULL;
+    for (uint64_t s = 1; result == NULL && s < view->symbol_count; s += 1)
+    {
+        const Elf64_Sym* symbol = &view->symbols[s];
+        const uint32_t type = ELF64_ST_TYPE(symbol->st_info);
+        const bool defined = symbol->st_shndx != SHN_UNDEF && symbol->st_shndx != SHN_ABS && symbol->st_shndx != SHN_COMMON;
+        if (defined && type != STT_SECTION && type != STT_FILE && !object_test_unnamed(view, s) && object_view_symbol_section(view, s) == data)
+        {
+            const char* candidate = object_view_string(view->symbol_names, view->symbol_names_size, view->symbols[s].st_name);
+            result = candidate != NULL && candidate[0] != 0 && (name == NULL || strcmp(name, candidate) == 0) ? candidate : NULL;
+        }
+    }
+    return result;
+}
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static uint64_t object_test_matching_section(const ObjectView* view, const ObjectView* source, uint64_t index)
 {
-    // Repeated linked-order names can even refer to the same code section. Pair their occurrences in object order.
-    const Elf64_Shdr* section = &source->sections[index];
-    const uint64_t data = section->sh_type == SHT_RELA ? section->sh_info : index;
-    const bool ordered = data < source->section_count && (source->sections[data].sh_flags & SHF_LINK_ORDER) != 0;
+    // Repeated names with explicit unique IDs can have identical ELF attributes, as linked-order sections can even
+    // refer to the same code section. A named definition pairs them independently of section order; without one,
+    // pair only unanchored occurrences. A missing named definition must not fall back to another section.
+    const char* anchor = object_test_section_anchor(source, index, NULL);
     uint64_t occurrence = 0;
-    for (uint64_t i = 1; ordered && i < index; i += 1)
+    for (uint64_t i = 1; anchor == NULL && i < index; i += 1)
     {
-        occurrence += object_test_same_section_identity(source, i, source, index);
+        occurrence += object_test_same_section_identity(source, i, source, index) && object_test_section_anchor(source, i, NULL) == NULL;
     }
     uint64_t result = 0;
     for (uint64_t i = 1; result == 0 && i < view->section_count; i += 1)
     {
-        if (object_test_same_section_identity(view, i, source, index))
+        if (object_test_same_section_identity(view, i, source, index) && (anchor != NULL || object_test_section_anchor(view, i, NULL) == NULL))
         {
-            result = occurrence == 0 ? i : 0;
-            occurrence -= occurrence != 0;
+            result = anchor != NULL ? (object_test_section_anchor(view, i, anchor) != NULL ? i : 0) : occurrence == 0 ? i : 0;
+            occurrence -= anchor == NULL && occurrence != 0;
         }
     }
     return result;

@@ -733,6 +733,7 @@ struct CheckLowerWrapperFrame
     bool bound;
 };
 
+typedef struct CheckLowerTransparent CheckLowerTransparent;
 typedef struct CheckLowerWriter CheckLowerWriter;
 struct CheckLowerWriter
 {
@@ -1038,9 +1039,10 @@ struct CheckLowerWriter
     uint64_t runtime_mask[(CHECK_LOWER_RUNTIMES + 63) / 64];
     uint32_t runtime_count;
     uint16_t* runtimes;
-    // The first token where clang's code may classify a function's type (check_lower_first_classification), plus one: 0
-    // until the writer first asks.
-    uint64_t first_classification;
+    // Immutable signature emission points and ordinary-union ABI rows (#1844); the body's own codegen point is
+    // separate from a signature's cached first arrangement, and decides va_arg's view of a late attribute.
+    const CheckLowerTransparent* transparent;
+    uint32_t emission_point;
     // #1048's inventory: each entry's owner in place of its token (CheckLowerOwners), with `sources`; null otherwise.
     CheckLowerOwners* owners;
     // #1048's node templates (c_check_program_templates.c): whether the writer takes them (`templates`, its columns
@@ -1408,7 +1410,7 @@ static uint32_t check_lower_vector_register_bytes(uint64_t features)
 }
 
 // The non-asm machine-operation allowance (CheckLowerWriter.operations), and vector constants. Each lane also
-// reserves one operation per placed asm statement in the largest body (CheckProgramAsms.row_capacity, #1359).
+// reserves placed asm rows and secondary result projections in the largest body (CheckProgramAsms.row_capacity).
 #define BUSTER_CHECK_LOWER_OPERATIONS 4096u
 #define BUSTER_CHECK_LOWER_VECTOR_CONSTANTS 4096u
 
@@ -2218,123 +2220,49 @@ static uint8_t check_lower_transparent_class(const CheckLowerWriter* writer, Typ
     return value && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 ? class : UINT8_MAX;
 }
 
-// Whether static object declaration `token`'s initializer names a function (check_lower_first_classification): one of
-// its tokens bound to a function's declaration.
-static bool check_lower_initializer_names_function(const CheckInput* input, uint32_t token)
-{
-    const uint32_t count = input->token_count;
-    const uint32_t end = check_sparse_get(input->initializer_ends, token) < count ? check_sparse_get(input->initializer_ends, token) : count;
-    bool named = false;
-    for (uint32_t use = check_sparse_get(input->initializer_begins, token); use < end && !named; use += 1)
-    {
-        const uint32_t declaration = input->declarations[use];
-        named = declaration < count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
-    }
-    return named;
-}
-
-// The first token where clang's code may classify a function's type, which it keeps for the type's every use
-// (check_lower_transparent_late), or UINT32_MAX for a unit with none: the first function definition's body, or a static
-// object's initializer before it that names a function, whose address clang's code takes where it emits the object, at
-// its definition. clang 23.1.4 passes a union to `int f(union U)` as the union after `int (*p)(union U) = f;`, though a
-// later declaration makes it transparent before any definition. Every such initializer counts, though clang's code
-// emits a static object's when a function first uses it, and so does every function, though only the function's own
-// type keeps its classification: the earliest place clang's code may classify, so that a union it may pass either way
-// is refused. A lane's writer finds it the first time it asks (CheckLowerWriter.first_classification), which only a
-// transparent union whose first member passes otherwise than it makes it do. AVX-512 finds the static objects'
-// declarations with initializers 16 tokens at a time and tests the rest one at a time.
-static __attribute__((noinline)) uint32_t check_lower_first_classification(CheckLowerWriter* writer)
-{
-    if (writer->first_classification == 0)
-    {
-        const CheckProgram* program = writer->program;
-        const CheckInput* input = program->input;
-        const uint32_t limit = program->body_count != 0 ? program->bodies[0].opening : input->token_count;
-        const uint32_t none = program->body_count != 0 ? limit : UINT32_MAX;
-        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        uint32_t found = none;
-        uint32_t token = 0;
-        for (; found == none && limit - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
-        {
-            const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)token), lanes);
-            const __mmask16 initialized = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(input->declarations + token), tokens) &
-                                          _mm_test_epi8_mask(_mm_loadu_si128((const __m128i*)(input->declaration_bits + token)), _mm_set1_epi8((char)BUSTER_CHECK_BITS_STATIC)) &
-                                          _mm512_cmplt_epu32_mask(check_sparse_vector(input->initializer_begins, token), check_sparse_vector(input->initializer_ends, token));
-            for (uint32_t bits = initialized; bits != 0 && found == none; bits &= bits - 1)
-            {
-                const uint32_t declaration = token + (uint32_t)__builtin_ctz(bits);
-                found = check_lower_initializer_names_function(input, declaration) ? declaration : none;
-            }
-        }
-        for (; found == none && token < limit; token += 1)
-        {
-            if (input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && check_sparse_get(input->initializer_begins, token) < check_sparse_get(input->initializer_ends, token) &&
-                check_lower_initializer_names_function(input, token))
-            {
-                found = token;
-            }
-        }
-        writer->first_classification = (uint64_t)found + 1;
-    }
-    return (uint32_t)(writer->first_classification - 1);
-}
-
-// Whether a transparent union was made so, by a later declaration's attribute (CheckGraph.transparent_unions has its
-// activation's token), after clang's code may have classified a function's type (check_lower_first_classification).
-// clang's code classifies a function's type the first time it meets it and keeps that for the type's every use: a type
-// met before the attribute passes the union as the union, after it too.
-static bool check_lower_transparent_late(CheckLowerWriter* writer, TypeId type)
-{
-    const CheckProgram* program = writer->program;
-    const CheckGraph* graph = &program->input->graph;
-    const uint32_t tag = program->types->types.index[type_index(type_strip_aligned(program->types, type))];
-    return graph->transparent_unions != NULL && tag < graph->tag_completion_count && graph->transparent_unions[tag] > check_lower_first_classification(writer);
-}
+// Source-time ABI arrangements shared by every lowering lane (#1844).
+#include "c_check_program_transparent.c"
 
 // Why a struct or a union can't pass as a transparent union's first member (check_lower_passed_as), or NULL (another's
 // passes as itself). A transparent union passes so where it has that member's size and alignment; one that an aligned
 // or packed attribute of its own sizes or aligns otherwise passes as clang's code passes it, its registers the member's
-// and its stack slot the union's (getIndirectResult, AbiTable.transparent, #1844), where the member is a scalar or an
-// aggregate of eightbytes, a pair, a vector of 16 bytes or an aggregate in memory, of any size, and is refused for
-// another member (a vector wider than 16 bytes, an _Atomic value in memory: abi_finish_transparent). And where the union
-// was made transparent after clang's code may have classified a function's type (check_lower_transparent_late) and its
-// first member passes otherwise than it (its registers, its stack or its extension), clang's code may pass it as either.
+// and its stack slot the union's (getIndirectResult, AbiTable.transparent, #1844), including wide vectors and atomic
+// members supported by the target. A signature arranged before the attribute keeps the ordinary union's ABI row.
 // Out of line: only aggregates ask.
-static __attribute__((noinline)) const char* check_lower_transparent_passed(CheckLowerWriter* writer, TypeId type)
+static __attribute__((noinline)) const char* check_lower_transparent_passed(CheckLowerWriter* writer, TypeId type, uint32_t point)
 {
     const AbiTable* table = writer->abi_table;
     const uint32_t places = BUSTER_ABI_PASS_REGISTER_CLASSES | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_UNCOUNTED |
-                            BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_SIGN | BUSTER_ABI_PASS_ZERO | BUSTER_ABI_PASS_LOW_GENERAL;
+                            BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_SIGN | BUSTER_ABI_PASS_ZERO | BUSTER_ABI_PASS_LOW_GENERAL |
+                            BUSTER_ABI_PASS_END_MEMORY | BUSTER_ABI_PASS_GROWN | BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_SMALLER;
     const uint32_t own = type_index(type);
     const TypeId member = check_lower_transparent(writer, type);
     const uint32_t first = member != 0 ? type_index(member) : own;
     const bool own_slot = table->transparent[own] != 0;
     const char* feature = NULL;
-    if (!own_slot && (table->stack_bytes[own] != table->stack_bytes[first] || table->alignment_log2[own] != table->alignment_log2[first]))
+    if (member != 0 && check_lower_transparent_active(writer, type, point) && !own_slot &&
+        (table->stack_bytes[own] != table->stack_bytes[first] || table->alignment_log2[own] != table->alignment_log2[first]))
     {
-        feature = "transparent unions sized or aligned otherwise than their first member, a vector wider than 16 bytes or an _Atomic value";
+        feature = "transparent unions with a first member unsupported by the target calling convention";
     }
-    else if (own_slot && check_lower_transparent_late(writer, type))
+    else if (member != 0 && writer->transparent != NULL && writer->transparent->unmodeled_attributes &&
+             ((table->pass[own] ^ table->pass[first]) & places) != 0 && !check_lower_transparent_active(writer, type, writer->transparent->first))
     {
-        feature = "unions made transparent after a function definition or an initializer naming a function, of a stack slot of their own";
-    }
-    else if (first != own && ((table->pass[own] ^ table->pass[first]) & places) != 0 && check_lower_transparent_late(writer, type))
-    {
-        feature = "unions made transparent after a function definition or an initializer naming a function, whose first members pass otherwise";
+        feature = "late transparent unions with regparm, noescape, object-size or retained-result function attributes";
     }
     return feature;
 }
 
 // Why an argument or a parameter of this type can't be passed, or NULL: a value of a class, or a struct or a union (and a
 // transparent union as its first member, check_lower_transparent_passed).
-static const char* check_lower_passed(CheckLowerWriter* writer, TypeId type)
+static const char* check_lower_passed_at(CheckLowerWriter* writer, TypeId type, uint32_t point)
 {
     const TypeTable* types = writer->program->types;
     const char* feature = NULL;
     if (check_lower_aggregate(writer, type))
     {
         feature = check_lower_by_value(writer, type, false);
-        feature = feature == NULL ? check_lower_transparent_passed(writer, type) : feature;
+        feature = feature == NULL ? check_lower_transparent_passed(writer, type, point) : feature;
     }
     else if (check_lower_class(writer, type) == UINT8_MAX)
     {
@@ -2343,18 +2271,23 @@ static const char* check_lower_passed(CheckLowerWriter* writer, TypeId type)
     return feature;
 }
 
+static const char* check_lower_passed(CheckLowerWriter* writer, TypeId type)
+{
+    return check_lower_passed_at(writer, type, writer->emission_point);
+}
+
 // check_lower_passed's for a call's parameters and arguments (check_lower_call_body), but a half-precision type's is
 // check_lower_half_passed: a call that passes one is check_lower_call_halves', which a call without one doesn't reach.
 static const char check_lower_half_passed[] = "half-precision arguments";
 
-static const char* check_lower_call_passed(CheckLowerWriter* writer, TypeId type)
+static const char* check_lower_call_passed(CheckLowerWriter* writer, TypeId type, uint32_t point)
 {
     const TypeTable* types = writer->program->types;
     const char* feature = NULL;
     if (check_lower_aggregate(writer, type))
     {
         feature = check_lower_by_value(writer, type, false);
-        feature = feature == NULL ? check_lower_transparent_passed(writer, type) : feature;
+        feature = feature == NULL ? check_lower_transparent_passed(writer, type, point) : feature;
     }
     else if (check_lower_class(writer, type) >= BUSTER_TYPED_CLASSES)
     {
@@ -7514,15 +7447,16 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
         const CheckConversion* conversion = stream->argument_conversions + first + a;
         plain = check_lower_plain_scalar(check_lower_type_info(writer, conversion->type), false) && (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) == 0;
     }
+    const uint32_t signature_point = !plain ? check_lower_transparent_point(writer, type, node) : BUSTER_CHECK_NONE;
     for (uint32_t a = 0; !plain && a < parameters && passed == NULL; a += 1)
     {
-        passed = halves ? check_lower_passed(writer, parameter_types[a]) : check_lower_call_passed(writer, parameter_types[a]);
+        passed = halves ? check_lower_passed_at(writer, parameter_types[a], signature_point) : check_lower_call_passed(writer, parameter_types[a], signature_point);
     }
     for (uint32_t kept = 0; !plain && kept < count && passed == NULL; kept += 1)
     {
         const uint32_t a = kept + (kept >= omit ? omitted : 0);
         const TypeId argument = stream->argument_conversions[first + a].type;
-        passed = halves ? check_lower_passed(writer, argument) : check_lower_call_passed(writer, argument);
+        passed = halves ? check_lower_passed_at(writer, argument, signature_point) : check_lower_call_passed(writer, argument, signature_point);
     }
     // A struct or union result lands in a frame object whose address is the call's value: its own, unless a whole-object
     // initializer supplies its unaliased destination, or the call passes the function's own hidden pointer on
@@ -7619,21 +7553,23 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
             const TypeId member = aggregate || (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0
                                       ? check_lower_transparent_argument(writer, conversion, a < parameters ? parameter_types[a] : 0)
                                       : 0;
+            bool ordinary_union = false;
             if (member != 0)
             {
                 const uint8_t member_class = check_lower_transparent_class(writer, member);
                 // The union itself where its stack slot is its own (check_lower_passed_as), its value the member's.
                 const TypeId transparent_union = (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0 && a < parameters ? parameter_types[a] : argument;
-                passed_type = check_lower_passed_as(writer, transparent_union) == transparent_union ? transparent_union : member;
+                ordinary_union = !check_lower_transparent_active(writer, transparent_union, signature_point);
+                passed_type = ordinary_union || check_lower_passed_as(writer, transparent_union) == transparent_union ? transparent_union : member;
                 // Its locations reach the IR's call, whose slots its own one may move (ir_typed_aggregate_call).
                 writer->aggregates |= passed_type == transparent_union;
-                aggregate = member_class == UINT8_MAX;
+                aggregate = ordinary_union || member_class == UINT8_MAX;
                 vector = 0;
                 wide = false;
                 class = aggregate ? BUSTER_TYPED_CLASS_U64 : member_class;
                 transparent = true;
             }
-            abi->arguments[abi->argument_count++] = passed_type;
+            abi->arguments[abi->argument_count++] = check_lower_transparent_abi(writer, passed_type, ordinary_union);
             writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(types, passed_type) : vector != 0 ? vector : wide ? 16 : 0;
             writer->aggregates |= aggregate || wide || vector != 0;
             writer->argument_classes[writer->argument_count++] = class;
@@ -7664,11 +7600,12 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
             const TypeId member = transparent ? check_lower_transparent_argument(writer, conversion, a < parameters ? parameter_types[a] : 0) : 0;
             if (member != 0)
             {
-                // The union itself where its stack slot is its own (check_lower_passed_as).
-                const TypeId own = a < parameters && (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0 && check_lower_passed_as(writer, parameter_types[a]) == parameter_types[a]
-                                       ? parameter_types[a]
-                                       : 0;
-                check_lower_transparent_value(writer, node, a + 3, argument, member, own);
+                // A signature arranged before the attribute still passes an ordinary union. A later member conversion
+                // builds its complete object before the cached convention reads it, including any byval padding.
+                const TypeId union_type = a < parameters && (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0 ? parameter_types[a] : argument;
+                const bool ordinary_union = !check_lower_transparent_active(writer, union_type, signature_point);
+                const TypeId own = ordinary_union || check_lower_passed_as(writer, union_type) == union_type ? union_type : 0;
+                check_lower_transparent_value(writer, node, a + 3, argument, ordinary_union ? union_type : member, own);
             }
             else if (atomic && check_lower_aggregate(writer, argument))
             {
@@ -10398,7 +10335,7 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
             // A transparent union's as its first member's (check_lower_transparent), into the union's object; one of a slot
             // of its own (AbiTable.transparent, #1844) from the overflow area as the union, its alignment and its bytes, as
             // clang's EmitX86_64VAArgFromMemory reads it.
-            const TypeId first = aggregate ? check_lower_transparent(writer, requested) : 0;
+            const TypeId first = aggregate && check_lower_transparent_active(writer, requested, writer->emission_point) ? check_lower_transparent(writer, requested) : 0;
             call->plan = abi_va_arg(writer->abi_table, types, first != 0 ? first : requested);
             if (first != 0 && writer->abi_table->transparent[type_index(requested)] != 0)
             {
@@ -10986,9 +10923,12 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
         members[r] = parameter != 0 && type_kind(types, type_strip_aligned(types, parameter)) == BUSTER_TYPE_KIND_UNION ? check_lower_transparent(writer, parameter) : 0;
         const bool atomic = parameter != 0 && check_action_kind(types, parameter) == BUSTER_TYPE_KIND_ATOMIC && check_lower_aggregate(writer, parameter);
         sources[r] = members[r] != 0 ? type : atomic ? type_conversion_operand(types, parameter) : 0;
-        // A union of a stack slot of its own (#1844, AbiTable.transparent) would pass as the union, which the printer's
-        // calls don't make.
-        refused = members[r] != 0 && check_lower_passed_as(writer, parameter) == parameter ? "__builtin_dump_struct for a printer's transparent union of a stack slot of its own" :
+        // The printer's synthetic variadic signatures retain their explicit boundaries: they don't make an own-slot
+        // union object, and the source-call arrangement directory doesn't model their generated argument tails.
+        const bool late = members[r] != 0 && writer->transparent != NULL && writer->transparent->ordinary != NULL &&
+                          !check_lower_transparent_active(writer, parameter, writer->transparent->first);
+        refused = late ? "__builtin_dump_struct for a printer's late transparent union" :
+                  members[r] != 0 && check_lower_passed_as(writer, parameter) == parameter ? "__builtin_dump_struct for a printer's transparent union of a stack slot of its own" :
                   members[r] != 0 && addresses[r] ? "__builtin_dump_struct of an array or a function for a printer's transparent union" :
                   addresses[r] ? NULL : check_lower_dump_passed(writer, members[r] != 0 ? members[r] : targets[r]);
     }
@@ -19324,9 +19264,17 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             uint8_t classes[BUSTER_CHECK_ASM_OPERANDS];
             uint8_t registers[BUSTER_CHECK_ASM_OPERANDS];
             uint32_t passed = 0;
+            uint32_t result_registers = 0;
+            uint32_t result_wide = 0;
             for (uint32_t k = 0; plan->inline_passed && k < count; k += 1)
             {
                 const CheckAsmPlace* place = plan->places + k;
+                if (place->returned)
+                {
+                    const uint32_t bit = 1u << check_asm_result_register(place);
+                    result_registers |= bit;
+                    result_wide |= place->size == 8 ? bit : 0;
+                }
                 if (check_lower_asm_passed(place))
                 {
                     classes[passed] = check_lower_asm_class(writer, plan, k);
@@ -19355,7 +19303,9 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .label_count = plan->presentation != NULL ? 1 : plan->label_count,
                     .exits = plan->inline_exits,
                     .goto_labels = plan->inline_goto_labels,
-                    .result = returned != 0 ? (uint8_t)(returned->reg + 1) : 0,
+                    .result = returned != 0 ? (uint8_t)(check_asm_result_register(returned) + 1) : 0,
+                    .result_registers = result_registers,
+                    .result_wide = result_wide,
                     .leaves = plan->inline_leaves,
                     .stack = plan->inline_stack,
                 };
@@ -19367,9 +19317,34 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
         {
             call = check_lower_native_call(writer, helper->symbol, result, &argument, plan->block != 0 ? 1 : 0);
         }
-        if (returned != 0)
+        for (uint32_t k = statement->output_count; returned != NULL && k-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, returned->type), returned_local);
+            const CheckAsmPlace* place = plan->places + k;
+            if (place->returned)
+            {
+                const uint32_t object = check_stream_value(program->stream, statement->operands[k].node).object;
+                const uint32_t local = object < program->object_count ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
+                const uint8_t class = check_lower_class(writer, place->type);
+                if (local == BUSTER_CHECK_NONE)
+                {
+                    check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+                }
+                else
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+                    if (k + 1 != plan->inline_result)
+                    {
+                        // A snapshot of another result of this same call, not a second invocation of the template.
+                        // Keeping the group explicit lets the IR promote every output independently into SSA.
+                        const Tier0Operation projection = {
+                            .result_class = class,
+                            .asm_result = (uint8_t)(check_asm_result_register(place) + 1),
+                        };
+                        check_lower_instruction(writer, BUSTER_TYPED_X86, class, check_lower_operation_add(writer, &projection));
+                        writer->vectors = true;
+                    }
+                }
+            }
         }
         check_lower_instruction(writer, BUSTER_TYPED_CALL,
                                 returned != 0 ? check_lower_class(writer, returned->type) : jumps ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_VOID, call);
@@ -20229,6 +20204,7 @@ struct CheckLowerShared
     // Every type's classification, made before the bodies: a body's struct or union result decides its returns
     // (check_lower_by_value), and a variadic definition's named registers its va_start.
     AbiTable table;
+    CheckLowerTransparent transparent;
     // Every type's class and facts (check_lower_classify_types), which the bodies ask of their nodes' types: `type_count`
     // of each, one per type of the program's table, which the lowering doesn't grow.
     uint8_t* type_classes;
@@ -21078,12 +21054,15 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // Calls, returns and va_arg belong to function bodies. Object initializers and generated helpers don't read this
     // table, so a unit without a body needs neither its columns nor its classifications (#613). The bodies' bit-field
     // accesses read their units, which the classification's storage bounds (check_lower_bit_units).
-    valid = valid && (program->body_count == 0 ||
-                      abi_initialize_types(&shared->table, scratch, types, check_lower_vector_register_bytes(program->target.features), types->types.count));
+    const uint32_t transparent_rows = valid && program->body_count != 0 ? check_lower_transparent_rows(program) : 0;
+    const uint64_t abi_rows = valid ? (uint64_t)types->types.count + transparent_rows : 0;
+    valid = valid && abi_rows <= (uint64_t)BUSTER_TYPE_MAX_INDEX + 1 && (program->body_count == 0 ||
+                      abi_initialize_types(&shared->table, scratch, types, check_lower_vector_register_bytes(program->target.features), (uint32_t)abi_rows));
     if (valid && program->body_count != 0)
     {
         abi_classify_all(&shared->table, types);
-        valid = check_lower_bit_units(types, &shared->table, scratch, &shared->bit_units);
+        valid = check_lower_transparent_prepare(&shared->transparent, program, &shared->table, scratch, transparent_rows) &&
+                check_lower_bit_units(types, &shared->table, scratch, &shared->bit_units);
         lowered->status = valid ? lowered->status : CHECK_PROGRAM_RESOURCE;
         lowered->reason = valid ? lowered->reason : "lowering bit-field units";
     }
@@ -21330,6 +21309,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .twice_names = shared->twice_names,
         .twice_tag = shared->twice_tag,
         .abi_table = &shared->table,
+        .transparent = &shared->transparent,
+        .emission_point = BUSTER_CHECK_NONE,
         .type_classes = shared->type_classes,
         .type_facts = shared->type_facts,
         .type_templates = shared->type_templates,
@@ -21900,6 +21881,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     {
         const CheckProgramBody body = program->bodies[b];
         const TypeId type = input->declared_types[body.declaration];
+        const uint32_t signature_point = check_lower_transparent_point(writer, type, BUSTER_CHECK_LOWER_SIGNATURE_DEFINITION);
         // --node-bodies (#2850): a body the producer took before the reader's walk, by its place among its verdicts. Its
         // labels are its producer's controls' (the program has none of it), and its statements check_lower_taken_body's.
         const uint32_t taken = __builtin_expect(input->node_bodies, 0) ? node_bodies_slot(input, body.opening) : UINT32_MAX;
@@ -21947,6 +21929,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->wrapper_depth = 0;
         writer->track = body.count != body.entry_count || shared->terminal;
         writer->body = program->bodies + b;
+        writer->emission_point = (program->body_eager == NULL || program->body_eager[b] != 0) && program->parser != NULL ?
+                                 program->parser->tree.parents[body.opening] + 1 : BUSTER_CHECK_NONE;
         // The function's instruction set (CheckProgram.body_targets), and so the classes it takes.
         const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
         writer->target = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? program->target : program->targets[body_target - 1];
@@ -22102,7 +22086,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 const bool aggregate = check_lower_aggregate(writer, parameter_type);
                 const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
                 const uint32_t alignment = type_alignment_log2(types, parameter_type) > declared_alignment ? type_alignment_log2(types, parameter_type) : declared_alignment;
-                const char* passed = check_lower_passed(writer, parameter_type);
+                const char* passed = check_lower_passed_at(writer, parameter_type, signature_point);
                 // So is a memory class's (check_lower_memory_class): a long double's, from its 16 bytes on the stack, and a
                 // 128-bit integer's, from its two eightbytes, as a struct of them; and a value's aligned past 8 bytes, whose
                 // slot would be aligned to 8, from its register's part or its slot, as a struct of it.
@@ -22129,7 +22113,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                     parameter = check_sparse_get(input->parameter_next, parameter);
                 }
                 // A transparent union's as its first member (check_lower_passed_as), whose bytes the prologue places.
-                abi->arguments[abi->argument_count++] = aggregate ? check_lower_passed_as(writer, parameter_type) : parameter_type;
+                const bool ordinary_union = aggregate && check_lower_transparent(writer, parameter_type) != 0 &&
+                                            !check_lower_transparent_active(writer, parameter_type, signature_point);
+                const TypeId passed_type = aggregate && !ordinary_union ? check_lower_passed_as(writer, parameter_type) : parameter_type;
+                abi->arguments[abi->argument_count++] = check_lower_transparent_abi(writer, passed_type, ordinary_union);
             }
             function->parameter_count += 1;
             declared += 1;

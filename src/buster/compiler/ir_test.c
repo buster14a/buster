@@ -2515,6 +2515,7 @@ static void ir_test_switch_collision_family(IrTestTally* tally, Arena* memory, A
 #include "ir_simd_model_test.c"
 #include "ir_simd_execute.c"
 #include "ir_simd_test.c"
+#include "ir_copy_pair_test.c"
 
 static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
 {
@@ -2619,6 +2620,140 @@ static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
     arena_pop_to(memory, mark);
 }
 
+// Register-result bodies have an independent semantic check list, outside the historical random corpus's frozen
+// digest. Both verifier entry points must reject malformed bundles without retaining scratch.
+static void ir_test_asm_result_check(IrTestTally* tally, const IrFunction* function, Arena* scratch, bool valid, const char* message)
+{
+    const uint64_t mark = scratch->length;
+    const IrCheck checked = ir_verify(function, scratch, NULL);
+    const IrCheck lowered = ir_verify_path(function, scratch, NULL, true);
+    ir_test_expect(tally, (checked.error == IR_OK) == valid, message);
+    ir_test_expect(tally, checked.error == lowered.error && checked.instruction == lowered.instruction && checked.detail == lowered.detail,
+                   "asm result verification differs between the lowered and complete paths");
+    ir_test_expect(tally, scratch->length == mark, "asm result verification retained scratch");
+}
+
+static void ir_test_asm_results(IrTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    const IrSizes sizes = {
+        .instruction_count = 8,
+        .block_count = 2,
+        .constant_count = 1,
+        .call_count = 1,
+        .asm_body_count = 1,
+    };
+    IrFunction function = { 0 };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_test_expect(tally, created, "asm result fixture allocation failed");
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.symbol_count = 2;
+        function.block_offsets[1] = 5;
+        function.block_offsets[2] = 8;
+        function.calls[0] = (IrCall){ .result_type = IR_I64, .body = 1 };
+        ir_test_instruction(&function, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 1, IR_CALL, IR_I64, 0, 0, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 4, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 5, IR_COPY, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 6, IR_COPY, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 7, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t primary = X86_REGISTER_RAX;
+        const uint32_t primary_bit = 1u << primary;
+        for (uint32_t reg = 0; reg < 32; reg += 1)
+        {
+            for (uint32_t wide = 0; reg != primary && wide < 2; wide += 1)
+            {
+                const uint32_t bit = 1u << reg;
+                const IrType type = reg < 16 ? (wide != 0 ? IR_I64 : IR_I32) : (wide != 0 ? IR_F64 : IR_F32);
+                function.asm_bodies[0] = (IrAsmBody){
+                    .touched = primary_bit | bit,
+                    .result = (uint8_t)(primary + 1),
+                    .result_registers = primary_bit | bit,
+                    .result_wide = primary_bit | (wide != 0 ? bit : 0),
+                };
+                ir_test_instruction(&function, 2, IR_ASM_RESULT, type, 1, reg, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 3, IR_COPY, type, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_asm_result_check(tally, &function, scratch, reg != X86_REGISTER_RSP, "a scalar asm result register or width was admitted incorrectly");
+            }
+        }
+        const uint32_t secondary = X86_REGISTER_RDX;
+        const uint32_t secondary_bit = 1u << secondary;
+        const IrAsmBody body = {
+            .touched = primary_bit | secondary_bit,
+            .result = (uint8_t)(primary + 1),
+            .result_registers = primary_bit | secondary_bit,
+            .result_wide = primary_bit | secondary_bit,
+        };
+        ir_test_instruction(&function, 2, IR_ASM_RESULT, IR_I64, 1, secondary, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 3, IR_COPY, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t reg = 0; reg < 32; reg += 1)
+        {
+            for (uint32_t wide = 0; reg != secondary && wide < 2; wide += 1)
+            {
+                const uint32_t bit = 1u << reg;
+                const IrType type = reg < 16 ? (wide != 0 ? IR_I64 : IR_I32) : (wide != 0 ? IR_F64 : IR_F32);
+                function.asm_bodies[0] = (IrAsmBody){
+                    .touched = bit | secondary_bit,
+                    .result = (uint8_t)(reg + 1),
+                    .result_registers = bit | secondary_bit,
+                    .result_wide = (wide != 0 ? bit : 0) | secondary_bit,
+                };
+                function.type[1] = (uint8_t)type;
+                function.calls[0].result_type = (uint8_t)type;
+                ir_test_asm_result_check(tally, &function, scratch, reg != X86_REGISTER_RSP, "a primary scalar asm result register or width was admitted incorrectly");
+            }
+        }
+        function.asm_bodies[0] = body;
+        function.type[1] = IR_I64;
+        function.calls[0].result_type = IR_I64;
+        ir_test_asm_result_check(tally, &function, scratch, true, "valid multi-result asm body rejected");
+        function.type[2] = IR_I32;
+        ir_test_asm_result_check(tally, &function, scratch, false, "asm result projection with the wrong width accepted");
+        function.type[2] = IR_I64;
+        function.b[2] = primary;
+        ir_test_asm_result_check(tally, &function, scratch, false, "the primary result was projected again");
+        function.b[2] = 32;
+        ir_test_asm_result_check(tally, &function, scratch, false, "out-of-range asm result register accepted");
+        function.b[2] = UINT32_MAX;
+        ir_test_asm_result_check(tally, &function, scratch, false, "overflowing asm result register accepted");
+        function.b[2] = secondary;
+        function.a[2] = 0;
+        ir_test_asm_result_check(tally, &function, scratch, false, "asm result projection from a non-call accepted");
+        function.a[2] = 2;
+        ir_test_asm_result_check(tally, &function, scratch, false, "asm result projection referring to itself accepted");
+        function.a[2] = 1;
+        ir_test_instruction(&function, 3, IR_ASM_RESULT, IR_I64, 1, secondary, BUSTER_IR_NONE);
+        ir_test_asm_result_check(tally, &function, scratch, false, "duplicate asm result projection accepted");
+        ir_test_instruction(&function, 2, IR_COPY, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 3, IR_COPY, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 6, IR_ASM_RESULT, IR_I64, 1, secondary, BUSTER_IR_NONE);
+        ir_test_asm_result_check(tally, &function, scratch, false, "asm result projection in another block accepted");
+        ir_test_instruction(&function, 6, IR_COPY, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 2, IR_ASM_RESULT, IR_I64, 1, secondary, BUSTER_IR_NONE);
+        function.asm_bodies[0].result = 0;
+        ir_test_asm_result_check(tally, &function, scratch, false, "non-void asm call without its primary register accepted");
+        function.asm_bodies[0] = body;
+        function.asm_bodies[0].result = 33;
+        ir_test_asm_result_check(tally, &function, scratch, false, "out-of-range primary asm result accepted");
+        function.asm_bodies[0] = body;
+        function.asm_bodies[0].result_registers = secondary_bit;
+        ir_test_asm_result_check(tally, &function, scratch, false, "asm result mask omitted the primary register");
+        function.asm_bodies[0] = body;
+        function.asm_bodies[0].result_wide |= 1u << X86_REGISTER_RCX;
+        ir_test_asm_result_check(tally, &function, scratch, false, "asm result width mask named an undeclared result");
+        function.asm_bodies[0] = body;
+        function.asm_bodies[0].touched = primary_bit;
+        ir_test_asm_result_check(tally, &function, scratch, false, "asm result register outside the touched mask accepted");
+        function.asm_bodies[0] = body;
+        function.calls[0].body = 0;
+        function.a[1] = 1;
+        ir_test_asm_result_check(tally, &function, scratch, false, "an ordinary call was allowed asm result projections");
+    }
+    arena_pop_to(memory, mark);
+}
+
 static int run_ir_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -2670,9 +2805,11 @@ static int run_ir_tests(int argc, char** argv)
             ir_test_switch(&tally, &memory, &scratch);
             ir_test_switch_collision_family(&tally, &memory, &scratch);
             ir_test_calls_memory(&tally, &memory, &scratch);
+            ir_copy_pair_tests(&tally, &memory, &scratch);
             ir_test_labels(&tally, &memory, &scratch);
             ir_test_label_lists(&tally, &memory, &scratch);
             ir_test_aggregates(&tally, &memory, &scratch);
+            ir_test_asm_results(&tally, &memory, &scratch);
             ir_test_types(&tally, &memory, &scratch);
             ir_test_simd(&tally, &memory, &scratch);
             const IrSimdModelTest model = ir_simd_model_test(stderr);

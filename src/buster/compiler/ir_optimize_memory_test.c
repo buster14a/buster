@@ -623,6 +623,226 @@ static void ir_memory_test_shapes(IrOptimizeTest* test, Arena* input, Arena* out
     }
 }
 
+// The clear analysis and rollback must preserve both the available values and the decisions to keep loads (#2826).
+// These checks have their own explicit forwarding counts and semantic comparisons, outside the older frozen digest
+// and random stream. Running with and without DCE also keeps an unused probe from hiding an incorrect decision.
+static void ir_memory_test_scope_check(IrOptimizeTest* test, const char* name, const IrFunction* f, uint32_t expected, Arena* output, Arena* scratch)
+{
+    for (uint32_t dce = 0; dce < 2; dce += 1)
+    {
+        const uint64_t output_mark = output->length;
+        const uint64_t scratch_mark = scratch->length;
+        IrOptimizeOptions options = ir_optimize_options();
+        options.passes = BUSTER_IR_OPTIMIZE_MEMORY | (dce != 0 ? BUSTER_IR_OPTIMIZE_DCE : 0);
+        IrOptimizeResult result = { 0 };
+        const IrCheck check = ir_optimize(f, output, scratch, options, &result);
+        ir_optimize_text_expect(test, check.error == IR_OK, name, "the scope fixture optimizes");
+        ir_optimize_text_expect(test, scratch->length == scratch_mark, name, "the pass restores scratch");
+        if (check.error == IR_OK)
+        {
+            if (result.forwarded_loads != expected && test->failures < 8)
+            {
+                fprintf(stderr, "ir-optimize: %s: forwarded %u loads, expected %u\n", name, result.forwarded_loads, expected);
+            }
+            ir_optimize_text_expect(test, result.forwarded_loads == expected, name, "the exact safe loads forward");
+            ir_optimize_text_execute(test, name, f, &result.function, scratch, true);
+        }
+        arena_pop_to(output, output_mark);
+    }
+}
+
+// A long dominator arm has just one writer, in its middle; the other arm reads its parent's values after the first
+// subtree has been undone. At their join only the written memory kind loses its inherited value. A single arm also
+// checks the childless and one-child paths, where no sibling needs a rollback. Lengths cross the vector batch boundary.
+static bool ir_memory_test_scope_program(char* text, size_t capacity, uint32_t length, uint32_t mode, bool diamond)
+{
+    IrMemoryTestText t = {
+        .text = text,
+        .capacity = capacity,
+        .ok = true,
+    };
+    ir_memory_test_append(&t, "function (i64, i64) -> i64 {\n");
+    for (uint32_t slot = 0; slot < 2; slot += 1)
+    {
+        ir_memory_test_append(&t, "  slot $%u size=16 align=8 type=void flags=0x00\n", slot);
+    }
+    ir_memory_test_append(&t, "b0:\n");
+    for (uint32_t parameter = 0; parameter < 2; parameter += 1)
+    {
+        ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "param.i64 %u\n", parameter);
+    }
+    for (uint32_t slot = 0; slot < 2; slot += 1)
+    {
+        ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "stack_addr.ptr $%u\n", slot);
+    }
+    ir_memory_test_value(&t);
+    ir_memory_test_append(&t, "call.void @1(%%3) fixed=(ptr) variadic=0\n");
+    const uint32_t zero = ir_memory_test_constant(&t, 0);
+    for (uint32_t slot = 0; slot < 2; slot += 1)
+    {
+        ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "store.void %%%u, %%0 align=8\n", 2 + slot);
+    }
+    if (diamond)
+    {
+        const uint32_t condition = ir_memory_test_condition(&t, 0);
+        ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "cbr.void %%%u, b1, b%u\n", condition, length + 1);
+    }
+    else
+    {
+        ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "br.void b1\n");
+    }
+    uint32_t sum = zero;
+    for (uint32_t step = 0; step < length; step += 1)
+    {
+        const uint32_t block = step + 1;
+        ir_memory_test_append(&t, "b%u:\n", block);
+        if (step == length / 2)
+        {
+            if (mode == 1 || mode == 7)
+            {
+                ir_memory_test_value(&t);
+                ir_memory_test_append(&t, "store.void %%3, %%1 align=8\n");
+            }
+            if (mode == 2 || mode == 7)
+            {
+                ir_memory_test_value(&t);
+                ir_memory_test_append(&t, "store.void %%2, %%1 align=8\n");
+            }
+            if (mode >= 3 && mode <= 6)
+            {
+                ir_memory_test_value(&t);
+                if (mode == 3)
+                {
+                    ir_memory_test_append(&t, "call.void @2() fixed=() variadic=0\n");
+                }
+                else if (mode == 4)
+                {
+                    ir_memory_test_append(&t, "fence.void seq_cst\n");
+                }
+                else
+                {
+                    ir_memory_test_append(&t, "lifetime.void $%u start\n", mode - 5);
+                }
+            }
+        }
+        for (uint32_t slot = 0; slot < 2; slot += 1)
+        {
+            const uint32_t loaded = ir_memory_test_value(&t);
+            ir_memory_test_append(&t, "load.i64 %%%u align=8\n", 2 + slot);
+            const uint32_t added = ir_memory_test_value(&t);
+            ir_memory_test_append(&t, "add.i64 %%%u, %%%u\n", sum, loaded);
+            sum = added;
+        }
+        ir_memory_test_value(&t);
+        if (step + 1 < length || diamond)
+        {
+            ir_memory_test_append(&t, "br.void b%u\n", step + 1 < length ? block + 1 : length + 2);
+        }
+        else
+        {
+            ir_memory_test_append(&t, "ret.void %%%u\n", sum);
+        }
+    }
+    if (diamond)
+    {
+        ir_memory_test_append(&t, "b%u:\n", length + 1);
+        const uint32_t private_value = ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "load.i64 %%2 align=8\n");
+        const uint32_t general_value = ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "load.i64 %%3 align=8\n");
+        const uint32_t sibling_sum = ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "add.i64 %%%u, %%%u\n", private_value, general_value);
+        ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "br.void b%u\nb%u:\n", length + 2, length + 2);
+        const uint32_t joined = ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "phi.i64 [%%%u, b%u], [%%%u, b%u]\n", sum, length, sibling_sum, length + 1);
+        sum = joined;
+        for (uint32_t access = 0; access < 4; access += 1)
+        {
+            const uint32_t loaded = ir_memory_test_value(&t);
+            ir_memory_test_append(&t, "load.i64 %%%u align=8\n", 2 + access % 2);
+            const uint32_t added = ir_memory_test_value(&t);
+            ir_memory_test_append(&t, "add.i64 %%%u, %%%u\n", sum, loaded);
+            sum = added;
+        }
+        ir_memory_test_value(&t);
+        ir_memory_test_append(&t, "ret.void %%%u\n", sum);
+    }
+    ir_memory_test_append(&t, "}\n");
+    return t.ok;
+}
+
+static void ir_memory_test_scopes(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch, char* text, size_t capacity)
+{
+    static const uint32_t lengths[] = {
+        1,
+        2,
+        17,
+        65,
+    };
+    for (uint32_t size = 0; size < BUSTER_ARRAY_LENGTH(lengths); size += 1)
+    {
+        const uint32_t length = lengths[size];
+        for (uint32_t mode = 0; mode < 8; mode += 1)
+        {
+            for (uint32_t diamond = 0; diamond < 2; diamond += 1)
+            {
+                const uint64_t input_mark = input->length;
+                const bool generated = ir_memory_test_scope_program(text, capacity, length, mode, diamond != 0);
+                char name[96];
+                snprintf(name, sizeof(name), "memory scopes: %u blocks, writer %u, %s", length, mode, diamond != 0 ? "diamond" : "chain");
+                IrFunction f = { 0 };
+                const String8 source = {
+                    .pointer = text,
+                    .length = generated ? strlen(text) : 0,
+                };
+                const bool parsed = generated && ir_optimize_text_parse(source, input, scratch, &f);
+                ir_optimize_text_expect(test, parsed, name, "the generated scope fixture parses");
+                if (parsed)
+                {
+                    // A store supplies its own following load; a call, fence or lifetime loses just that kind's
+                    // first load. A join loses one first load per written kind, but its two repeated loads forward.
+                    const uint32_t lost_at_writer = mode >= 3 && mode <= 6 ? 1u : 0u;
+                    const uint32_t lost_at_join = mode == 0 ? 0u : mode == 7 ? 2u : 1u;
+                    const uint32_t expected = length * 2 - lost_at_writer + (diamond != 0 ? 6 - lost_at_join : 0);
+                    ir_memory_test_scope_check(test, name, &f, expected, output, scratch);
+                }
+                arena_pop_to(input, input_mark);
+            }
+        }
+    }
+    static const char* const names[] = {
+        "memory-scope-nested",
+        "memory-scope-irreducible",
+    };
+    static const uint32_t expected[] = {
+        // Two each in b1, b2, b3, b4 and b6; three in b5 after its sibling's stores and epochs are undone.
+        13,
+        // The private loads in both cycle entries, the load just stored in b3, and both loads after b1's exit.
+        5,
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(names); fixture += 1)
+    {
+        const uint64_t input_mark = input->length;
+        char path[128];
+        snprintf(path, sizeof(path), "tests/ir/optimize/%s.ir", names[fixture]);
+        String8 source = { 0 };
+        IrFunction f = { 0 };
+        const bool parsed = ir_optimize_text_read(path, input, &source) && ir_optimize_text_parse(source, input, scratch, &f);
+        ir_optimize_text_expect(test, parsed, names[fixture], "the scope fixture reads and parses");
+        if (parsed)
+        {
+            ir_memory_test_scope_check(test, names[fixture], &f, expected[fixture], output, scratch);
+        }
+        arena_pop_to(input, input_mark);
+    }
+}
+
 static void ir_optimize_memory_tests(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(1ull << 24);
@@ -662,6 +882,7 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test)
     {
         ir_memory_test_overflows(test, &input, &vector, &scratch);
         ir_memory_test_shapes(test, &input, &vector, &scratch, values);
+        ir_memory_test_scopes(test, &input, &vector, &scratch, text, 1u << 16);
     }
     free(values);
     free(text);

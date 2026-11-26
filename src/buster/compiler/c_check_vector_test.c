@@ -227,26 +227,84 @@ static void check_test_vector_members(CheckTest* test, TypeTable* table)
         CheckVectorMember member;
         const bool decoded = check_vector_member_decode((const uint8_t*)names[i], (uint32_t)strlen(names[i]), lanes, sizeof(lanes), &member);
         check_test_expect(test, decoded, "bounded vector member decoder fits original fixture");
-        const CheckAction action = {
-            .op = CHECK_OP_MEMBER,
-            .operands = { { .type = ei, .category = CHECK_LVALUE } },
-            .vector_member = &member,
-        };
-        const CheckActionResult result = check_test_action(test, table, action);
-        check_test_expect(test, valid[i] ? result.diagnostic == CHECK_DIAG_NONE && result.value.type == types[i] && result.value.category == CHECK_LVALUE : result.diagnostic == CHECK_DIAG_MEMBER,
-                          "decoded vector members have checked bounds and independently stated result types");
-        if (valid[i])
+        for (uint32_t arrow = 0; arrow < 2; arrow += 1)
         {
-            const CheckAction store = {
-                .op = CHECK_OP_ASSIGN,
-                .operands = { result.value, { .type = types[i] } },
+            const CheckAction action = {
+                .op = arrow != 0 ? CHECK_OP_ARROW : CHECK_OP_MEMBER,
+                .operands = {
+                    {
+                        .type = arrow != 0 ? type_pointer(table, ei) : ei,
+                        .category = arrow != 0 ? CHECK_RVALUE : CHECK_LVALUE,
+                    },
+                },
+                .vector_member = &member,
             };
-            const CheckActionResult stored = check_test_action(test, table, store);
-            check_test_expect(test, (stored.diagnostic == CHECK_DIAG_NONE) == (i != 2 && i != 13), "only swizzles without repeated components are writable");
-            const CheckAction address = { .op = CHECK_OP_ADDRESS, .operands = { result.value } };
-            const CheckActionResult addressed = check_test_action(test, table, address);
-            check_test_expect(test, addressed.diagnostic != CHECK_DIAG_NONE, "vector swizzle addresses are forbidden");
+            const CheckActionResult result = check_test_action(test, table, action);
+            check_test_expect(test, valid[i] ? result.diagnostic == CHECK_DIAG_NONE && result.value.type == types[i] && result.value.category == CHECK_LVALUE : result.diagnostic == CHECK_DIAG_MEMBER,
+                              "decoded vector members through dot and arrow have checked bounds and independently stated result types");
+            if (valid[i])
+            {
+                const CheckAction store = {
+                    .op = CHECK_OP_ASSIGN,
+                    .operands = {
+                        result.value,
+                        { .type = types[i] },
+                    },
+                };
+                const CheckActionResult stored = check_test_action(test, table, store);
+                check_test_expect(test, (stored.diagnostic == CHECK_DIAG_NONE) == (i != 2 && i != 13), "only swizzles without repeated components are writable");
+                const CheckAction address = { .op = CHECK_OP_ADDRESS, .operands = { result.value } };
+                const CheckActionResult addressed = check_test_action(test, table, address);
+                check_test_expect(test, addressed.diagnostic != CHECK_DIAG_NONE, "vector swizzle addresses are forbidden");
+            }
         }
+    }
+    const uint32_t qualifiers[] = {
+        0,
+        BUSTER_TYPE_CONST,
+        BUSTER_TYPE_VOLATILE,
+        BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE,
+    };
+    const uint8_t lane = 1;
+    const CheckVectorMember selected = {
+        .lanes = &lane,
+        .count = 1,
+        .kind = CHECK_VECTOR_MEMBER_LANES,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(qualifiers); i += 1)
+    {
+        const CheckAction arrow = {
+            .op = CHECK_OP_ARROW,
+            .operands = {
+                {
+                    .type = type_pointer(table, ei | qualifiers[i]),
+                    .category = CHECK_LVALUE,
+                    .flags = BUSTER_CHECK_REGISTER,
+                },
+            },
+            .vector_member = &selected,
+        };
+        const CheckActionResult result = check_test_action(test, table, arrow);
+        check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == (BUSTER_TYPE_INT | qualifiers[i]) && result.value.category == CHECK_LVALUE &&
+                               (result.value.flags & (BUSTER_CHECK_VECTOR_ELEMENT | BUSTER_CHECK_REGISTER | BUSTER_CHECK_SIDE_EFFECT)) == BUSTER_CHECK_VECTOR_ELEMENT,
+                          "an arrow lane keeps pointee qualifiers without inheriting the pointer's register flag or loading the lane");
+        const CheckAction read = {
+            .op = CHECK_OP_POSITIVE,
+            .operands = { result.value },
+        };
+        const CheckActionResult loaded = check_test_action(test, table, read);
+        check_test_expect(test, loaded.diagnostic == CHECK_DIAG_NONE && ((loaded.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0) == ((qualifiers[i] & BUSTER_TYPE_VOLATILE) != 0),
+                          "loading an arrow lane observes the pointed-to vector's volatile qualification");
+        const CheckAction store = {
+            .op = CHECK_OP_ASSIGN,
+            .operands = {
+                result.value,
+                check_test_integer(BUSTER_TYPE_INT, 7),
+            },
+        };
+        const CheckActionResult stored = check_test_action(test, table, store);
+        check_test_expect(test, (stored.diagnostic == CHECK_DIAG_NONE) == ((qualifiers[i] & BUSTER_TYPE_CONST) == 0),
+                          "an arrow lane is writable exactly when the pointed-to vector is not const");
     }
     uint8_t guarded[3] = { 0xa5, 0xa5, 0xa5 };
     CheckVectorMember short_output;

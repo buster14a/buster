@@ -2992,6 +2992,14 @@ static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const
     return severity;
 }
 
+// A tentative candidate awaits the semantic initializer walk (#2222). payload.token is its rejected-definition
+// prerequisite until check_driver_missing_variable_filter resolves it; ordinary events carry NO_SOURCE there.
+static bool check_driver_missing_variable_pending(const CheckWarningEvent* event)
+{
+    return event->kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS && event->completion_kind == CHECK_WARNING_COMPLETE_TU_END &&
+           event->payload.token != BUSTER_CHECK_WARNING_NO_SOURCE;
+}
+
 // The reader's warning events to publish on a unit with errors (#1447), as clang leaves out those its errors suppress:
 // - ActOnEndOfTranslationUnit gives no unused file-scope declaration's warning once an error has occurred, so a rejected
 //   unit's unused functions' and file-scope objects' warnings, which complete at the unit's end, are left out;
@@ -3041,7 +3049,8 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
             }
             const bool scoped = errors != NULL && close < count && errors[close + 1] != errors[start];
             kept[total] = *event;
-            total += !(unit_end || scoped);
+            // Recovery rereads do not check the original initializer. Their unresolved candidates cannot publish.
+            total += !(unit_end || scoped || check_driver_missing_variable_pending(event));
         }
         view->events = valid ? kept : events->events;
         view->count = valid ? total : events->count;
@@ -3049,8 +3058,45 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
+// A hard rejected initializer leaves no variable definition for FinalizeDeclaration's missing-extern warning (#2222),
+// but can restore the entity's acting tentative definition. Resolve those conditional events before promotion, keeping
+// the reader's published prefix immutable. Only rejected or conditional candidates require a private copied view.
+static bool check_driver_missing_variable_filter(CheckWarningEvents* view, const uint8_t* invalid, uint32_t tokens, Arena* arena)
+{
+    bool valid = true;
+    bool changed = false;
+    const uint32_t count = view->count;
+    const CheckWarningEvent* const events = view->events;
+    for (uint32_t i = 0; !changed && i < count; i += 1)
+    {
+        changed = check_driver_missing_variable_pending(events + i) ||
+                  (invalid != NULL && events[i].kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS &&
+                   events[i].completion_kind != CHECK_WARNING_COMPLETE_TU_END && events[i].token < tokens && invalid[events[i].token] != 0);
+    }
+    if (changed)
+    {
+        CheckWarningEvent* kept = BUSTER_ARENA_PUSH_ARRAY(arena, CheckWarningEvent, count);
+        valid = kept != NULL;
+        uint32_t total = 0;
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            const CheckWarningEvent* event = events + i;
+            const bool pending = check_driver_missing_variable_pending(event);
+            const bool remove = pending ? invalid == NULL || event->payload.token >= tokens || invalid[event->payload.token] == 0 :
+                                invalid != NULL && event->kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS &&
+                                event->completion_kind != CHECK_WARNING_COMPLETE_TU_END && event->token < tokens && invalid[event->token] != 0;
+            kept[total] = *event;
+            kept[total].payload.token = pending ? BUSTER_CHECK_WARNING_NO_SOURCE : event->payload.token;
+            total += !remove;
+        }
+        view->events = valid ? kept : events;
+        view->count = valid ? total : count;
+    }
+    return valid;
+}
+
 // The class of a reader's warning event for check_driver_unit_end_split: 0 published where it stands, 1 a tentative
-// definition's (#2238's array, #2168's const object), 2 an unused file-scope declaration's, 3 an unused block-scope
+// definition's (#2238's array, #2222's missing extern declaration, #2168's const object), 2 an unused file-scope declaration's, 3 an unused block-scope
 // typedef's (#2264), which clang gives after those, under their gate, in its source locations' order, where a macro
 // expansion's location comes after every file location: 4 one a macro wrote.
 static uint32_t check_driver_unit_end_class(const Parser* parser, const Preprocessor* pp, const CheckWarningEvent* event)
@@ -3060,7 +3106,8 @@ static uint32_t check_driver_unit_end_class(const Parser* parser, const Preproce
     const bool typedefs = event->kind == CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF;
     const uint32_t source = typedefs && event->token < parser->tokens.count ? parse_source_index(&parser->tokens, event->token) : BUSTER_PP_NONE;
     const bool macro = source < pp->output.count && pp->output.flags != NULL && (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
-    const bool tentative = event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY || (event->kind == CHECK_WARNING_EVENT_DEFAULT_CONST_INIT && unit_end);
+    const bool tentative = event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY ||
+                           ((event->kind == CHECK_WARNING_EVENT_DEFAULT_CONST_INIT || event->kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS) && unit_end);
     return tentative ? 1u : unused ? 2u : typedefs ? (macro ? 4u : 3u) : 0u;
 }
 
@@ -8994,8 +9041,47 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
                 }
             }
         }
-        // Errors alone: the reading's warnings are the next round's, and its unit-wide records (pragmas, implicit
-        // declarations, K&R's) the first reading's.
+        // A cleanup type error removes its declaration in the next round, including the alignment warning that
+        // precedes it (#1844). Keep that pair together, but only for a report trusted as new above: another view's
+        // warning may be the edit's own, and a report already published must not duplicate its warning.
+        const uint32_t warning_count = input.warning_events.count;
+        const uint32_t first_warning_count = first->count;
+        const CheckWarningEvent* const first_warnings = first->events;
+        bool cleanup_error = false;
+        for (uint32_t i = 0; !cleanup_error && i < published.report_count; i += 1)
+        {
+            cleanup_error = published.reports[i].message == CHECK_INPUT_CLEANUP_TYPE;
+        }
+        CheckWarningEvent* warnings = valid && cleanup_error && warning_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckWarningEvent, warning_count) : NULL;
+        valid = valid && (!cleanup_error || warning_count == 0 || warnings != NULL);
+        CheckWarningEvents alignment =
+        {
+            .events = warnings,
+            .notes = input.warning_events.notes,
+            .note_count = input.warning_events.note_count,
+        };
+        for (uint32_t i = 0; warnings != NULL && i < warning_count; i += 1)
+        {
+            const CheckWarningEvent* event = input.warning_events.events + i;
+            bool paired = false;
+            for (uint32_t j = 0; event->kind == CHECK_WARNING_EVENT_ALIGN_MISMATCH && !paired && j < published.report_count; j += 1)
+            {
+                paired = published.reports[j].message == CHECK_INPUT_CLEANUP_TYPE && published.reports[j].token == event->token;
+            }
+            const uint32_t at = edited && event->token < view_count ? view.to_original[event->token] : event->token;
+            bool known = false;
+            for (uint32_t j = 0; paired && !known && at < unit_stop && j < first_warning_count; j += 1)
+            {
+                known = first_warnings[j].kind == event->kind && first_warnings[j].token == at;
+            }
+            if (paired && !known)
+            {
+                warnings[alignment.count++] = *event;
+            }
+        }
+        valid = valid && check_driver_warning_events_at(parser, pp, &input, &types, &alignment, NULL, publication_end, scratch);
+        // The other warnings are the next round's, and the unit-wide records (pragmas, implicit declarations, K&R's)
+        // the first reading's.
         published.implicit_function_count = 0;
         published.kr_diagnostic_count = 0;
         published.fp_pragma_count = 0;
@@ -9046,6 +9132,21 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const uint64_t key = (uint64_t)at << 32 | events->events[i].kind;
             const bool known_event = check_driver_rejected_event_known(sorted, known_count, key);
             bool errored = false;
+            if (events->events[i].kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS && at < count)
+            {
+                // The original declaration's initializer decision owns its warning, including a discarded one.
+                // Removing its failed initializer in a recovery view must not invent a new tentative definition.
+                errored = at < unit_stop && at < first_input->token_count && first_input->declarations != NULL &&
+                          first_input->declarations[at] == at;
+                for (uint32_t j = 0; !errored && j < first_input->report_count; j += 1)
+                {
+                    const CheckInputReport* report = first_input->reports + j;
+                    // This error follows type checking: the rejected block initializer still leaves an extern
+                    // declaration, though recovery omits its body. An invalid type's extern has no such report.
+                    errored = report->message == CHECK_INPUT_BLOCK_EXTERN_INITIALIZER && report->token < at &&
+                              unit->tokens.names[report->token] == unit->tokens.names[at];
+                }
+            }
             // Omitting a first call can make a later use look like the first undeclared use of the same builtin.
             // The header warning belongs to the original lookup, including when policy silenced it there.
             if (!known_event && events->events[i].kind == CHECK_WARNING_EVENT_BUILTIN_HEADER)
@@ -10396,19 +10497,11 @@ static SymbolId check_driver_atom_symbol(const Link* link, AtomId atom)
 // (check_driver_object_build: the link, checked, its `sections` and its temporaries), pushed on `text`, named after
 // `source_path` and written to `output_path` ("-" for standard output), as -c writes its object. A unit with what the
 // sink doesn't print yet is an error that names it, and writes nothing.
-static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgram* program, ObjectAtomSection* sections, const ObjectDebug* debug,
+static bool check_driver_assembly_text(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug,
                                        const char* source_path, const char* output_path, Arena* text, Arena* scratch, FILE* errors)
 {
-    const CheckProgramAsms* asms = &code->lowered.asms;
-    bool inline_assembly = asms->naked != NULL || asms->file_assembled;
-    for (uint32_t p = 0; !inline_assembly && p < asms->plan_count; p += 1)
-    {
-        inline_assembly = asms->plans[p].planned && asms->plans[p].presentation == NULL;
-    }
-    const bool multiversioned = program->cpu_group_count != 0 || program->target_group_count != 0;
-    const char* refusal = inline_assembly ? "inline assembly" : multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
     uint8_t* temporary = 0;
-    const bool linked = refusal == 0 && link_check(&code->link) == LINK_ERROR_NONE && check_driver_temporaries(code, scratch, &temporary);
+    const bool linked = link_check(&code->link) == LINK_ERROR_NONE && check_driver_temporaries(code, scratch, &temporary);
     AssemblyResult printed = { .error = ASSEMBLY_FULL };
     if (linked)
     {
@@ -10417,6 +10510,7 @@ static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgra
             .debug = debug,
             .code = code->assembly_code,
             .code_count = code->assembly_code_count,
+            .cfi_atom = code->assembly_cfi_atom,
             .sections = sections,
             .section_count = sections != 0 ? code->link.atoms.count : 0,
             .temporary = temporary,
@@ -10428,11 +10522,7 @@ static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgra
         printed = assembly_print(&view, text, scratch);
     }
     bool valid = printed.error == ASSEMBLY_OK;
-    if (refusal != 0)
-    {
-        fprintf(errors, "%s: error: -S doesn't print %s yet\n", source_path, refusal);
-    }
-    else if (printed.error == ASSEMBLY_UNSUPPORTED || printed.error == ASSEMBLY_INVALID)
+    if (printed.error == ASSEMBLY_UNSUPPORTED || printed.error == ASSEMBLY_INVALID)
     {
         // The sink's reason, with the function or object it stopped at.
         const SymbolId symbol = printed.symbol != 0 ? printed.symbol : check_driver_atom_symbol(&code->link, printed.atom);
@@ -10754,6 +10844,9 @@ static bool check_driver_provisional_refresh(CheckProgram* over, const CheckProg
         over->switch_count = program->switch_count;
         over->lifetime_event_count = program->lifetime_event_count;
         over->region_reached = program->region_reached;
+        over->abi_emission_nodes = program->abi_emission_nodes;
+        over->abi_emission_objects = program->abi_emission_objects;
+        over->abi_emission_types = program->abi_emission_types;
     }
     arena_pop_to(scratch, mark);
     return valid;
@@ -11238,7 +11331,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     else if (valid && lanes != NULL && lanes->assembly)
     {
         // -S (#1362): the unit's assembly where -c writes its object, its text on the emission's output arena.
-        valid = check_driver_assembly_text(&code, program, sections, debug ? &dwarf.object : NULL, source_path, output_path, &state->output, scratch, errors);
+        valid = check_driver_assembly_text(&code, sections, debug ? &dwarf.object : NULL, source_path, output_path, &state->output, scratch, errors);
         check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_WRITE);
     }
     else if (valid)
@@ -12217,7 +12310,7 @@ static bool check_driver_id_order(InternTable* table, const PPOptions* options, 
 
 // Fault injection for test-check-units' reusable-driver child, set before any workers start and immutable until its
 // command returns. Normal commands leave it null. Fail the named unit's type-table reservation, not its preprocessing.
-static const char* check_driver_test_failed_types;
+static BUSTER_START_DATA const char* check_driver_test_failed_types;
 
 // What every translation unit of a command reads, and none writes: run_check_command_mode's options.
 typedef struct CheckDriverCommand CheckDriverCommand;
@@ -13389,7 +13482,7 @@ static void check_driver_discard_scratch(Arena* scratch, CheckProgramLanes* lane
 // reader beside the design's passes (check_input_run as check_input_compile calls it, with its environment published),
 // and each declaration's record at the unit's end. Null in every other command, which tests it once at each place.
 typedef struct CheckAttested CheckAttested;
-static CheckAttested* check_driver_attested;
+static BUSTER_START_DATA CheckAttested* check_driver_attested;
 static bool check_attested_input(CheckAttested* census, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, const char* path);
 static void check_attested_after(CheckAttested* census, const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, bool valid,
@@ -13414,7 +13507,7 @@ static bool check_attested_again(const CheckAttested* attested, bool failed);
 static void check_attested_summary(const CheckAttested* attested, uint64_t* counts);
 // The last command's counts of attested declarations (c_checker_units.c), which a command of one source file with a memo
 // kept across processes gives too, for the tests.
-static uint64_t check_units_attested_last[CHECK_ATTESTED_SUMMARY];
+static BUSTER_START_DATA uint64_t check_units_attested_last[CHECK_ATTESTED_SUMMARY];
 
 // The type table initializes its builtin columns, sentinels and buckets, and writes each new record before
 // publishing its index. It can reuse dirty storage. Fit a small table or index in the lane arena's base pages:
@@ -14077,6 +14170,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     const uint32_t counted_end = additional_count;
                     uint32_t* rejected_initializer_roots = NULL;
                     const uint8_t* invalid_initializer_nodes = NULL;
+                    const uint8_t* invalid_variable_definitions = NULL;
                     if (!expression_valid || repairing || initializers.status != CHECK_INIT_OK)
                     {
                         CheckInitDiagnostic earlier = { 0 };
@@ -14094,6 +14188,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                                                                      output_arena, scratch, &warnings);
                         rejected_initializer_roots = diagnosed ? earlier.rejected_roots : NULL;
                         invalid_initializer_nodes = diagnosed ? earlier.invalid_nodes : NULL;
+                        invalid_variable_definitions = diagnosed ? earlier.invalid_variable_definitions : NULL;
                         if (!storage || initializers.status == CHECK_INIT_RESOURCE)
                         {
                             earlier.status = CHECK_INIT_RESOURCE;
@@ -14358,6 +14453,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             }
                         }
                     }
+                    if (input.missing_variable_warnings && !check_driver_missing_variable_filter(&input.warning_events, invalid_variable_definitions, input.token_count, output_arena))
+                    {
+                        check_common_exhausted(pp);
+                    }
                     const CheckWarningEvents initializer_warning_view = initializer_context ? check_warning_view(&initializer_warnings) : (CheckWarningEvents){ 0 };
                     uint32_t promoted_token = BUSTER_CHECK_NONE;
                     bool promoted = !quiet && check_diagnostic_first_error(&input, &stream, &promoted_token);
@@ -14518,7 +14617,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                            check_driver_provisional_select(&provisional, &program, &data, scalar, &select_shared, output_arena, scratch);
                         CheckDriverLoop loop;
                         uint32_t compound_count = 0;
-                        windowed = provisional_made && command->windowed_loop && lanes != NULL &&
+                        // A late transparent union's signature cache needs the complete eager-emission walk (#1844).
+                        windowed = provisional_made && command->windowed_loop && lanes != NULL && !check_program_abi_late(&program, &data) &&
                                    check_driver_statement_assign(&program, &provisional.program, &compound_count, output_arena) &&
                                    check_driver_loop_prepare(&loop, &run, &provisional.program, output_arena);
                         if (windowed)
@@ -14914,6 +15014,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             else
             {
+                // No initializer walk ran for this rejected reader. Its conditional tentative candidates remain
+                // unproved and cannot be promoted or rendered as completed definitions.
+                if (input.missing_variable_warnings && !check_driver_missing_variable_filter(&input.warning_events, NULL, input.token_count, output_arena))
+                {
+                    check_common_exhausted(pp);
+                }
                 // (With a statement start's typo corrections' errors, check_driver_typo_errors.)
                 CheckDriverDiagnostic* typo_errors = typo_edits.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 2 * typo_edits.count) : NULL;
                 const uint32_t typo_count = typo_errors != NULL ? check_driver_typo_errors(&typo_edits, parser, checking, pp, typo_errors, 0, output_arena) : 0;
@@ -15305,13 +15411,14 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     return run->result;
 }
 
-// The driver's lanes (check_driver_command): 98 KB, almost all of it the lanes' arenas (CheckProgramLanes.arenas), in .bss
-// as the unit's preprocessor and parser are (check_driver_one_unit), so that a compile touches only the pages it uses: a
-// zeroed local touched them all, 24 pages of stack, each a page fault, even for an empty file's -fsyntax-only (#652). A
-// command after the process's first zeroes them again; only the tests' reusable routes run more than one, and only lane
-// 0 runs the command (run_check_command_mode).
-static CheckProgramLanes check_driver_lanes;
-static bool check_driver_lanes_taken;
+// The driver's lanes (check_driver_command), almost all of it the lanes' arena array, in .bss as the unit's
+// preprocessor and parser are (check_driver_one_unit), so that a compile touches only the pages it uses: a zeroed
+// local touched them all, even for an empty file's -fsyntax-only (#652). The controls precede the array and fit in
+// the first page (#2886), aligned here so a command that needs no lane's arena touches only that page. A command
+// after the process's first zeroes them again; only the tests' reusable routes run more than one, and only lane 0
+// runs the command (run_check_command_mode).
+static CheckProgramLanes check_driver_lanes __attribute__((aligned(BUSTER_ARENA_PAGE_BYTES)));
+static BUSTER_START_DATA bool check_driver_lanes_taken;
 
 // The command's warm arenas' slots (arena_reserve_warm), the same in every process, so that each finds its own pages.
 typedef enum CheckDriverWarm

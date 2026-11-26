@@ -34,7 +34,7 @@ static uint32_t ir_rebuild_values(uint32_t op)
         case IR_COPY: case IR_NEG: case IR_NOT: case IR_FNEG: case IR_TRUNC: case IR_ZEXT: case IR_SEXT:
         case IR_FTRUNC: case IR_FEXT: case IR_SITOFP: case IR_UITOFP: case IR_FPTOSI: case IR_FPTOUI:
         case IR_INTTOPTR: case IR_PTRTOINT: case IR_BITCAST: case IR_ADDRESS: case IR_LOAD:
-        case IR_CALL_INDIRECT: case IR_CBR: case IR_SWITCH: case IR_ALLOCA: case IR_STACK_RESTORE: mask = 1; break;
+        case IR_CALL_INDIRECT: case IR_CBR: case IR_SWITCH: case IR_ALLOCA: case IR_STACK_RESTORE: case IR_ASM_RESULT: mask = 1; break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_SDIV: case IR_UDIV: case IR_SREM: case IR_UREM:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_LSHR: case IR_ASHR:
         case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV: case IR_ICMP: case IR_FCMP: case IR_STORE: case IR_INTRINSIC: case IR_ATOMIC_RMW: case IR_SCATTER: mask = 3; break;
