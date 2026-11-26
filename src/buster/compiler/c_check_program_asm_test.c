@@ -359,8 +359,9 @@ static void check_test_program_asm_unit_placement(CheckTest* test)
 {
     enum
     {
-        STATEMENTS = 18,
+        STATEMENTS = 19,
         UNITS = 15,
+        CONSTANT_DEAD = STATEMENTS - 2,
     };
     CheckTestFixtures fixtures;
     const bool loaded = check_test_fixtures_load(&fixtures, "checker/programs/asm-directive-placement") && fixtures.count == 1;
@@ -405,13 +406,14 @@ static void check_test_program_asm_unit_placement(CheckTest* test)
         CheckProgramHelpers helpers = { 0 };
         ready = ready && check_program_asm_plan(&planned, &helpers, &program, &output, &scratch) && planned.plans != NULL;
         char description[256];
-        snprintf(description, sizeof(description), "asm unit placement, Tier %u: all %u statements are planned without a helper (%u)", tier, STATEMENTS, helpers.count);
+        snprintf(description, sizeof(description), "asm unit placement, Tier %u: the fixture is planned without a helper (%u)", tier, helpers.count);
         check_test_expect(test, ready && helpers.count == 0, description);
         uint32_t units = 0;
         for (uint32_t s = 0; ready && s < STATEMENTS; s += 1)
         {
             const CheckProgramAsm* plan = planned.plans + s;
-            bool placed = plan->planned && plan->reason == NULL && plan->inlined && plan->helper == BUSTER_CHECK_NONE && plan->row == NULL;
+            bool placed = s == CONSTANT_DEAD ? !plan->planned :
+                          plan->planned && plan->reason == NULL && plan->inlined && plan->helper == BUSTER_CHECK_NONE && plan->row == NULL;
             if (placed && plan->inline_unit)
             {
                 const uint32_t atom = plan->unit.entry_atom;
@@ -420,8 +422,15 @@ static void check_test_program_asm_unit_placement(CheckTest* test)
                          plan->inline_label_records[0] <= plan->inline_count && plan->inline_label_names[0] == planned.name_count + s;
             }
             units += plan->inline_unit;
-            snprintf(description, sizeof(description), "asm unit placement, Tier %u: statement %u is an inline %s with its emission anchor", tier, s,
-                     plan->inline_unit ? "assembled unit" : "record body");
+            if (s == CONSTANT_DEAD)
+            {
+                snprintf(description, sizeof(description), "asm unit placement, Tier %u: constant-dead statement %u has no plan", tier, s);
+            }
+            else
+            {
+                snprintf(description, sizeof(description), "asm unit placement, Tier %u: statement %u is an inline %s with its emission anchor", tier, s,
+                         plan->inline_unit ? "assembled unit" : "record body");
+            }
             check_test_expect(test, placed, description);
         }
         snprintf(description, sizeof(description), "asm unit placement, Tier %u: %u assembled units, including trailing and directive-only alignment", tier, units);

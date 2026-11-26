@@ -7,6 +7,7 @@
 static int buster2351_data = 71;
 extern const unsigned char buster2351_trailing[];
 extern const unsigned char buster2351_only[];
+extern char buster2351_dead_code[];
 
 static int aligned(int n)
 {
@@ -149,6 +150,13 @@ zero:
 
 static int unreachable(int n)
 {
+    int dead = 0;
+    if (dead)
+    {
+        __asm__ volatile(".p2align 4\nbuster2351_dead_code:\n\tnop\n"
+                         "\t.pushsection .rodata.buster2351_dead, \"a\"\n\t.balign 8\nbuster2351_dead_data:\n"
+                         "\t.quad buster2351_dead_code\n\t.popsection");
+    }
     if (0)
     {
         __asm__ volatile(".p2align 6\n\t.byte 0x90");

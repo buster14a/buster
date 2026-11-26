@@ -103,6 +103,10 @@ struct CheckProgramCode
     // numeric labels and what asm_object_options marked (ObjectOptions.temporary_symbols).
     SymbolId* unit_temporary;
     uint32_t unit_temporary_count;
+    // Asm-owned symbols left without definitions. After the static data and aliases
+    // publish, check_program_sections leaves only actually referenced ones named for binding.
+    SymbolId* asm_undefined_symbols;
+    uint32_t asm_undefined_count;
     // The unit program symbols whose `.size` a template set, indexed by SymbolId: the values, and which ones. The
     // definitions' atoms exist only after the static data is published, so check_program_sections applies them.
     uint64_t* asm_sizes;
@@ -7115,6 +7119,34 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     (priority == 65535 || link_add_priority(&result->link, atom, priority));
         }
     }
+    // Every live asm unit has published its labels. Definitions and references removed with their statements or
+    // functions leave undefined names; check_program_sections drops those no live fixup needs. Only asm-owned names
+    // change: C data, aliases and `.comm` overrides may still await publication. Weak declarations keep their names.
+    for (uint32_t n = 0; valid && n < asms->name_count; n += 1)
+    {
+        const CheckAsmName* name = asms->names + n;
+        const SymbolId symbol = asm_symbols[n];
+        const bool owned = symbol >= asm_first || (asm_defines != 0 && symbol != 0 && symbol <= program->symbol_count && asm_defines[symbol] == n + 1);
+        const bool reference = symbol >= asm_first && !name->label && name->referenced && result->link.symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE &&
+                               (result->link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_WEAK;
+        if (symbol != 0 && result->link.symbols.atom[symbol] == 0 && ((name->label && owned) || reference))
+        {
+            if (result->asm_undefined_symbols == NULL)
+            {
+                result->asm_undefined_symbols = BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, asms->name_count);
+                valid = result->asm_undefined_symbols != NULL;
+            }
+            if (valid)
+            {
+                result->asm_undefined_symbols[result->asm_undefined_count++] = symbol;
+                result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_NONE;
+                if ((result->link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL)
+                {
+                    result->link.symbols.flags[symbol] = (uint8_t)((result->link.symbols.flags[symbol] & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_GLOBAL);
+                }
+            }
+        }
+    }
     // A template's `.size` on one of the unit's program symbols, which check_program_sections applies once the static
     // data's atoms exist: a variable's atom is published after this emission.
     bool sized = false;
@@ -7754,6 +7786,26 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     valid = valid && check_program_define_aliases(code, program) && check_program_define_pragma_aliases(code, program);
     // Every atom exists: the forwarded references take their symbols (#2204).
     check_program_label_forward_fixups(code);
+    // Binding visits every named undefined symbol, and executable emission resolves every slot. An asm name with no
+    // live code or data reference leaves an unnamed weak slot, as a forwarded label does, which objects omit and
+    // executables resolve to nothing. A referenced one keeps its name and binding for the ordinary diagnostic.
+    for (uint32_t k = 0; valid && k < code->asm_undefined_count; k += 1)
+    {
+        const SymbolId symbol = code->asm_undefined_symbols[k];
+        bool referenced = link->symbols.atom[symbol] != 0;
+        for (FixupId f = 1; !referenced && f < link->fixups.count; f += 1)
+        {
+            referenced = link->fixups.target[f] == symbol;
+        }
+        if (!referenced)
+        {
+            link->symbols.name[symbol] = 0;
+            link->symbols.value[symbol] = 0;
+            link->symbols.size[symbol] = 0;
+            link->symbols.flags[symbol] = BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE;
+            link->symbols.source[symbol] = BUSTER_LINK_SOURCE_NONE;
+        }
+    }
     // A symbol of internal linkage that no definition emitted is still an undefined reference: clang writes it as a
     // global undefined symbol (GNU ld and lld report it, and an executable link fails), never as an undefined local,
     // which an ELF object can't hold. The definitions' and aliases' symbols above have their sources set.

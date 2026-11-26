@@ -1437,14 +1437,15 @@ has the commands, the logs and the default path's numbers against main.
     template that returns before any branch, and CFI.
 
   #2351's `checker/programs/asm-directive-placement` fixture separately
-  requires every eligible statement to plan without a helper at both tiers.
+  checks helper-free plans at both tiers.
   Its native execution checks local branches over data, each data directive's
   bytes, 64-byte internal and trailing alignment, a directive-only alignment
   before another statement's label, data in a pushed section, absolute and
   PC-relative fixups, `loop` and `jrcxz` across sized branches, address-size
   prefixes, explicit rsp inputs, packed vector operands, and a directive asm
   goto with outputs on every exit and label-address data in another section. Dead `if (0)`
-  and unreachable labeled blocks check that absent anchors publish nothing.
+  and unreachable labeled blocks check that absent anchors publish nothing;
+  a block eliminated by Tier 1 also owns named code and side-section data.
   The planner's arena-capacity sweep includes a nonempty directive unit, so
   exhaustion must roll back its allocations and report failure consistently.
 
@@ -1494,6 +1495,17 @@ has the commands, the logs and the default path's numbers against main.
   leaf functions, and define each retained label once inside its C function.
   Reading the first byte at a named label also checks that scheduling leaves
   it at the exact template instruction.
+  `driver/tier1_asm_units.c` directly links the shared directive fixture under
+  strict Tier 1 with verification. This also checks removal of the symbol
+  promises of a dead unit: its code label has a C declaration and its data
+  label belongs only to the asm. The object writer followed by clang's linker
+  does not expose that direct-binder failure.
+  A separate dead-label fixture keeps a global volatile pointer initialized to
+  the label: its live data fixup must produce the normal undefined-reference
+  error with the label's name, not lose the name during dead-unit cleanup.
+  An external referenced only by an eliminated asm side section instead must
+  disappear; that separate fixture links and runs against clang -O2's build,
+  since clang -O0 retains the reference.
 - `test-tier0` checks which general-purpose forms a row takes and refuses.
 - `test-assembler` checks `asm_assemble_code` by both paths: the records, the
   branch columns, the references, each refusal, and the arenas after a failure.

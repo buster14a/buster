@@ -4345,12 +4345,75 @@ static void check_test_driver_tier1_asm_control(CheckTest* test, const char* cla
     unlink(reference);
 }
 
+// #2351: -c followed by clang's linker can accept a dead asm label's empty PROGRAM promise. The direct executable
+// binder must not see it after Tier 1 eliminates the body: both a C-declared code label and an asm-only data label.
+static void check_test_driver_tier1_asm_units(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[PATH_MAX];
+    char reference[PATH_MAX];
+    char program[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/driver/tier1_asm_units.c", check_test_fixture_root);
+    snprintf(reference, sizeof(reference), "%s/tier1-asm-units-clang", directory);
+    snprintf(program, sizeof(program), "%s/tier1-asm-units", directory);
+    char* arguments[] = { (char*)clang, "-O0", "-w", "-no-pie", "-o", reference, source, NULL };
+    char* text = NULL;
+    const bool referenced = check_test_driver_spawn(arguments, &text) == 0;
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "Clang runs the directive unit fixture including the dead named unit");
+    // The fixture deliberately puts absolute pointers in text and a read-only side section. Direct PIEs reject those.
+    char* unit_arguments[] = { (char*)executable, "--tier1", "--tier1-strict", "--tier1-report", "--verify", "-no-pie", "-o", program, source, NULL };
+    text = NULL;
+    const bool compiled = ran && check_test_driver_spawn(unit_arguments, &text) == 0;
+    uint64_t code_certified = 0;
+    uint64_t code_uncertified = 0;
+    const bool reported = compiled && check_test_tier1_field(text, "code_certified", &code_certified) &&
+                          check_test_tier1_field(text, "code_uncertified", &code_uncertified);
+    free(text);
+    check_test_expect(test, compiled, "the direct binder accepts dead asm code and data names after strict Tier 1 removes their unit");
+    check_test_expect(test, reported && code_certified != 0 && code_uncertified != 0,
+                      "directive units retain allocation verification and explicitly leave their opaque bytes uncertified");
+    char actual[4096] = { 0 };
+    check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                      "the directly linked directive units match Clang's bytes, alignment, goto outputs and relocations");
+    unlink(program);
+    unlink(reference);
+
+    // Static data publishes after code. Its live fixup must retain the missing name and produce the ordinary error.
+    snprintf(source, sizeof(source), "%s/driver/tier1_asm_dead_reference.c", check_test_fixture_root);
+    char* missing_arguments[] = { (char*)executable, "--tier1", "--tier1-strict", "--verify", "-o", program, source, NULL };
+    text = NULL;
+    const int missing_status = check_test_driver_spawn(missing_arguments, &text);
+    check_test_expect(test, missing_status == 1 && text != NULL && strstr(text, "undefined reference to 'buster2351_dead_reference'") != NULL &&
+                          strstr(text, "internal compiler error") == NULL && access(program, F_OK) != 0,
+                      "a live static-data reference to an eliminated asm label keeps its name and fails normal direct linking");
+    free(text);
+    unlink(program);
+
+    // With no live fixup, an external named only in the dead side section disappears. Clang -O2 removes that block too.
+    snprintf(source, sizeof(source), "%s/driver/tier1_asm_dead_external.c", check_test_fixture_root);
+    char* external_arguments[] = { (char*)clang, "-O2", "-w", "-o", reference, source, NULL };
+    text = NULL;
+    const bool external_reference = check_test_driver_spawn(external_arguments, &text) == 0;
+    free(text);
+    const bool external_ran = external_reference && check_test_driver_capture(reference, expected, sizeof(expected));
+    check_test_expect(test, external_ran, "Clang -O2 links and runs after eliminating an asm-only undefined external");
+    CheckTestTier1Build build;
+    const bool external_compiled = external_ran && check_test_tier1_build(executable, source, "", program, true, false, false, false, "--tier1-strict", &build);
+    check_test_expect(test, external_compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                      "strict Tier 1's direct binder ignores an external referenced only in an eliminated asm unit");
+    unlink(program);
+    unlink(reference);
+}
+
 // The asm bodies' fixture (#1839) compiled by --tier1 --verify into an executable by each path, with and without
 // rematerialization, with no function refused: it must print what clang -O0's build prints. Its -c object's
 // tier1_cpuid holds its cpuid among its own records, with no call, and pushes rbx in its prologue.
 static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_asm_control(test, clang, executable, directory);
+    check_test_driver_tier1_asm_units(test, clang, executable, directory);
     char unit[512];
     char reference[512];
     char object[512];
