@@ -374,6 +374,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             {
                 // An asm body (#1839, Tier0Function.call_asm) takes its register operands from the stack (#2144) and
                 // returns its primary scalar register result, if any. Its secondary result rows project this call.
+                // For asm goto the primary result is the exit number used by the ordinary dispatch.
                 const bool body = input->call_asm != 0 && input->call_asm[value] != 0;
                 depth -= input->call_argument_counts[value];
                 // An indirect call's address (U64) was pushed before its arguments, under them.

@@ -654,6 +654,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         emitted->fixed_count += fixed != 0;
         prepared->asm_count += body;
         prepared->asm_callee |= body ? fixed & BUSTER_ABI_CALLEE_SAVED : 0;
+        prepared->asm_opaque |= body && function->asm_bodies[plan->patterns[node].immediate].opaque;
         // The asm operand contract names only the low vector registers. Keep its unmodelled upper clobbers outside
         // allocation until that separate contract describes all 32 registers.
         prepared->vector_reserved |= body ? 0xffff0000u : 0;
@@ -3719,6 +3720,16 @@ static Tier1EmitError tier1_emit_cfg_asm(const Tier1SelectPlan* plan, Tier1EmitR
         // The body's records, between the saves and the restores.
         const uint32_t first = buffer->count;
         range[0] = pass == 0 ? first : range[0];
+        if (error == TIER1_EMIT_OK && pass == 0)
+        {
+            error = body->label_count <= emitted->asm_label_capacity - emitted->asm_label_count ? error : TIER1_EMIT_MEMORY;
+            for (uint32_t k = 0; error == TIER1_EMIT_OK && k < body->label_count; k += 1)
+            {
+                const uint32_t at = emitted->asm_label_count++;
+                emitted->asm_label_records[at] = first + body->label_records[k];
+                emitted->asm_label_names[at] = body->label_names[k];
+            }
+        }
         uint32_t branch = 0;
         for (uint32_t r = 0; error == TIER1_EMIT_OK && pass == 0 && r < body->count; r += 1)
         {
@@ -3752,6 +3763,7 @@ struct Tier1EmitCfgCapacity
 {
     uint64_t records;
     uint64_t branches;
+    uint64_t asm_labels;
     uint32_t references;
     uint32_t literals;
 };
@@ -3799,6 +3811,7 @@ static Tier1EmitCfgCapacity tier1_emit_cfg_capacity(const Tier1SelectPlan* plan,
                 const IrAsmBody* body = &function->asm_bodies[call->body - 1];
                 capacity.records += body->count + 2u * (uint64_t)body->passed + 2u * (uint32_t)__builtin_popcount(body->result_registers) + 2u + 2u * (BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 15u + 7u);
                 capacity.branches += function->op[node] == IR_CALL ? body->branch_count : 0;
+                capacity.asm_labels += body->label_count;
             }
             if (tier1_select_function_call(function, node))
             {
@@ -4001,7 +4014,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count + extra.branches;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
-    Tier1EmitError error = capacity <= UINT32_MAX && branch_capacity <= UINT32_MAX ? TIER1_EMIT_OK : TIER1_EMIT_LIMIT;
+    Tier1EmitError error = capacity <= UINT32_MAX && branch_capacity <= UINT32_MAX && extra.asm_labels <= UINT32_MAX ? TIER1_EMIT_OK : TIER1_EMIT_LIMIT;
     Tier1SelectCode* code = &emitted->code;
     Tier1EmitBuffer buffer = { .capacity = (uint32_t)capacity, .branch_capacity = (uint32_t)branch_capacity };
     Tier1SelectRequests requests = { 0 };
@@ -4038,6 +4051,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     code->branches = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
     code->targets = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
     emitted->references = ok && emitted->reference_capacity != 0 ? ir_allocate(output, emitted->reference_capacity, sizeof(LinkReference), &ok) : 0;
+    emitted->asm_label_capacity = (uint32_t)extra.asm_labels;
+    emitted->asm_label_count = 0;
+    emitted->asm_label_records = ok && extra.asm_labels != 0 ? ir_allocate(output, extra.asm_labels, 4, &ok) : 0;
+    emitted->asm_label_names = ok && extra.asm_labels != 0 ? ir_allocate(output, extra.asm_labels, 4, &ok) : 0;
     // Each vector constant or F80 constant needs at most one literal per definition. The vector index also distinguishes widths.
     const uint64_t literal_index = vector_constants != 0 ? 3 * (uint64_t)function->vector_constant_count : 0;
     emitted->literal_capacity = (uint32_t)literal_room;
@@ -4080,8 +4097,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     uint32_t* pending_branches = ok ? ir_allocate(scratch, branch_capacity + 1, 4, &ok) : 0;
     uint32_t* pending_goals = ok ? ir_allocate(scratch, branch_capacity + 1, 4, &ok) : 0;
     uint8_t* dropped = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
-    // The asm bodies' records' ranges (#1839), in code order, which the target's forms don't bound.
-    uint32_t* asm_ranges = ok ? ir_allocate(scratch, 2 * (uint64_t)emitted->prepared.asm_count + 2, 4, &ok) : 0;
+    // The asm bodies' records' ranges (#1839), in code order, which the target's forms don't bound. Retain them so
+    // post scheduling preserves the template's exact records and the instructions its labels name (#2351).
+    uint32_t* asm_ranges = ok && emitted->prepared.asm_count != 0 ? ir_allocate(output, 2 * (uint64_t)emitted->prepared.asm_count, 4, &ok) : 0;
     uint32_t asm_range_count = 0;
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
     uint32_t* entries = 0;
@@ -4785,6 +4803,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         code->count = buffer.count;
         code->branch_count = buffer.branch_count;
         emitted->frame_event_count = buffer.event_count;
+        emitted->asm_ranges = asm_ranges;
+        emitted->asm_range_count = asm_range_count;
         code->node_first[count] = buffer.count;
         code->error_node = BUSTER_IR_NONE;
         code->arena_bytes = output->length - output_mark;

@@ -103,6 +103,10 @@ struct CheckProgramCode
     // numeric labels and what asm_object_options marked (ObjectOptions.temporary_symbols).
     SymbolId* unit_temporary;
     uint32_t unit_temporary_count;
+    // Asm-owned symbols left without definitions. After the static data and aliases
+    // publish, check_program_sections leaves only actually referenced ones named for binding.
+    SymbolId* asm_undefined_symbols;
+    uint32_t asm_undefined_count;
     // The unit program symbols whose `.size` a template set, indexed by SymbolId: the values, and which ones. The
     // definitions' atoms exist only after the static data is published, so check_program_sections applies them.
     uint64_t* asm_sizes;
@@ -1381,6 +1385,10 @@ struct CheckEmitBody
     uint32_t* fixup_ends;
     uint32_t* label_offsets;
     uint32_t* asm_offsets;
+    // With -S and placed byte templates, the final record boundaries and spans survive the lane's scratch rewind.
+    uint32_t* assembly_offsets;
+    AssemblyRawSpan* assembly_spans;
+    uint32_t assembly_span_count;
     uint32_t* row_offsets;
     uint32_t* row_tokens;
     uint32_t row_count;
@@ -1401,6 +1409,9 @@ struct CheckEmitBody
     uint32_t sled;
     uint32_t prefix;
     uint32_t endbr;
+    // Alignment required by a byte template placed in this function, in addition to the function's own.
+    uint8_t asm_alignment;
+    uint32_t inline_unit_count;
 };
 
 // A part's steps (CheckLowerPart, the lowering's), and its first body whose backend failed (either tier) and whose code
@@ -2077,6 +2088,142 @@ static __attribute__((noinline, cold)) uint8_t* check_program_branch_entries(con
     return room ? marks : 0;
 }
 
+typedef struct CheckAsmSpan CheckAsmSpan;
+struct CheckAsmSpan
+{
+    const CheckProgramAsm* plan;
+    uint32_t record;
+    uint32_t begin;
+    uint32_t end;
+};
+
+static int check_program_asm_span_order(const void* left, const void* right)
+{
+    const CheckAsmSpan* a = left;
+    const CheckAsmSpan* b = right;
+    return a->record != b->record ? (a->record > b->record) - (a->record < b->record) : (a->end > b->end) - (a->end < b->end);
+}
+
+// Branch sizing sees each assembled span's maximum padding, so every chosen short branch remains in range when
+// the unused padding is removed. Keep those opcode lengths, compact the bytes and record boundaries once, then
+// rewrite the ordinary branches and fixup ends. The raw unit's own branches were sized by the assembler. This runs
+// before source/frame metadata consumes the offsets, including for a template ending in an alignment directive.
+static int64_t check_program_emit_asm_bytes(const CheckProgramAsms* asms, const EmittedCode* code, CheckEmitBody* body, uint8_t* bytes, uint32_t* offsets,
+                                           uint32_t length, uint32_t sled, Arena* scratch, CheckProgramStatus* failure)
+{
+    uint32_t count = 0;
+    for (uint32_t k = 0; k < code->asm_label_count; k += 1)
+    {
+        const uint32_t name = code->asm_label_names[k];
+        const uint32_t plan = name - asms->name_count;
+        count += code->asm_label_records[k] != UINT32_MAX && name >= asms->name_count && plan < asms->plan_count && asms->plans[plan].inline_unit;
+    }
+    CheckAsmSpan* spans = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckAsmSpan, count) : NULL;
+    body->inline_unit_count = count;
+    bool valid = count == 0 || spans != NULL;
+    *failure = valid ? *failure : CHECK_PROGRAM_RESOURCE;
+    uint32_t at = 0;
+    for (uint32_t k = 0; valid && k < code->asm_label_count; k += 1)
+    {
+        const uint32_t name = code->asm_label_names[k];
+        const uint32_t p = name - asms->name_count;
+        const CheckProgramAsm* plan = name >= asms->name_count && p < asms->plan_count && asms->plans[p].inline_unit ? asms->plans + p : NULL;
+        if (plan != NULL && code->asm_label_records[k] != UINT32_MAX)
+        {
+            const uint32_t record = code->asm_label_records[k];
+            valid = record <= code->count && plan->inline_unit_size <= code->count - record;
+            if (valid)
+            {
+                const uint32_t begin = offsets[record];
+                const uint32_t end = offsets[record + plan->inline_unit_size];
+                valid = end >= begin && end - begin == plan->inline_unit_size;
+                spans[at++] = (CheckAsmSpan){ .plan = plan, .record = record, .begin = begin, .end = end };
+            }
+        }
+    }
+    if (valid && count > 1)
+    {
+        qsort(spans, count, sizeof(CheckAsmSpan), check_program_asm_span_order);
+    }
+    uint32_t read = 0;
+    uint32_t written = 0;
+    uint32_t record = 0;
+    uint32_t removed = 0;
+    for (uint32_t k = 0; valid && k < count; k += 1)
+    {
+        const CheckAsmSpan span = spans[k];
+        if (body->assembly_spans != NULL && span.plan->inline_unit_size != 0)
+        {
+            body->assembly_spans[body->assembly_span_count++] = (AssemblyRawSpan){ .first = span.record, .count = span.plan->inline_unit_size };
+        }
+        const AsmResult* unit = &span.plan->unit;
+        const uint32_t size = (uint32_t)unit->link.atoms.size[unit->entry_atom];
+        const uint8_t alignment = unit->link.atoms.alignment_log2[unit->entry_atom];
+        valid = span.begin >= read && span.end <= length && span.record >= record && alignment < 32;
+        if (valid)
+        {
+            const uint32_t plain = span.begin - read;
+            memmove(bytes + written, bytes + read, plain);
+            written += plain;
+            const uint32_t padding = (0u - written - sled) & ((UINT32_C(1) << alignment) - 1);
+            const uint32_t used = padding + size;
+            valid = used <= span.plan->inline_unit_size;
+            if (valid)
+            {
+                check_program_emit_nops(bytes + written, padding);
+                if (size != 0)
+                {
+                    memcpy(bytes + written + padding, unit->link.atoms.bytes[unit->entry_atom], size);
+                }
+                for (; record < span.record; record += 1)
+                {
+                    offsets[record] -= removed;
+                }
+                for (uint32_t r = 0; r < span.plan->inline_unit_size; r += 1)
+                {
+                    offsets[record++] = written + (r < used ? r : used);
+                }
+                removed += span.plan->inline_unit_size - used;
+                written += used;
+                read = span.end;
+                body->asm_alignment = alignment > body->asm_alignment ? alignment : body->asm_alignment;
+            }
+        }
+    }
+    if (valid && count != 0)
+    {
+        memmove(bytes + written, bytes + read, length - read);
+        written += length - read;
+        for (; record <= code->count; record += 1)
+        {
+            offsets[record] -= removed;
+        }
+        for (uint32_t b = 0; valid && b < code->branch_count; b += 1)
+        {
+            const uint32_t branch = code->branches[b];
+            const uint32_t target = code->targets[b];
+            X86Instruction* instruction = code->records + branch;
+            instruction->displacement = (int32_t)((int64_t)offsets[target] - offsets[branch + 1]);
+            uint8_t encoded[BUSTER_X86_ENCODER_CAPACITY(1)];
+            const int64_t size = x86_encode(instruction, 1, encoded, sizeof(encoded), NULL, NULL);
+            valid = size > 0 && size == (int64_t)offsets[branch + 1] - offsets[branch];
+            if (valid)
+            {
+                memcpy(bytes + offsets[branch], encoded, (size_t)size);
+            }
+        }
+        uint32_t fixup = 0;
+        for (uint32_t r = 0; valid && r < code->count; r += 1)
+        {
+            if ((code->records[r].form & BUSTER_X86_FORM_FIXUP) != 0)
+            {
+                body->fixup_ends[fixup++] = offsets[r + 1];
+            }
+        }
+    }
+    return valid ? count != 0 ? (int64_t)written : (int64_t)length : -1;
+}
+
 static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b)
 {
     const CheckProgram* program = run->program;
@@ -2092,6 +2239,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     // A naked function's templates' labels, or its asm bodies' (#1839, EmittedCode.asm_label_records): it has no body.
     const uint32_t asm_label_count = naked != 0 ? naked->label_count : code->asm_label_count;
     body->asm_offsets = asm_label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, asm_label_count) : 0;
+    const bool assembly_offsets = run->lanes != NULL && run->lanes->assembly && code->asm_label_count != 0;
+    body->assembly_offsets = assembly_offsets ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1) : NULL;
+    body->assembly_spans = assembly_offsets ? BUSTER_ARENA_PUSH_ARRAY(scratch, AssemblyRawSpan, code->asm_label_count) : NULL;
     const uint64_t rows = run->sources ? (uint64_t)code->source_count + 2 + BUSTER_CHECK_DEBUG_SLACK : 0;
     body->row_offsets = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
     body->row_tokens = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
@@ -2124,6 +2274,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     uint8_t* encoded = arena_push(bytes, byte_capacity + sled, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
                  (asm_label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0 && body->debug_spans != NULL)) &&
+                 (!assembly_offsets || (body->assembly_offsets != NULL && body->assembly_spans != NULL)) &&
                  (!run->sources || code->local_range_count == 0 || (body->debug_locations != NULL && body->debug_location_first != NULL)) &&
                  (!run->unwind || code->frame_count == 0 || frame_rows != 0);
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
@@ -2144,9 +2295,18 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
         const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
         check_clock_lap(run->stage_clock, CHECK_STAGE_BRANCH_SIZING);
-        const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+        int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+        if (length >= 0 && code->asm_label_count != 0)
+        {
+            offsets[code->count] = (uint32_t)length;
+            length = check_program_emit_asm_bytes(&run->lowered->asms, code, body, encoded, offsets, (uint32_t)length, sled, scratch, &failure);
+        }
         check_clock_lap(run->stage_clock, CHECK_STAGE_ENCODE);
         valid = length >= 0;
+        if (valid && body->assembly_offsets != NULL)
+        {
+            memcpy(body->assembly_offsets, offsets, ((uint64_t)code->count + 1) * sizeof(uint32_t));
+        }
         if (valid && run->sources)
         {
             // The rows' own failure: no room (a lane's, which the emission retries on one lane) or the protocol's refusal.
@@ -2227,6 +2387,15 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             {
                 const uint32_t record = naked != 0 ? naked->labels[k].record : code->asm_label_records[k];
                 body->asm_offsets[k] = record < code->count ? offsets[record] : record == code->count ? (uint32_t)length : UINT32_MAX;
+                const uint32_t name = naked == NULL ? code->asm_label_names[k] : 0;
+                const uint32_t p = name - run->lowered->asms.name_count;
+                if (naked == NULL && name >= run->lowered->asms.name_count && p < run->lowered->asms.plan_count && run->lowered->asms.plans[p].inline_unit &&
+                    body->asm_offsets[k] != UINT32_MAX)
+                {
+                    const AsmResult* unit = &run->lowered->asms.plans[p].unit;
+                    const uint32_t mask = (UINT32_C(1) << unit->link.atoms.alignment_log2[unit->entry_atom]) - 1;
+                    body->asm_offsets[k] += (0u - body->asm_offsets[k] - sled) & mask;
+                }
             }
             if (sled != 0)
             {
@@ -3830,9 +3999,28 @@ static uint32_t check_program_emit_asm_name(const CheckProgramAsms* asms, String
 // atom and its section descriptor. False for an arena without room or an inconsistent unit.
 // With `omit_frames`, the unit's .eh_frame atom, its symbols and its fixups are left out: a naked function's frame rows
 // are the emission's unwind entry instead (#1848, CheckProgramNaked.frame_rows).
+typedef struct CheckAsmPlacedFixup CheckAsmPlacedFixup;
+struct CheckAsmPlacedFixup
+{
+    int64_t addend;
+    uint32_t offset;
+    SymbolId target;
+    uint8_t kind;
+};
+
+typedef struct CheckAsmPlacement CheckAsmPlacement;
+struct CheckAsmPlacement
+{
+    AtomId atom;
+    uint32_t offset;
+    CheckAsmPlacedFixup* fixups;
+    uint32_t count;
+    uint32_t capacity;
+};
+
 static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckProgramAsms* asms, const AsmResult* unit, const SymbolId* asm_symbols,
                                         SymbolId symbol, AtomId* atoms, ObjectAtomSection* sections, uint32_t* section_count, Arena* bytes, Arena* scratch,
-                                        AtomId* entry_atom, uint8_t** entry_bytes, uint64_t* entry_length, bool omit_frames)
+                                        AtomId* entry_atom, uint8_t** entry_bytes, uint64_t* entry_length, bool omit_frames, CheckAsmPlacement* placed)
 {
     const Link* source = &unit->link;
     const uint64_t mark = scratch->length;
@@ -3852,6 +4040,14 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
         const uint8_t class = source->atoms.class[a];
         if (omit_frames && class == BUSTER_LINK_CLASS_EH_FRAME)
         {
+            continue;
+        }
+        if (placed != NULL && a == unit->entry_atom)
+        {
+            mapped[a] = placed->atom;
+            valid = placed->atom != 0 && placed->atom < result->link.atoms.count &&
+                    placed->offset <= result->link.atoms.size[placed->atom] &&
+                    source->atoms.size[a] <= result->link.atoms.size[placed->atom] - placed->offset;
             continue;
         }
         const uint64_t size = source->atoms.size[a];
@@ -3886,6 +4082,7 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
     {
         const uint32_t atom = source->symbols.atom[s];
         const bool defined = atom != 0;
+        const uint64_t value = source->symbols.value[s] + (placed != NULL && atom == unit->entry_atom ? placed->offset : 0);
         if (defined && atom < source->atoms.count && mapped[atom] == 0)
         {
             // An omitted .eh_frame's own label.
@@ -3896,7 +4093,7 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
         {
             // A numeric label or `.`: an unnamed local symbol, defined at its atom.
             symbols[s] = defined && atom < source->atoms.count ?
-                         link_add_symbol(&result->link, 0, mapped[atom], source->symbols.value[s], source->symbols.size[s],
+                         link_add_symbol(&result->link, 0, mapped[atom], value, source->symbols.size[s],
                                          BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_PROGRAM) :
                          0;
             valid = symbols[s] != 0;
@@ -3925,7 +4122,7 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
             }
             else if (valid && defined)
             {
-                valid = atom < source->atoms.count && link_define_symbol(&result->link, symbols[s], mapped[atom], source->symbols.value[s], source->symbols.size[s]);
+                valid = atom < source->atoms.count && link_define_symbol(&result->link, symbols[s], mapped[atom], value, source->symbols.size[s]);
                 if (valid)
                 {
                     result->link.symbols.source[symbols[s]] = BUSTER_LINK_SOURCE_PROGRAM;
@@ -3945,15 +4142,31 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
         {
             const FixupId fixup = begin + f;
             const SymbolId target = source->fixups.target[fixup] < source->symbols.count ? symbols[source->fixups.target[fixup]] : 0;
-            valid = target != 0 && link_add_fixup(&result->link, mapped[a], source->fixups.offset[fixup], source->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND,
-                                                   target, link_fixup_addend(source, fixup)) != 0;
+            if (placed != NULL && a == unit->entry_atom)
+            {
+                valid = target != 0 && placed->count < placed->capacity;
+                if (valid)
+                {
+                    placed->fixups[placed->count++] = (CheckAsmPlacedFixup){
+                        .addend = link_fixup_addend(source, fixup),
+                        .offset = placed->offset + source->fixups.offset[fixup],
+                        .target = target,
+                        .kind = source->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND,
+                    };
+                }
+            }
+            else
+            {
+                valid = target != 0 && link_add_fixup(&result->link, mapped[a], source->fixups.offset[fixup], source->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND,
+                                                       target, link_fixup_addend(source, fixup)) != 0;
+            }
         }
     }
     if (valid && unit->entry_atom != 0 && unit->entry_atom < source->atoms.count)
     {
         *entry_atom = mapped[unit->entry_atom];
-        *entry_bytes = result->link.atoms.bytes[*entry_atom];
-        *entry_length = result->link.atoms.size[*entry_atom];
+        *entry_bytes = placed != NULL ? result->link.atoms.bytes[*entry_atom] + placed->offset : result->link.atoms.bytes[*entry_atom];
+        *entry_length = placed != NULL ? source->atoms.size[unit->entry_atom] : result->link.atoms.size[*entry_atom];
     }
     valid = valid && *entry_atom != 0;
     if (valid && symbol != 0)
@@ -3963,6 +4176,81 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
         {
             result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
         }
+    }
+    arena_pop_to(scratch, mark);
+    return valid;
+}
+
+static int check_program_asm_fixup_order(const void* left, const void* right)
+{
+    const CheckAsmPlacedFixup* a = left;
+    const CheckAsmPlacedFixup* b = right;
+    return (a->offset > b->offset) - (a->offset < b->offset);
+}
+
+// A function's ordinary fixups and the byte templates' fixups interleave. Hold the ordinary ones while the units'
+// side sections are published, then append the merged, offset-ordered function fixups as one contiguous atom range.
+// No other atom has been added since link_add_code_fixups wrote the ordinary range.
+static bool check_program_emit_asm_placed(CheckProgramCode* result, const CheckProgramAsms* asms, const EmittedCode* code, const CheckEmitBody* body,
+                                         const SymbolId* asm_symbols, AtomId atom, uint32_t wide_mark, Arena* bytes, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    Link* link = &result->link;
+    const uint32_t ordinary = link->atoms.fixup_count[atom];
+    const uint32_t begin = ordinary != 0 ? link->atoms.fixup_begin[atom] : link->fixups.count;
+    uint64_t capacity = ordinary;
+    for (uint32_t k = 0; k < code->asm_label_count; k += 1)
+    {
+        const uint32_t name = code->asm_label_names[k];
+        const uint32_t p = name - asms->name_count;
+        if (body->asm_offsets[k] != UINT32_MAX && name >= asms->name_count && p < asms->plan_count && asms->plans[p].inline_unit)
+        {
+            const AsmResult* unit = &asms->plans[p].unit;
+            capacity += unit->link.atoms.fixup_count[unit->entry_atom];
+        }
+    }
+    CheckAsmPlacedFixup* fixups = capacity != 0 && capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckAsmPlacedFixup, capacity) : NULL;
+    bool valid = (capacity == 0 || fixups != NULL) && (uint64_t)begin + ordinary == link->fixups.count;
+    for (uint32_t f = 0; valid && f < ordinary; f += 1)
+    {
+        const uint32_t source = begin + f;
+        fixups[f] = (CheckAsmPlacedFixup){
+            .addend = link_fixup_addend(link, source),
+            .offset = link->fixups.offset[source],
+            .target = link->fixups.target[source],
+            .kind = link->fixups.kind[source] & BUSTER_LINK_FIXUP_KIND,
+        };
+    }
+    CheckAsmPlacement placed = { .atom = atom, .fixups = fixups, .count = ordinary, .capacity = (uint32_t)capacity };
+    if (valid)
+    {
+        link->fixups.count = begin;
+        link->fixups.wide_count = wide_mark;
+        link->atoms.fixup_count[atom] = 0;
+        link->atoms.fixup_begin[atom] = 0;
+    }
+    for (uint32_t k = 0; valid && k < code->asm_label_count; k += 1)
+    {
+        const uint32_t name = code->asm_label_names[k];
+        const uint32_t p = name - asms->name_count;
+        if (body->asm_offsets[k] != UINT32_MAX && name >= asms->name_count && p < asms->plan_count && asms->plans[p].inline_unit)
+        {
+            AtomId entry_atom = 0;
+            uint8_t* entry_bytes = NULL;
+            uint64_t entry_length = 0;
+            placed.offset = body->asm_offsets[k];
+            valid = check_program_emit_asm_unit(result, asms, &asms->plans[p].unit, asm_symbols, 0, result->unit_atoms, result->unit_sections,
+                                                &result->unit_atom_count, bytes, scratch, &entry_atom, &entry_bytes, &entry_length, false, &placed);
+        }
+    }
+    if (valid && placed.count > 1)
+    {
+        qsort(fixups, placed.count, sizeof(CheckAsmPlacedFixup), check_program_asm_fixup_order);
+    }
+    for (uint32_t f = 0; valid && f < placed.count; f += 1)
+    {
+        const CheckAsmPlacedFixup fixup = fixups[f];
+        valid = link_add_fixup(link, atom, fixup.offset, fixup.kind, fixup.target, fixup.addend) != 0;
     }
     arena_pop_to(scratch, mark);
     return valid;
@@ -4582,6 +4870,120 @@ static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCod
             .sled = sled,
             .endbr = endbr != 0 ? prefix + 1 : 0,
         };
+    }
+    return valid;
+}
+
+// A matched instruction whose bytes overlap a fixup needs instruction spelling in -S: ABS32S and GOT fields do not
+// have equivalent data directives. The atom's fixups are ordered and disjoint, so their ends admit a binary search.
+static bool check_program_emit_asm_instruction_fixed(const AsmResult* unit, const AsmFragment* fragment)
+{
+    const Link* link = &unit->link;
+    const uint32_t begin = link->atoms.fixup_begin[unit->entry_atom];
+    const uint32_t count = link->atoms.fixup_count[unit->entry_atom];
+    uint32_t first = 0;
+    uint32_t end = count;
+    while (first < end)
+    {
+        const uint32_t middle = first + (end - first) / 2;
+        const uint32_t fixup = begin + middle;
+        const uint32_t offset = link->fixups.offset[fixup];
+        const uint32_t width = link_fixup_kinds[link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND].width;
+        if ((uint64_t)offset + width <= fragment->offset)
+        {
+            first = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    return first < count && link->fixups.offset[begin + first] < (uint64_t)fragment->offset + fragment->size;
+}
+
+static int check_program_emit_asm_instruction_order(const void* left, const void* right)
+{
+    const AssemblyRawInstruction* a = left;
+    const AssemblyRawInstruction* b = right;
+    return (a->offset > b->offset) - (a->offset < b->offset);
+}
+
+// A placed byte template replaces its placeholder records in -S too. Ordinary records retain their symbolic
+// spelling; raw spans retain their actual bytes and the matched instructions whose fields need symbolic spelling.
+static bool check_program_emit_keep_spans(AssemblyCode* kept, const EmittedCode* code, const CheckEmitBody* body, const CheckProgramAsms* asms, Arena* output)
+{
+    uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)code->count + 1);
+    AssemblyRawSpan* spans = body->assembly_span_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AssemblyRawSpan, body->assembly_span_count) : NULL;
+    bool valid = offsets != NULL && body->assembly_offsets != NULL && (body->assembly_span_count == 0 || spans != NULL);
+    if (valid)
+    {
+        memcpy(offsets, body->assembly_offsets, ((uint64_t)code->count + 1) * sizeof(uint32_t));
+        if (body->assembly_span_count != 0)
+        {
+            memcpy(spans, body->assembly_spans, (uint64_t)body->assembly_span_count * sizeof(AssemblyRawSpan));
+        }
+    }
+    for (uint32_t s = 0; valid && s < body->assembly_span_count; s += 1)
+    {
+        const AsmResult* unit = NULL;
+        uint32_t base = 0;
+        for (uint32_t k = 0; unit == NULL && k < code->asm_label_count; k += 1)
+        {
+            const uint32_t name = code->asm_label_names[k];
+            const uint32_t p = name - asms->name_count;
+            const CheckProgramAsm* plan = name >= asms->name_count && p < asms->plan_count ? asms->plans + p : NULL;
+            if (plan != NULL && plan->inline_unit && plan->inline_unit_size == spans[s].count && code->asm_label_records[k] == spans[s].first)
+            {
+                unit = &plan->unit;
+                base = body->asm_offsets[k];
+            }
+        }
+        valid = unit != NULL && base != UINT32_MAX && (unit->instructions == 0 || (unit->template_instructions != NULL && unit->template_fragments != NULL));
+        uint32_t count = 0;
+        for (uint32_t pass = 0; valid && pass < 2; pass += 1)
+        {
+            AssemblyRawInstruction* instructions = pass != 0 && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AssemblyRawInstruction, count) : NULL;
+            valid = pass == 0 || count == 0 || instructions != NULL;
+            uint32_t at = 0;
+            for (uint32_t i = 0; valid && i < unit->instructions; i += 1)
+            {
+                const AsmInstruction* instruction = unit->template_instructions + i;
+                const AsmFragment* fragment = unit->template_fragments + instruction->fragment;
+                if (fragment->section == BUSTER_LINK_CLASS_TEXT && check_program_emit_asm_instruction_fixed(unit, fragment))
+                {
+                    valid = (uint64_t)base + fragment->offset + fragment->size <= body->length;
+                    if (valid && pass != 0)
+                    {
+                        instructions[at] = (AssemblyRawInstruction){
+                            .record = instruction->record,
+                            .offset = base + fragment->offset,
+                            .size = fragment->size,
+                            .address32 = instruction->address32,
+                        };
+                    }
+                    at += valid;
+                }
+            }
+            if (pass == 0)
+            {
+                count = at;
+            }
+            else if (valid)
+            {
+                if (count > 1)
+                {
+                    qsort(instructions, count, sizeof(AssemblyRawInstruction), check_program_emit_asm_instruction_order);
+                }
+                spans[s].instructions = instructions;
+                spans[s].instruction_count = count;
+            }
+        }
+    }
+    if (valid)
+    {
+        kept->offsets = offsets;
+        kept->raw_spans = spans;
+        kept->raw_span_count = body->assembly_span_count;
     }
     return valid;
 }
@@ -6354,7 +6756,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         uint8_t* entry_bytes = 0;
         uint64_t entry_length = 0;
         valid = check_program_emit_asm_unit(result, asms, file_unit, asm_symbols, 0, result->asm_atoms, result->asm_sections, &result->asm_atom_count, bytes,
-                                            scratch, &entry_atom, &entry_bytes, &entry_length, false);
+                                            scratch, &entry_atom, &entry_bytes, &entry_length, false, NULL);
         valid = valid && check_program_emit_asm_groups(result, asms, file_unit, asm_symbols, output);
         // Its atoms' bytes are the only room it takes that the link's capacity doesn't count, as the file-scope assembly's
         // copy did before (#619): a failure is the bytes arena's.
@@ -6364,13 +6766,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t s = 0; valid && asms->plans != 0 && s < asms->plan_count; s += 1)
     {
         const CheckProgramAsm* plan = asms->plans + s;
-        if (plan->unit_assembled && plan->helper == BUSTER_CHECK_NONE)
+        if (plan->unit_assembled && !plan->inline_unit && plan->helper == BUSTER_CHECK_NONE)
         {
             AtomId entry_atom = 0;
             uint8_t* entry_bytes = 0;
             uint64_t entry_length = 0;
             valid = check_program_emit_asm_unit(result, asms, &plan->unit, asm_symbols, 0, result->unit_atoms, result->unit_sections, &result->unit_atom_count,
-                                                bytes, scratch, &entry_atom, &entry_bytes, &entry_length, false);
+                                                bytes, scratch, &entry_atom, &entry_bytes, &entry_length, false, NULL);
             if (!valid)
             {
                 result->status = CHECK_PROGRAM_BACKEND;
@@ -6428,7 +6830,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const bool naked_frames = framed != NULL;
             valid = symbol != 0 && !patchable && !tracked &&
                     check_program_emit_asm_unit(result, asms, unit, asm_symbols, symbol, result->unit_atoms, result->unit_sections,
-                                                &result->unit_atom_count, bytes, scratch, &entry_atom, &entry_bytes, &entry_length, naked_frames);
+                                                &result->unit_atom_count, bytes, scratch, &entry_atom, &entry_bytes, &entry_length, naked_frames, NULL);
             if (valid && keep_records && unit_plan != NULL && unit_plan->presentation != NULL)
             {
                 valid = entry_atom < result->assembly_code_count;
@@ -6559,12 +6961,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             // A function with patchable_function_entry's NOPs (#1447, CheckEmitBody.sled) has its symbol after the first
             // `prefix` of them, which the atom's alignment comes before, as clang's: its entry's label is the atom's start.
-            const AtomId atom = link_add_atom(&result->link, BUSTER_LINK_CLASS_TEXT, alignment, body->length, body->bytes, 0);
+            const uint8_t aligned = body->asm_alignment > alignment ? body->asm_alignment : alignment;
+            const AtomId atom = link_add_atom(&result->link, BUSTER_LINK_CLASS_TEXT, aligned, body->length, body->bytes, 0);
             // A window's body keeps only its marked records (check_program_emit_window_keep).
             const uint32_t record_count = body->windowed ? body->kept_records : code->count;
+            const uint32_t wide_mark = result->link.fixups.wide_count;
             valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, body->prefix, body->length - body->prefix) &&
                     link_add_code_fixups(&result->link, atom, code->records, record_count, body->fixup_ends,
                                          assembly ? check_program_emit_marked(code) : code->reference_count, code->references, code->reference_count);
+            if (valid && source_body && body->inline_unit_count != 0)
+            {
+                valid = check_program_emit_asm_placed(result, asms, code, body, asm_symbols, atom, wide_mark, bytes, scratch);
+            }
             if (valid && source_body && body->sled != body->endbr)
             {
                 valid = check_program_emit_patchable_entry(result, program, b, atom, bytes);
@@ -6574,6 +6982,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             if (valid && keep_records && !body->windowed && atom < result->assembly_code_count)
             {
                 valid = check_program_emit_keep_records(&result->assembly_code[atom], code, body->sled, body->prefix, body->endbr, output);
+                result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
+            }
+            if (valid && keep_records && source_body && body->inline_unit_count != 0 && atom < result->assembly_code_count)
+            {
+                valid = check_program_emit_keep_spans(&result->assembly_code[atom], code, body, asms, output);
                 result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
             }
             // The labels its templates define, each at its record's offset (its lane's, for a naked function): the
@@ -6615,6 +7028,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                             kept->templates[kept->template_count++] = piece;
                         }
                     }
+                    continue;
+                }
+                if (name >= asms->name_count && p < asms->plan_count && asms->plans[p].inline_unit)
+                {
+                    // The unit's own symbols were published at this private placement anchor above.
                     continue;
                 }
                 const SymbolId label = name < asms->name_count ? asm_symbols[name] : 0;
@@ -6845,6 +7263,34 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                                                        (uint8_t*)memset(data, 0, 8), 0) : 0;
             valid = atom != 0 && link_add_fixup(&result->link, atom, 0, BUSTER_LINK_FIXUP_ABS64, symbol, 0) != 0 &&
                     (priority == 65535 || link_add_priority(&result->link, atom, priority));
+        }
+    }
+    // Every live asm unit has published its labels. Definitions and references removed with their statements or
+    // functions leave undefined names; check_program_sections drops those no live fixup needs. Only asm-owned names
+    // change: C data, aliases and `.comm` overrides may still await publication. Weak declarations keep their names.
+    for (uint32_t n = 0; valid && n < asms->name_count; n += 1)
+    {
+        const CheckAsmName* name = asms->names + n;
+        const SymbolId symbol = asm_symbols[n];
+        const bool owned = symbol >= asm_first || (asm_defines != 0 && symbol != 0 && symbol <= program->symbol_count && asm_defines[symbol] == n + 1);
+        const bool reference = symbol >= asm_first && !name->label && name->referenced && result->link.symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE &&
+                               (result->link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_WEAK;
+        if (symbol != 0 && result->link.symbols.atom[symbol] == 0 && ((name->label && owned) || reference))
+        {
+            if (result->asm_undefined_symbols == NULL)
+            {
+                result->asm_undefined_symbols = BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, asms->name_count);
+                valid = result->asm_undefined_symbols != NULL;
+            }
+            if (valid)
+            {
+                result->asm_undefined_symbols[result->asm_undefined_count++] = symbol;
+                result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_NONE;
+                if ((result->link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL)
+                {
+                    result->link.symbols.flags[symbol] = (uint8_t)((result->link.symbols.flags[symbol] & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_GLOBAL);
+                }
+            }
         }
     }
     // A template's `.size` on one of the unit's program symbols, which check_program_sections applies once the static
@@ -7486,6 +7932,26 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     valid = valid && check_program_define_aliases(code, program) && check_program_define_pragma_aliases(code, program);
     // Every atom exists: the forwarded references take their symbols (#2204).
     check_program_label_forward_fixups(code);
+    // Binding visits every named undefined symbol, and executable emission resolves every slot. An asm name with no
+    // live code or data reference leaves an unnamed weak slot, as a forwarded label does, which objects omit and
+    // executables resolve to nothing. A referenced one keeps its name and binding for the ordinary diagnostic.
+    for (uint32_t k = 0; valid && k < code->asm_undefined_count; k += 1)
+    {
+        const SymbolId symbol = code->asm_undefined_symbols[k];
+        bool referenced = link->symbols.atom[symbol] != 0;
+        for (FixupId f = 1; !referenced && f < link->fixups.count; f += 1)
+        {
+            referenced = link->fixups.target[f] == symbol;
+        }
+        if (!referenced)
+        {
+            link->symbols.name[symbol] = 0;
+            link->symbols.value[symbol] = 0;
+            link->symbols.size[symbol] = 0;
+            link->symbols.flags[symbol] = BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE;
+            link->symbols.source[symbol] = BUSTER_LINK_SOURCE_NONE;
+        }
+    }
     // A symbol of internal linkage that no definition emitted is still an undefined reference: clang writes it as a
     // global undefined symbol (GNU ld and lld report it, and an executable link fails), never as an undefined local,
     // which an ELF object can't hold. The definitions' and aliases' symbols above have their sources set.

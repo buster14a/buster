@@ -78,6 +78,26 @@ struct AssemblyInline
     uint32_t statement;
 };
 
+// Placeholder records replaced by a placed assembly unit's bytes. The final offset map gives this range's byte
+// boundaries, including its leading alignment padding; ordinary records outside it keep their own encodings.
+typedef struct AssemblyRawInstruction AssemblyRawInstruction;
+struct AssemblyRawInstruction
+{
+    X86Instruction record;
+    uint32_t offset;
+    uint32_t size;
+    bool address32;
+};
+
+typedef struct AssemblyRawSpan AssemblyRawSpan;
+struct AssemblyRawSpan
+{
+    const AssemblyRawInstruction* instructions;
+    uint32_t first;
+    uint32_t count;
+    uint32_t instruction_count;
+};
+
 // A TEXT atom's instructions, as the emission made them: `count` records, sized (each branch's rel8 or rel32 form) and
 // encoded into the atom's bytes, and its branches to its own records (`branches[i]` targets `targets[i]`, a record or
 // `count` for the code's end).
@@ -85,12 +105,14 @@ typedef struct AssemblyCode AssemblyCode;
 struct AssemblyCode
 {
     const X86Instruction* records;
-    // A full assembly unit's records may have data between them. Non-null offsets select the mixed-code writer.
+    // Final byte offsets for a mixed assembly unit or a C function with placed spans.
     const uint32_t* offsets;
     const uint32_t* branches;
     const uint32_t* targets;
+    const AssemblyRawSpan* raw_spans;
     uint32_t count;
     uint32_t branch_count;
+    uint32_t raw_span_count;
     // The patchable-entry bytes in the atom before its first instruction record; among them, indirect branch tracking's
     // endbr64 (#3570), at its offset plus one (0 for none), which is printed as the instruction.
     uint32_t sled;
@@ -569,7 +591,7 @@ static bool assembly_reference(AssemblyText* text, const Link* link, const Assem
 // A memory operand in AT&T syntax: the segment, the displacement (or the reference's expression), then (base, index,
 // scale) or (%rip); a broadcast's {1toN} after it.
 static bool assembly_memory(AssemblyText* text, const Link* link, const AssemblyNames* names, const X86Instruction* record, const X86FormDescription* form,
-                            const AssemblyReference* reference)
+                            const AssemblyReference* reference, bool address32)
 {
     const uint32_t segment = x86_form_segment(record->form);
     if (segment != 0)
@@ -591,19 +613,19 @@ static bool assembly_memory(AssemblyText* text, const Link* link, const Assembly
     }
     if (rip)
     {
-        assembly_append(text, "(%rip)");
+        assembly_append(text, address32 ? "(%eip)" : "(%rip)");
     }
     else if (base || index)
     {
         assembly_append(text, "(");
         if (base)
         {
-            assembly_register(text, record->rm, BUSTER_X86_CLASS_GPR64);
+            assembly_register(text, record->rm, address32 ? BUSTER_X86_CLASS_GPR32 : BUSTER_X86_CLASS_GPR64);
         }
         if (index)
         {
             assembly_append(text, ",");
-            assembly_register(text, record->index, (form->rm & BUSTER_X86_OPERAND_VSIB) ? form->rm : BUSTER_X86_CLASS_GPR64);
+            assembly_register(text, record->index, (form->rm & BUSTER_X86_OPERAND_VSIB) ? form->rm : address32 ? BUSTER_X86_CLASS_GPR32 : BUSTER_X86_CLASS_GPR64);
             assembly_append(text, ",");
             assembly_unsigned(text, 1u << (record->mode & BUSTER_X86_MODE_SCALE));
         }
@@ -786,7 +808,8 @@ static void assembly_immediate(AssemblyText* text, const X86Instruction* record,
 // record of its atom, or UINT32_MAX). An escaped record (assembly_escaped) is its `length` bytes, `encoded`. Returns
 // false, with `reason`, for a reference the sink can't spell there.
 static bool assembly_instruction(AssemblyText* text, const Link* link, const AssemblyNames* names, uint8_t* widths, const X86Instruction* record, const uint8_t* encoded,
-                                 uint32_t length, const AssemblyReference* displacement, const AssemblyReference* immediate, AtomId atom, uint32_t target, const char** reason)
+                                 uint32_t length, bool address32, const AssemblyReference* displacement, const AssemblyReference* immediate, AtomId atom, uint32_t target,
+                                 const char** reason)
 {
     const X86FormDescription* form = x86_form_description(record->form);
     const char* operands = assembly_operands(form->syntax);
@@ -861,7 +884,7 @@ static bool assembly_instruction(AssemblyText* text, const Link* link, const Ass
                 assembly_append(text, indirect ? "*" : "");
                 if (memory)
                 {
-                    spelled = assembly_memory(text, link, names, record, form, displacement);
+                    spelled = assembly_memory(text, link, names, record, form, displacement, address32);
                 }
                 else
                 {
@@ -1355,10 +1378,103 @@ static AssemblyError assembly_data_fixup(AssemblyText* text, const Link* link, c
     return error;
 }
 
-// A data atom's contents: its bytes (zero-fill's `.zero`), with each symbol's label at its offset and each fixup's
-// directive at its field (whose bytes, zero in the object, it prints in their place). Returns the error, with `reason`.
-static AssemblyError assembly_data(AssemblyText* text, const Link* link, const AssemblyNames* names, AtomId atom, const SymbolId* defined, uint32_t begin, uint32_t end,
-                                   const char** reason)
+// Resolve a record's fields from the atom's offset-ordered fixups. A PC-relative field's source expression includes
+// the distance to the instruction's end, which the assembler removes when it writes the relocation again.
+static AssemblyError assembly_instruction_references(const Link* link, AtomId atom, const X86Instruction* record, uint32_t at, uint32_t end,
+                                                     uint32_t* cursor, AssemblyReference* displacement, AssemblyReference* immediate, const char** reason)
+{
+    const uint32_t count = link->atoms.fixup_count[atom];
+    const FixupId begin = link->atoms.fixup_begin[atom];
+    AssemblyError error = ASSEMBLY_OK;
+    while (error == ASSEMBLY_OK && *cursor < count && link->fixups.offset[begin + *cursor] < end)
+    {
+        const FixupId fixup = begin + *cursor;
+        const uint32_t offset = link->fixups.offset[fixup];
+        const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+        const uint32_t to_end = end - offset;
+        const bool on_displacement = to_end == x86_fixup_distance(record->form, X86_FIXUP_DISPLACEMENT) && !displacement->present;
+        const bool on_immediate = to_end == x86_fixup_distance(record->form, X86_FIXUP_IMMEDIATE) && !immediate->present;
+        AssemblyReference* reference = on_displacement ? displacement : on_immediate ? immediate : NULL;
+        if (offset < at || (uint64_t)offset + link_fixup_kinds[kind].width > end || reference == NULL)
+        {
+            error = ASSEMBLY_INVALID;
+            *reason = "a fixup off its instruction's fields";
+        }
+        else
+        {
+            const int64_t addend = link_fixup_addend(link, fixup);
+            *reference = (AssemblyReference){
+                .addend = link_fixup_kinds[kind].pc_relative ? addend + (int64_t)to_end : addend,
+                .target = link->fixups.target[fixup],
+                .kind = kind,
+                .present = true,
+            };
+            *cursor += 1;
+        }
+    }
+    return error;
+}
+
+// A placed unit's symbolic instruction still has its matched record, including where a data directive could not
+// spell the relocation kind (a sign-extended absolute address or a GOT load). Validate it against the final bytes.
+static AssemblyError assembly_raw_instruction(AssemblyText* text, const Link* link, const AssemblyNames* names, AtomId atom,
+                                              const AssemblyRawInstruction* instruction, uint32_t* next_fixup, const char** reason)
+{
+    const uint32_t first = *next_fixup;
+    const uint32_t at = instruction->offset;
+    const uint32_t size = instruction->size;
+    const X86Instruction* record = &instruction->record;
+    AssemblyReference displacement = { 0 };
+    AssemblyReference immediate = { 0 };
+    uint8_t encoded[BUSTER_X86_ENCODER_CAPACITY(1) + 1];
+    int64_t length = x86_encode(record, 1, encoded, sizeof(encoded) - 1, NULL, NULL);
+    if (length > 0 && instruction->address32)
+    {
+        uint32_t prefix = encoded[0] == 0x9b ? 1 : 0;
+        const uint8_t byte = (uint64_t)prefix < (uint64_t)length ? encoded[prefix] : 0;
+        prefix += byte == 0x26 || byte == 0x2e || byte == 0x36 || byte == 0x3e || byte == 0x64 || byte == 0x65;
+        memmove(encoded + prefix + 1, encoded + prefix, (uint64_t)length - prefix);
+        encoded[prefix] = 0x67;
+        length += 1;
+    }
+    AssemblyError error = length > 0 && length == size && (uint64_t)at + size <= link->atoms.size[atom] ? ASSEMBLY_OK : ASSEMBLY_INVALID;
+    *reason = error != ASSEMBLY_OK ? "a placed instruction with an inconsistent byte range" : *reason;
+    if (error == ASSEMBLY_OK)
+    {
+        error = assembly_instruction_references(link, atom, record, at, at + size, next_fixup, &displacement, &immediate, reason);
+    }
+    for (uint32_t f = first; error == ASSEMBLY_OK && f < *next_fixup; f += 1)
+    {
+        const FixupId fixup = link->atoms.fixup_begin[atom] + f;
+        const uint32_t offset = link->fixups.offset[fixup] - at;
+        const uint32_t width = link_fixup_kinds[link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND].width;
+        memset(encoded + offset, 0, width);
+    }
+    if (error == ASSEMBLY_OK && memcmp(encoded, link->atoms.bytes[atom] + at, size) != 0)
+    {
+        error = ASSEMBLY_INVALID;
+        *reason = "a placed instruction that doesn't encode to its bytes";
+    }
+    if (error == ASSEMBLY_OK && !assembly_instruction(text, link, names, names->widths, record, encoded, size, instruction->address32,
+                                                     &displacement, &immediate, atom, UINT32_MAX, reason))
+    {
+        error = ASSEMBLY_UNSUPPORTED;
+    }
+    return error;
+}
+
+static void assembly_inline_text(AssemblyText* text, const AssemblyInline* piece)
+{
+    assembly_append(text, "#APP\n");
+    assembly_bytes(text, piece->text.pointer, piece->text.length);
+    assembly_append(text, "\n#NO_APP\n");
+}
+
+// A byte range, with each symbol's label and symbolic fixup at its offset. A placed unit's range also keeps
+// extraction markers in source order; the cursors continue in the surrounding function's ordinary instructions.
+static AssemblyError assembly_data_range(AssemblyText* text, const Link* link, const AssemblyNames* names, AtomId atom, const SymbolId* defined, uint32_t end,
+                                         uint64_t first, uint64_t limit, uint32_t* label_cursor, uint32_t* fixup_cursor, const AssemblyCode* code,
+                                         uint32_t* marker_cursor, const AssemblyRawSpan* raw_span, const char** reason)
 {
     const uint8_t class = link->atoms.class[atom];
     const uint8_t* bytes = link->atoms.bytes[atom];
@@ -1366,22 +1482,54 @@ static AssemblyError assembly_data(AssemblyText* text, const Link* link, const A
     const uint32_t fixup_count = link->atoms.fixup_count[atom];
     const FixupId fixup_begin = link->atoms.fixup_begin[atom];
     const bool zero_fill = object_class_is_zero_fill(class) || bytes == 0;
-    uint32_t cursor = begin;
-    uint32_t next_fixup = 0;
-    uint64_t at = 0;
-    AssemblyError error = zero_fill && fixup_count != 0 ? ASSEMBLY_INVALID : ASSEMBLY_OK;
-    *reason = error != ASSEMBLY_OK ? "a fixup in zero-fill data" : *reason;
-    while (error == ASSEMBLY_OK && !text->full && at <= size)
+    uint32_t cursor = *label_cursor;
+    uint32_t next_fixup = *fixup_cursor;
+    uint32_t piece = marker_cursor != NULL ? *marker_cursor : 0;
+    uint32_t instruction = 0;
+    const uint32_t instruction_count = raw_span != NULL ? raw_span->instruction_count : 0;
+    uint64_t at = first;
+    AssemblyError error = first > limit || limit > size || (zero_fill && fixup_count != 0) ||
+                          (instruction_count != 0 && raw_span->instructions == NULL) ? ASSEMBLY_INVALID : ASSEMBLY_OK;
+    *reason = error != ASSEMBLY_OK ? "an invalid byte range or a fixup in zero-fill data" : *reason;
+    while (error == ASSEMBLY_OK && !text->full && at <= limit)
     {
         assembly_labels(text, link, names, defined, end, &cursor, at);
-        const uint64_t symbol_at = cursor < end ? link->symbols.value[defined[cursor]] : size;
+        if (code != NULL && piece < code->template_count && code->templates[piece].offset == at &&
+            (at < limit || code->templates[piece].size == 0))
+        {
+            const AssemblyInline* marker = code->templates + piece++;
+            const uint64_t stop = at + marker->size;
+            const bool covers_symbol = cursor < end && link->symbols.value[defined[cursor]] < stop;
+            const bool covers_fixup = next_fixup < fixup_count && link->fixups.offset[fixup_begin + next_fixup] < stop;
+            const bool covers_instruction = instruction < instruction_count && raw_span->instructions[instruction].offset < stop;
+            error = stop <= limit && !covers_symbol && !covers_fixup && !covers_instruction ? ASSEMBLY_OK : ASSEMBLY_INVALID;
+            *reason = error != ASSEMBLY_OK ? "an inline assembly marker overlapping a label, fixup or instruction" : *reason;
+            if (error == ASSEMBLY_OK)
+            {
+                assembly_inline_text(text, marker);
+                at = stop;
+            }
+            continue;
+        }
+        const uint64_t symbol = cursor < end ? link->symbols.value[defined[cursor]] : limit;
+        const uint64_t symbol_at = symbol < limit ? symbol : limit;
         const FixupId fixup = next_fixup < fixup_count ? fixup_begin + next_fixup : 0;
-        const uint64_t fixup_at = fixup != 0 ? link->fixups.offset[fixup] : size;
-        const uint64_t stop = symbol_at < fixup_at ? symbol_at : fixup_at;
+        const uint64_t field = fixup != 0 ? link->fixups.offset[fixup] : limit;
+        const uint64_t fixup_at = field < limit ? field : limit;
+        const uint64_t marker = code != NULL && piece < code->template_count ? code->templates[piece].offset : limit;
+        const uint64_t marker_at = marker < limit ? marker : limit;
+        const uint64_t instruction_at = instruction < instruction_count ? raw_span->instructions[instruction].offset : limit;
+        const uint64_t next = symbol_at < fixup_at ? symbol_at : fixup_at;
+        const uint64_t boundary = next < marker_at ? next : marker_at;
+        const uint64_t stop = boundary < instruction_at ? boundary : instruction_at;
         if (stop < at)
         {
             error = ASSEMBLY_INVALID;
-            *reason = "a fixup or a symbol inside another fixup's field";
+            *reason = "a fixup, symbol or marker inside another fixup's field";
+        }
+        else if (at == limit)
+        {
+            at = limit + 1;
         }
         else if (stop > at)
         {
@@ -1401,10 +1549,19 @@ static AssemblyError assembly_data(AssemblyText* text, const Link* link, const A
             }
             at = stop;
         }
+        else if (instruction < instruction_count && instruction_at == at)
+        {
+            const AssemblyRawInstruction* raw = raw_span->instructions + instruction++;
+            error = raw->size != 0 && (uint64_t)raw->offset + raw->size <= limit ?
+                    assembly_raw_instruction(text, link, names, atom, raw, &next_fixup, reason) : ASSEMBLY_INVALID;
+            *reason = raw->size == 0 || (uint64_t)raw->offset + raw->size > limit ? "a placed instruction outside its byte range" : *reason;
+            at += raw->size;
+        }
         else if (fixup != 0 && fixup_at == at)
         {
             const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
-            error = assembly_data_fixup(text, link, names, atom, fixup, reason);
+            error = at + link_fixup_kinds[kind].width <= limit ? assembly_data_fixup(text, link, names, atom, fixup, reason) : ASSEMBLY_INVALID;
+            *reason = at + link_fixup_kinds[kind].width > limit ? "a fixup crosses the end of a byte range" : *reason;
             if (error == ASSEMBLY_OK)
             {
                 at += link_fixup_kinds[kind].width;
@@ -1413,20 +1570,38 @@ static AssemblyError assembly_data(AssemblyText* text, const Link* link, const A
         }
         else
         {
-            // The end, with its labels printed: every symbol of the atom's must have been.
-            error = cursor == end ? ASSEMBLY_OK : ASSEMBLY_INVALID;
-            *reason = error != ASSEMBLY_OK ? "a symbol past its atom's end" : *reason;
-            at = size + 1;
+            error = ASSEMBLY_INVALID;
+            *reason = "an inconsistent byte range boundary";
         }
+    }
+    *label_cursor = cursor;
+    *fixup_cursor = next_fixup;
+    if (marker_cursor != NULL)
+    {
+        *marker_cursor = piece;
+    }
+    if (error == ASSEMBLY_OK && instruction != instruction_count)
+    {
+        error = ASSEMBLY_INVALID;
+        *reason = "a placed instruction outside its byte range";
     }
     return error;
 }
 
-static void assembly_inline_text(AssemblyText* text, const AssemblyInline* piece)
+// A data atom's contents: its bytes (zero-fill's `.zero`), with labels and symbolic fields. A complete atom must
+// consume every label and fixup; a placed byte range above leaves the following ones for its ordinary instructions.
+static AssemblyError assembly_data(AssemblyText* text, const Link* link, const AssemblyNames* names, AtomId atom, const SymbolId* defined, uint32_t begin, uint32_t end,
+                                   const char** reason)
 {
-    assembly_append(text, "#APP\n");
-    assembly_bytes(text, piece->text.pointer, piece->text.length);
-    assembly_append(text, "\n#NO_APP\n");
+    uint32_t cursor = begin;
+    uint32_t fixup = 0;
+    AssemblyError error = assembly_data_range(text, link, names, atom, defined, end, 0, link->atoms.size[atom], &cursor, &fixup, NULL, NULL, NULL, reason);
+    if (error == ASSEMBLY_OK && (cursor != end || fixup != link->atoms.fixup_count[atom]))
+    {
+        error = ASSEMBLY_INVALID;
+        *reason = "a symbol or a fixup past its atom's end";
+    }
+    return error;
 }
 
 // .cfi_escape retains a row whose 64-bit offset exceeds the assembler's named directives' signed 32-bit operands.
@@ -1639,6 +1814,49 @@ static AssemblyError assembly_inline_helper(AssemblyText* text, const Link* link
         *reason = "an inconsistent inline assembly range";
     }
     return valid ? ASSEMBLY_OK : ASSEMBLY_INVALID;
+}
+
+// A mixed function's ordinary records must still encode to their own final ranges. Its raw spans take the atom's
+// bytes, and their placeholder records occupy no independently printable instructions after compaction.
+static bool assembly_code_mixed(const AssemblyCode* code, const uint8_t* atom_bytes, uint64_t size, uint8_t* encoded, uint32_t* offsets)
+{
+    const uint32_t count = code->count;
+    const uint32_t sled = code->sled;
+    bool valid = code->offsets != NULL && (code->raw_span_count == 0 || code->raw_spans != NULL) && sled <= size &&
+                 size - sled <= BUSTER_X86_ENCODER_CAPACITY(count) && code->offsets[0] == 0 && code->offsets[count] == size - sled;
+    uint32_t previous = 0;
+    for (uint32_t s = 0; valid && s < code->raw_span_count; s += 1)
+    {
+        const AssemblyRawSpan span = code->raw_spans[s];
+        valid = span.first >= previous && span.first <= count && span.count != 0 && span.count <= count - span.first;
+        previous = valid ? span.first + span.count : previous;
+    }
+    if (valid)
+    {
+        memcpy(offsets, code->offsets, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memcpy(encoded, atom_bytes + sled, size - sled);
+    }
+    uint32_t span = 0;
+    for (uint32_t r = 0; valid && r < count; r += 1)
+    {
+        valid = offsets[r] <= offsets[r + 1] && offsets[r + 1] <= size - sled;
+        const bool raw = span < code->raw_span_count && r >= code->raw_spans[span].first;
+        if (valid && !raw)
+        {
+            uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
+            const int64_t length = x86_encode(code->records + r, 1, bytes, sizeof(bytes), NULL, NULL);
+            valid = length > 0 && length == (int64_t)offsets[r + 1] - offsets[r];
+            if (valid)
+            {
+                memcpy(encoded + offsets[r], bytes, (size_t)length);
+            }
+        }
+        if (raw && r + 1 == code->raw_spans[span].first + code->raw_spans[span].count)
+        {
+            span += 1;
+        }
+    }
+    return valid;
 }
 
 static int assembly_offset_order(const void* left, const void* right)
@@ -1891,7 +2109,7 @@ static AssemblyError assembly_mixed_code(AssemblyText* text, const Link* link, c
                     // A literal relative displacement may intentionally leave the atom. Preserve its selected bytes.
                     assembly_plain_bytes(text, bytes + at, width);
                 }
-                else if (!assembly_instruction(text, link, names, names->widths, record, instruction_bytes, width, &displacement, &immediate, atom,
+                else if (!assembly_instruction(text, link, names, names->widths, record, instruction_bytes, width, false, &displacement, &immediate, atom,
                                                (uint32_t)target, reason))
                 {
                     error = ASSEMBLY_UNSUPPORTED;
@@ -1949,7 +2167,11 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
     uint8_t* labeled = targets != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     uint8_t* encoded = labeled != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, BUSTER_X86_ENCODER_CAPACITY(count)) : 0;
     AssemblyError error = encoded != 0 ? ASSEMBLY_OK : ASSEMBLY_FULL;
-    const int64_t length = encoded != 0 ? x86_encode(code->records, count, encoded, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0) : -1;
+    int64_t length = encoded != 0 ? x86_encode(code->records, count, encoded, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0) : -1;
+    if (error == ASSEMBLY_OK && (code->offsets != NULL || code->raw_span_count != 0))
+    {
+        length = atom_bytes != NULL && assembly_code_mixed(code, atom_bytes, size, encoded, offsets) ? (int64_t)(size - sled) : -1;
+    }
     if (error == ASSEMBLY_OK && (length < 0 || (uint64_t)length + sled != size || size > UINT32_MAX || atom_bytes == 0))
     {
         error = ASSEMBLY_INVALID;
@@ -1975,6 +2197,15 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
             }
         }
         *reason = error != ASSEMBLY_OK ? "a branch outside its function's records" : *reason;
+        for (uint32_t s = 0; error == ASSEMBLY_OK && s < code->raw_span_count; s += 1)
+        {
+            const AssemblyRawSpan span = code->raw_spans[s];
+            for (uint32_t r = span.first + 1; error == ASSEMBLY_OK && r < span.first + span.count; r += 1)
+            {
+                error = labeled[r] == 0 ? ASSEMBLY_OK : ASSEMBLY_INVALID;
+            }
+            *reason = error != ASSEMBLY_OK ? "an ordinary branch target inside placed assembly bytes" : *reason;
+        }
     }
     // The fixups' fields are zero in the atom: zero them in the records' bytes too, and compare.
     const uint32_t fixup_count = link->atoms.fixup_count[atom];
@@ -2027,6 +2258,7 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
     }
     uint32_t next_fixup = 0;
     uint32_t piece = 0;
+    uint32_t raw_span = 0;
     for (uint32_t r = 0; error == ASSEMBLY_OK && !text->full && r < count; r += 1)
     {
         const uint32_t offset = offsets[r];
@@ -2051,6 +2283,14 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
             assembly_append(text, ".");
             assembly_unsigned(text, r);
             assembly_append(text, ":\n");
+        }
+        if (raw_span < code->raw_span_count && code->raw_spans[raw_span].first == r)
+        {
+            const AssemblyRawSpan span = code->raw_spans[raw_span++];
+            error = assembly_data_range(text, link, names, atom, defined, end, at, offsets[r + span.count] + sled,
+                                        &cursor, &next_fixup, code, &piece, &span, reason);
+            r += span.count - 1;
+            continue;
         }
         while (piece < code->template_count && code->templates[piece].offset == at)
         {
@@ -2120,7 +2360,7 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
                 error = assembly_escaped_fields(text, link, names, atom, form, at, record_end,
                                                 fixup_begin + first_fixup, fixup_begin + next_fixup, reason);
             }
-            else if (!assembly_instruction(text, link, names, names->widths, record, encoded + offset, record_end - at, &displacement, &immediate, atom, targets[r], reason))
+            else if (!assembly_instruction(text, link, names, names->widths, record, encoded + offset, record_end - at, false, &displacement, &immediate, atom, targets[r], reason))
             {
                 error = ASSEMBLY_UNSUPPORTED;
             }
@@ -2540,7 +2780,7 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
                                     ((class == BUSTER_LINK_CLASS_INIT || class == BUSTER_LINK_CLASS_FINI) && code != NULL && code->offsets != NULL);
             if (result.error == ASSEMBLY_OK && executable && link->atoms.size[a] != 0)
             {
-                result.error = code->offsets != NULL ? assembly_mixed_code(&text, link, &names, a, code, defined, begin, end, scratch, &reason) :
+                result.error = code->offsets != NULL && code->raw_span_count == 0 ? assembly_mixed_code(&text, link, &names, a, code, defined, begin, end, scratch, &reason) :
                                code->records == NULL ? assembly_inline_helper(&text, link, &names, a, code, defined, begin, end, &reason) :
                                                        assembly_code(&text, link, &names, a, code, defined, begin, end, scratch, &reason);
             }

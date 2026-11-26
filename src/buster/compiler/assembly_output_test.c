@@ -556,6 +556,77 @@ static void assembly_test_program(AssemblyTest* test)
     arena_pop_to(&test->arena, mark);
 }
 
+// A placed unit's data and symbolic instructions share a function with ordinary records. Its labels, fixups and
+// zero-width markers must survive both the writer's own assembler and GNU as, without printing placeholder NOPs.
+static void assembly_test_raw_span(AssemblyTest* test)
+{
+    const uint64_t mark = test->arena.length;
+    const uint64_t output_mark = test->output.length;
+    const uint64_t scratch_mark = test->scratch.length;
+    AssemblyFixture fixture;
+    assembly_fixture_begin(&fixture, &test->arena);
+    const AtomId atom = assembly_fixture_function(test, &fixture, "raw_host", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 4,
+                                                  "call external\nmov eax, 1\npayload:\nmov rcx, qword ptr [rip + external_data@GOTPCREL]\n"
+                                                  "mov rdx, offset external_data + 4\nnop\nnop\nnop\nnop\nret\n");
+    AssemblyCode* code = fixture.valid ? fixture.code + atom : NULL;
+    uint32_t* offsets = code != NULL ? BUSTER_ARENA_PUSH_ARRAY(&test->arena, uint32_t, (uint64_t)code->count + 1) : NULL;
+    uint8_t* encoded = offsets != NULL ? arena_push(&test->arena, BUSTER_X86_ENCODER_CAPACITY(code->count), 16) : NULL;
+    const int64_t length = encoded != NULL ? x86_encode(code->records, code->count, encoded, BUSTER_X86_ENCODER_CAPACITY(code->count), offsets, NULL) : -1;
+    fixture.valid = fixture.valid && code != NULL && code->count == 9 && length > 0;
+    AssemblyRawInstruction instructions[2] = { 0 };
+    AssemblyRawSpan span = { .first = 2, .count = 6, .instructions = instructions, .instruction_count = 2 };
+    AssemblyInline markers[3] = { 0 };
+    if (fixture.valid)
+    {
+        offsets[code->count] = (uint32_t)length;
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            instructions[i] = (AssemblyRawInstruction){ .record = code->records[i + 2], .offset = offsets[i + 2], .size = offsets[i + 3] - offsets[i + 2] };
+        }
+        markers[0] = (AssemblyInline){ .text = BUSTER_S8("# placed start"), .offset = offsets[2] };
+        markers[1] = (AssemblyInline){ .text = BUSTER_S8("# placed data"), .offset = offsets[4] };
+        markers[2] = (AssemblyInline){ .text = BUSTER_S8("# placed end"), .offset = offsets[8] };
+        code->offsets = offsets;
+        code->raw_spans = &span;
+        code->raw_span_count = 1;
+        code->templates = markers;
+        code->template_count = BUSTER_ARRAY_LENGTH(markers);
+        memset(fixture.link.atoms.bytes[atom] + offsets[4], 0, 4);
+        assembly_fixture_define(&fixture, "raw_word", BUSTER_LINK_SYMBOL_GLOBAL, atom, offsets[4], 0);
+        assembly_fixture_fixup(&fixture, atom, offsets[4], BUSTER_LINK_FIXUP_ABS32, "external_data", 8);
+    }
+    assembly_test_check(test, fixture.valid && link_check(&fixture.link) == LINK_ERROR_NONE, "the mixed placed span's link", NULL);
+    const AssemblyView view = assembly_fixture_view(&fixture);
+    const AssemblyResult result = fixture.valid ? assembly_print(&view, &test->output, &test->scratch) : (AssemblyResult){ .error = ASSEMBLY_INVALID };
+    assembly_test_check(test, result.error == ASSEMBLY_OK, "ordinary records and placed bytes print together", result.reason);
+    if (result.error == ASSEMBLY_OK)
+    {
+        assembly_test_check(test, assembly_test_contains(&result, "\tcall external@PLT\n") &&
+                                 assembly_test_contains(&result, "external_data@GOTPCREL(%rip), %rcx\n") &&
+                                 assembly_test_contains(&result, "\tmov $external_data+4, %rdx\n") &&
+                                 assembly_test_contains(&result, "\t.long external_data+8\n") &&
+                                 assembly_test_contains(&result, "payload:\n") && assembly_test_contains(&result, "raw_word:\n") &&
+                                 assembly_test_contains(&result, "#APP\n# placed data\n#NO_APP\n"), "placed spans retain symbolic fields, labels and markers", NULL);
+        const Object object = assembly_test_object(&fixture, &test->scratch);
+        AsmResult assembled = asm_assemble((String8){ .pointer = (char*)result.bytes, .length = result.length }, test->index, (AsmOptions){ 0 }, &test->scratch);
+        const Object rebuilt = assembled.error == NULL ? asm_object(&assembled, BUSTER_S8("fixture.c"), &test->scratch) : (Object){ 0 };
+        char difference[256] = { 0 };
+        const String8 bytes = { .pointer = (char*)rebuilt.bytes, .length = rebuilt.size };
+        const bool same = object.error == OBJECT_ERROR_NONE && assembled.error == NULL && rebuilt.error == OBJECT_ERROR_NONE &&
+                          assembly_test_same_objects(test, object.bytes, object.size, bytes, difference, sizeof(difference));
+        assembly_test_check(test, same, "Buster reassembles mixed placed spans into the same object", assembled.error != NULL ? assembled.error : difference);
+        if (test->cross_check)
+        {
+            const bool gnu = object.error == OBJECT_ERROR_NONE && assembly_test_against_as(test, "raw-span", result.bytes, result.length, &object, difference, sizeof(difference));
+            assembly_test_check(test, gnu, "GNU as reassembles mixed placed spans into the same object", difference);
+        }
+    }
+    arena_pop_to(&test->scratch, scratch_mark);
+    arena_pop_to(&test->output, output_mark);
+    assembly_fixture_end(&fixture);
+    arena_pop_to(&test->arena, mark);
+}
+
 static void assembly_test_mixed(AssemblyTest* test)
 {
     const uint64_t mark = test->arena.length;
@@ -1891,6 +1962,7 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_cfi_boundaries(&test);
         assembly_test_small(&test);
         assembly_test_program(&test);
+        assembly_test_raw_span(&test);
         assembly_test_sections(&test);
         assembly_test_groups(&test);
         assembly_test_unique(&test);

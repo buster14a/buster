@@ -198,6 +198,8 @@ struct Tier1EmitPrepared
     // frame), and the callee-saved registers they touch, which its prologue saves.
     uint32_t asm_count;
     uint32_t asm_callee;
+    // An opaque assembled byte span whose record positions post-allocation scheduling must retain (#2351).
+    bool asm_opaque;
     // Secondary result snapshots by producer node (#2144). The lists contain IR_ASM_RESULT nodes only; each body's
     // primary result is its own node. Null without asm bodies.
     uint32_t* asm_result_heads;
@@ -366,6 +368,16 @@ struct Tier1EmitResult
     // entries, preserving the function's label indices, and none in a function without labels.
     uint32_t* label_records;
     uint32_t label_count;
+    // The asm bodies' named labels (#2351), in emitted order: each name's front-end index and its record, including
+    // the body's end. They become EmittedCode.asm_label_records/names, and are scheduling boundaries.
+    uint32_t* asm_label_records;
+    uint32_t* asm_label_names;
+    uint32_t asm_label_count;
+    uint32_t asm_label_capacity;
+    // The bodies' [first, end) record pairs, in emitted order. Post scheduling preserves every record in them,
+    // including the exact instruction following a named label (#2351).
+    uint32_t* asm_ranges;
+    uint32_t asm_range_count;
     // Each return's ret, in record order: its record's index in `code`, right after its epilogue (tier1_frame_emit's),
     // `exit_count` of them.
     uint32_t* exits;

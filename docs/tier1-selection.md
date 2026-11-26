@@ -1928,6 +1928,15 @@ The other results stay available while the copies resolve cycles, and no restore
 can overwrite a result before it is captured. A result's interval does not count
 as crossing the body that defines it.
 
+The body's retained labels travel to `Tier1EmitResult.asm_label_records` and
+`asm_label_names`, then the C driver's `EmittedCode`: their offsets name the
+template's exact records, including the next-record boundary of an empty
+body. `asm_ranges` retains each body's emitted record range. Post scheduling
+puts a boundary at every record in those ranges, preserving template order
+while scheduling the surrounding C code. An asm goto's eax result is its exit
+number; the following typed dispatch is ordinary IR control flow, with no
+helper call. Named bodies are not inlined, and the unroller refuses all calls.
+
 The general registers it touches are its fixed registers
 (`tier1_select_node_fixed`), so that the frame gives them call-save rows where a
 value crosses the body in one (`tier1_emit_cfg_saves`, a callee-saved register's
@@ -1952,6 +1961,15 @@ registers before checking the captures ([the certificate guide](tier1-certificat
 results, both scalar widths and primary register classes, with a division between
 the producer and projections. Constrained masks force initial spills, and native
 execution checks an independent integer oracle.
+
+A whole assembled unit uses a body's opaque reserved span
+(`IrAsmBody.opaque`). Final emission replaces it with aligned bytes and rebases
+the unit's symbols and fixups into the containing function. Its hidden label
+anchor also prevents duplication. Such a function skips post scheduling and
+reports `opaque-asm` instead of claiming emitted-code certification of the
+placeholder records; the allocation certificate remains enabled. The
+[inline assembly guide](c-inline-assembly.md)'s "Templates that take directives"
+describes the effects gate, final layout and remaining helper boundaries.
 
 Registers outside `touched` hold no value across the node: a function with an
 asm body keeps its vector values in xmm0 to xmm14 (xmm15 is the class's scratch within a node,

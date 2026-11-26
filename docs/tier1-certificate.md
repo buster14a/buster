@@ -632,6 +632,14 @@ The decoding:
   decoded moves; a projection's later IR position does not read a register or
   define the value again. The mixed result pressure fixtures corrupt each
   initial output store's source register and require refusal.
+  The same capture checks cover an asm goto's eax exit number. Its typed dispatch uses ordinary IR branches.
+- **Opaque assembled asm** (#2351, `IrAsmBody.opaque`) reports
+  `TIER1_CERT_EMITTED_OPAQUE`, printed as `opaque-asm`, and counts as
+  `code_uncertified`. The reserved records are placeholders for bytes that
+  final emission will align and splice into the function; certifying those
+  NOPs would not certify the actual template. The emitted-code certificate records an unsupported shape. The allocation certificate still runs, and record-only bodies
+  retain the checks above. A function whose body restores an explicit rsp
+  input can also have the existing dynamic-frame limitation independently.
 - **Machine rows** (`TIER1_RULE_ROW`, #1284). The emitter publishes the
   placement it gave each row (`Tier1RowPlacement`: each role's register, and
   the opmask registers the row names by number, renamed). The certificate

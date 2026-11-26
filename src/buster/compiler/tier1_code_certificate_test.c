@@ -1557,6 +1557,98 @@ static void tier1_code_certificate_barrier(Tier1EmitTest* test, bool pointer, Ti
     arena_pop_to(&test->input, 0);
 }
 
+// #2351: the asm result is born in rdx, which this allocation cannot use. The certificate must prove its move into
+// the allocated result register, before the clobbered parameter is restored, and reject a missing move. Labels at
+// either end of the body must retain their exact emitted records. Opaque replacement bytes are explicitly uncertified.
+static void tier1_code_certificate_asm_result(Tier1EmitTest* test)
+{
+    const IrSizes sizes = {
+        .instruction_count = 4,
+        .block_count = 1,
+        .parameter_count = 1,
+        .call_count = 1,
+        .asm_body_count = 1,
+    };
+    const X86Instruction record = {
+        .form = X86_FORM_MOV_RM64_IMM32,
+        .rm = X86_REGISTER_RDX,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .immediate = 19,
+    };
+    const uint32_t label_records[2] = { 0, 1 };
+    const uint32_t label_names[2] = { 17, 29 };
+    IrFunction function = { 0 };
+    const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.parameter_types[0] = IR_I64;
+        function.incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 1 };
+        function.block_offsets[1] = 4;
+        function.calls[0] = (IrCall){ .result_type = IR_I64, .body = 1 };
+        function.asm_bodies[0] = (IrAsmBody){
+            .records = &record,
+            .count = 1,
+            .touched = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX),
+            .result = X86_REGISTER_RDX + 1,
+            .result_registers = 1u << X86_REGISTER_RDX,
+            .result_wide = 1u << X86_REGISTER_RDX,
+            .label_records = label_records,
+            .label_names = label_names,
+            .label_count = 2,
+        };
+        uint32_t next = 0;
+        const uint32_t parameter = tier1_select_test_append(&function, &next, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t result = tier1_select_test_append(&function, &next, IR_CALL, IR_I64, 0, 0, BUSTER_IR_NONE);
+        const uint32_t sum = tier1_select_test_append(&function, &next, IR_ADD, IR_I64, parameter, result, BUSTER_IR_NONE);
+        tier1_select_test_append(&function, &next, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the asm result certificate fixture is valid IR");
+    IrDominance dominance = { 0 };
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
+    Tier1SelectPlan plan = { 0 };
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned, "the asm result certificate fixture selects");
+    const Tier1EmitOptions options = {
+        .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX),
+        .certify = true,
+    };
+    Tier1EmitResult emitted = { 0 };
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+    tier1_emit_test_expect(test, certified, "the asm output and its move before restores pass the code certificate");
+    const bool labels = certified && emitted.asm_label_count == 2 && emitted.asm_label_names[0] == 17 && emitted.asm_label_names[1] == 29 &&
+                        emitted.asm_label_records[1] == emitted.asm_label_records[0] + 1 && emitted.asm_label_records[0] < emitted.code.count &&
+                        tier1_cert_emitted_exactly(emitted.code.records[emitted.asm_label_records[0]], record);
+    tier1_emit_test_expect(test, labels, "the asm labels name the first record and the body's end");
+    const uint32_t capture = labels ? emitted.asm_label_records[1] : emitted.code.count;
+    const bool bounded = capture < emitted.code.count;
+    const X86Instruction move = bounded ? emitted.code.records[capture] : (X86Instruction){ 0 };
+    const bool copied = bounded && move.form == X86_FORM_MOV_R64_RM64 && move.mode == BUSTER_X86_REGISTER_DIRECT &&
+                        move.rm == X86_REGISTER_RDX && move.reg != move.rm;
+    const bool spilled = bounded && move.form == X86_FORM_MOV_RM64_R64 && move.mode == BUSTER_X86_MEMORY_BASE && move.reg == X86_REGISTER_RDX;
+    tier1_emit_test_expect(test, copied || spilled, "the asm output is captured from rdx at the body's end");
+    if (copied || spilled)
+    {
+        X86Instruction mutant = move;
+        mutant.rm = copied ? move.reg : move.rm;
+        mutant.reg = spilled ? X86_REGISTER_RCX : move.reg;
+        tier1_emit_test_expect(test, tier1_code_certificate_refuses(test, &plan, &emitted, capture, mutant, UINT32_MAX), "a wrong asm result source fails the code certificate");
+    }
+    if (certified)
+    {
+        function.asm_bodies[0].opaque = true;
+        Tier1CertEmittedStats stats = { 0 };
+        const Tier1CertEmittedReason reason = tier1_certificate_emitted_check(&plan, &emitted, &test->output, &test->scratch, 0, &stats);
+        tier1_emit_test_expect(test, reason == TIER1_CERT_EMITTED_OPAQUE, "opaque replacement bytes are not certified as their placeholder records");
+    }
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 // A seq_cst source store remains IR_STORE and preserves a desired value live past it. Its certified kernel must retain
 // both the copy into the scratch and the locked memory exchange, including when its return takes a different CFG edge.
 static void tier1_code_certificate_store(Tier1EmitTest* test)
@@ -3276,6 +3368,7 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     tier1_code_certificate_masks(test);
     tier1_code_certificate_aggregate_copy(test);
     tier1_code_certificate_frame_copy(test);
+    tier1_code_certificate_asm_result(test);
     for (uint32_t variant = 0; variant < 4; variant += 1)
     {
         tier1_code_certificate_carry(test, (variant & 1) != 0, (variant & 2) != 0);

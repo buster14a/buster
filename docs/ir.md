@@ -844,7 +844,8 @@ An asm statement the C driver places in its caller as an asm body
 ([the inline assembly guide](c-inline-assembly.md)'s "Asm bodies") is a body call:
 an `IR_CALL` whose descriptor names the body (`IrCall.body`, 1 plus its index in
 `IrFunction.asm_bodies`) in place of a callee, its symbol `a` 0 and its row 0,
-of no ABI records and not variadic. An `IrAsmBody` holds the statement's
+of no ABI records and not variadic. An asm goto returns its exit number in eax. The typed
+dispatch lowers to ordinary IR branches for fall-through and each target. An `IrAsmBody` holds the statement's
 records (borrowed from the producer, `Tier0AsmBody`'s), its own branches and their
 targets relative to its first record (a target may be the body's end), and the
 registers it writes (`touched`, rax to r15 in bits 0 to 15 and xmm0 to xmm15 in 16
@@ -857,7 +858,11 @@ narrow integer extended as a call's argument is, each with its register in
 `IrAsmBody.locations` (Tier 0's call row's `AbiLocation`s: a general register's
 number, or `BUSTER_ABI_REGISTER_VECTOR | n` for xmm n), as Tier 0's call row
 passes them (`CheckProgramAsm.inline_passed`), so that they need no round trip
-through the block. `ir_asm_body_block` names the block argument.
+through the block. `ir_asm_body_block` names the block argument. Retained labels
+travel with their body-relative record indices (`label_records`, including
+`count` for the end) and front-end name indices (`label_names`), so final
+emission defines each at the body's actual location in the C function. A body
+of no instructions can still define a label at its next-record boundary.
 
 Scalar register outputs use the same register numbering. `IrAsmBody.result`
 is the primary register plus one, or zero for a void body; `result_registers`
@@ -893,16 +898,30 @@ So every pass takes a body call as an unknown callee's of that pointer: the bloc
 escapes into it (neither SSA promotion nor SROA's `flagged` mode makes its slot
 values), its stores stay before the call, no load or store moves across it, and
 the operands' objects, whose addresses the block holds, are memory the call may
-read and write. The inliner copies a callee's bodies with it (appended to the
+read and write. The inliner copies an eligible callee's bodies with it (appended to the
 caller's, `IrCall.body` rebased), its block argument the rebased slot's address,
-as a row call's row is copied. The verifier checks a body call's descriptor
-against its body (`ir_body_call_valid`): within the column, of no row, one
+as a row call's row is copied. Retained names prohibit inlining the function,
+since copying would define them twice. The front end removes private `.L`
+labels that no other template or directive names, leaving their local branch
+targets safe to copy. The unroller already refuses all calls. The verifier
+checks a body call against its descriptor (`ir_body_call_valid`): within the column, of no row, one
 `ptr` argument or none, then a register operand's per location, each in
 registers, and the branch columns in order within the records. Its primary
 result type must match its register and width; every output must be touched,
 none may be `rsp`, and the width mask must be a subset of the result mask.
 Both verifier entry points check projection identity, type, block and
 uniqueness.
+Each retained label indexes a record or the end and requires both label columns.
+
+A whole assembled template's body has `opaque` set. Its records reserve a byte
+span that final emission replaces with the assembled unit after placement and
+alignment; a hidden retained label anchors the replacement and prevents
+duplication. Such a function skips Tier 1 post scheduling and reports
+`opaque-asm` for emitted-code certification, while its allocation certificate
+still runs. Record bodies are certified normally; post scheduling keeps each
+body's records in their original order so labels retain exact instruction
+addresses ([the selection guide](tier1-selection.md)'s "Asm bodies" and
+[the certificate guide](tier1-certificate.md)'s "Asm bodies").
 
 The text form has no syntax for a body: the printer writes `asm #k(...)` and a
 line per body (`asm #k records=<count> branches=<count> touched=<mask>

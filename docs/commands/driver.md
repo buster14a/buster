@@ -551,6 +551,14 @@ The emission keeps each function's records for it (`CheckProgramLanes.assembly`,
 the emission's output arena, after branch sizing) and runs the bodies in one
 window (`--emit-window` is 0 under `-S`). Only assembly output requests these copies.
 
+Inline statements placed as direct rows or asm bodies print with their
+containing function (#2351). A template assembled whole retains its final
+record boundaries and byte spans: ordinary instructions keep their symbolic
+spelling, while the spans print their actual bytes, labels and relocations.
+Matched instructions with symbolic fields retain their records too, so GOT
+loads and signed absolute addresses keep their instruction relocations. The
+listing preserves the alignment and compacted layout that `-c` publishes.
+
 With `-g`, the assembly contains the same DWARF 5 section contributions as
 `-c -g`, including the line program, scopes, address table, ranges and
 variable location lists. Section offsets use symbolic `.long` directives.
@@ -564,8 +572,8 @@ AT&T syntax, interleaved with labels, data, alignment bytes and symbolic
 relocations. The constraint and integrated-assembler limits are the same as
 for object emission. For inline assembly with integer constant inputs, `-S` preserves a single
 `.ascii "…"` directive after operand substitution, including the literal text
-that kernel build scripts extract. It retains the directive in the helper
-where `-c` places its bytes. A single raw `->…` line is also supported.
+that kernel build scripts extract. It retains the directive at the same
+in-function byte span where `-c` places it. A single raw `->…` line is also supported.
 The compiler emits it at the statement's instruction boundary so a script
 can read it directly from the assembly listing. Both forms accept basic asm
 or extended asm with no outputs, clobbers or goto labels.
@@ -576,6 +584,9 @@ retain their relocation kinds, including the dynamic accessors' relaxation
 prefixes. Multiversioned functions retain their implementations, dispatchers,
 IFUNC symbols and resolver instructions. Section groups and GNU unique object
 symbols keep their ELF identities.
+
+A placed directive template uses a reserved byte span at its final position in the containing function.
+The writer emits its bytes, symbolic fixups and extraction anchors in that order.
 
 Generated unwind tables use `.cfi_startproc`, explicit callee-saved baseline rules, CFA and saved-register
 directives at the final instruction boundaries, and `.cfi_endproc`. The

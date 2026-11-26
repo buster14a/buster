@@ -1253,12 +1253,15 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             v += 1;
         }
     }
-    // Each label's first record, where the emission defines its symbol (#789).
-    uint32_t* labels = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.label_count + 1) : 0;
+    // Each label's first record, where the emission defines its symbol (#789). The asm bodies' labels follow the C
+    // labels, so one contiguous span protects both sets during post-allocation scheduling (#2351).
+    const uint64_t label_count = (uint64_t)emitted.label_count + emitted.asm_label_count;
+    uint32_t* labels = stage == CHECK_TIER1_COMPILED && label_count <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, label_count + 1) : 0;
+    uint32_t* asm_names = stage == CHECK_TIER1_COMPILED && emitted.asm_label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, emitted.asm_label_count) : 0;
     // Its frame's events (#1056); with -g, source/storage ranges are published only after final record scheduling.
     EmissionFrameEvent* frames = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, EmissionFrameEvent, (uint64_t)emitted.frame_event_count + 1) : 0;
     if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || frames == 0 ||
-                                          (emitted.literal_count != 0 && literals == 0) || !values_copied))
+                                          (emitted.literal_count != 0 && literals == 0) || (emitted.asm_label_count != 0 && asm_names == 0) || !values_copied))
     {
         arena_pop_to(output, mark);
         outcome = check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0);
@@ -1288,6 +1291,11 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         if (emitted.label_count != 0)
         {
             memcpy(labels, emitted.label_records, (uint64_t)emitted.label_count * sizeof(uint32_t));
+        }
+        if (emitted.asm_label_count != 0)
+        {
+            memcpy(labels + emitted.label_count, emitted.asm_label_records, (uint64_t)emitted.asm_label_count * sizeof(uint32_t));
+            memcpy(asm_names, emitted.asm_label_names, (uint64_t)emitted.asm_label_count * sizeof(uint32_t));
         }
         *counts = (CheckTier1Counts){
             .records = selected->count,
@@ -1335,7 +1343,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         // make; the body's start and the epilogue's are cuts with or without -g, so that -g doesn't change the code.
         CheckTier1ScheduleResult scheduled = { .verified = true, .ready = true };
         uint32_t* record_order = NULL;
-        if (lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_POST)
+        if (lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_POST && !emitted.prepared.asm_opaque)
         {
             record_order = sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)selected->count + 1) : NULL;
             const uint32_t anchors[2] = { emitted.body_record, epilogue };
@@ -1348,11 +1356,13 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
                 .references = references,
                 .reference_count = emitted.reference_count,
                 .labels = labels,
-                .label_count = emitted.label_count,
+                .label_count = (uint32_t)label_count,
                 .frames = frames,
                 .frame_count = emitted.frame_event_count,
                 .anchors = anchors,
                 .anchor_count = 2,
+                .fixed_ranges = emitted.asm_ranges,
+                .fixed_range_count = emitted.asm_range_count,
                 .record_order = record_order,
             };
             scheduled = sources && record_order == NULL ? (CheckTier1ScheduleResult){ 0 } : check_tier1_schedule_code(scratch, &schedule, certify || sources);
@@ -1376,6 +1386,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .value_table_count = value_table_count,
             .label_records = labels,
             .label_count = emitted.label_count,
+            .asm_label_records = emitted.asm_label_count != 0 ? labels + emitted.label_count : 0,
+            .asm_label_names = asm_names,
+            .asm_label_count = emitted.asm_label_count,
             .local_count = sources ? function->local_count : 0,
             .local_ranges = debug.local_ranges,
             .local_range_count = debug.local_range_count,
