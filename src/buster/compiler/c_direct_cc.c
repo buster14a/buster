@@ -1330,6 +1330,64 @@ static uint32_t fast_cc_init_int_run(FastCCState* cc, FastType type, uint32_t si
     return count;
 }
 
+// #3577: an incomplete array type T completed with COUNT elements, as a copy: T may be a typedef's, which its next object
+// completes again (`typedef int arr_t[]; arr_t a = {1, 2, 3}; arr_t b = {1};` made b three ints in main's direct path,
+// whose initializers wrote the count into the typedef's type).
+static __attribute__((noinline)) FastType fast_cc_completed_array(FastCCState* cc, FastType t, uint32_t count)
+{
+    const uint32_t cidx = t & BUSTER_FTYPE_CIDX_MASK;
+    const uint64_t size = (uint64_t)count * (uint64_t)ftype_size(cc, cc->ctypes[cidx].inner);
+    const uint32_t copy = size <= (uint64_t)INT32_MAX ? fast_cc_alloc_ctype(cc, FCTYPE_ARRAY) : 0u;
+    FastType result = t;
+    if (copy == 0)
+    {
+        fast_cc_bail(cc, "an incomplete array's completion");
+    }
+    else
+    {
+        cc->ctypes[copy] = cc->ctypes[cidx];
+        cc->ctypes[copy].count = count;
+        cc->ctypes[copy].size = (uint32_t)size;
+        cc->ctypes[copy].complete = 1u;
+        result = ftype_from_index(cc, copy) | (t & (BUSTER_FTYPE_CONST | BUSTER_FTYPE_VOL));
+    }
+    return result;
+}
+
+// #3577: the element count the braced initializer at POS gives an incomplete array of ELEM, counted on its tokens: its
+// top-level initializers, each one element's where the element is a scalar's, or where each is braced (or a string
+// literal, for an array of characters). A designator, an aggregate element's unbraced initializers (brace elision) and a
+// string literal for a character (which initializes the whole array) need the initializer's own walk: UINT32_MAX, and
+// the caller leaves. (Main's direct path counted the commas, so `int a[] = { [5] = 1 }` was one int and
+// `struct P a[] = { 1, 2, 3, 4 }` four records.) None, `{}`, is a zero-length array, the full pipeline's warning:
+// UINT32_MAX.
+static __attribute__((cold, noinline)) uint32_t fast_cc_incomplete_array_count(const FastCCState* cc, uint32_t pos, FastType elem)
+{
+    const bool aggregate = ftype_is_record(elem) || ftype_is_array(elem);
+    const bool characters = ftype_is_array(elem) && ftype_is_char_type(cc->ctypes[elem & BUSTER_FTYPE_CIDX_MASK].inner);
+    const bool character = ftype_is_char_type(elem);
+    uint32_t depth = 1u;
+    uint32_t elems = 0;
+    bool counted = true;
+    bool start = true;
+    for (uint32_t scan = pos + 1u; scan < cc->tcount && depth > 0 && counted; scan += 1u)
+    {
+        const uint8_t sk = cc->tk[scan];
+        if (depth == 1u && start && sk != FTOK_RBRACE)
+        {
+            // An initializer starts: a designator, or an aggregate's that isn't braced (nor a string), isn't counted.
+            counted = sk != FTOK_LBRACKET && sk != FTOK_DOT && (!aggregate || sk == FTOK_LBRACE || (characters && sk == FTOK_STR_LIT)) &&
+                      !(character && sk == FTOK_STR_LIT);
+            elems += 1u;
+            start = false;
+        }
+        if (sk == FTOK_LBRACE || sk == FTOK_LPAREN || sk == FTOK_LBRACKET) { depth += 1u; }
+        else if (sk == FTOK_RBRACE || sk == FTOK_RPAREN || sk == FTOK_RBRACKET) { depth -= 1u; }
+        else if (depth == 1u && sk == FTOK_COMMA) { start = true; }
+    }
+    return counted && depth == 0 && elems != 0 ? elems : UINT32_MAX;
+}
+
 // Iterative static/global initializer: allocates storage in `.rodata` / `.data.rel.ro` / `.data`,
 // sizes incomplete arrays (`int a[] = {...}` or `char s[] = "..."`), and emits bytes + relocations!
 static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, FastType* io_type, FastSecId sec, uint32_t align)
@@ -1374,13 +1432,12 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
             if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
             if (fast_cc_peek(cc) == FTOK_RBRACE) { cc->pos += 1u; }
         }
-        FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
-        if (ar->count == UINT32_MAX)
+        if (cc->ctypes[root_t & BUSTER_FTYPE_CIDX_MASK].count == UINT32_MAX)
         {
-            ar->count = slen + 1u;
-            ar->size = slen + 1u;
-            ar->complete = 1u;
+            root_t = fast_cc_completed_array(cc, root_t, slen + 1u);
+            *io_type = root_t;
         }
+        const FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
         // #3577: a string longer than its array (but for the null) is the full pipeline's -Wexcess-initializers.
         if (slen > ar->size) { fast_cc_bail(cc, "a string initializer longer than its array"); return 0; }
         uint8_t* dst = NULL;
@@ -1711,10 +1768,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
     }
     if (inc_arr && !cc->bailout)
     {
-        FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
-        ar->count = st[0].max_elem;
-        ar->size = st[0].max_elem * st[0].elem_size;
-        ar->complete = 1u;
+        *io_type = fast_cc_completed_array(cc, root_t, st[0].max_elem);
     }
     return root_off;
 }
@@ -8159,11 +8213,20 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                     {
                         // Compound literal `(T){ e0, e1, ... }` handled iteratively via FEOP_COMPOUND_LIT!
                         if (ftype_is_unsupported(ct)) { fast_cc_bail(cc, "unsupported compound literal type"); break; }
-                        // #3577: an array of unknown size (which its elements would size) or another incomplete type.
-                        if (BUSTER_FAST_OBJECT_INCOMPLETE(cc, ct, 0u) != 0) { fast_cc_bail(cc, "compound literal of an incomplete type"); break; }
+                        // #3577: an array of unknown size takes its elements' count (fast_cc_incomplete_array_count, into a copy
+                        // of the type: musl's `(long[]){s, ns}`); any other incomplete type leaves.
+                        FastType clt = ct;
+                        if (BUSTER_FAST_OBJECT_INCOMPLETE(cc, ct, 0u) != 0)
+                        {
+                            const uint32_t elems = ftype_is_array(ct) && cc->ctypes[ct & BUSTER_FTYPE_CIDX_MASK].count == UINT32_MAX ?
+                                                   fast_cc_incomplete_array_count(cc, cc->pos, cc->ctypes[ct & BUSTER_FTYPE_CIDX_MASK].inner) : UINT32_MAX;
+                            if (elems == UINT32_MAX) { fast_cc_bail(cc, "compound literal of an incomplete type"); break; }
+                            clt = fast_cc_completed_array(cc, ct, elems);
+                            if (cc->bailout) { break; }
+                        }
                         cc->pos += 1u; // '{'
-                        const uint32_t csz = ftype_size(cc, ct);
-                        const uint32_t cal = ftype_align(cc, ct);
+                        const uint32_t csz = ftype_size(cc, clt);
+                        const uint32_t cal = ftype_align(cc, clt);
                         // #3577: a compound literal lives to the end of its block, not of its statement (`p = &(int){ x };`
                         // reads it after): a local's slot (each one's for the whole function), above the temporaries the
                         // expression holds.
@@ -8178,19 +8241,19 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                         if (fast_cc_peek(cc) == FTOK_RBRACE)
                         {
                             cc->pos += 1u;
-                            if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = ct, .kind = FVAL_LOCAL, .off = slot, .is_lvalue = 1u }; }
+                            if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = clt, .kind = FVAL_LOCAL, .off = slot, .is_lvalue = 1u }; }
                             expect_val = false;
                             continue;
                         }
                         if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                        ops[osp++] = (FastExprOp){ .op = FEOP_COMPOUND_LIT, .extra = 0u, .type = ct, .slot = slot, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+                        ops[osp++] = (FastExprOp){ .op = FEOP_COMPOUND_LIT, .extra = 0u, .type = clt, .slot = slot, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
                         // Handle optional designator `.field =` or `[idx] =` right before first element!
-                        if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(ct))
+                        if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(clt))
                         {
                             cc->pos += 1u;
                             if (fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "compound lit .field"); break; }
-                            const FastComplexType* rec = cc->ctypes + (ct & BUSTER_FTYPE_CIDX_MASK);
-                            const FastMemberInfo* mi = fast_struct_find_member(cc, ct & BUSTER_FTYPE_CIDX_MASK, fast_cc_data(cc));
+                            const FastComplexType* rec = cc->ctypes + (clt & BUSTER_FTYPE_CIDX_MASK);
+                            const FastMemberInfo* mi = fast_struct_find_member(cc, clt & BUSTER_FTYPE_CIDX_MASK, fast_cc_data(cc));
                             if (mi == NULL) { fast_cc_bail(cc, "compound lit unknown field"); break; }
                             ops[osp - 1u].extra = (uint16_t)(mi - (cc->member_info + rec->start));
                             cc->pos += 1u;
@@ -9279,13 +9342,12 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
             if (fast_cc_peek(cc) == FTOK_RBRACE) { cc->pos += 1u; }
         }
-        FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
-        if (ar->count == UINT32_MAX)
+        if (cc->ctypes[root_t & BUSTER_FTYPE_CIDX_MASK].count == UINT32_MAX)
         {
-            ar->count = slen + 1u;
-            ar->size = slen + 1u;
-            ar->complete = 1u;
+            root_t = fast_cc_completed_array(cc, root_t, slen + 1u);
+            *io_type = root_t;
         }
+        const FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
         // #3577: a string longer than its array (but for the null) is the full pipeline's -Wexcess-initializers.
         if (slen > ar->size) { fast_cc_bail(cc, "a string initializer longer than its array"); return 0; }
         const int32_t off = fast_cc_alloc_local(cc, ar->size, al);
@@ -9323,28 +9385,17 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
     }
 
     // If incomplete local array `T a[] = { e0, e1, ... }`, count top-level elements first so we know exact stack size!
+    // #3577: exactly, or leave (fast_cc_incomplete_array_count), and into a copy of the type (fast_cc_completed_array).
     if (is_arr && cc->ctypes[root_t & BUSTER_FTYPE_CIDX_MASK].count == UINT32_MAX)
     {
-        uint32_t scan = cc->pos + 1u;
-        uint32_t depth = 1u;
-        uint32_t elems = 0;
-        bool has_tok = false;
-        while (scan < cc->tcount && depth > 0)
+        const uint32_t elems = fast_cc_incomplete_array_count(cc, cc->pos, cc->ctypes[root_t & BUSTER_FTYPE_CIDX_MASK].inner);
+        if (elems == UINT32_MAX)
         {
-            const uint8_t sk = cc->tk[scan++];
-            if (sk == FTOK_LBRACE || sk == FTOK_LPAREN || sk == FTOK_LBRACKET) { depth += 1u; has_tok = true; }
-            else if (sk == FTOK_RBRACE || sk == FTOK_RPAREN || sk == FTOK_RBRACKET)
-            {
-                depth -= 1u;
-                if (depth == 0 && has_tok) { elems += 1u; }
-            }
-            else if (depth == 1u && sk == FTOK_COMMA) { elems += 1u; has_tok = false; }
-            else if (depth == 1u) { has_tok = true; }
+            fast_cc_bail(cc, "an incomplete array's initializer this path doesn't count");
+            return 0;
         }
-        FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
-        ar->count = elems;
-        ar->size = elems * ftype_size(cc, ar->inner);
-        ar->complete = 1u;
+        root_t = fast_cc_completed_array(cc, root_t, elems);
+        *io_type = root_t;
     }
 
     const uint32_t total_sz = ftype_size(cc, root_t);

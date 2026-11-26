@@ -3453,9 +3453,7 @@ static bool c_direct_test_dead_arms(const char* obj_path)
         "    sizeof(x) == sizeof(double) ? (int)(__DOUBLE_BITS(x)>>63) : __signbitl(x) )\n"
         "static inline void fp_force_evalf(float x) { volatile float y; y = x; }\n"
         "static inline void fp_force_eval(double x) { volatile double y; y = x; }\n"
-        // (#3577: the direct path checks an inline body where it is defined, and a long double one leaves it: musl's
-        // fp_force_evall() is declared here, its call as dead as with its definition.)
-        "void fp_force_evall(long double x);\n"
+        "static inline void fp_force_evall(long double x) { volatile long double y; y = x; }\n"
         "#define FORCE_EVAL(x) do { if (sizeof(x) == sizeof(float)) { fp_force_evalf(x); } \\\n"
         "    else if (sizeof(x) == sizeof(double)) { fp_force_eval(x); } else { fp_force_evall(x); } } while(0)\n"
         "static inline int a_ctz_32(unsigned x) { return (int)x; }\n"
@@ -4583,6 +4581,16 @@ static int c_direct_unit_tests(void)
         "_Static_assert(sizeof(register_t) == 8 && sizeof(udi) == 8 && sizeof(struct M) == 16, \"mode sizes\");\n"
         "long moded(register_t r, udi u, struct M* m) { long* p = &r; unsigned long* q = &u; short h __attribute__((mode(HI))) = 7;\n"
         "    _Static_assert(sizeof(h) == 2, \"HI\"); return *p + (long)*q + m->a + m->b + h; }\n",
+        // 25. Arrays of unknown size completed by their initializers, each a copy of a typedef's (the asserted sizes):
+        // locals, a string's, file-scope objects, and compound literals (musl's `(long[]){s, ns}`).
+        "typedef int arr_t[];\ntypedef char str_t[];\narr_t ga = { 1, 2, 3 };\narr_t gb = { 4 };\n"
+        "_Static_assert(sizeof(ga) == 12 && sizeof(gb) == 4, \"file scope\");\nlong take(const long* p, char* const* v);\n"
+        "long sized(long s, long ns, char* cmd) {\n"
+        "    arr_t a = { 1, 2, 3 }; arr_t b = { 1 }; str_t c = \"abcd\"; str_t d = \"ab\"; int e[] = { 5, 6, };\n"
+        "    _Static_assert(sizeof(a) == 12 && sizeof(b) == 4 && sizeof(c) == 5 && sizeof(d) == 3 && sizeof(e) == 8, \"locals\");\n"
+        "    return take((long[]){ s, ns }, (char*[]){ \"sh\", \"-c\", cmd, 0 }) + a[2] + b[0] + c[3] + d[1] + e[1] +\n"
+        "           (long)sizeof((long[]){ 1, 2 });\n"
+        "}\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4833,6 +4841,13 @@ static int c_direct_unit_tests(void)
         "typedef int sf __attribute__((mode(SF)));\nint f(void) { return 0; }\n",
         "typedef int* ip __attribute__((mode(DI)));\nint f(void) { return 0; }\n",
         "typedef int oi __attribute__((mode(OI)));\nint f(void) { return 0; }\n",
+        // An array of unknown size whose initializer has a designator or elides an aggregate element's braces (main's
+        // direct path counted its commas): locals and compound literals.
+        "int f(void) { int a[] = { [5] = 1 }; return sizeof(a); }\n",
+        "int f(void) { int a[] = { 1, 2, [7] = 3 }; return sizeof(a); }\n",
+        "struct P { int x, y; };\nint f(void) { struct P a[] = { 1, 2, 3, 4 }; return sizeof(a); }\n",
+        "int f(void) { int a[][2] = { 1, 2, 3, 4, 5 }; return sizeof(a); }\n",
+        "int f(void) { return sizeof((int[]){ [3] = 1 }); }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

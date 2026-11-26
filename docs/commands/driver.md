@@ -325,7 +325,16 @@ against `--no-direct`, which found main's direct path quiet on fifteen more
 and the pointer-to-int casts); the variants that touch types ran or asserted
 their sizes as well, and found three of its layouts and values wrong (an
 enumerator past `INT64_MAX`, a `(*p)[N]` parameter, packed records with
-alignments). `-Wfortify-source` (a memcpy, memset, strcpy or strncpy family
+alignments). Running each case against the full pipeline's object found more:
+an array of unknown size took its count from its initializer's commas in a
+block (`int a[] = { [5] = 1 }` was one int, `struct P a[] = { 1, 2, 3, 4 }` four
+records), and every completion wrote the count into the array's type, so a
+typedef's `int[]` or `char[]` took its first object's size. A block's count is
+now exact or leaves (`fast_cc_incomplete_array_count`: a designator, or an
+aggregate element's elided braces, need the initializer's walk), and each
+completion is a copy (`fast_cc_completed_array`); a compound literal of unknown
+size takes its elements' count the same way (musl's `(long[]){s, ns}`, which
+the direct path had refused). `-Wfortify-source` (a memcpy, memset, strcpy or strncpy family
 call's constant amount past the object its destination points into) walks the
 destination's tokens as the full pipeline's `check_common_call_object` walks
 its expression, and reads where it points from the value: a local's or a
