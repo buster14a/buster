@@ -1267,6 +1267,33 @@ static uint32_t tier1_cfg_piece_at(const Tier1CfgPieces* pieces, uint32_t first,
     return low > first && pieces->ends[low - 1] > position ? low - 1 : BUSTER_TIER1_CFG_NONE;
 }
 
+// A latch phi that mostly carries its header's phi unchanged takes that value's convention, rather than a cold
+// operand's merely because its predecessor is nearest in layout (#2553). The candidate is the successor phi, so one
+// bounded vector pass counts its occurrences and finds the nearest earlier matching predecessor. No profile is
+// inferred: a strict majority of all incoming edges must carry the same value, including undefined edges in the total.
+static uint32_t tier1_cfg_phi_carried_predecessor(const uint32_t* operands, const uint32_t* predecessors, uint32_t count, uint32_t value, uint32_t block)
+{
+    const __m512i wanted = _mm512_set1_epi32((int)value);
+    const __m512i limit = _mm512_set1_epi32((int)block);
+    const __m512i one = _mm512_set1_epi32(1);
+    __m512i nearest = _mm512_setzero_si512();
+    uint32_t votes = 0;
+    for (uint32_t j = 0; j < count; j += 16)
+    {
+        const uint32_t left = count - j;
+        const __mmask16 lanes = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+        const __m512i values = _mm512_maskz_loadu_epi32(lanes, operands + j);
+        const __m512i blocks = _mm512_maskz_loadu_epi32(lanes, predecessors + j);
+        const __mmask16 same = _mm512_mask_cmpeq_epi32_mask(lanes, values, wanted);
+        const __mmask16 earlier = _mm512_mask_cmplt_epu32_mask(same, blocks, limit);
+        votes += (uint32_t)__builtin_popcount((uint32_t)same);
+        // One-based block ids distinguish predecessor zero from an empty lane. Each eligible id is below block.
+        nearest = _mm512_max_epu32(nearest, _mm512_maskz_add_epi32(earlier, blocks, one));
+    }
+    const uint32_t found = _mm512_reduce_max_epu32(nearest);
+    return votes > count / 2 && found != 0 ? found - 1 : BUSTER_TIER1_CFG_NONE;
+}
+
 // A phi's interval that no sibling convention models (#1216) takes its operand's register at the exit of its block's
 // chosen predecessor (#2553, tier1_cfg_anchors). Every value's intervals must be filled: an operand's may follow its
 // phi's.
@@ -1295,6 +1322,7 @@ static void tier1_cfg_phi_exits(const Tier1CfgInput* input, const uint32_t* chos
         const uint32_t exit = predecessor != BUSTER_TIER1_CFG_NONE ? input->block_starts[predecessor + 1] - 1 : 0;
         const bool single = input->successor_offsets[b + 1] - input->successor_offsets[b] == 1;
         const uint32_t next = single ? input->successors[input->successor_offsets[b]] : BUSTER_TIER1_CFG_NONE;
+        const uint32_t degree = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
         for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
         {
             const uint32_t v = input->phi_values[k];
@@ -1315,6 +1343,16 @@ static void tier1_cfg_phi_exits(const Tier1CfgInput* input, const uint32_t* chos
                 pieces->hint_intervals[own] = convention;
             }
             const uint32_t operand = predecessor != BUSTER_TIER1_CFG_NONE ? input->phi_operands[input->phi_operand_offsets[k] + j] : BUSTER_TIER1_CFG_NONE;
+            // The latch and header carry each other's phis. Preserve the header's convention where most incoming
+            // edges pass it unchanged, without changing the block's anchor or overriding a sibling's convention.
+            const bool carried = along && next > b && degree >= 3 && operand != up && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE;
+            const uint32_t from = carried ? tier1_cfg_phi_carried_predecessor(input->phi_operands + input->phi_operand_offsets[k], input->predecessors + input->predecessor_offsets[b], degree, up, b) : BUSTER_TIER1_CFG_NONE;
+            const uint32_t kept = from != BUSTER_TIER1_CFG_NONE ? tier1_cfg_piece_at(pieces, offsets[up], offsets[up + 1], input->block_starts[from + 1] - 1) : BUSTER_TIER1_CFG_NONE;
+            if (kept != BUSTER_TIER1_CFG_NONE && pieces->classes[kept] == pieces->classes[own] && pieces->ends[kept] <= pieces->starts[own])
+            {
+                pieces->hints[own] = up;
+                pieces->hint_intervals[own] = kept | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+            }
             const uint32_t taken = operand != BUSTER_TIER1_CFG_NONE ? tier1_cfg_piece_at(pieces, offsets[operand], offsets[operand + 1], exit) : BUSTER_TIER1_CFG_NONE;
             if (own != BUSTER_TIER1_CFG_NONE && taken != BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE && pieces->classes[taken] == pieces->classes[own] &&
                 pieces->ends[taken] <= pieces->starts[own])

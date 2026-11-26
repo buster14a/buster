@@ -573,6 +573,25 @@ take, by exit hints:
   operand's place at the end of that operand's range, where the range ends at
   the definition ("Two-address results" below).
 
+A latch before its header can have many incoming edges carrying the header's
+phi unchanged, while the nearest predecessor supplies a different value.
+`tier1_cfg_phi_exits` keeps the repeated value's convention when the latch has
+one successor, that later successor's phi takes the latch phi, and a strict
+majority of the latch phi's operands are that successor phi. It takes the
+nearest earlier matching predecessor's interval exit. The block's anchor,
+sibling conventions and the successor alternate's settled-place guard stay as
+before. Undefined operands count in the denominator; a tie, no earlier matching
+predecessor, or an unavailable interval leaves the existing choice in place.
+The known successor phi needs no histogram: one masked AVX-512 pass counts its
+occurrences and finds the nearest predecessor, with no extra scratch storage.
+
+`test-tier1-cfg` checks a dispatch loop with three unchanged handler inputs and
+a different cold operand nearest in layout, including reordered predecessor
+rows and a tied case with an undefined operand. The unchanged handler and latch
+edges move nothing in the majority case. Both checkers and the certificate
+check the allocations; protected-page rows around the vector width check the
+selection's tails and empty input.
+
 Slot sharing joins phi-to-phi pairs before the others (`tier1_cfg_share_slots`):
 in `sqlite3VdbeExec`, whose latch's join is laid out before its header, an
 operand spilled where it entered the loop joined its phi's slot first and kept
