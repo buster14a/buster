@@ -1348,7 +1348,8 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/lane_test.c", "main.c main_unit_checker.c main_unit_executable.c", "CPU topology for driver, checker lanes and foreign process tests", UINT64_C(0xd524a795555803d8) },
     { "src/buster/compiler/link_order_test.c", "main_unit_link.c main_unit_dynamic.c main_unit_executable.c", "link permutation helper used by link and writer fixtures", UINT64_C(0xe1808f7c37e1295e) },
     { "src/buster/compiler/link_test.c", "main_unit_link.c main_unit_dynamic.c main_unit_executable.c", "linked-program inputs for link and both ELF writers", UINT64_C(0xfe3eb21c41538ca2) },
-    { "src/buster/compiler/object_writer_test.c", ownership_main_units, "object metadata types and helpers used by shared symbol/source readers", UINT64_C(0x1753ed9d953b02d3) },
+    // The section-anchor helper shares the existing section comparator's ASSEMBLER/LINK guard.
+    { "src/buster/compiler/object_writer_test.c", ownership_main_units, "object metadata types and helpers used by shared symbol/source readers", UINT64_C(0xa03b8aa9f45a470a) },
     { "src/buster/compiler/snapshot_test.c", "main_unit_executable.c main_unit_checker.c", "executable patch checks shared with checker debug tests", UINT64_C(0xf83ab1966416eae8) },
     { "src/buster/compiler/static_test.c", "main_unit_executable.c main_unit_dynamic.c", "static executable writer shared by executable and dynamic tests", UINT64_C(0xe0e54572562aaf20) },
     { "src/buster/compiler/tier0_benchmark_measure.c", "main_unit_backend.c main_unit_checker.c", "counter utilities for backend IR and checker source benchmarks", UINT64_C(0x19f550c607e8538c) },
