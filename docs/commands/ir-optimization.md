@@ -292,13 +292,41 @@ of 64 bytes read from the parameter's object with a second 16-byte load, a
 zeroed object's quadword constants, and two that must stay memory (the
 scalar's object written between its loads, and one lane another scalar's).
 
-On the compiler's own lexer by `--tier1`, `c_tokenize` went from 30.20 to
-14.62 instructions per byte on a 9,076-byte file (clang -O2: 3.06), every
-instruction counted; the record is
-[buster-performance's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-vector-lexer-breakdown-1344-2026-11-14).
-What it leaves are true constants that Tier 1's constant rule still builds
-below `rsp` (#2744), but for those whose quadwords are one value, which are a
-`mov` and a `vpbroadcastq` at EVEX targets (13.46 instructions per byte).
+In the November 14 census, against main `ca2bd994`, this change took
+`c_tokenize` from 30.20 to 14.62 instructions per byte on a 9,076-byte file
+(clang -O2: 3.06), with every instruction of one call counted. The quadword
+splat rule, a `mov` and a `vpbroadcastq` at EVEX targets, reduced that to
+13.46. These are historical results for #2742, retained in the
+[measurement record](https://github.com/buster14a/buster-performance/tree/6a1fcbc6beb4e842ef4a16510049d94477e145f6/docs/measurements/tier1-vector-lexer-breakdown-1344-2026-11-14),
+not measurements of current main or a reproduction of #1344's original
+Clang -O3 comparison.
+
+Those revisions still built general vector constants below `rsp`. #2794
+subsequently replaced that construction with the
+[literal pool](../tier1-selection.md#the-literal-pool-2744): general vector
+constants are no longer constructed by storing their words below `rsp`. #2790 also enabled
+[vector-only value numbering and LICM](#vector-and-mask-values-by-default-2781)
+by default. Distinct-scalar vector initializers (#3641) are separate from these
+constant and splat transformations; their element stores may still remain.
+
+## Mask round trips (#1344)
+
+The C intrinsic interfaces carry a comparison's mask as an integer before a
+masked consumer converts it back. Tier 1's existing identity pass now forwards
+an exact `m8`, `m16`, `m32` or `m64` value through a bitcast to an integer and
+back to the same mask type. The existing forwarding map and dead-code pass
+remove the conversions when they have no other users. An observable integer
+use keeps its conversion; integer computation and changes of mask width are
+not treated as this identity.
+
+`test-ir-optimize` checks all four mask widths through the independent IR
+interpreter, including retained integer uses and conversions that change the
+bits. `tests/driver/tier1_patterns.c` compiles real compare-to-blend and
+compare-to-compress chains strictly with Tier 1 and `--verify`, compares them
+with a Clang-built byte model, and requires no general-register/opmask moves
+in the pure chains. A shared mask still returns its integer bits with one
+opmask-to-general-register move. The native cases cover every mask bit,
+unaligned buffers, integer XOR and narrowing followed by zero extension.
 
 ## Register-class aggregates in registers (#3311)
 

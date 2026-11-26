@@ -1251,6 +1251,207 @@ static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, A
     }
 }
 
+// C's mask intrinsics (#1344) carry a comparison's mask through an integer before the next intrinsic consumes it.
+// Every mask width returns to the original bits, including its high bit. Repeated round trips disappear as well, but
+// a shared integer consumer, real integer arithmetic, a changed mask width and a truncation's lost bits must remain.
+static void ir_optimize_test_mask_identities(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    static const uint8_t masks[] = { IR_M8, IR_M16, IR_M32, IR_M64 };
+    static const uint8_t integers[] = { IR_I8, IR_I16, IR_I32, IR_I64 };
+    for (uint32_t width = 0; width < BUSTER_ARRAY_LENGTH(masks); width += 1)
+    {
+        const uint32_t mask = masks[width];
+        const uint32_t integer = integers[width];
+        const uint64_t all = UINT64_MAX >> (64 - ir_type_bits[mask]);
+        const uint64_t arguments[] = { 0, 1, all, UINT64_C(1) << (ir_type_bits[mask] - 1),
+                                       UINT64_C(0xaaaaaaaaaaaaaaaa) & all, UINT64_C(0x5555555555555555) & all,
+                                       UINT64_C(0x0123456789abcdef) & all, UINT64_C(0xfedcba9876543210) & all };
+        for (uint32_t kind = 0; kind < 5; kind += 1)
+        {
+            const uint64_t input_mark = input->length;
+            const uint64_t scratch_mark = scratch->length;
+            const uint32_t other = width + 1 < BUSTER_ARRAY_LENGTH(masks) ? width + 1 : width - 1;
+            const uint32_t narrow = width == 0 ? IR_I1 : integers[width - 1];
+            const uint32_t result_mask = kind == 3 ? masks[other] : mask;
+            const uint32_t count = kind == 0 ? 4 : kind == 2 ? 8 : kind == 3 ? 5 : 6;
+            const IrSizes sizes = { .instruction_count = count, .block_count = 1, .parameter_count = 1, .constant_count = kind == 2 };
+            IrFunction f = { 0 };
+            const bool created = ir_create(input, &sizes, &f) == IR_OK;
+            if (created)
+            {
+                f.result_type = result_mask;
+                f.parameter_types[0] = mask;
+                f.block_offsets[1] = count;
+                ir_optimize_test_instruction(&f, 0, IR_PARAM, mask, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 1, IR_BITCAST, integer, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                if (kind < 2)
+                {
+                    ir_optimize_test_instruction(&f, 2, IR_BITCAST, mask, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    if (kind == 1)
+                    {
+                        ir_optimize_test_instruction(&f, 3, IR_BITCAST, integer, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        ir_optimize_test_instruction(&f, 4, IR_BITCAST, mask, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    }
+                }
+                else if (kind == 2)
+                {
+                    f.constants[0].low = 1;
+                    ir_optimize_test_instruction(&f, 2, IR_BITCAST, mask, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 3, IR_CONST, integer, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 4, IR_ADD, integer, 1, 3, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 5, IR_BITCAST, mask, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 6, IR_XOR, mask, 2, 5, BUSTER_IR_NONE);
+                }
+                else if (kind == 3)
+                {
+                    ir_optimize_test_instruction(&f, 2, width < other ? IR_ZEXT : IR_TRUNC, integers[other], 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 3, IR_BITCAST, result_mask, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                }
+                else
+                {
+                    ir_optimize_test_instruction(&f, 2, IR_TRUNC, narrow, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 3, IR_ZEXT, integer, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_optimize_test_instruction(&f, 4, IR_BITCAST, mask, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                }
+                ir_optimize_test_instruction(&f, count - 1, IR_RET, IR_VOID, count - 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            const bool valid = created && ir_verify(&f, scratch, 0).error == IR_OK;
+            ir_optimize_test_expect(test, valid, "mask identity fixture verifies at every width");
+            for (uint32_t identity = 0; valid && identity < 2; identity += 1)
+            {
+                const uint64_t output_mark = output->length;
+                IrOptimizeOptions options = ir_optimize_options();
+                options.passes |= identity != 0 ? BUSTER_IR_OPTIMIZE_IDENTITY : 0;
+                IrOptimizeResult result = { 0 };
+                const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
+                ir_optimize_test_expect(test, check.error == IR_OK && scratch->length == scratch_mark, "mask identity optimization verifies and restores scratch");
+                if (check.error == IR_OK)
+                {
+                    const IrFunction* out = &result.function;
+                    uint32_t counts[IR_OP_COUNT] = { 0 };
+                    for (uint32_t i = 0; i < out->instruction_count; i += 1)
+                    {
+                        counts[out->op[i]] += 1;
+                    }
+                    const uint32_t casts = kind < 2 ? (identity != 0 ? 0 : 2 + kind * 2) : kind == 2 ? (identity != 0 ? 2 : 3) : 2;
+                    bool shape = counts[IR_BITCAST] == casts;
+                    if (kind < 2 && identity != 0)
+                    {
+                        shape = shape && out->instruction_count == 2 && out->op[0] == IR_PARAM && out->op[1] == IR_RET && out->a[1] == 0;
+                    }
+                    else if (kind == 2)
+                    {
+                        shape = shape && counts[IR_ADD] == 1 && counts[IR_XOR] == 1;
+                    }
+                    else if (kind >= 3)
+                    {
+                        shape = shape && counts[IR_TRUNC] == (uint32_t)(kind == 4 || width > other) && counts[IR_ZEXT] == (uint32_t)(kind == 4 || width < other);
+                    }
+                    ir_optimize_test_expect(test, shape, "only exact mask round trips disappear; integer uses and width changes remain");
+                    for (uint32_t trial = 0; trial < BUSTER_ARRAY_LENGTH(arguments); trial += 1)
+                    {
+                        const InterpreterValue argument = { .low = arguments[trial] };
+                        const uint64_t expected = kind == 2 ? argument.low ^ ((argument.low + 1) & all) :
+                                                  kind == 3 ? argument.low & (UINT64_MAX >> (64 - ir_type_bits[result_mask])) :
+                                                  kind == 4 ? argument.low & (UINT64_MAX >> (64 - ir_type_bits[narrow])) : argument.low;
+                        const InterpreterResult before = ir_optimize_test_simd_run(&f, &argument, 1, scratch);
+                        const InterpreterResult after = ir_optimize_test_simd_run(out, &argument, 1, scratch);
+                        ir_optimize_test_expect(test, before.status == INTERPRETER_OK && after.status == INTERPRETER_OK &&
+                                                before.value.low == expected && after.value.low == expected && before.value.high == 0 && after.value.high == 0 && scratch->length == scratch_mark,
+                                                "mask identities preserve independently computed bits, including the highest lane");
+                    }
+                }
+                arena_pop_to(output, output_mark);
+            }
+            arena_pop_to(input, input_mark);
+        }
+    }
+}
+
+// The round trip neither defines nor clears any bits (#3424): an undef remains undefined, including at a phi's
+// incoming edge. Forward mask operands both into and out of the join, keeping dominance and the selected value.
+static void ir_optimize_test_mask_identity_flow(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    static const uint8_t integers[] = { IR_I8, IR_I16, IR_I32, IR_I64 };
+    for (uint32_t width = 0; width < BUSTER_ARRAY_LENGTH(integers); width += 1)
+    {
+        const uint32_t mask = IR_M8 + width;
+        const uint32_t integer = integers[width];
+        const uint64_t all = UINT64_MAX >> (64 - ir_type_bits[mask]);
+        for (uint32_t undefined = 0; undefined < 2; undefined += 1)
+        {
+            const uint64_t input_mark = input->length;
+            const uint64_t output_mark = output->length;
+            const uint64_t scratch_mark = scratch->length;
+            const IrSizes sizes = { .instruction_count = 14, .block_count = 4, .parameter_count = undefined != 0 ? 2 : 3, .extra_count = 4 };
+            IrFunction f = { 0 };
+            const bool created = ir_create(input, &sizes, &f) == IR_OK;
+            if (created)
+            {
+                f.result_type = mask;
+                f.parameter_types[0] = mask;
+                f.parameter_types[1] = IR_I1;
+                if (undefined == 0)
+                {
+                    f.parameter_types[2] = mask;
+                }
+                const uint32_t offsets[] = { 0, 4, 7, 10, 14 };
+                const uint32_t incoming[] = { 1, 5, 2, 8 };
+                memcpy(f.block_offsets, offsets, sizeof(offsets));
+                memcpy(f.extra, incoming, sizeof(incoming));
+                ir_optimize_test_instruction(&f, 0, IR_PARAM, mask, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 1, IR_PARAM, IR_I1, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 2, undefined != 0 ? IR_UNDEF : IR_PARAM, mask, undefined != 0 ? BUSTER_IR_NONE : 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 3, IR_CBR, IR_VOID, 1, 1, 2);
+                ir_optimize_test_instruction(&f, 4, IR_BITCAST, integer, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 5, IR_BITCAST, mask, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 6, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 7, IR_BITCAST, integer, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 8, IR_BITCAST, mask, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 9, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 10, IR_PHI, mask, 0, 2, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 11, IR_BITCAST, integer, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 12, IR_BITCAST, mask, 11, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 13, IR_RET, IR_VOID, 12, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            const bool valid = created && ir_verify(&f, scratch, 0).error == IR_OK;
+            ir_optimize_test_expect(test, valid, "mask phi identity fixture verifies");
+            if (valid)
+            {
+                IrOptimizeOptions options = ir_optimize_options();
+                options.passes |= BUSTER_IR_OPTIMIZE_IDENTITY;
+                IrOptimizeResult result = { 0 };
+                const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
+                ir_optimize_test_expect(test, check.error == IR_OK, "mask identities across phi edges preserve verified dominance");
+                if (check.error == IR_OK)
+                {
+                    uint32_t casts = 0;
+                    uint32_t phis = 0;
+                    for (uint32_t i = 0; i < result.function.instruction_count; i += 1)
+                    {
+                        casts += result.function.op[i] == IR_BITCAST;
+                        phis += result.function.op[i] == IR_PHI;
+                    }
+                    ir_optimize_test_expect(test, casts == 0 && phis == 1, "mask round trips into and out of a phi are forwarded");
+                    for (uint32_t branch = 0; branch < 2; branch += 1)
+                    {
+                        const InterpreterValue arguments[] = { { .low = all }, { .low = branch }, { .low = UINT64_C(0xaaaaaaaaaaaaaaaa) & all } };
+                        const InterpreterStatus status = undefined != 0 && branch == 0 ? INTERPRETER_UNDEFINED : INTERPRETER_OK;
+                        const uint64_t expected = branch != 0 ? arguments[0].low : arguments[2].low;
+                        const InterpreterResult before = ir_optimize_test_simd_run(&f, arguments, f.parameter_count, scratch);
+                        const InterpreterResult after = ir_optimize_test_simd_run(&result.function, arguments, f.parameter_count, scratch);
+                        ir_optimize_test_expect(test, before.status == status && after.status == status && scratch->length == scratch_mark &&
+                                                (status != INTERPRETER_OK || (before.value.low == expected && after.value.low == expected && before.value.high == 0 && after.value.high == 0)),
+                                                "mask identity phi preserves defined bits and diagnoses the undefined edge");
+                    }
+                }
+            }
+            arena_pop_to(output, output_mark);
+            arena_pop_to(input, input_mark);
+        }
+    }
+}
+
 static void ir_optimize_test_simd(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(UINT64_C(16) << 20);
@@ -1264,6 +1465,8 @@ static void ir_optimize_test_simd(IrOptimizeTest* test)
         ir_optimize_test_simd_lanes(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_float_pairs(test);
         ir_optimize_test_scalar_floats(test, &input, &vector, &scratch);
+        ir_optimize_test_mask_identities(test, &input, &vector, &scratch);
+        ir_optimize_test_mask_identity_flow(test, &input, &vector, &scratch);
         ir_optimize_test_simd_flow(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_loop(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_splats(test, &input, &vector, &scalar, &scratch);

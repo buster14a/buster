@@ -1227,7 +1227,10 @@ static uint32_t ir_optimize_identity_source(const IrOptimizeWork* work, const ui
 // Identities' forwarding (#2554), after SCCP and before DCE: an integer operation, I1 to I64, of a reachable block that
 // returns one of its operands unchanged by SCCP's facts (ir_optimize_identity_kinds: a shift by zero, Lua's instruction
 // decoding's `>> 0`, a multiplication by one, a C `n * sizeof (char)`, and the rest) forwards that operand, of its own
-// type; and a conversion of an integer, f32 or f64 back to its operand's operand's type (#3311) forwards that value. Its users read the operand in its place (ir_optimize_rewrite), DCE marks the operand rather than it (a shift's
+// type; and a conversion of an integer, f32 or f64 back to its operand's operand's type (#3311) forwards that value.
+// A mask's bitcast to an integer and back to the same mask type does too (#1344): C's intrinsic signatures carry masks
+// as integers, leaving this round trip between a vector comparison and its mask consumer. Its users read the operand
+// in its place (ir_optimize_rewrite), DCE marks the operand rather than it (a shift's
 // root with it, ir_optimize_dce) and it is gone. An operand defines a value that dominates the operation, which
 // dominates the operation's users, so every use stays dominated. A chain of them forwards its first operand that isn't
 // one, found with path compression. A result SCCP folded and a vector's stay as they are. False where the map (`count`
@@ -1249,7 +1252,8 @@ static bool ir_optimize_identities(IrOptimizeWork* work, Arena* scratch)
             const uint32_t type = f->type[i];
             uint32_t source = BUSTER_IR_NONE;
             const bool scalar = (type >= IR_I1 && type <= IR_I64) || type == IR_F32 || type == IR_F64;
-            if (scalar && work->blocks[work->cfg.instruction_blocks[i]] != 0 && work->states[i] != IROPT_CONSTANT)
+            const bool mask = ir_mask_type(type) && f->op[i] == IR_BITCAST && ir_integer(f->type[f->a[i]]);
+            if ((scalar || mask) && work->blocks[work->cfg.instruction_blocks[i]] != 0 && work->states[i] != IROPT_CONSTANT)
             {
                 source = ir_optimize_identity_source(work, forward, i, type);
                 source = source != BUSTER_IR_NONE && f->type[source] == type ? source : BUSTER_IR_NONE;
