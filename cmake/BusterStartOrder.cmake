@@ -17,7 +17,9 @@
 # data (.data.rel.ro.buster: their .data.rel.ro, which a static link at a fixed address relocates in the file, where the
 # C library's own, in .data.rel.ro, is written by its start). The two make a writable segment of their own, between the
 # read-only data and the code, which the bake makes read-only (baked.c's bake_seal), so that the exit helper can ask
-# for its ranges in huge pages as for the code's.
+# for its ranges in huge pages as for the code's. The direct path, frontend and checker lead the relocated data, so
+# their small tables share ranges instead of the other units' tests and benchmarks separating them. Each starts on
+# a 64 KB fault-around boundary, so preceding units do not shift its tables across the windows.
 #
 #   buster_start_order_files(LIST SCRIPT SYMBOLS SHIFT_SOURCE CHECKER_SHIFT)
 #
@@ -107,7 +109,14 @@ function(buster_start_order_files list script symbols shift_source checker_shift
         "/* The start's code order (cmake/BusterStartOrder.cmake), from ${list}. */\n"
         "SECTIONS\n{\n"
         "    buster_baked : ALIGN(0x200000)\n    {\n        *(buster_baked)\n    }\n"
-        "    .data.rel.ro.buster :\n    {\n        *.c.o(.data.rel.ro .data.rel.ro.*)\n        */native.o(.data.rel.ro .data.rel.ro.*)\n    }\n"
+        "    .data.rel.ro.buster :\n    {\n"
+        "        . = ALIGN(0x10000);\n"
+        "        */c_direct.c.o(.data.rel.ro .data.rel.ro.*)\n        */c_direct/native.o(.data.rel.ro .data.rel.ro.*)\n"
+        "        . = ALIGN(0x10000);\n"
+        "        */main_unit_frontend.c.o(.data.rel.ro .data.rel.ro.*)\n        */main_unit_frontend/native.o(.data.rel.ro .data.rel.ro.*)\n"
+        "        . = ALIGN(0x10000);\n"
+        "        */main_unit_checker.c.o(.data.rel.ro .data.rel.ro.*)\n        */main_unit_checker/native.o(.data.rel.ro .data.rel.ro.*)\n"
+        "        *.c.o(.data.rel.ro .data.rel.ro.*)\n        */native.o(.data.rel.ro .data.rel.ro.*)\n    }\n"
         "    .text.buster_start : ALIGN(0x200000)\n    {\n        buster_start_probe = .;\n        . += 0x20000;\n${sections}    }\n"
         "    ASSERT(SIZEOF(.text.buster_start) > 0x20000, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
         "    .text.buster_checker :${checker_alignment}\n    {\n${checker_sections}        buster_start_end = .;\n    }\n"

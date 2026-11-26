@@ -1706,6 +1706,23 @@ same bytes. What the executable still takes is its data: of `-c sqlite3.c`'s
 80 faults in it, 20 are in `.data.rel.ro`, 21 in the baked tables and 22 in
 `.bss`, where the text took 121 and the read-only data 29 before.
 
+## Read-only startup tables
+
+The static lld start-order script places the direct path's, frontend's and
+checker's relocated read-only data first in `.data.rel.ro.buster` (#2886),
+before the other units' tables and test fixtures. Each of those three input
+groups starts on a 64 KB boundary, the kernel's file fault-around window:
+the preceding group's size cannot shift its tables partway across a window.
+The selectors cover both whole-unit objects and the units in parts' `native.o`;
+the ordinary compiler-object selectors still collect every remaining input.
+
+This changes placement alone. The baked tables keep their existing order and
+2 MB alignment, the C library's writable relocation state stays outside the
+sealed section, and `bake_seal` still checks the segment before making it
+read-only. The exit helper uses its existing threshold of 64 mapped base pages
+per 2 MB range; ordering gathers the compile's tables without lowering that
+threshold.
+
 ## Compact writable startup state
 
 The small globals a compile reads or writes belong together, away from the
