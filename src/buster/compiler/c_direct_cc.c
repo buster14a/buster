@@ -9375,14 +9375,15 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
         fast_cc_bail(cc, "expression did not produce single value");
         return;
     }
-    FastVal final_v = ex.vstack[0];
+    // The value stays where the reductions left it (#3596); nothing below changes the stack until the branch.
+    FastVal* const final_v = &ex.vstack[0];
     // #3577: -Wunsequenced. Without the log: no variable modified, or one whose modification is the expression's last
     // operator (its operands are evaluated before it stores; BUSTER_FSEQ_MODIFIED), is quiet, and any other modification
     // looks further (fast_cc_sequenced_lazy). With it (a compile again): a variable modified and named or modified again
     // where nothing sequences the two (seq_hit, set by the log, says where that may be).
     if (!logging)
     {
-        if (ex.seq_mod_count != 0 && ((uint32_t)(ex.seq_mod_count != 1u) | (uint32_t)(final_v.seq_ident != BUSTER_FSEQ_MODIFIED)) != 0 &&
+        if (ex.seq_mod_count != 0 && ((uint32_t)(ex.seq_mod_count != 1u) | (uint32_t)(final_v->seq_ident != BUSTER_FSEQ_MODIFIED)) != 0 &&
             !fast_cc_sequenced_lazy(cc, &ex, stop_at_comma))
         {
             return;
@@ -9397,30 +9398,32 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
     {
         // An assignment as a condition, outside parentheses, is -Wparentheses (#3577); a parenthesized comparison for
         // equality, -Wparentheses-equality (fast_cc_parentheses_equality, looked at where the condition starts with `(`).
-        if (final_v.op == FTOK_ASSIGN) { fast_cc_bail(cc, "assignment as a condition"); return; }
+        if (final_v->op == FTOK_ASSIGN) { fast_cc_bail(cc, "assignment as a condition"); return; }
         if (cc->tk[ex.seq_start_pos] == FTOK_LPAREN && fast_cc_parentheses_equality(cc, ex.seq_start_pos, cc->pos))
         {
             fast_cc_bail(cc, "an equality comparison in extraneous parentheses as a condition");
             return;
         }
-        cc->branch_constant = (uint8_t)((uint32_t)(final_v.kind == FVAL_IMM) * (BUSTER_FCONSTANT_FALSE + (uint32_t)(final_v.imm != 0)));
-        fval_branch(&ex, &final_v, branch_on_true, branch_label);
+        // The value leaves the stack before its branch, as #3596 has it, so no spill can write the stack's entry.
+        ex.vsp = 0;
+        cc->branch_constant = (uint8_t)((uint32_t)(final_v->kind == FVAL_IMM) * (BUSTER_FCONSTANT_FALSE + (uint32_t)(final_v->imm != 0)));
+        fval_branch(&ex, final_v, branch_on_true, branch_label);
     }
-    else if (discard_result)
+    else if (discard_result && BUSTER_FAST_DISCARD_QUIET(*final_v) == 0)
     {
-        // A statement's value: one with no effect is -Wunused-value, a warn_unused_result call's -Wunused-result.
-        if (BUSTER_FAST_DISCARD_QUIET(final_v) == 0) { fast_cc_bail(cc, "discarded value"); return; }
-        fval_release(&ex, &final_v);
+        // A statement's value: one with no effect is -Wunused-value, a warn_unused_result call's -Wunused-result. A quiet
+        // one needs no release, as #3596 found: the context ends here.
+        fast_cc_bail(cc, "discarded value");
     }
     else if (out_val != NULL)
     {
-        *out_val = ex.vstack[0];
+        *out_val = *final_v;
     }
 }
 
 // Main iterative C17 expression compiler (#3577: without the -Wunsequenced log; fast_cc_expr_compile).
 // If `is_branch` is true, emits a direct branch to `branch_label` and releases the result.
-// If `discard_result` is true, releases the result (used for expression statements).
+// If `discard_result` is true, the result is a statement's, which -Wunused-value checks.
 static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, bool discard_result,
                          bool is_branch, bool branch_on_true, uint32_t branch_label, FastVal* out_val)
 {
