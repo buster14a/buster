@@ -1510,7 +1510,12 @@ static void ir_unroll_test_vectors(IrOptimizeTest* test)
                 const uint32_t bytes = ir_vectorize_test_bytes(t);
                 snprintf(message, sizeof(message), "%s: the vectorizer creates one %u-byte loop%s", fixture->name, bytes, t == 3 ? " with a scalar tail" : "");
                 ir_optimize_test_expect(test, vc.error == IR_OK && vectorized.vectorized == 1 && scratch.length == 0, message);
-                for (uint32_t factor = t == 0 ? 2 : 4; vc.error == IR_OK && vectorized.vectorized == 1 && factor <= (t == 0 ? 8 : 4); factor *= 2)
+                // The production handoff still contains if-conversion's unreachable stubs. Validate their structure
+                // and every reachable SSA use here; the optimizer below removes them before its strict final check.
+                const IrCheck handoff = vc.error == IR_OK ? ir_verify_complete(&vectorized.function, &scratch) : vc;
+                snprintf(message, sizeof(message), "%s: the raw vectorizer handoff verifies all reachable SSA uses", fixture->name);
+                ir_optimize_test_expect(test, handoff.error == IR_OK && handoff.dominance_checked && scratch.length == 0, message);
+                for (uint32_t factor = t == 0 ? 2 : 4; handoff.error == IR_OK && vectorized.vectorized == 1 && factor <= (t == 0 ? 8 : 4); factor *= 2)
                 {
                     IrUnrollOptions options = ir_unroll_options();
                     options.factor = factor;
@@ -1527,13 +1532,13 @@ static void ir_unroll_test_vectors(IrOptimizeTest* test)
                         bool vector_body = false;
                         for (uint32_t i = result.function.block_offsets[vectorized.function.block_count]; i < result.function.instruction_count; i += 1)
                         {
-                            vector_body = vector_body || ir_vector_type(result.function.type[i]);
+                            const bool vector_store = result.function.op[i] == IR_STORE && ir_vector_type(result.function.type[result.function.b[i]]);
+                            vector_body = vector_body || ir_vector_type(result.function.type[i]) || vector_store;
                         }
                         ir_optimize_test_expect(test, vector_body, "the new unrolled body contains vector values, rather than another copy of the scalar fallback");
-                        const IrCheck verified = ir_optimize_verify_result(&result.function, &cleanup, &scratch);
-                        arena_pop_to(&cleanup, 0);
-                        snprintf(message, sizeof(message), "%s: composed result verifies with dominance (error %u at %u)", fixture->name, verified.error, verified.instruction);
-                        ir_optimize_test_expect(test, verified.error == IR_OK, message);
+                        const IrCheck verified = ir_verify_complete(&result.function, &scratch);
+                        snprintf(message, sizeof(message), "%s: composed result verifies with reachable SSA dominance (error %u at %u)", fixture->name, verified.error, verified.instruction);
+                        ir_optimize_test_expect(test, verified.error == IR_OK && verified.dominance_checked && scratch.length == 0, message);
                         IrOptimizeOptions optimize = ir_optimize_options();
                         optimize.passes |= BUSTER_IR_OPTIMIZE_MERGE;
                         IrOptimizeResult optimized = { 0 };
