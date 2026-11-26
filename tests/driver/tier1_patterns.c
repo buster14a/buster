@@ -26,8 +26,8 @@
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
-// - #3641's vectors constructed from runtime lanes and constants: no temporary stack accesses, with the lane bytes
-//   checked independently on zero, high-bit and unequal inputs, including required zero tails and observable effects;
+// - #3641's vectors constructed from runtime lanes and constants: no memory construction, with the lane bytes checked
+//   independently on zero, high-bit and unequal inputs, including required zero tails and observable effects;
 // - #2784's str_gsub loop, whose body precedes its header: no value stored back where the instruction before loaded
 //   it from, as a range that waits in its slot (#2768) and is evicted after its reload did;
 // - #2843's conditional sums whose arm is a load's extension to 64 bits while the comparison reads the load (#2838's
@@ -1553,6 +1553,8 @@ typedef enum PatternsKind
     PATTERNS_GSUB,
     PATTERNS_ARMS,
     PATTERNS_CONSTRUCT,
+    PATTERNS_CONSTRUCT_ALL,
+    PATTERNS_CONSTRUCT_INLINED,
     PATTERNS_CONSTRUCT_VOLATILE,
     PATTERNS_SEMANTIC,
 } PatternsKind;
@@ -1604,9 +1606,9 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_arms_half", PATTERNS_ARMS },
     { "patterns_construct_lane0", PATTERNS_CONSTRUCT },
     { "patterns_construct_pair", PATTERNS_CONSTRUCT },
-    { "patterns_construct_inlined", PATTERNS_CONSTRUCT },
+    { "patterns_construct_inlined", PATTERNS_CONSTRUCT_INLINED },
     { "patterns_construct_mixed", PATTERNS_CONSTRUCT },
-    { "patterns_construct_all", PATTERNS_CONSTRUCT },
+    { "patterns_construct_all", PATTERNS_CONSTRUCT_ALL },
     { "patterns_construct_ends", PATTERNS_CONSTRUCT },
     { "patterns_construct_splat", PATTERNS_CONSTRUCT },
     { "patterns_construct_constant", PATTERNS_SEMANTIC },
@@ -1646,7 +1648,68 @@ static bool patterns_memory(const char* operand)
     return strchr(operand, '(') != NULL;
 }
 
-static bool patterns_shape(const PatternsFunction* function, const PatternsBody* body)
+static bool patterns_mentions_output_pointer(const char* operands)
+{
+    return strstr(operands, "%rdi") != NULL || strstr(operands, "%edi") != NULL || strstr(operands, "%di") != NULL;
+}
+
+// Eight distinct input values occupy every available caller-saved general register. The output pointer may spill
+// while the independent 128-bit pairs are built. Admit precisely that pointer's save/restore, never a scalar lane's
+// store or a vector reload: it must still be the incoming rdi when saved, be restored from the identical slot, and
+// feed the sole vector output store without being changed again. Every other constructor must use no stack memory.
+static bool patterns_output_pointer_spill(const PatternsBody* body)
+{
+    unsigned stack_indices[2] = { 0, 0 };
+    unsigned stack_count = 0;
+    unsigned vector_stores = 0;
+    unsigned vector_store = 0;
+    for (unsigned i = 0; i < body->count; i += 1)
+    {
+        const PatternsInstruction* instruction = &body->instructions[i];
+        const char* operands = instruction->operands;
+        const bool stack = strstr(operands, "(%rsp") != NULL || strstr(operands, "(%rbp") != NULL;
+        if (stack)
+        {
+            if (stack_count < 2)
+            {
+                stack_indices[stack_count] = i;
+            }
+            stack_count += 1;
+        }
+        const char* comma = strrchr(operands, ',');
+        if (strncmp(instruction->operation, "vmov", 4) == 0 && operands[0] == '%' && comma != NULL && patterns_memory(comma + 1))
+        {
+            vector_store = i;
+            vector_stores += 1;
+        }
+    }
+    bool valid = stack_count == 2 && vector_stores == 1 && stack_indices[0] < stack_indices[1] && stack_indices[1] < vector_store;
+    if (valid)
+    {
+        const PatternsInstruction* save = &body->instructions[stack_indices[0]];
+        const PatternsInstruction* restore = &body->instructions[stack_indices[1]];
+        const char* store_destination = strrchr(body->instructions[vector_store].operands, ',');
+        valid = strcmp(save->operation, "mov") == 0 && strcmp(restore->operation, "mov") == 0 &&
+                strncmp(save->operands, "%rdi,", 5) == 0 && store_destination != NULL && strcmp(store_destination + 1, "(%rdi)") == 0;
+        if (valid)
+        {
+            const char* slot = save->operands + 5;
+            const size_t length = strlen(slot);
+            valid = strlen(restore->operands) == length + 5 && strncmp(restore->operands, slot, length) == 0 && strcmp(restore->operands + length, ",%rdi") == 0;
+        }
+        for (unsigned i = 0; valid && i < stack_indices[0]; i += 1)
+        {
+            valid = !patterns_mentions_output_pointer(body->instructions[i].operands);
+        }
+        for (unsigned i = stack_indices[1] + 1; valid && i < vector_store; i += 1)
+        {
+            valid = !patterns_mentions_output_pointer(body->instructions[i].operands);
+        }
+    }
+    return valid;
+}
+
+static bool patterns_shape(const PatternsFunction* function, const PatternsBody* body, bool expanded)
 {
     unsigned sets = 0;
     unsigned moves = 0;
@@ -1770,6 +1833,12 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_CONSTRUCT:
         valid = valid && stack_accesses == 0 && vector_stores == 1 && calls == 0;
         break;
+    case PATTERNS_CONSTRUCT_ALL:
+        valid = valid && (stack_accesses == 0 || patterns_output_pointer_spill(body)) && vector_stores == 1 && calls == 0;
+        break;
+    case PATTERNS_CONSTRUCT_INLINED:
+        valid = valid && (!expanded || (stack_accesses == 0 && vector_stores == 1 && calls == 0));
+        break;
     case PATTERNS_CONSTRUCT_VOLATILE:
         valid = valid && source_loads == 8;
         break;
@@ -1785,7 +1854,7 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     return valid;
 }
 
-static bool patterns_shapes(const char* path)
+static bool patterns_shapes(const char* path, bool expanded)
 {
     static PatternsBody bodies[BUSTER_PATTERNS_COUNT];
     memset(bodies, 0, sizeof(bodies));
@@ -1813,11 +1882,40 @@ static bool patterns_shapes(const char* path)
         else if (current < BUSTER_PATTERNS_COUNT)
         {
             PatternsInstruction instruction = { 0 };
-            const int fields = sscanf(line, " %llx: %31s %95s", &instruction.address, instruction.operation, instruction.operands);
-            if (fields >= 2 && bodies[current].count < BUSTER_PATTERNS_INSTRUCTIONS)
+            int consumed = 0;
+            const int fields = sscanf(line, " %llx:%n", &instruction.address, &consumed);
+            if (fields == 1 && consumed > 0)
             {
-                bodies[current].instructions[bodies[current].count] = instruction;
-                bodies[current].count += 1;
+                const char* cursor = line + consumed;
+                cursor += strspn(cursor, " \t");
+                // GNU objdump annotates some encodings, e.g. `{evex} vpinsrq ...`. Those prefixes are not mnemonics;
+                // skipping them must not discard the real operands, including any forbidden stack-memory operand.
+                while (valid && *cursor == '{')
+                {
+                    const char* close = strchr(cursor, '}');
+                    valid = close != NULL && (close[1] == ' ' || close[1] == '\t');
+                    if (valid)
+                    {
+                        cursor = close + 1;
+                        cursor += strspn(cursor, " \t");
+                    }
+                }
+                const size_t operation_length = strcspn(cursor, " \t\r\n");
+                valid = valid && operation_length != 0 && operation_length < sizeof(instruction.operation);
+                if (valid)
+                {
+                    memcpy(instruction.operation, cursor, operation_length);
+                    cursor += operation_length;
+                    cursor += strspn(cursor, " \t");
+                    const size_t operands_length = strcspn(cursor, " \t\r\n");
+                    valid = operands_length < sizeof(instruction.operands) && bodies[current].count < BUSTER_PATTERNS_INSTRUCTIONS;
+                    if (valid)
+                    {
+                        memcpy(instruction.operands, cursor, operands_length);
+                        bodies[current].instructions[bodies[current].count] = instruction;
+                        bodies[current].count += 1;
+                    }
+                }
             }
         }
     }
@@ -1828,7 +1926,7 @@ static bool patterns_shapes(const char* path)
     }
     for (unsigned i = 0; i < BUSTER_PATTERNS_COUNT; i += 1)
     {
-        valid = patterns_shape(&patterns_functions[i], &bodies[i]) && valid;
+        valid = patterns_shape(&patterns_functions[i], &bodies[i], expanded) && valid;
     }
     return valid;
 }
@@ -1847,7 +1945,7 @@ static bool patterns_report_value(const char* line, const char* name, unsigned l
     return valid;
 }
 
-static bool patterns_report(const char* path, bool constructors)
+static bool patterns_report(const char* path, bool constructors, bool expanded)
 {
     unsigned minimum_functions = 0;
     for (unsigned i = 0; i < BUSTER_PATTERNS_COUNT; i += 1)
@@ -1874,7 +1972,7 @@ static bool patterns_report(const char* path, bool constructors)
                     patterns_report_value(line, "\tcompiled=", &compiled) &&
                     patterns_report_value(line, "\tfallbacks=", &fallbacks) &&
                     patterns_report_value(line, "\tinlined=", &inlined) &&
-                    functions >= minimum_functions && requested == functions && compiled == functions && fallbacks == 0 && (!constructors || inlined != 0);
+                    functions >= minimum_functions && requested == functions && compiled == functions && fallbacks == 0 && (!constructors || (expanded ? inlined != 0 : inlined == 0));
             reports += 1;
         }
     }
@@ -1926,22 +2024,36 @@ int main(int argc, char** argv)
     {
         // Fresh outputs: an unsuccessful command must never reuse the preceding path's files.
         unlink(subject);
-        unlink(constructors);
-        unlink(program);
-        unlink(assembly);
         unlink(report);
-        unlink(constructor_report);
         // The existing scalar-pattern fixtures retain their original output target. Only the vector-construction
         // unit targets Zen 5; enabling that ISA globally would vectorize the older scalar-loop shape fixtures.
         char* compile[] = { argv[1], "--tier1", "--tier1-strict", "--verify", "--lanes", "1", "--tier1-report", "-std=gnu17", "-DBUSTER_TIER1_PATTERNS_SUBJECT", "-c", source, "-o", subject, scalar ? "--scalar" : NULL, NULL };
-        char* construct[] = { argv[1], "--tier1", "--tier1-strict", "--verify", "--lanes", "1", "--tier1-report", "-march=znver5", "-std=gnu17", "-DBUSTER_TIER1_CONSTRUCT_SUBJECT", "-c", source, "-o", constructors, scalar ? "--scalar" : NULL, NULL };
-        char* link[] = { argv[2], oracle, subject, constructors, "-o", program, NULL };
-        char* execute[] = { program, NULL };
-        char* disassemble[] = { "objdump", "-d", "--no-show-raw-insn", subject, constructors, NULL };
-        valid = patterns_run(compile, NULL, report) && patterns_report(report, false) &&
-                patterns_run(construct, NULL, constructor_report) && patterns_report(constructor_report, true) &&
-                patterns_run(link, NULL, NULL) && patterns_run(execute, NULL, NULL) &&
-                patterns_run(disassemble, assembly, NULL) && patterns_shapes(assembly);
+        valid = patterns_run(compile, NULL, report) && patterns_report(report, false, false);
+        for (unsigned disabled = 0; valid && disabled < 2; disabled += 1)
+        {
+            unlink(constructors);
+            unlink(program);
+            unlink(assembly);
+            unlink(constructor_report);
+            const bool expanded = disabled == 0;
+            char* construct[] = { argv[1], "--tier1", "--tier1-strict", "--verify", "--lanes", "1", "--tier1-report", "-march=znver5", "-std=gnu17", "-DBUSTER_TIER1_CONSTRUCT_SUBJECT", "-c", source, "-o", constructors, NULL, NULL, NULL };
+            unsigned argument = sizeof(construct) / sizeof(construct[0]) - 3;
+            if (scalar)
+            {
+                construct[argument++] = "--scalar";
+            }
+            if (!expanded)
+            {
+                construct[argument++] = "--tier1-passes=-inline";
+            }
+            char* link[] = { argv[2], oracle, subject, constructors, "-o", program, NULL };
+            char* execute[] = { program, NULL };
+            char* disassemble[] = { "objdump", "-d", "--no-show-raw-insn", subject, constructors, NULL };
+            valid = patterns_run(construct, NULL, constructor_report) && patterns_report(constructor_report, true, expanded) &&
+                    patterns_run(link, NULL, NULL) && patterns_run(execute, NULL, NULL) &&
+                    patterns_run(disassemble, assembly, NULL) && patterns_shapes(assembly, expanded);
+            printf("Tier 1 construction %s inline-%s: %s\n", scalar ? "scalar" : "default", expanded ? "on" : "off", valid ? "pass" : "FAIL");
+        }
         printf("Tier 1 patterns %s: %s\n", scalar ? "scalar" : "default", valid ? "pass" : "FAIL");
     }
     if (valid)

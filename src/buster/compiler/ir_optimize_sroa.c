@@ -410,9 +410,9 @@ static uint32_t ir_sroa_construction_constant(IrSroaConstructionEmit* emit, uint
 }
 
 // A 16-byte piece: seed with its low runtime lane's splat when possible, otherwise zero, then replace only different
-// lanes. Constants travel through general registers too: a nonuniform VCONST may still use temporary memory at some
-// targets (#2744), which must not reintroduce the construction eliminated here. Narrow scalar inserts stay inside
-// these independent pieces; inserting a lane into a wide vector would extract and reinsert its 16-byte piece.
+// lanes. Constant lanes enter as scalar bits; later folding can use the existing vector literal pool for constant
+// pieces. Narrow scalar inserts stay inside these independent pieces; inserting a lane into a wide vector would
+// extract and reinsert its 16-byte piece.
 static uint32_t ir_sroa_construction_piece(const IrFunction* f, const IrSroaConstruction* plan, uint32_t first, IrSroaConstructionEmit* emit)
 {
     const uint32_t seed = plan->values[first];

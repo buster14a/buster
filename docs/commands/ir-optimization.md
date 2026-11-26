@@ -301,9 +301,10 @@ with a zero tail is bitcast to its scalar SSE carrier and widened directly
 (byte and word values are zero-extended first). Other constructions build
 independent 16-byte pieces with lane inserts, then join them with a balanced
 tree of widening and half insertion. Empty upper halves need only widening.
-Nonuniform constant lanes in these mixed constructions use scalar constants
-and lane inserts, avoiding #2744's memory construction of a nonuniform
-`IR_VCONST`. The existing all-constant and splat paths are unchanged.
+Constant lanes in these mixed constructions use scalar constants and lane
+inserts; the optimizer may fold a wholly constant piece to an `IR_VCONST`.
+The existing all-constant and splat paths are unchanged, and Tier 1's literal
+pool handles nonuniform vector constants (#2744).
 
 The C driver and inline expander enable runtime construction only at output
 targets with AVX512F, AVX512BW, AVX512DQ and AVX512VL, which the existing lane
@@ -325,17 +326,26 @@ disabled construction, and arena rollback. The source regression in
 `tests/driver/tier1_patterns.c` compiles the vector constructors separately for
 Zen 5 with strict Tier 1 and verifies the selection report. It links them to
 an independent byte/effect oracle, also runs the same source through Clang,
-and checks the pure constructors for one vector output store and no stack
-access or call. An always-inline helper checks the expanded path. The older
-scalar pattern fixtures keep their original output target.
+and checks the pure constructors for one vector output store and no temporary
+memory construction or call. Nine pure constructors have no stack access;
+the eight-distinct-input case may save and reload only its output pointer,
+matched at the same stack address and used by the final store. Its eight
+scalar inputs otherwise occupy all available general registers. An
+always-inline helper checks the expanded path. A second constructor compile
+with `--tier1-passes=-inline` checks the ordinary path, including the same
+bytes/effects and pure shapes; the deliberately uninlined helper caller keeps
+its semantic check. The older scalar pattern fixtures keep their original
+output target.
 
 On the compiler's own lexer by `--tier1`, `c_tokenize` went from 30.20 to
 14.62 instructions per byte on a 9,076-byte file (clang -O2: 3.06), every
 instruction counted; the record is
 [buster-performance's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-vector-lexer-breakdown-1344-2026-11-14).
-What it leaves are true constants that Tier 1's constant rule still builds
-below `rsp` (#2744), but for those whose quadwords are one value, which are a
-`mov` and a `vpbroadcastq` at EVEX targets (13.46 instructions per byte).
+At that revision the remaining true constants still built below `rsp`,
+except those whose quadwords were one value: a `mov` and a `vpbroadcastq` at
+EVEX targets (13.46 instructions per byte). #2744 subsequently added literal
+pool loads for the other vector constants. These historical lexer measurements
+are not measurements of #3641's runtime construction change.
 
 ## Register-class aggregates in registers (#3311)
 
