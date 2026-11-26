@@ -458,6 +458,7 @@ static uint16_t tier1_emit_cfg_inverse(uint16_t form)
 // object's slot, and its addend the constant added to it.
 static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, uint8_t* operations, uint8_t* flags, uint64_t* values, int64_t* addends)
 {
+    const bool frame_recipes = (tier1_measure_experiment() & 1u) != 0;
     const uint32_t count = plan->function->instruction_count;
     for (uint32_t node = 0; node < count; node += 1)
     {
@@ -469,7 +470,8 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
         {
             const Tier1SelectPattern* pattern = &plan->patterns[root];
             const bool copy = pattern->rule == TIER1_RULE_COPY;
-            const bool offset = pattern->rule == TIER1_RULE_ADDRESS && pattern->values[1] == BUSTER_IR_NONE;
+            const bool offset = pattern->rule == TIER1_RULE_ADDRESS && pattern->values[1] == BUSTER_IR_NONE &&
+                                (!frame_recipes || (pattern->stack_object == BUSTER_IR_NONE && !pattern->rip));
             const uint32_t next = copy || offset ? pattern->values[0] : BUSTER_IR_NONE;
             walking = next < count && !plan->covered[next];
             displacement += walking && offset ? pattern->displacement : 0;
@@ -482,9 +484,11 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
         const bool mask = tier1_emit_class(&emitted->prepared, node) == BUSTER_TIER1_ALLOCATE_MASK || tier1_emit_class(&emitted->prepared, root) == BUSTER_TIER1_ALLOCATE_MASK;
         const uint8_t rule = plan->covered[root] || mask ? TIER1_RULE_NONE : pattern->rule;
         // A folded symbol's lea (#2573): the symbol, at its own displacement past the chain's.
-        const bool folded = rule == TIER1_RULE_ADDRESS && pattern->rip && pattern->stack_object != BUSTER_IR_NONE && pattern->values[1] == BUSTER_IR_NONE;
-        const uint32_t symbol = folded ? pattern->stack_object : (uint32_t)pattern->immediate;
-        const uint8_t access = (rule == TIER1_RULE_SYMBOL_ADDRESS || folded) && symbol < emitted->symbol_access_count ? emitted->symbol_access[symbol] : BUSTER_TIER1_ACCESS_DIRECT;
+        const bool folded = rule == TIER1_RULE_ADDRESS && pattern->stack_object != BUSTER_IR_NONE && pattern->values[1] == BUSTER_IR_NONE &&
+                            (frame_recipes ? pattern->values[0] == BUSTER_IR_NONE : pattern->rip);
+        const bool symbol_address = rule == TIER1_RULE_SYMBOL_ADDRESS || (folded && (!frame_recipes || pattern->rip));
+        const uint32_t object = folded ? pattern->stack_object : (uint32_t)pattern->immediate;
+        const uint8_t access = symbol_address && object < emitted->symbol_access_count ? emitted->symbol_access[object] : BUSTER_TIER1_ACCESS_DIRECT;
         displacement += folded ? pattern->displacement : 0;
         const bool displaced = displacement != 0;
         const bool fits = displacement >= INT32_MIN && displacement <= INT32_MAX;
@@ -494,17 +498,17 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
             operations[node] = BUSTER_TIER1_REMAT_INTEGER;
             values[node] = pattern->immediate;
         }
-        else if ((rule == TIER1_RULE_SYMBOL_ADDRESS || folded) && fits && (access == BUSTER_TIER1_ACCESS_DIRECT || (access == BUSTER_TIER1_ACCESS_GOT && !displaced && !folded)))
+        else if (symbol_address && fits && (access == BUSTER_TIER1_ACCESS_DIRECT || (access == BUSTER_TIER1_ACCESS_GOT && !displaced && !folded)))
         {
             operations[node] = BUSTER_TIER1_REMAT_SYMBOL;
-            values[node] = symbol;
+            values[node] = object;
             addends[node] = displacement;
             flags[node] = BUSTER_TIER1_REMAT_STABLE | (access == BUSTER_TIER1_ACCESS_GOT ? BUSTER_TIER1_REMAT_GOT : 0);
         }
-        else if (rule == TIER1_RULE_STACK_ADDRESS && fits && !tier1_emit_cfg_incoming_object(plan->function, (uint32_t)pattern->immediate, &past))
+        else if ((rule == TIER1_RULE_STACK_ADDRESS || (frame_recipes && folded && !pattern->rip)) && fits && !tier1_emit_cfg_incoming_object(plan->function, object, &past))
         {
             operations[node] = BUSTER_TIER1_REMAT_STACK;
-            values[node] = pattern->immediate;
+            values[node] = frame_recipes ? object : pattern->immediate;
             addends[node] = displacement;
             flags[node] = BUSTER_TIER1_REMAT_STABLE;
         }
@@ -4979,6 +4983,7 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
     uint8_t* hot = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 1, &ok) : 0;
     uint32_t candidates = 0;
     uint32_t hot_count = 0;
+    const uint32_t experiment = tier1_measure_experiment();
     for (uint32_t pass = 0; ok && pass < 2; pass += 1)
     {
         if (pass == 1 && candidates != 0)
@@ -5051,15 +5056,16 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
             // A recomputable value read on every iteration of a loop (#2574) may hold a caller-saved register past calls too,
             // which evict it: recomputed after one, where it is next needed, rather than evicted first from the callee-saved
             // registers the loop's other values crowd.
-            const uint32_t across = hot[v] == 1 ? callee | (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) : callee;
+            const bool resident = hot[v] == 1 || ((experiment & 4u) != 0 && recipe);
+            const uint32_t across = resident ? callee | (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) : callee;
             allowed[v] = general ? (crosses ? across : avoid != 0 ? caller | callee : caller) & ~avoid : input->allowed_registers[v];
             count += pass == 1 && general && (crosses || avoid != 0);
-            hot_count += pass == 1 && hot[v] == 1 && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
+            hot_count += pass == 1 && resident && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
         }
     }
     // The calls' definition phases clobber the caller-saved registers in the preferred problem, where a hot value leaves
     // one of them: its recomputation, where it is next needed, stands for a save and a reload around the call.
-    uint32_t* clobbers = ok && hot_count != 0 ? ir_allocate(output, (uint64_t)call_count + 1, 4, &ok) : 0;
+    uint32_t* clobbers = ok && (hot_count != 0 || ((experiment & 2u) != 0 && call_count != 0)) ? ir_allocate(output, (uint64_t)call_count + 1, 4, &ok) : 0;
     if (clobbers != 0 && call_count != 0)
     {
         memcpy(clobbers, calls, (uint64_t)call_count * 4);

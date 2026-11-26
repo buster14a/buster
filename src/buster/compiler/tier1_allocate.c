@@ -20,6 +20,12 @@
 #include <string.h>
 #include "host_isa.h"
 
+// Standalone allocator/selector benchmarks keep the original behavior; the private measurement executable's
+// main.c supplies the runtime switch before including this module.
+#ifndef BUSTER_TIER1_MEASURE_KINDS
+#define tier1_measure_experiment() 0u
+#endif
+
 #define BUSTER_TIER1_ALLOCATE_MAX_INTERVALS (1u << 20)
 #define BUSTER_TIER1_ALLOCATE_MAX_POSITIONS (1u << 24)
 #define BUSTER_TIER1_ALLOCATE_MAX_USES (1u << 24)
@@ -169,7 +175,9 @@ typedef struct Tier1AllocationVerdict Tier1AllocationVerdict;
 struct Tier1AllocationVerdict
 {
     const uint32_t* allowed_registers;
+    const uint32_t* avoided_registers;
     uint32_t registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+    uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
     bool taken;
     bool constraint;
 };
@@ -1263,9 +1271,11 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
             const bool whole = columns.use_required == 0 || columns.flags != 0;
             Tier1AllocationInput other = columns;
             other.allowed_registers = verdict->allowed_registers;
+            other.avoided_registers = (tier1_measure_experiment() & 2u) != 0 ? verdict->avoided_registers : other.avoided_registers;
             for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
             {
                 other.registers[c] = verdict->registers[c];
+                other.clobber_registers[c] = (tier1_measure_experiment() & 2u) != 0 ? verdict->clobber_registers[c] : other.clobber_registers[c];
             }
             verdict->taken = true;
             verdict->constraint = false;

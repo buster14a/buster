@@ -120,6 +120,17 @@
 #include <limits.h>
 #include <assert.h>
 #include <errno.h>
+#include <stdlib.h>
+
+// Private measurement variants for #2610; zero is the exact base behavior. These affect generated programs only
+// when explicitly requested: bit 1 is the folded-frame recipe fix, bit 2 the experimental clobber avoidance,
+// bit 4 gives every nonphi crossing recipe the existing resident caller-register pool, and bit 8 makes bit 2
+// require two calls. The source patch records all variants; neither compiler time nor this switch is benchmarked.
+static __attribute__((unused)) uint32_t tier1_measure_experiment(void)
+{
+    const char* const value = getenv("BUSTER_TIER1_EXPERIMENT");
+    return value != 0 ? (uint32_t)strtoul(value, 0, 0) & 15u : 0;
+}
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
 #define BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) (BUSTER_ARRAY_LENGTH(strlit) - 1)
