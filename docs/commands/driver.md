@@ -252,8 +252,9 @@ A plain `-c` of one C file goes first to the fused direct compiler
 (`c_direct.c`, #2850), which leaves the unit to the full pipeline, writing
 nothing, wherever its result could differ: a construct it doesn't compile, and
 anything the full pipeline diagnoses. Each default warning and error has a
-check that refuses the unit, so a compile's standard error and exit status are
-the full pipeline's alone, and the direct path only writes the object sooner.
+check that refuses the unit (but one, below), so a compile's standard error and
+exit status are the full pipeline's alone, and the direct path only writes the
+object sooner.
 `BUSTER_TEST_DIRECT_BAILS=FILE` appends a line of the refusing rule and the
 input to FILE each time it refuses one (read on that fallback alone). The
 checks are written for [the compile's count](ci.md#the-compiles-count-before-the-merge):
@@ -305,6 +306,21 @@ all the function's declarations (#3595). Such a definition that names a static
 function or object (`-Wstatic-in-inline`), or that the unit's end decides and
 declares a modifiable static local (`-Wstatic-local-in-inline`), is the full
 pipeline's.
+
+`tests/` alone doesn't show that: many families of warnings appear there only
+in files that leave the direct path for another reason first (the flags each
+file prints with `--no-direct`, against its bail log's reason, show which).
+Each family of the full pipeline's default warnings was probed with variants
+against `--no-direct`, which found main's direct path quiet on fourteen more
+(among them `-Wreturn-stack-address`, `-Warray-bounds`,
+`-Waddress-of-packed-member`, `-Wsizeof-pointer-memaccess` and the
+pointer-to-int casts); the variants that touch types ran or asserted their
+sizes as well, and found three of its layouts and values wrong (an enumerator
+past `INT64_MAX`, a `(*p)[N]` parameter, packed records with alignments). One
+gap is left: a loop's empty body (`for (...);`) is `-Wempty-body` only where the
+next statement is a block or is indented past the loop, as clang decides, and
+the direct path's tokens keep no columns, so it compiles such loops quietly as
+before. `if (x);` and `switch (x);` leave on any line.
 
 `./build/compiler test-direct --differential [--jobs N] [--direct-floor N]
 DIRECTORY...` compiles every C file under the directories with this
