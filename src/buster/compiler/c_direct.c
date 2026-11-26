@@ -4512,6 +4512,9 @@ static int c_direct_unit_tests(void)
         // 17. Sizeofs the full pipeline's -Wsizeof-array-decay leaves alone: of a conditional of arrays, an int sum, a
         // comparison with an array, a comma's array on the left.
         "int sized2(int c, int n, int* p) { int a[3] = { 0 }, b[3] = { 0 }; return (int)sizeof(c ? a : b) + (int)sizeof(n + 1) + (int)sizeof(a == p) + (int)sizeof((a, 0)); }\n",
+        // 18. Casts the full pipeline's -Wpointer-to-int-cast family leaves alone: a pointer to a long and a _Bool, a long
+        // and a constant to a pointer.
+        "long casted(void* p, long l) { return (long)p + (_Bool)p + (long)(int*)l + (long)(int*)12; }\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4662,6 +4665,14 @@ static int c_direct_unit_tests(void)
         // -Wsizeof-array-decay: sizeof of an array under + and a comma.
         "int f(void) { int a[3] = { 0 }; return (int)sizeof(a + 0); }\n",
         "int f(void) { int a[3] = { 0 }; return (int)sizeof((0, a)); }\n",
+        // -Wpointer-to-int-cast and its family: a pointer to an int, a char and an enum, an int and a char to a pointer,
+        // in sizeof too.
+        "int f(void* p) { return (int)p; }\n",
+        "char f(char* p) { return (char)p; }\n",
+        "enum E { A };\nenum E f(void* p) { return (enum E)p; }\n",
+        "int* f(int x) { return (int*)x; }\n",
+        "void* f(char c) { return (void*)c; }\n",
+        "unsigned long f(void* p) { return sizeof((int)p); }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

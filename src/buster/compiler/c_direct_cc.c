@@ -6370,6 +6370,15 @@ static __attribute__((cold, noinline)) bool fast_cc_array_index_questioned(const
 
 static bool fast_cc_sizeof_decays(const FastCCState* cc, uint32_t lparen);
 
+// #3577: whether a cast between a pointer and an integer is the full pipeline's -Wpointer-to-int-cast family: to an integer
+// type narrower than a pointer from one (TO_INTEGER), _Bool aside, or to a pointer from a narrower integer that isn't a
+// constant.
+static __attribute__((cold, noinline)) bool fast_cc_cast_size_questioned(const FastCCState* cc, const FastVal* v, FastType to, bool to_integer)
+{
+    const bool questioned = to_integer ? (!ftype_is_bool(to) && ftype_size(cc, to) < 8u) : (v->kind != FVAL_IMM && ftype_size(cc, v->type) < 8u);
+    return questioned;
+}
+
 static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* ops, uint32_t* osp_ptr)
 {
     FastCCState* cc = ex->cc;
@@ -6435,6 +6444,13 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
                 if ((allowed | to_void) == 0)
                 {
                     fast_cc_bail(cc, "cast the full pipeline refuses");
+                    return;
+                }
+                // #3577: a pointer to a smaller integer type (_Bool aside), or a smaller integer that isn't a constant to a
+                // pointer, is the full pipeline's -Wpointer-to-int-cast family, in dead branches and sizeof too.
+                if (((UINT32_C(0x104) >> pair) & 1u) != 0 && fast_cc_cast_size_questioned(cc, v, cur.type, pair == 8u))
+                {
+                    fast_cc_bail(cc, "a cast between a pointer and a smaller integer");
                     return;
                 }
             }
