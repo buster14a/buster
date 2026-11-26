@@ -1125,6 +1125,12 @@ static inline const uint8_t* fast_skip_hspace(const uint8_t* p, const uint8_t* e
 #define BUSTER_FPP_MAX_HIDE        64u
 #define BUSTER_FPP_MAX_CALLS       16u
 
+// A search directory's descriptor (FastPP.dir_fds): not opened yet, open, or not a directory that can be opened, where
+// no search finds anything (#3586).
+#define BUSTER_FPP_DIR_UNOPENED    0u
+#define BUSTER_FPP_DIR_OPEN        1u
+#define BUSTER_FPP_DIR_MISSING     2u
+
 typedef struct FastMacro FastMacro;
 struct FastMacro
 {
@@ -1216,11 +1222,24 @@ struct FastCondFrame
     uint8_t is_guard;        // matches file's outer #ifndef guard
 };
 
+// A file the compile has opened, by its path (#3586): its mapping, which the compile keeps, so that a header with no
+// guard, as glibc's <bits/mathcalls.h> and clang's <stddef.h>, is included again with no system call (sqlite3.c
+// opened 155 files 216 times, and mapped and unmapped each time), and its path. In the persistent arena, where only a
+// file the compile opens writes one: the guard table's entries stay 16 bytes, and the table, which FastPP holds and
+// every unit clears, as small as it was.
+typedef struct FastFileRecord FastFileRecord;
+struct FastFileRecord
+{
+    const uint8_t* bytes;    // the file's text, or NULL where no mapping is kept
+    uint64_t size;           // the mapping's size: 0 for an empty file, which maps nothing
+    char path[];             // NUL-terminated
+};
+
 typedef struct FastGuardEntry FastGuardEntry;
 struct FastGuardEntry
 {
     uint32_t hash;
-    uint32_t path_off;
+    uint32_t record;         // the file's FastFileRecord, by its offset in the persistent arena
     uint16_t path_len;
     uint8_t once;
     uint8_t used;
@@ -1324,6 +1343,9 @@ struct FastPP
     const char* dirs[BUSTER_FPP_MAX_DIRS];
     uint32_t dir_lens[BUSTER_FPP_MAX_DIRS];
     uint8_t dir_is_system[BUSTER_FPP_MAX_DIRS];
+    // Each directory's descriptor (O_PATH), opened by its first search: BUSTER_FPP_DIR_* (#3586)
+    int dir_fds[BUSTER_FPP_MAX_DIRS];
+    uint8_t dir_states[BUSTER_FPP_MAX_DIRS];
     uint32_t dir_count;
     uint32_t angled_first;
 
@@ -2427,6 +2449,11 @@ static inline uint32_t fast_guard_hash(const char* s, uint32_t len)
     return (uint32_t)(h ^ (h >> 32)) | 1u;
 }
 
+static inline FastFileRecord* fast_guard_record(const FastPP* pp, const FastGuardEntry* e)
+{
+    return (FastFileRecord*)(void*)(pp->arena->base + e->record);
+}
+
 static FastGuardEntry* fast_guard_lookup(FastPP* pp, const char* path, uint32_t len, bool create)
 {
     const uint32_t h = fast_guard_hash(path, len);
@@ -2438,14 +2465,15 @@ static FastGuardEntry* fast_guard_lookup(FastPP* pp, const char* path, uint32_t 
         FastGuardEntry* e = pp->guards + idx;
         if (e->used == 0)
         {
-            if (create && pp->lit_bytes_used + len + 1u <= pp->lit_bytes_cap)
+            FastFileRecord* const record = create ? (FastFileRecord*)fast_arena_alloc(pp->arena, sizeof(FastFileRecord) + len + 1u, 8) : NULL;
+            if (record != NULL)
             {
-                const uint32_t off = (uint32_t)pp->lit_bytes_used;
-                memcpy(pp->lit_bytes + off, path, len);
-                pp->lit_bytes[off + len] = '\0';
-                pp->lit_bytes_used += len + 1u;
+                record->bytes = NULL;
+                record->size = 0;
+                memcpy(record->path, path, len);
+                record->path[len] = '\0';
                 e->hash = h;
-                e->path_off = off;
+                e->record = (uint32_t)((const uint8_t*)record - pp->arena->base);
                 e->path_len = (uint16_t)len;
                 e->once = 0;
                 e->guard_ident = 0;
@@ -2454,7 +2482,7 @@ static FastGuardEntry* fast_guard_lookup(FastPP* pp, const char* path, uint32_t 
             }
             break;
         }
-        if (e->hash == h && e->path_len == len && memcmp(pp->lit_bytes + e->path_off, path, len) == 0)
+        if (e->hash == h && e->path_len == len && memcmp(fast_guard_record(pp, e)->path, path, len) == 0)
         {
             result = e;
             break;
@@ -2570,7 +2598,8 @@ static __attribute__((cold, noinline)) uint32_t fast_pp_dependency_observe(FastP
 }
 
 // A reading of the file a guard entry names, whose record the entry keeps (#3592): an include its guard or #pragma once
-// skips, or a __has_include, of a file the unit read before. An entry without a record leaves.
+// skips, a reading from the mapping the compile kept of it (#3586), or a __has_include, of a file the unit read before.
+// An entry without a record leaves.
 static __attribute__((cold, noinline)) void fast_pp_dependency_again(FastPP* pp, const FastGuardEntry* ge, bool system)
 {
     const uint32_t entry = pp->guard_dependencies[ge - pp->guards];
@@ -2662,67 +2691,148 @@ static void fast_pp_pop_file(FastPP* pp)
 }
 
 // Reads the file at `path`, found in search directory `dir_idx` (UINT32_MAX for none), as a system header's inclusion or
-// not (`is_system`), unless its guard or #pragma once skips it. With -MD (#3592), the reading is recorded either way, as
-// the full pipeline's pp_enter_file observes a file before its guard.
-static bool fast_pp_open_and_push(FastPP* pp, const char* path, uint32_t path_len, uint32_t dir_idx, bool is_system)
+// not (`is_system`), unless its guard or #pragma once skips it: from the mapping the compile kept of it, if it has read
+// it before (#3586), else mapped whole from `fd` (the include search's descriptor, which this closes, or -1 to open
+// `path`). A file the guard table has no room for is mapped for this push alone. With -MD (#3592), the reading is
+// recorded either way, as the full pipeline's pp_enter_file observes a file before its guard; a file's guard entry
+// keeps its record from its first reading.
+static bool fast_pp_open_and_push(FastPP* pp, const char* path, uint32_t path_len, uint32_t dir_idx, bool is_system, int fd)
 {
+    static const uint8_t empty_byte = 0;
+    bool ok = false;
     // Check include-guard cache BEFORE open()!
-    const FastGuardEntry* ge = fast_guard_lookup(pp, path, path_len, false);
+    FastGuardEntry* ge = fast_guard_lookup(pp, path, path_len, false);
+    const FastFileRecord* const known = ge != NULL ? fast_guard_record(pp, ge) : NULL;
     if (ge != NULL && (ge->once != 0 || (ge->guard_ident != 0 && fast_ident_is_macro(&pp->idents, ge->guard_ident))))
     {
         if (pp->dependency_records != NULL)
         {
             fast_pp_dependency_again(pp, ge, is_system);
         }
-        return true; // Skipped with ZERO syscalls!
+        ok = true; // Skipped with ZERO syscalls!
     }
-    // A file #pragma GCC system_header marked is a system header from its start.
-    is_system |= ge != NULL && pp->dependency_records != NULL && (pp->guard_dependencies[ge - pp->guards] & BUSTER_FPP_SYSTEM_PRAGMA) != 0;
-    const int fd = open(path, O_RDONLY);
-    bool ok = false;
-    if (fd >= 0)
+    else
     {
-        struct stat st;
-        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode))
+        // A file #pragma GCC system_header marked is a system header from its start.
+        is_system |= ge != NULL && pp->dependency_records != NULL && (pp->guard_dependencies[ge - pp->guards] & BUSTER_FPP_SYSTEM_PRAGMA) != 0;
+        if (known != NULL && known->bytes != NULL)
         {
-            const uint32_t record = pp->dependency_records != NULL ? fast_pp_dependency_observe(pp, path, path_len, &st, is_system) : 0u;
-            const uint64_t sz = (uint64_t)st.st_size;
-            if (sz == 0)
+            if (pp->dependency_records != NULL)
             {
-                static const uint8_t empty_byte = 0;
-                ok = fast_pp_push_memory(pp, path, &empty_byte, 0, dir_idx, false, is_system);
-                if (ok)
-                {
-                    pp->files[pp->file_depth - 1u].dependency = record;
-                }
+                fast_pp_dependency_again(pp, ge, is_system);
             }
-            else
+            ok = fast_pp_push_memory(pp, path, known->bytes, known->size, dir_idx, false, is_system);
+            if (ok)
             {
+                pp->files[pp->file_depth - 1u].dependency = pp->dependency_records != NULL ? pp->dependency_last : 0u;
+            }
+        }
+        else
+        {
+            fd = fd >= 0 ? fd : open(path, O_RDONLY | O_CLOEXEC);
+            struct stat st;
+            if (fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode))
+            {
+                const uint32_t record = pp->dependency_records != NULL ? fast_pp_dependency_observe(pp, path, path_len, &st, is_system) : 0u;
+                const uint64_t sz = (uint64_t)st.st_size;
                 // The whole file is read: its pages are mapped by this call and not by a fault each sixteen pages.
-                void* mem = mmap(NULL, sz, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+                void* const mem = sz == 0 ? (void*)(uintptr_t)&empty_byte : mmap(NULL, sz, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
                 if (mem != MAP_FAILED)
                 {
-                    ok = fast_pp_push_memory(pp, path, (const uint8_t*)mem, sz, dir_idx, true, is_system);
-                    if (!ok)
+                    FastGuardEntry* const entry = ge != NULL ? ge : fast_guard_lookup(pp, path, path_len, true);
+                    FastFileRecord* const kept = entry != NULL ? fast_guard_record(pp, entry) : NULL;
+                    if (kept != NULL)
                     {
-                        (void)munmap(mem, sz);
+                        kept->bytes = (const uint8_t*)mem;
+                        kept->size = sz;
                     }
-                    else
+                    if (entry != NULL && pp->dependency_records != NULL)
+                    {
+                        pp->guard_dependencies[entry - pp->guards] = (pp->guard_dependencies[entry - pp->guards] & BUSTER_FPP_SYSTEM_PRAGMA) | record;
+                    }
+                    const bool owned = kept == NULL && sz != 0;
+                    ok = fast_pp_push_memory(pp, path, (const uint8_t*)mem, sz, dir_idx, owned, is_system);
+                    if (ok)
                     {
                         pp->files[pp->file_depth - 1u].dependency = record;
+                    }
+                    else if (owned)
+                    {
+                        (void)munmap(mem, sz);
                     }
                 }
             }
         }
+    }
+    if (fd >= 0)
+    {
         (void)close(fd);
     }
     return ok;
 }
 
-// Whether the include search may take `path`: a file the unit has read already, or a readable one. A path that was
-// not is remembered, and not asked for again in this compile.
-static bool fast_pp_include_candidate(FastPP* pp, const char* path, uint32_t length)
+// The file mappings the compile kept and the search directories' descriptors, released (#3586). A compile that bailed
+// out leaves its process to the full pipeline, and a caller that goes on running asks for its memory back; a process
+// that exits after its compile leaves them to its exit, which tears the whole address space down at once.
+static void fast_pp_release_files(FastPP* pp)
 {
+    for (uint32_t i = 0; i < BUSTER_FPP_MAX_GUARDS; i += 1)
+    {
+        if (pp->guards[i].used != 0)
+        {
+            FastFileRecord* const record = fast_guard_record(pp, pp->guards + i);
+            if (record->bytes != NULL && record->size != 0)
+            {
+                (void)munmap((void*)(uintptr_t)record->bytes, record->size);
+            }
+            record->bytes = NULL;
+            record->size = 0;
+        }
+    }
+    // A compile that bailed out inside a file: the mappings of its own that the include stack holds.
+    for (uint32_t i = 0; i < pp->file_depth; i += 1)
+    {
+        FastIncludeFile* const f = pp->files + i;
+        if (f->owned_mmap && f->base != NULL && f->map_size != 0)
+        {
+            (void)munmap((void*)(uintptr_t)f->base, f->map_size);
+        }
+        f->owned_mmap = false;
+    }
+    for (uint32_t d = 0; d < pp->dir_count; d += 1)
+    {
+        if (pp->dir_states[d] == BUSTER_FPP_DIR_OPEN)
+        {
+            (void)close(pp->dir_fds[d]);
+        }
+        pp->dir_states[d] = BUSTER_FPP_DIR_UNOPENED;
+    }
+}
+
+// Search directory `d`'s descriptor, which its first search opens, or -1 where it can't be opened (#3586). A file is
+// looked up from it by its name alone: the kernel walks the directory's path once, not again for each name.
+static int fast_pp_dir_fd(FastPP* pp, uint32_t d)
+{
+    if (pp->dir_states[d] == BUSTER_FPP_DIR_UNOPENED)
+    {
+        const int fd = open(pp->dirs[d], O_PATH | O_DIRECTORY | O_CLOEXEC);
+        pp->dir_fds[d] = fd;
+        pp->dir_states[d] = fd >= 0 ? BUSTER_FPP_DIR_OPEN : BUSTER_FPP_DIR_MISSING;
+    }
+    return pp->dir_states[d] == BUSTER_FPP_DIR_OPEN ? pp->dir_fds[d] : -1;
+}
+
+// Whether the include search may take `path`: a file the unit has read already, or a readable one. A path that was
+// not is remembered, and not asked for again in this compile. `name` is the path's part after search directory `dir`
+// (UINT32_MAX for a path of its own), which is looked up from the directory's descriptor (#3586). With `fd`, a file
+// found readable is opened, and `*fd` is its descriptor (-1 where it has been read before), which the caller closes;
+// without, it is only asked for.
+static bool fast_pp_include_candidate(FastPP* pp, const char* path, uint32_t length, uint32_t dir, const char* name, int* fd)
+{
+    if (fd != NULL)
+    {
+        *fd = -1;
+    }
     bool found = fast_guard_lookup(pp, path, length, false) != NULL;
     if (!found)
     {
@@ -2743,7 +2853,20 @@ static bool fast_pp_include_candidate(FastPP* pp, const char* path, uint32_t len
         }
         if (!known_missing)
         {
-            found = access(path, R_OK) == 0;
+            const int at = dir == UINT32_MAX ? AT_FDCWD : fast_pp_dir_fd(pp, dir);
+            const char* const looked = dir == UINT32_MAX ? path : name;
+            if (at == AT_FDCWD || at >= 0)
+            {
+                if (fd != NULL)
+                {
+                    *fd = openat(at, looked, O_RDONLY | O_CLOEXEC);
+                    found = *fd >= 0;
+                }
+                else
+                {
+                    found = faccessat(at, looked, R_OK, 0) == 0;
+                }
+            }
             // Half full at most, so that a search for a free slot ends.
             if (!found && pp->missing_count < BUSTER_FPP_MAX_MISSING / 2u)
             {
@@ -2763,9 +2886,15 @@ static bool fast_pp_include_candidate(FastPP* pp, const char* path, uint32_t len
     return found;
 }
 
+// The file `name` names, by the include search: its path, its directory's index and whether it is a system header.
+// `fd` as fast_pp_include_candidate's.
 static bool fast_pp_resolve_include(FastPP* pp, const char* name, uint32_t name_len, bool angled, bool is_next,
-                                    char* out_path, uint32_t out_cap, uint32_t* out_dir_idx, bool* out_system)
+                                    char* out_path, uint32_t out_cap, uint32_t* out_dir_idx, bool* out_system, int* fd)
 {
+    if (fd != NULL)
+    {
+        *fd = -1;
+    }
     bool found = false;
     if (name_len > 0 && name[0] == '/')
     {
@@ -2813,7 +2942,7 @@ static bool fast_pp_resolve_include(FastPP* pp, const char* name, uint32_t name_
                 memcpy(out_path + dlen, name, name_len);
                 out_path[dlen + name_len] = '\0';
                 const uint32_t total = dlen + name_len;
-                if (fast_pp_include_candidate(pp, out_path, total))
+                if (fast_pp_include_candidate(pp, out_path, total, UINT32_MAX, NULL, fd))
                 {
                     *out_dir_idx = UINT32_MAX;
                     *out_system = cur->is_system;
@@ -2834,7 +2963,7 @@ static bool fast_pp_resolve_include(FastPP* pp, const char* name, uint32_t name_
             memcpy(out_path + dlen + 1u, name, name_len);
             out_path[dlen + 1u + name_len] = '\0';
             const uint32_t total = dlen + 1u + name_len;
-            if (fast_pp_include_candidate(pp, out_path, total))
+            if (fast_pp_include_candidate(pp, out_path, total, d, out_path + dlen + 1u, fd))
             {
                 *out_dir_idx = d;
                 *out_system = pp->dir_is_system[d] != 0;
@@ -4032,7 +4161,7 @@ static bool fast_pp_expand_buffer(FastPP* pp, const FastTok* in_toks, uint32_t i
                             uint32_t d = 0;
                             bool sys = false;
                             val = fast_pp_resolve_include(pp, hname, hlen, angled,
-                                                          pkw == FPP_KW_HAS_INCLUDE_NEXT, tmp_path, sizeof(tmp_path), &d, &sys) ? 1u : 0u;
+                                                          pkw == FPP_KW_HAS_INCLUDE_NEXT, tmp_path, sizeof(tmp_path), &d, &sys, NULL) ? 1u : 0u;
                             if (val != 0 && pp->dependency_records != NULL)
                             {
                                 fast_pp_dependency_probe(pp, tmp_path, sys);
@@ -4800,14 +4929,15 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
     char resolved[1024];
     uint32_t dir_idx = 0;
     bool is_sys = false;
-    if (!fast_pp_resolve_include(pp, name_buf, name_len, angled, is_next, resolved, sizeof(resolved), &dir_idx, &is_sys))
+    int fd = -1;
+    if (!fast_pp_resolve_include(pp, name_buf, name_len, angled, is_next, resolved, sizeof(resolved), &dir_idx, &is_sys, &fd))
     {
         fast_pp_bail(pp, "include file not found");
         return;
     }
     // An inclusion is as much a system header's as the file and its includer are (clang's HandleHeaderIncludeOrImport, the
     // full pipeline's pp_dependency_observe): -MD's records see it (#3592).
-    if (!fast_pp_open_and_push(pp, resolved, (uint32_t)strlen(resolved), dir_idx, is_sys || f->is_system))
+    if (!fast_pp_open_and_push(pp, resolved, (uint32_t)strlen(resolved), dir_idx, is_sys || f->is_system, fd))
     {
         fast_pp_bail(pp, "include open failed");
     }
@@ -6746,7 +6876,7 @@ static bool fast_pp_run_buffer(FastPP* pp, const char* name, const char* bytes, 
 static bool fast_pp_run_file(FastPP* pp, const char* path, bool is_main, bool is_system)
 {
     pp->base_file = path;
-    bool ok = fast_pp_open_and_push(pp, path, (uint32_t)strlen(path), UINT32_MAX, is_system);
+    bool ok = fast_pp_open_and_push(pp, path, (uint32_t)strlen(path), UINT32_MAX, is_system, -1);
     if (ok && is_main)
     {
         // The main file's push, and -MD's record of it (#3592), which a guard of an -include file may have skipped.

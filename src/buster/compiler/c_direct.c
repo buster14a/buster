@@ -10,6 +10,7 @@
 #include "buster/compiler/c_direct.h"
 #include "buster/compiler/c_direct_cc.c"
 
+#include <limits.h>
 #include <sys/wait.h>
 #include <pthread.h>
 #include <time.h>
@@ -216,7 +217,7 @@ int c_direct_try_compile(const CDirectRequest* request)
             {
                 ok = fast_pp_run_file(pp, inc, false, false);
             }
-            else if (fast_pp_resolve_include(pp, inc, (uint32_t)strlen(inc), false, false, resolved, sizeof(resolved), &dir_idx, &is_sys))
+            else if (fast_pp_resolve_include(pp, inc, (uint32_t)strlen(inc), false, false, resolved, sizeof(resolved), &dir_idx, &is_sys, NULL))
             {
                 ok = fast_pp_run_file(pp, resolved, false, is_sys);
             }
@@ -289,6 +290,10 @@ int c_direct_try_compile(const CDirectRequest* request)
     // Always release on bailout (caller will run full pipeline) or when caller requests cleanup
     if (status != 0 || request->release)
     {
+        if (pp != NULL)
+        {
+            fast_pp_release_files(pp);
+        }
         fast_arena_destroy(&scratch);
         fast_arena_destroy(&arena);
     }
@@ -1861,6 +1866,33 @@ static bool c_direct_test_overwrite(const char* obj_path)
     return ok;
 }
 
+// The object's 4-byte .data section as a number, or UINT32_MAX where it has none.
+static uint32_t c_direct_test_data_word(const char* obj_path)
+{
+    uint32_t result = UINT32_MAX;
+    FILE* const object = fopen(obj_path, "rb");
+    if (object != NULL)
+    {
+        Elf64_Ehdr eh;
+        if (fread(&eh, 1, sizeof(eh), object) == sizeof(eh))
+        {
+            for (uint16_t i = 0; i < eh.e_shnum && result == UINT32_MAX; i += 1)
+            {
+                Elf64_Shdr sh;
+                uint32_t value = 0;
+                if (fseek(object, (long)(eh.e_shoff + (uint64_t)i * sizeof(sh)), SEEK_SET) == 0 && fread(&sh, 1, sizeof(sh), object) == sizeof(sh) &&
+                    sh.sh_type == SHT_PROGBITS && (sh.sh_flags & (SHF_WRITE | SHF_EXECINSTR)) == SHF_WRITE && sh.sh_size == 4u &&
+                    fseek(object, (long)sh.sh_offset, SEEK_SET) == 0 && fread(&value, 1, 4, object) == 4u)
+                {
+                    result = value;
+                }
+            }
+        }
+        fclose(object);
+    }
+    return result;
+}
+
 // A header that the search's second directory holds, included twice: the first directory is asked once and
 // remembered as holding none (#2850), and both includes find the header. Then a header that the first directory does
 // hold, whose path falls in the remembered one's slot of the table: it is another path, and is found.
@@ -1908,36 +1940,131 @@ static bool c_direct_test_include_search(const char* obj_path)
         uint32_t text_length = 0;
         uint32_t symbol_count = 0;
         ok = c_direct_test_compile_source_keep(source, obj_path, directories, 2, &text_length, &symbol_count, NULL);
-        if (ok)
-        {
-            ok = false;
-            FILE* const object = fopen(obj_path, "rb");
-            if (object != NULL)
-            {
-                Elf64_Ehdr eh;
-                if (fread(&eh, 1, sizeof(eh), object) == sizeof(eh))
-                {
-                    for (uint16_t i = 0; i < eh.e_shnum && !ok; i += 1)
-                    {
-                        Elf64_Shdr sh;
-                        uint32_t value = 0;
-                        if (fseek(object, (long)(eh.e_shoff + (uint64_t)i * sizeof(sh)), SEEK_SET) == 0 && fread(&sh, 1, sizeof(sh), object) == sizeof(sh) &&
-                            sh.sh_type == SHT_PROGBITS && (sh.sh_flags & (SHF_WRITE | SHF_EXECINSTR)) == SHF_WRITE && sh.sh_size == 4u &&
-                            fseek(object, (long)sh.sh_offset, SEEK_SET) == 0 && fread(&value, 1, 4, object) == 4u)
-                        {
-                            ok = value == 3u;
-                        }
-                    }
-                }
-                fclose(object);
-            }
-        }
+        ok = ok && c_direct_test_data_word(obj_path) == 3u;
     }
     unlink(obj_path);
     unlink(header);
     unlink(other);
     rmdir(second);
     rmdir(first);
+    return ok;
+}
+
+// The process's mappings of the file at `path` (/proc/self/maps, which names it by its real path), or UINT32_MAX
+// where they can't be read.
+static uint32_t c_direct_test_mappings_of(const char* path)
+{
+    uint32_t count = UINT32_MAX;
+    char real[PATH_MAX];
+    FILE* const maps = realpath(path, real) != NULL ? fopen("/proc/self/maps", "r") : NULL;
+    if (maps != NULL)
+    {
+        count = 0;
+        const size_t length = strlen(real);
+        char line[1024];
+        while (fgets(line, sizeof(line), maps) != NULL)
+        {
+            const char* const name = strchr(line, '/');
+            count += name != NULL && strncmp(name, real, length) == 0 && name[length] == '\n' ? 1u : 0u;
+        }
+        fclose(maps);
+    }
+    return count;
+}
+
+// The process's open descriptors below 1024.
+static uint32_t c_direct_test_descriptors(void)
+{
+    uint32_t count = 0;
+    for (int fd = 0; fd < 1024; fd += 1)
+    {
+        count += fcntl(fd, F_GETFD) != -1 ? 1u : 0u;
+    }
+    return count;
+}
+
+// The compile keeps the mappings of the files it reads (#3586): a header with no guard, which the search finds in its
+// second directory past one that does not exist, is included twice and mapped once. A compile that keeps its arenas
+// (`release` false, a process that exits next) leaves the mappings and the directories' descriptors to its exit; one
+// that releases them, or that bails out to the full pipeline, unmaps and closes every one before it returns.
+static bool c_direct_test_kept_files(void)
+{
+    char none[256];
+    char directory[256];
+    char header[320];
+    char src_path[256];
+    char obj_path[256];
+    snprintf(none, sizeof(none), "/tmp/buster_direct_kept_%d_none", (int)getpid());
+    snprintf(directory, sizeof(directory), "/tmp/buster_direct_kept_%d", (int)getpid());
+    snprintf(header, sizeof(header), "%s/twice.h", directory);
+    snprintf(src_path, sizeof(src_path), "/tmp/buster_direct_kept_%d.c", (int)getpid());
+    snprintf(obj_path, sizeof(obj_path), "/tmp/buster_direct_kept_%d.o", (int)getpid());
+    bool ok = mkdir(directory, 0700) == 0;
+    if (ok)
+    {
+        FILE* const file = fopen(header, "wb");
+        ok = file != NULL && fputs("+1\n", file) != EOF;
+        ok = (file == NULL || fclose(file) == 0) && ok;
+    }
+    static const char* const sources[3] = {
+        "int counted = 0\n#include <twice.h>\n#include <twice.h>\n;\n",
+        "int counted = 0\n#include <twice.h>\n#include <twice.h>\n;\n",
+        "int counted = 0\n#include <twice.h>\n#include <twice.h>\n;\n#error the full pipeline's\n",
+    };
+    static const bool releases[3] = { true, false, false };
+    for (uint32_t c = 0; ok && c < 3u; c += 1)
+    {
+        FILE* const source = fopen(src_path, "wb");
+        ok = source != NULL && fputs(sources[c], source) != EOF;
+        ok = (source == NULL || fclose(source) == 0) && ok;
+        unlink(obj_path);
+        fflush(NULL);
+        const pid_t child = ok ? fork() : -1;
+        if (child == 0)
+        {
+            static const char predefines[] = "#define __x86_64__ 1\n#define __LP64__ 1\n#define __STDC__ 1\n#define __STDC_VERSION__ 201710L\n";
+            static const uint8_t system_directories[2] = { 1, 1 };
+            const char* const directories[2] = { none, directory };
+            const CDirectRequest request = {
+                .input_path = src_path,
+                .output_path = obj_path,
+                .predefines_text = predefines,
+                .predefines_length = (uint32_t)(sizeof(predefines) - 1u),
+                .directories = directories,
+                .directory_system = system_directories,
+                .directory_count = 2,
+                .pic = true,
+                .unwind_tables = true,
+                .quiet = true,
+                .release = releases[c],
+            };
+            const uint32_t descriptors = c_direct_test_descriptors();
+            const int status = c_direct_try_compile(&request);
+            const bool bails = c == 2u;
+            const bool kept = !bails && !releases[c];
+            const uint32_t header_maps = c_direct_test_mappings_of(header);
+            const uint32_t source_maps = c_direct_test_mappings_of(src_path);
+            const uint32_t open_after = c_direct_test_descriptors();
+            bool child_ok = status == (bails ? 1 : 0);
+            child_ok = child_ok && header_maps == (kept ? 1u : 0u) && source_maps == (kept ? 1u : 0u);
+            // Kept: the two search directories' descriptors stay open; the first one, which does not exist, has none.
+            child_ok = child_ok && open_after == descriptors + (kept ? 1u : 0u);
+            child_ok = child_ok && (bails ? access(obj_path, F_OK) != 0 : c_direct_test_data_word(obj_path) == 2u);
+            if (!child_ok)
+            {
+                fprintf(stderr, "test-direct: kept files, case %u: status %d, %u mappings of the header, %u of the source, %u descriptors (%u before)\n", c,
+                        status, header_maps, source_maps, open_after, descriptors);
+            }
+            fflush(NULL);
+            _exit(child_ok ? 0 : 1);
+        }
+        int status = 0;
+        ok = ok && child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    unlink(src_path);
+    unlink(obj_path);
+    unlink(header);
+    rmdir(directory);
     return ok;
 }
 
@@ -4228,6 +4355,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL include search past a directory without the header\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_kept_files())
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL the files' mappings kept, released, and released by a bailout\n");
         failed += 1u;
     }
 
