@@ -596,7 +596,10 @@ static bool ssa_ir_test_promote(SsaIrTestTally* tally, const IrFunction* input, 
 // adds frame objects (arrays and structs, some of twin layouts) and COPY between them, which stay memory through
 // promotion while the locals around them are promoted.
 #define BUSTER_SSA_IR_TEST_DIGEST UINT64_C(0x2cce058d55e482b7)
-#define BUSTER_SSA_IR_TEST_DIGEST_OBJECTS UINT64_C(0x213503e404c13fa4)
+// #2818 adds 68 printed copy_piece suffixes to two object-bearing snapshots. Removing only those load/store suffixes
+// reproduces every original snapshot byte for byte and its 0x213503e404c13fa4 digest. Keep the new metadata in this
+// golden, so the snapshot still checks the complete printed IR as well as the semantic execution checks below.
+#define BUSTER_SSA_IR_TEST_DIGEST_OBJECTS UINT64_C(0xd775b1b420aa0ea4)
 
 static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t count, bool objects)
 {
@@ -694,8 +697,9 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
         arena_pop_to(&output, 0);
     }
     ssa_ir_test_expect(tally, functions_seen == (uint64_t)count * 8 && slots_after < slots_before && phis != 0, "generated path actually promotes locals and constructs phis");
-    // Recorded on #2924's tests commit, where the vector constructor and Braun's scalar construction printed the same
-    // IR for every function: the default seed and count's digests, without and with objects.
+    // The original snapshots were recorded on #2924's tests commit, where the vector constructor and Braun's scalar
+    // construction printed the same IR for every function. The default seed and count's object digest also includes
+    // #2818's printer annotations, whose byte-for-byte comparison with the originals is documented above.
     const uint64_t recorded = objects ? BUSTER_SSA_IR_TEST_DIGEST_OBJECTS : BUSTER_SSA_IR_TEST_DIGEST;
     printf("SSA IR generated programs%s: promoted IR digest 0x%016" PRIx64 "\n", objects ? " with objects" : "", digest);
     if (seed == 134 && count == 16)

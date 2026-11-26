@@ -37,6 +37,16 @@ static void tier1_copy_select_records(Tier1SelectTest* test)
         };
         for (uint32_t target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
         {
+            // measure-tier1-model's manifest contains baseline forms only. Keep the AVX targets' native and coverage
+            // checks, but not their rows or accounting, as tier1_select_test_intrinsics does for its V3 fixtures.
+            const bool manifest = test->manifest;
+            uint64_t emitted_records[3];
+            uint64_t unknown_costs[3];
+            uint64_t missing_columns[3][X86_COST_COLUMN_COUNT];
+            memcpy(emitted_records, test->emitted_records, sizeof(emitted_records));
+            memcpy(unknown_costs, test->unknown_costs, sizeof(unknown_costs));
+            memcpy(missing_columns, test->missing_columns, sizeof(missing_columns));
+            test->manifest = manifest && target_index == 0;
             X86Target target;
             const bool parsed = x86_target_parse(targets[target_index], strlen(targets[target_index]), &target);
             tier1_select_test_expect(test, parsed, "paired-copy target parses");
@@ -112,6 +122,13 @@ static void tier1_copy_select_records(Tier1SelectTest* test)
                         }
                     }
                 }
+            }
+            test->manifest = manifest;
+            if (target_index != 0)
+            {
+                memcpy(test->emitted_records, emitted_records, sizeof(emitted_records));
+                memcpy(test->unknown_costs, unknown_costs, sizeof(unknown_costs));
+                memcpy(test->missing_columns, missing_columns, sizeof(missing_columns));
             }
         }
         test->native_allowed = 0;
