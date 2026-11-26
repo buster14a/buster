@@ -592,22 +592,49 @@ t.c:3:2: warning: hi [-W#warnings]
   `maybeAddRange` does, to at most the line limit; the gutter then numbers
   them from the presumed line of the first range's start where it is earlier.
   A diagnostic with ranges shows its lines at the last one's place too.
+- **Fix-its.** A primary or attached note owns up to four `PPDiagnosticFixIt`
+  records: a removed character range and replacement text. Empty ranges
+  insert; empty text removes. `pp_diagnostic_fixit_tokens`,
+  `pp_diagnostic_fixit_insert` and `pp_diagnostic_fixit_characters` set a
+  primary's pending hints, cleared by `pp_diagnostic_fixits_clear` after it.
+  Notes carry their own ranges and hints. Output-token coordinates resolve
+  only after their diagnostic path has ensured expansion history; lexical
+  collection never starts a replay. Collected records own copies of all
+  replacement strings, including each note's, so producer scratch may be
+  reused before publication. Removed spans contribute the same highlighted
+  ranges and snippet lines as Clang's; nonempty single-line text appears on
+  an insertion line at its original display column. Tabs and Unicode source
+  columns use the source line's existing column map. A note's replacement can
+  therefore appear on another line of its snippet, as a typo correction's
+  declaration note does. Hints are never printed with carets disabled.
+  Caller-written macro arguments remain editable, and complete expansion
+  boundaries map to their invocations. An interior replacement-list token
+  has no editable caller occurrence and its hint is omitted.
+- **Generated spellings.** Pasted tokens, stringification, builtin strings and
+  `_Pragma` notes show their scratch spelling, with the generated token's
+  ranges. `_Pragma` keeps its leading space and diagnostic byte offset.
+  Paste records retain both replacement-list operands, including the ends
+  of a chain, so the macro note highlights the whole paste. Scratch line
+  numbers identify generated buffers and are allocation-dependent; they
+  are not presumed source-file lines.
 - **Which diagnostics have them** (clang's, diagnostic by diagnostic): a name
   that names nothing and its corrections (the name); a header not found (its
   name, quotes or brackets and all); an unknown or nonstandard escape (its
   backslash and character); an indirection of a non-pointer (its operand); a
   shift count past the width or negative (the count); a division or remainder
   by zero (the divisor); an assignment to what isn't assignable, an array or a
-  const (the expression assigned to; not yet the "declared const here" note's
+  const (the expression assigned to and the "declared const here" note's
   declaration); a register variable's address (its operand, without its
   parentheses); and an incompatible conversion's initializing, assigning,
   passing or returning (its source expression); an unknown attribute (its
   name, from its scope); a member of no such member, of a pointer or of no
   record (the base, and for no record the member's name too); and an
-  assignment as a condition (the assignment). An expression's range is its
+  assignment as a condition (the assignment); unused binary operands,
+  uninitialized reads, array indexes, returned local expressions, and
+  nonconstant initializers. An expression's range is its
   subtree's tokens, with the parentheses around it unless the diagnostic looks
   through them (`check_semantic_range`).
-- **None again.** A diagnostic without ranges at the last one's place shows no
+- **None again.** A diagnostic without ranges or fix-its at the last one's place shows no
   line, unless the last was a note and this one isn't (clang's `LastLoc` rule;
   `Preprocessor.diagnostic_caret_location`). A diagnostic counts once its notes
   are printed, an "expanded from" note once it is; the published diagnostics'
@@ -620,10 +647,9 @@ t.c:3:2: warning: hi [-W#warnings]
   (no gutter); `-fcaret-diagnostics-max-lines=N`, clang's unsigned grammar
   (decimal, `0x`, `0b`, `0o`, leading-zero octal) on its last occurrence, a
   malformed value an error.
-- **Not yet** (#2376's later pieces): the other diagnostics' ranges, fix-it
-  lines, the lines of scratch space (a pasted token's, `_Pragma`'s) and a
-  pasted token's range in its macro's note; `-fmessage-length`, `-ftabstop`
-  and colors. The assembler's diagnostics (`assembler_driver.c`) print none.
+- **Other display controls.** `-fmessage-length`, `-ftabstop` and colors are
+  not implemented. The standalone assembler's diagnostics
+  (`assembler_driver.c`) do not use this C frontend renderer.
   `test-checker-driver --carets` measures what is left over the oracle suite
   ([the checker guide](checker.md)).
 
@@ -633,7 +659,12 @@ against clang, whole output (`c_caret_test.c`). Its cases are runtime data,
 FILE, FLAGS, OPTIONS and NAME, tab-separated; every `.c` file of the directory
 must be a case's. Each case's command line (OPTIONS, then the file) runs as
 ours, a child of `/proc/self/exe`, and as clang's, both with carets on by
-default, and their exit statuses and standard errors must be the same bytes;
+default, and their exit statuses and standard errors must be the same bytes
+apart from scratch-buffer allocation line numbers. The normalizer replaces
+only the line number in a complete
+`<scratch space>:LINE:COLUMN: note: expanded from here` heading and its
+immediately following matching source-gutter number. It preserves gutter width,
+diagnostic columns, source bytes, carets, ranges, fix-its and all real-file line numbers;
 FLAGS `prefix` marks a command line both refuse for its options, where ours
 prints its usage after clang's error, which must start ours. The cases cover
 the preprocessor's and checker's located diagnostics at a line's start,
@@ -644,8 +675,15 @@ last line without a newline; CR LF and lone CR line ends; NUL bytes; and the
 4,096-byte limits; and ranges: names through macros' bodies and arguments,
 operands, counts and divisors with their parentheses, through a macro, over
 lines and cut to the line limit, escapes in literals and header names not
-found. The other oracle suites still compare with `-fno-caret-diagnostics` on
-both sides.
+found; independent primary and note fix-its, inserted parentheses and
+operators, replacements and removals, multiline snippets, macro invocation
+boundaries and caller arguments, const declaration notes, generated scratch
+spellings, and declaration-visible `NULL`/`false` macro state for initializer
+suggestions. The preprocessor's private ownership regression mutates producer
+scratch after collection, and checks immediate and queued rendering, disabled
+carets, suppressed warnings and hint isolation. Parser hints retain the completed
+type boundary for missing `sizeof` and alignment parentheses. The other oracle
+suites still compare with `-fno-caret-diagnostics` on both sides.
 
 ## Preprocessor benchmark
 

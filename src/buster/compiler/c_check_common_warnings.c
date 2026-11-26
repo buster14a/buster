@@ -12,7 +12,79 @@ struct CheckCommonNote
 {
     uint32_t token;
     const char* message;
+    PPDiagnosticRange ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
+    PPDiagnosticFixIt fixits[BUSTER_PP_DIAGNOSTIC_FIXITS];
+    uint8_t range_count;
+    uint8_t fixit_count;
+    bool after_token;
 };
+
+// These records are cold diagnostic data. Their ranges already use output-token indexes, so copying a note never
+// reinterprets one parser's compressed source column or eagerly asks for deferred macro history.
+static void check_common_note_fixit(const Parser* parser, CheckCommonNote* note, uint32_t first, uint32_t last, const char* text)
+{
+    if (first <= last && last < parser->tokens.count && note->fixit_count < BUSTER_PP_DIAGNOSTIC_FIXITS)
+    {
+        note->fixits[note->fixit_count++] = (PPDiagnosticFixIt)
+        {
+            .range =
+            {
+                .begin = parse_source_index(&parser->tokens, first),
+                .end = parse_source_index(&parser->tokens, last),
+                .pending = PP_RANGE_TOKENS,
+            },
+            .text = text,
+        };
+    }
+}
+
+static void check_common_note_parentheses_range(CheckCommonNote* note, PPDiagnosticRange range)
+{
+    if (range.pending == PP_RANGE_TOKENS && note->fixit_count + 2 <= BUSTER_PP_DIAGNOSTIC_FIXITS)
+    {
+        note->fixits[note->fixit_count++] = (PPDiagnosticFixIt)
+        {
+            .range = { .begin = range.begin, .end = range.begin, .pending = PP_RANGE_INSERT_BEFORE },
+            .text = "(",
+        };
+        note->fixits[note->fixit_count++] = (PPDiagnosticFixIt)
+        {
+            .range = { .begin = range.end, .end = range.end, .pending = PP_RANGE_INSERT_AFTER },
+            .text = ")",
+        };
+    }
+}
+
+static void check_common_note_parentheses(const Parser* parser, CheckCommonNote* note, uint32_t node)
+{
+    check_common_note_parentheses_range(note, check_semantic_token_range(parser, node, true));
+}
+
+// The string-plus warning's array-indexing spelling, for a pointer on the left: `p + n` becomes `&p[n]`.
+static void check_common_note_indexing(const Parser* parser, CheckCommonNote* note, uint32_t token)
+{
+    const PPDiagnosticRange range = check_semantic_token_range(parser, token, false);
+    if (range.pending == PP_RANGE_TOKENS)
+    {
+        const uint32_t source = parse_source_index(&parser->tokens, token);
+        note->fixits[0] = (PPDiagnosticFixIt)
+        {
+            .range = { .begin = range.begin, .end = range.begin, .pending = PP_RANGE_INSERT_BEFORE },
+            .text = "&",
+        };
+        note->fixits[1] = (PPDiagnosticFixIt)
+        {
+            .range = { .begin = source, .end = source, .pending = PP_RANGE_TOKENS },
+            .text = "[",
+        };
+        note->fixits[2] = (PPDiagnosticFixIt)
+        {
+            .range = { .begin = range.end, .end = range.end, .pending = PP_RANGE_INSERT_AFTER },
+            .text = "]",
+        };
+        note->fixit_count = 3;
+    }
+}
 
 static uint32_t check_common_address_root(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node, bool members);
 static uint64_t check_driver_first_error(const Parser* original, const Preprocessor* pp);
@@ -215,7 +287,12 @@ static void check_common_publish(const Parser* parser, Preprocessor* pp, uint32_
         {
             .token = notes[i].token < parser->tokens.count ? parse_source_index(&parser->tokens, notes[i].token) : parse_source_index(&parser->tokens, token),
             .message = notes[i].message,
+            .range_count = notes[i].range_count,
+            .fixit_count = notes[i].fixit_count,
+            .after_token = notes[i].after_token,
         };
+        memcpy(attached[i].ranges, notes[i].ranges, sizeof(notes[i].ranges));
+        memcpy(attached[i].fixits, notes[i].fixits, sizeof(notes[i].fixits));
     }
     if (suffix != NULL)
     {
@@ -1012,8 +1089,24 @@ static void check_common_report_unused(const Parser* parser, Preprocessor* pp, c
                                        Arena* scratch)
 {
     const PPDiagnosticRecord* previous = pp->diagnostic_last;
+    const CheckGraph* graph = &input->graph;
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    if (op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_OR)
+    {
+        const uint32_t left = graph->operand0[node];
+        const uint32_t right = graph->operand1[node];
+        if (left < graph->count)
+        {
+            check_semantic_range(parser, pp, graph->tokens[left], true);
+        }
+        if (right < graph->count)
+        {
+            check_semantic_range(parser, pp, graph->tokens[right], true);
+        }
+    }
     check_common_report_evaluated(parser, pp, input, token, check_common_function_boundary(parser, token), PP_DIAGNOSTIC_DEFERRED, id, false,
                                   message, notes, note_count, scratch);
+    pp_diagnostic_ranges_clear(pp);
     check_common_queue(parser, pp, previous, &input->graph, parents, node, true);
 }
 
@@ -4867,8 +4960,11 @@ static void check_common_self_assigns(const Parser* parser, Preprocessor* pp, co
                 {
                     const char* message = check_warning_text(scratch, "explicitly assigning value of variable of type %.*s to itself",
                                                               (int)type_name.length, type_name.pointer);
+                    check_semantic_range(parser, pp, graph->tokens[graph->operand0[node]], true);
+                    check_semantic_range(parser, pp, graph->tokens[graph->operand1[node]], true);
                     check_common_report_evaluated(parser, pp, input, token, token, PP_DIAGNOSTIC_SEMANTIC, CHECK_WARNING_ID_SELF_ASSIGN, true, message,
                                                   NULL, 0, scratch);
+                    pp_diagnostic_ranges_clear(pp);
                 }
             }
         }
@@ -5056,8 +5152,10 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
                             // emitted it — right after this expression's own discard warnings, as its full expression
                             // completes (#2252).
                             const PPDiagnosticRecord* previous = pp->diagnostic_last;
+                            check_semantic_range(parser, pp, graph->tokens[index], true);
                             check_common_report_bounds(parser, pp, input, graph->tokens[root], message, note.message != NULL ? &note : NULL,
                                                        note.message != NULL ? 1u : 0u, scratch);
+                            pp_diagnostic_ranges_clear(pp);
                             check_common_queue(parser, pp, previous, graph, emission->parents, node, true);
                         }
                     }
@@ -5397,11 +5495,14 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
             const bool equality = left_role == PARSE_ROLE_EQUALITY;
             const char* message = equality ? (parser->tokens.kinds[left] == PARSE_KIND_EQUALEQUAL ? "equality comparison result unused" : "inequality comparison result unused") :
                                              "relational comparison result unused";
-            const CheckCommonNote note = { report, parser->tokens.kinds[left] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
+            CheckCommonNote note = { report, parser->tokens.kinds[left] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
                                                      parser->tokens.kinds[left] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
             const bool suggest = equality && check_common_comparison_lvalue(input, stream, left);
+            check_common_note_fixit(parser, &note, left, left, parser->tokens.kinds[left] == PARSE_KIND_EQUALEQUAL ? "=" : "|=");
+            check_semantic_range(parser, pp, left, true);
             check_common_report_discarded(parser, pp, input, report, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
                                           suggest ? &note : NULL, suggest ? 1u : 0u, scratch);
+            pp_diagnostic_ranges_clear(pp);
         }
         else if (report_role == PARSE_ROLE_CLOSE_CAST)
         {
@@ -6513,12 +6614,18 @@ static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp,
             const uint32_t spelling = sized ? BUSTER_CHECK_NONE : integer && walked == BUSTER_CHECK_NONE ? 0 : walked;
             const String8 name = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, spelling, check_driver_operand_sugar(input, stream, node));
             const char* message = name.length != 0 ? check_warning_text(scratch, "adding %.*s to a string does not append to the string", (int)name.length, name.pointer) : NULL;
-            const CheckCommonNote note = { token, "use array indexing to silence this warning" };
+            CheckCommonNote note = { token, "use array indexing to silence this warning" };
             if (message != NULL)
             {
+                if (left_string != BUSTER_CHECK_NONE)
+                {
+                    check_common_note_indexing(parser, &note, token);
+                }
+                check_semantic_range(parser, pp, token, false);
                 completion = check_common_operand_end(parser, token);
                 check_common_report_at(parser, pp, input, token, completion, CHECK_WARNING_ID_STRING_PLUS_INT, false, message, &note, 1,
                                        scratch);
+                pp_diagnostic_ranges_clear(pp);
             }
             arena_pop_to(scratch, mark);
         }
@@ -6539,11 +6646,17 @@ static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp,
             const TypeId type = literal.integer <= UINT8_MAX && literal.type != BUSTER_TYPE_UCHAR ? BUSTER_TYPE_CHAR : literal.type;
             const String8 name = literal.valid ? check_driver_warning_type(parser, pp, input, types, spell, scratch, type, 0) : (String8){ 0 };
             const char* message = name.length != 0 ? check_warning_text(scratch, "adding %.*s to a string pointer does not append to the string", (int)name.length, name.pointer) : NULL;
-            const CheckCommonNote note = { token, "use array indexing to silence this warning" };
+            CheckCommonNote note = { token, "use array indexing to silence this warning" };
             if (message != NULL)
             {
+                if (pointer < token)
+                {
+                    check_common_note_indexing(parser, &note, token);
+                }
+                check_semantic_range(parser, pp, token, false);
                 completion = completion == BUSTER_CHECK_NONE ? check_common_operand_end(parser, token) : completion;
                 check_common_report_at(parser, pp, input, token, completion, CHECK_WARNING_ID_STRING_PLUS_CHAR, false, message, &note, 1, scratch);
+                pp_diagnostic_ranges_clear(pp);
             }
             arena_pop_to(scratch, mark);
         }
@@ -6593,14 +6706,18 @@ static void check_common_shift_op_parentheses(const Parser* parser, Preprocessor
                 const char* shifted = kind == PARSE_KIND_LESSLESS ? "<<" : ">>";
                 const char* added = side_kind == PARSE_KIND_PLUS ? "+" : "-";
                 const char* message = check_warning_text(scratch, "operator '%s' has lower precedence than '%s'; '%s' will be evaluated first", shifted, added, added);
-                const CheckCommonNote note = { side, check_warning_text(scratch, "place parentheses around the '%s' expression to silence this warning", added) };
+                CheckCommonNote note = { side, check_warning_text(scratch, "place parentheses around the '%s' expression to silence this warning", added) };
+                check_common_note_parentheses(parser, &note, side);
                 end = end == BUSTER_CHECK_NONE ? check_common_operand_end(parser, token) : end;
                 if (message != NULL && note.message != NULL)
                 {
                     // Its range, and its note's, is the `+` expression's, which shows the macro a `+` from its argument came
                     // through (Preprocessor.diagnostic_arguments, which its note keeps too).
                     pp->diagnostic_arguments = true;
+                    check_semantic_range(parser, pp, side, true);
+                    pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, token), parse_source_index(&parser->tokens, token));
                     check_common_report_at(parser, pp, input, side, end, CHECK_WARNING_ID_SHIFT_OP_PARENTHESES, false, message, &note, 1, scratch);
+                    pp_diagnostic_ranges_clear(pp);
                     pp->diagnostic_arguments = false;
                 }
                 arena_pop_to(scratch, mark);
@@ -6749,12 +6866,17 @@ static void check_common_parentheses_equality(const Parser* parser, Preprocessor
                             (value.flags & BUSTER_CHECK_VECTOR_DUPLICATE) == 0 && !type_kind_is_array(check_action_kind(types, value.type));
     if (truth && !macro && modifiable)
     {
-        const CheckCommonNote notes[] = {
+        CheckCommonNote notes[] = {
             { token, "remove extraneous parentheses around the comparison to silence this warning" },
             { token, "use '=' to turn this equality comparison into an assignment" },
         };
+        check_common_note_fixit(parser, notes, grouped, grouped, "");
+        check_common_note_fixit(parser, notes, outer, outer, "");
+        check_common_note_fixit(parser, notes + 1, token, token, "=");
+        check_semantic_range(parser, pp, token, false);
         check_common_report_at(parser, pp, input, token, parent, CHECK_WARNING_ID_PARENTHESES_EQUALITY, false,
                                "equality comparison with extraneous parentheses", notes, BUSTER_ARRAY_LENGTH(notes), scratch);
+        pp_diagnostic_ranges_clear(pp);
     }
 }
 
@@ -6779,16 +6901,21 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
         if (role == PARSE_ROLE_ASSIGN && (parent_role == PARSE_ROLE_CLOSE_CONDITION || for_condition) && !switch_condition &&
             parser->tokens.kinds[token] == PARSE_KIND_EQUAL)
         {
-            const CheckCommonNote notes[2] = {
+            CheckCommonNote notes[2] = {
                 { token, "place parentheses around the assignment to silence this warning" },
                 { token, "use '==' to turn this assignment into an equality comparison" },
             };
+            check_common_note_parentheses(parser, notes, token);
+            check_common_note_fixit(parser, notes + 1, token, token, "==");
             // Clang checks the condition once it is whole (CheckBooleanCondition): after the diagnostics its operands gave as
             // they were built, a call's format or a statement expression's own (#1941), so published at its `)` or `;`.
             // The assignment highlighted (#2376), clang's E->getSourceRange() in DiagnoseAssignmentAsCondition.
             check_semantic_range(parser, pp, token, true);
+            const bool spans = pp->diagnostic_spans;
+            pp->diagnostic_spans = true;
             check_common_report_at(parser, pp, input, token, parent, CHECK_WARNING_ID_PARENTHESES, false,
                                    "using the result of an assignment as a condition without parentheses", notes, 2, scratch);
+            pp->diagnostic_spans = spans;
             pp_diagnostic_ranges_clear(pp);
         }
         else if (role == PARSE_ROLE_EQUALITY && parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL && parent_role == PARSE_ROLE_CLOSE_GROUP)
@@ -6806,15 +6933,21 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
             if (!check_common_boolean_value(stream, types, operand, pp, scratch) && !check_common_boolean_value(stream, types, right, pp, scratch))
             {
                 const bool bitwise = parent_role == PARSE_ROLE_BITWISE_AND;
-                const CheckCommonNote notes[2] = {
+                CheckCommonNote notes[2] = {
                     { token, bitwise ? "add parentheses after the '!' to evaluate the bitwise operator first" :
                                        "add parentheses after the '!' to evaluate the comparison first" },
                     { token, "add parentheses around left hand side expression to silence this warning" },
                 };
+                PPDiagnosticRange compared = check_semantic_token_range(parser, parent, true);
+                compared.begin = parse_source_index(&parser->tokens, token + 1);
+                check_common_note_parentheses_range(notes, compared);
+                check_common_note_parentheses(parser, notes + 1, token);
+                pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, parent), parse_source_index(&parser->tokens, parent));
                 // Both forms warn as the outer operator is built, including in an unevaluated expression.
                 check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, parent), CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false,
                                        bitwise ? "logical not is only applied to the left hand side of this bitwise operator" :
                                                  "logical not is only applied to the left hand side of this comparison", notes, 2, scratch);
+                pp_diagnostic_ranges_clear(pp);
             }
         }
         else if (parent_role == PARSE_ROLE_BITWISE_AND || parent_role == PARSE_ROLE_BITWISE_OR || parent_role == PARSE_ROLE_BITWISE_XOR)
@@ -6824,13 +6957,26 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                 const char* lower = check_common_operator_spelling(parser, parent);
                 const char* upper = check_common_operator_spelling(parser, token);
                 const char* message = check_warning_text(scratch, "%s has lower precedence than %s; %s will be evaluated first", lower, upper, upper);
-                const CheckCommonNote notes[2] = {
+                CheckCommonNote notes[2] = {
                     { parent, check_warning_text(scratch, "place parentheses around the '%s' expression to silence this warning", upper) },
                     { parent, check_warning_text(scratch, "place parentheses around the %s expression to evaluate it first", lower) },
                 };
+                check_common_note_parentheses(parser, notes, token);
+                PPDiagnosticRange grouped = check_semantic_token_range(parser, parent, true);
+                const uint32_t adjacent = check_common_operand_root_of(parser, token, parent < token ? token - 1 : token + 1);
+                const PPDiagnosticRange side = check_semantic_token_range(parser, adjacent, true);
+                if (side.pending == PP_RANGE_TOKENS)
+                {
+                    grouped.begin = parent < token ? grouped.begin : side.begin;
+                    grouped.end = parent < token ? side.end : grouped.end;
+                    check_common_note_parentheses_range(notes + 1, grouped);
+                }
+                check_semantic_range(parser, pp, token, true);
+                pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, parent), parse_source_index(&parser->tokens, parent));
                 // Clang warns as it builds the bitwise operator, after its right operand's own diagnostics (#1941).
                 check_common_report_at(parser, pp, input, parent, check_common_operand_end(parser, parent), CHECK_WARNING_ID_PARENTHESES, false, message,
                                        notes, 2, scratch);
+                pp_diagnostic_ranges_clear(pp);
             }
         }
         else if ((role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL) &&
@@ -6840,9 +6986,10 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
             const bool equality = role == PARSE_ROLE_EQUALITY;
             const char* message = equality ? (parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "equality comparison result unused" : "inequality comparison result unused") :
                                             "relational comparison result unused";
-            const CheckCommonNote note = { token, parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
+            CheckCommonNote note = { token, parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
                                                      parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
             const bool suggest = equality && check_common_comparison_lvalue(input, stream, token);
+            check_common_note_fixit(parser, &note, token, token, parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "=" : "|=");
             // (A statement expression's value is the walk's, as the statement expression's discarded value, #1447.)
             // Published at the statement's end (#2914): clang's DiagnoseUnusedExprResult runs once the full expression is
             // built, after the comparison's own warnings (an ordered comparison of a pointer and an integer).
@@ -6850,8 +6997,10 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
             // where the unused value's own warning is dropped too (check_common_ignored_macro).
             if (!check_common_statement_value(parser, parent) && !check_common_ignored_macro(parser, pp, token))
             {
+                check_semantic_range(parser, pp, token, true);
                 check_common_report_evaluated(parser, pp, input, token, parent, PP_DIAGNOSTIC_SEMANTIC, CHECK_WARNING_ID_UNUSED_COMPARISON, false, message,
                                               suggest ? &note : NULL, suggest ? 1u : 0u, scratch);
+                pp_diagnostic_ranges_clear(pp);
             }
         }
     }
@@ -7664,7 +7813,9 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
                 const char* subject = check_common_parameter_token(input, parser, declaration) ? "parameter" : "local variable";
                 const char* message = check_warning_text(scratch, "address of stack memory associated with %s '%.*s' returned", subject,
                                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                check_semantic_range(parser, pp, graph->tokens[root], true);
                 check_common_report(parser, pp, input, graph->tokens[root], CHECK_WARNING_ID_RETURN_STACK_ADDRESS, false, message, NULL, 0, scratch);
+                pp_diagnostic_ranges_clear(pp);
             }
         }
     }
@@ -14693,7 +14844,11 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                     const uint32_t body = check_common_sparse_get(input->declaration_bodies, declaration);
                     const uint32_t brace = body < parser->tokens.count ? parser->tree.parents[body] : BUSTER_CHECK_NONE;
                     const uint32_t publication = brace < parser->tokens.count ? check_driver_publication_position(parser, pp, brace + 1, pp->output.count) : pp->output.count;
+                    const uint32_t source = parse_source_index(&parser->tokens, declaration);
+                    pp_diagnostic_range_tokens(pp, source, source);
+                    check_semantic_range(parser, pp, read_token, false);
                     check_common_report_published(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message, NULL, 0, scratch);
+                    pp_diagnostic_ranges_clear(pp);
                 }
                 continue;
             }
@@ -14707,16 +14862,64 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name)) :
                     check_warning_text(scratch, "variable '%.*s' is uninitialized when used here",
                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                const CheckCommonNote note = { declaration + 1 < parser->tokens.count ? declaration + 1 : declaration,
-                    check_warning_text(scratch, "initialize the variable '%.*s' to silence this warning",
-                                       (int)intern_length(pp->table, name), intern_bytes(pp->table, name)) };
                 const uint32_t body = check_common_sparse_get(input->declaration_bodies, declaration);
                 const uint32_t brace = body < parser->tokens.count ? parser->tree.parents[body] : BUSTER_CHECK_NONE;
                 const uint32_t publication = brace < parser->tokens.count ? check_driver_publication_position(parser, pp, brace + 1, pp->output.count) : pp->output.count;
-                if (analysed)
+                if (analysed && check_common_severity(pp, parser, input, read_token, CHECK_WARNING_ID_UNINITIALIZED, true) != CHECK_WARNING_IGNORE)
                 {
+                    uint32_t last = declaration;
+                    for (uint32_t at = declaration + 1; at < parser->tokens.count; at = last + 1)
+                    {
+                        const uint8_t next = parser->tokens.kinds[at];
+                        const uint32_t close = parser->tree.parents[at];
+                        if (next == PARSE_KIND_R_PAREN)
+                        {
+                            last = at;
+                        }
+                        else if ((next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE) && close > at && close < parser->tokens.count)
+                        {
+                            last = close;
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+                    const bool macro = check_common_from_macro(parser, pp, declaration) || check_common_from_macro(parser, pp, last);
+                    const uint32_t note_token = macro ? check_input_declaration_begin(parser, declaration) : last;
+                    CheckCommonNote note =
+                    {
+                        .token = note_token,
+                        .message = check_warning_text(scratch, macro ? "variable '%.*s' is declared here" : "initialize the variable '%.*s' to silence this warning",
+                                                      (int)intern_length(pp->table, name), intern_bytes(pp->table, name)),
+                        .after_token = !macro,
+                    };
+                    if (!self_initialization && !macro)
+                    {
+                        // Clang chooses NULL/false from the macro state at the declaration, before later directives.
+                        const uint32_t source = parse_source_index(&parser->tokens, last);
+                        const uint32_t visible = parse_source_index(&parser->tokens, declaration);
+                        const TypeId bare = type_unqualified(type_strip_aligned(types, type));
+                        const bool character = bare == BUSTER_TYPE_CHAR || bare == BUSTER_TYPE_SCHAR || bare == BUSTER_TYPE_UCHAR;
+                        const bool named_null = kind == BUSTER_TYPE_KIND_POINTER && pp_diagnostic_macro_defined(pp, "NULL", visible);
+                        const bool named_false = bare == BUSTER_TYPE_BOOL && pp_diagnostic_macro_defined(pp, "false", visible);
+                        note.fixits[0] = (PPDiagnosticFixIt)
+                        {
+                            .range = { .begin = source, .end = source, .pending = PP_RANGE_INSERT_AFTER },
+                            .text = named_null ? " = NULL" : named_false ? " = false" : kind == BUSTER_TYPE_KIND_FLOATING ? " = 0.0" :
+                                    character ? " = '\\0'" : " = 0",
+                        };
+                        note.fixit_count = 1;
+                    }
+                    if (self_initialization)
+                    {
+                        const uint32_t source = parse_source_index(&parser->tokens, declaration);
+                        pp_diagnostic_range_tokens(pp, source, source);
+                    }
+                    check_semantic_range(parser, pp, read_token, false);
                     check_common_report_published(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message,
                                                   self_initialization ? NULL : &note, self_initialization ? 0u : 1u, scratch);
+                    pp_diagnostic_ranges_clear(pp);
                 }
             }
             else if (parameter && scalar && !addressed[declaration] && first_use_read[declaration] == BUSTER_CHECK_NONE &&
@@ -15055,7 +15258,21 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
                                                    (int)names[0].length, names[0].pointer, (int)names[1].length, names[1].pointer,
                                                    (int)names[2].length, names[2].pointer, (int)names[3].length, names[3].pointer) :
                     "variables used in loop condition not modified in loop body";
+                for (uint32_t token = semis[0] + 1; token < semis[1]; token += 1)
+                {
+                    const uint32_t declaration = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+                    for (uint32_t i = 0; declaration != BUSTER_CHECK_NONE && i < used; i += 1)
+                    {
+                        if (decls[i] == declaration)
+                        {
+                            const uint32_t source = parse_source_index(&parser->tokens, token);
+                            pp_diagnostic_range_tokens(pp, source, source);
+                            break;
+                        }
+                    }
+                }
                 check_common_report_at(parser, pp, input, at, publication, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, NULL, 0, scratch);
+                pp_diagnostic_ranges_clear(pp);
             }
         }
         // The increment and the body block's last statement, each exactly a variable's ++ or --.

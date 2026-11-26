@@ -2131,8 +2131,10 @@ primary's and each note's, the renderer writes clang's caret display
 line numbers and a caret under the column ([the preprocessor
 guide](commands/preprocessor.md#caret-display-2376)), with the highlighted
 ranges a diagnostic's producer gives it, mapped through the expansion history
-as clang maps them. Fix-its and scratch-space excerpts are #2376's later
-pieces.
+as clang maps them. Primary and attached-note fix-its own their replacement
+text through collection and publication, and contribute removal ranges and
+insertion lines. Generated spellings have scratch-space excerpts; a paste
+retains its replacement-list endpoints for the macro note's range.
 
 The renderer assembles one diagnostic, its include stack and all expansion or
 definition notes in a 2 KiB stack buffer, growing into temporary scratch only
@@ -3599,9 +3601,9 @@ spellings alone would miss this change (#272).
   #109's comparison prints our stream with clang's spacing
   ([the fuzzing](preprocessor-fuzz.md), "Clang's `-P` printer, emulated").
 - Diagnostics include presumed locations, include stacks and macro backtraces
-  (#108, above), and clang's source lines, carets and, for the diagnostics
-  that give them so far, highlighted ranges (#2376); not yet fix-it lines or
-  scratch space's lines.
+  (#108, above), and clang's source lines, carets, producer-selected highlighted
+  ranges, independent note ranges and fix-it lines, and scratch-space excerpts
+  (#2376).
 - C++ (`-x c++`), dependency output (`-M`) aren't supported.
 - `-E`'s line markers for the pragma lines that a `_Pragma` without its `(`
   reads past (a directive's among a macro's arguments, another `_Pragma`'s):

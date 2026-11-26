@@ -57,9 +57,10 @@ static bool check_semantic_inside(const Parser* parser, uint32_t token, uint32_t
 // Adds the parser tokens of `node`'s subtree, which are contiguous around it, as a highlighted range of the next
 // diagnostic (#2376): clang's source range of the expression the node is (getSourceRange), with `parentheses` the ones
 // around it, which clang's ParenExpr keeps where a diagnostic doesn't look through them (IgnoreParens).
-static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_t node, bool parentheses)
+static PPDiagnosticRange check_semantic_token_range(const Parser* parser, uint32_t node, bool parentheses)
 {
     const uint32_t count = parser->tokens.count;
+    PPDiagnosticRange result = { 0 };
     if (node < count)
     {
         uint32_t first = node;
@@ -87,7 +88,22 @@ static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_
             first -= grouped ? 1 : 0;
             last += grouped ? 1 : 0;
         }
-        pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, first), parse_source_index(&parser->tokens, last));
+        result = (PPDiagnosticRange)
+        {
+            .begin = parse_source_index(&parser->tokens, first),
+            .end = parse_source_index(&parser->tokens, last),
+            .pending = PP_RANGE_TOKENS,
+        };
+    }
+    return result;
+}
+
+static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_t node, bool parentheses)
+{
+    const PPDiagnosticRange range = check_semantic_token_range(parser, node, parentheses);
+    if (range.pending == PP_RANGE_TOKENS)
+    {
+        pp_diagnostic_range_tokens(pp, range.begin, range.end);
     }
 }
 
@@ -2083,6 +2099,36 @@ static void check_semantic_add_note(const Parser* parser, PPOutputDiagnosticNote
     }
 }
 
+// VarDecl/FieldDecl source ranges include the declaration specifiers and any initializer, but not their separator.
+// A record's enclosing opening brace is a boundary here, while a record definition in the specifiers is retained.
+static void check_semantic_declaration_note(const Parser* parser, const CheckInput* input, PPOutputDiagnosticNote* notes, uint32_t* count,
+                                           uint32_t token, const char* message)
+{
+    const uint32_t prior = *count;
+    check_semantic_add_note(parser, notes, count, token, message);
+    if (*count != prior)
+    {
+        uint32_t first = check_input_declaration_begin(parser, token);
+        for (uint32_t at = first; at < token; at += 1)
+        {
+            if (parser->tree.roles[at] == PARSE_ROLE_OPEN_STRUCT && parser->tree.parents[at] > token)
+            {
+                first = at + 1;
+            }
+        }
+        const uint32_t initialized = token < input->token_count ? check_sparse_get(input->initializer_ends, token) : BUSTER_CHECK_NONE;
+        const uint32_t end = initialized > token && initialized <= parser->tokens.count ? initialized : check_input_availability_declarator_end(parser, token);
+        const uint32_t last = end > token && end <= parser->tokens.count ? end - 1 : token;
+        notes[prior].ranges[0] = (PPDiagnosticRange)
+        {
+            .begin = parse_source_index(&parser->tokens, first),
+            .end = parse_source_index(&parser->tokens, last),
+            .pending = PP_RANGE_TOKENS,
+        };
+        notes[prior].range_count = 1;
+    }
+}
+
 // The first token of a function declaration's return type, as clang's getReturnTypeSourceRange begins it: its
 // specifiers' first type specifier, past storage classes, qualifiers and attributes (`const struct s *f(void)`'s
 // `struct`). The declaration's own first token where none is found.
@@ -2147,7 +2193,7 @@ static const char* check_semantic_const_assignment(const Parser* parser, Preproc
                 result = result != NULL || type.length == 0 ? result :
                          check_warning_text(scratch, "cannot assign to non-static data member '%.*s' with const-qualified type %.*s", (int)name.length,
                                             name.pointer, (int)type.length, type.pointer);
-                check_semantic_add_note(parser, notes, note_count, declarator,
+                check_semantic_declaration_note(parser, input, notes, note_count, declarator,
                                         name.length != 0 ? check_warning_text(scratch, "non-static data member '%.*s' declared const here", (int)name.length,
                                                                               name.pointer) : NULL);
             }
@@ -2180,7 +2226,7 @@ static const char* check_semantic_const_assignment(const Parser* parser, Preproc
             result = result != NULL || declared.length == 0 ? result :
                      check_warning_text(scratch, "cannot assign to variable '%.*s' with const-qualified type %.*s", (int)name.length, name.pointer,
                                         (int)declared.length, declared.pointer);
-            check_semantic_add_note(parser, notes, note_count, declaration,
+            check_semantic_declaration_note(parser, input, notes, note_count, declaration,
                                     name.length != 0 ? check_warning_text(scratch, "variable '%.*s' declared const here", (int)name.length, name.pointer) :
                                                        NULL);
         }
@@ -2263,7 +2309,7 @@ static const char* check_semantic_const_fields(const Parser* parser, Preprocesso
                 result = result != NULL || field_name.length == 0 ? result :
                          check_warning_text(scratch, "cannot assign to %s with %sconst-qualified data member '%.*s'", named, r != 0 ? "nested " : "",
                                             (int)field_name.length, field_name.pointer);
-                check_semantic_add_note(parser, notes, note_count, field_token,
+                check_semantic_declaration_note(parser, input, notes, note_count, field_token,
                                         field_name.length != 0 ? check_warning_text(scratch, "%sdata member '%.*s' declared const here", r != 0 ? "nested " : "",
                                                                                     (int)field_name.length, field_name.pointer) : NULL);
             }
@@ -3294,6 +3340,12 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             result = type.length != 0 ? check_warning_text(scratch, "value of type %.*s is not contextually convertible to 'bool'", (int)type.length, type.pointer) : NULL;
             const uint32_t keyword = check_semantic_assertion_keyword(parser, graph->tokens[node]);
             *location = keyword < parser->tokens.count ? keyword + 2 : check_semantic_first_token(parser, graph->tokens[node]);
+            const uint32_t close = keyword < parser->tokens.count && keyword + 1 < parser->tokens.count ? parser->tree.parents[keyword + 1] : parser->tokens.count;
+            const uint32_t end = close < parser->tokens.count ? check_constant_punctuation(parser, keyword + 2, close, PARSE_KIND_COMMA) : 0;
+            if (end > keyword + 2)
+            {
+                pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, keyword + 2), parse_source_index(&parser->tokens, end - 1));
+            }
         }
         else if (first < parser->tokens.count)
         {
@@ -3306,6 +3358,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, value.type, spelling);
                 result = type.length != 0 ? check_warning_text(scratch, "integer constant expression must have integer type, not %.*s", (int)type.length, type.pointer) : NULL;
                 *location = first;
+                check_semantic_range(parser, pp, graph->tokens[root], true);
             }
             else if (report->message == CHECK_MESSAGE_CONSTANT)
             {
@@ -3323,6 +3376,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         const uint32_t value = initialize ? operand : node;
         const TypeId target = initialize && node < stream->count ? check_stream_type(stream, node) : 0;
         *location = check_init_culprit_at(graph, stream, types, parser, value, token, target);
+        check_semantic_range(parser, pp, graph->tokens[value], false);
     }
     else if (report->message == CHECK_MESSAGE_ACTION && node < count)
     {
@@ -3362,6 +3416,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             if (result != NULL && !aggregate && !suggestion && kind != BUSTER_TYPE_KIND_EXT_VECTOR && token + 1 < parser->tokens.count)
             {
                 pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, token + 1), parse_source_index(&parser->tokens, token + 1));
+            }
+            if (result != NULL && suggestion)
+            {
+                const uint32_t source = parse_source_index(&parser->tokens, token);
+                pp_diagnostic_fixit_tokens(pp, source, source, "->");
             }
             if (kind == BUSTER_TYPE_KIND_EXT_VECTOR)
             {
@@ -3409,6 +3468,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             *location = check_semantic_switch(parser, graph->tokens[node]);
             result = type.length != 0 ? check_warning_text(scratch, "statement requires expression of integer type (%.*s invalid)", (int)type.length, type.pointer) :
                                         NULL;
+            check_semantic_range(parser, pp, graph->tokens[operand], true);
         }
         else if ((report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED ||
                   report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED) && op >= CHECK_OP_POSITIVE && op <= CHECK_OP_BIT_NOT && operand_type != 0)
@@ -3416,6 +3476,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_value_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "invalid argument type %.*s to unary expression", (int)type.length, type.pointer) : NULL;
+            check_semantic_range(parser, pp, graph->tokens[operand], true);
         }
         else if (report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED && op == CHECK_OP_CONDITION && operand_type != 0)
         {
@@ -3423,6 +3484,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "statement requires expression of scalar type (%.*s invalid)", (int)type.length, type.pointer) : NULL;
             *location = check_semantic_condition_keyword(parser, graph->tokens[node]);
+            check_semantic_range(parser, pp, graph->tokens[operand], true);
         }
         else if (report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED && op == CHECK_OP_CONDITIONAL && operand_type != 0)
         {
@@ -3430,6 +3492,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "used type %.*s where arithmetic or pointer type is required", (int)type.length, type.pointer) : NULL;
             *location = check_semantic_conditional_question(parser, graph->tokens[node]);
+            check_semantic_range(parser, pp, graph->tokens[operand], true);
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CONDITIONAL &&
                  graph->operand1[node] < stream->count && graph->operand2[node] < stream->count)
@@ -3445,6 +3508,8 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "incompatible operand types (%.*s and %.*s)",
                                                                                (int)left.length, left.pointer, (int)right.length, right.pointer) : NULL;
             *location = check_semantic_conditional_question(parser, graph->tokens[node]);
+            check_semantic_range(parser, pp, graph->tokens[first], true);
+            check_semantic_range(parser, pp, graph->tokens[second], true);
         }
         else if ((report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED ||
                   report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED ||
@@ -3465,6 +3530,8 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                                                                                         second, check_semantic_operator_spelling(parser, input, stream, types, second)));
             result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "invalid operands to binary expression (%.*s and %.*s)", (int)left.length,
                                                                                 left.pointer, (int)right.length, right.pointer) : NULL;
+            check_semantic_range(parser, pp, graph->tokens[operand], true);
+            check_semantic_range(parser, pp, graph->tokens[second], true);
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CAST && operand_type != 0 && token + 1 < parser->tokens.count &&
                  parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST && node < stream->count && graph->types != NULL &&
@@ -3653,6 +3720,14 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             *location = open;
             result = subscriptable && report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED ? "array subscript is not an integer" :
                                                                                          "subscripted value is not an array, pointer, or vector";
+            if (operand < count && (!subscriptable || (check_action_kind(types, second_type) == BUSTER_TYPE_KIND_POINTER && !check_vector_type(types, operand_value_type))))
+            {
+                check_semantic_range(parser, pp, graph->tokens[operand], true);
+            }
+            if (second < count && (!subscriptable || check_action_kind(types, operand_value_type) == BUSTER_TYPE_KIND_POINTER || check_vector_type(types, operand_value_type)))
+            {
+                check_semantic_range(parser, pp, graph->tokens[second], true);
+            }
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPLETE && (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && token < parser->tokens.count &&
                  graph->tokens[node] == token)
@@ -3702,6 +3777,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             {
                 result = check_warning_text(scratch, "called object type %.*s is not a function or function pointer", (int)type.length, type.pointer);
                 *location = open;
+                check_semantic_range(parser, pp, graph->tokens[operand], true);
             }
         }
         else if ((report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED || report->diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED) &&
@@ -3730,6 +3806,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "cannot take the address of an rvalue of type %.*s", (int)type.length, type.pointer) : NULL;
+            check_semantic_range(parser, pp, graph->tokens[operand], false);
         }
         else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED &&
                  (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)))
@@ -3752,10 +3829,23 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const bool found = open < parser->tokens.count && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close;
             result = found ? "assignment to cast is illegal, lvalue casts are not supported" : "expression is not assignable";
             *location = found ? open : token;
-            // The expression assigned to (#2376), clang's E->getSourceRange(); a cast's has another shape, not yet given.
-            if (!found && operand < count)
+            // A cast's parser subtree ends at its type's `)`: its operand has a distinct graph node.
+            if (found)
+            {
+                const PPDiagnosticRange cast_operand = check_semantic_token_range(parser, graph->tokens[inner], true);
+                if (cast_operand.pending == PP_RANGE_TOKENS)
+                {
+                    pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, open), cast_operand.end);
+                }
+            }
+            else if (operand < count)
             {
                 check_semantic_range(parser, pp, graph->tokens[operand], true);
+            }
+            if (found)
+            {
+                const uint32_t source = parse_source_index(&parser->tokens, token);
+                pp_diagnostic_range_tokens(pp, source, source);
             }
         }
         else if (report->diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED && operand_type != 0)

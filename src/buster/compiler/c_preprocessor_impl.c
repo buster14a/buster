@@ -141,9 +141,13 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
             pp_diagnostic_resolve_ranges(pp, false);
             pp->render_ranges = pp->diagnostic_ranges;
             pp->render_range_count = pp->diagnostic_range_count;
+            pp->render_fixits = pp->diagnostic_fixits;
+            pp->render_fixit_count = pp->diagnostic_fixit_count;
             pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, NULL, format, arguments);
             pp->render_ranges = NULL;
             pp->render_range_count = 0;
+            pp->render_fixits = NULL;
+            pp->render_fixit_count = 0;
         }
         va_end(arguments);
     }
@@ -967,6 +971,36 @@ BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
     return (pp->is_macro[id / 64] >> (id % 64)) & 1;
 }
 
+// The completed checker sees the final macro map, but clang chooses an initializer using the variable's declaration
+// location. Record just its two optional macro spellings, only with history: a clean deferred pass pays no spelling
+// lookup or allocation. pp_set_macro also covers #undef and pop_macro, including changes made by included files.
+static __attribute__((noinline, cold)) void pp_diagnostic_macro_change(Preprocessor* pp, IdentId name, PPMacroId macro)
+{
+    const uint32_t length = intern_length(pp->table, name);
+    const uint8_t* bytes = intern_bytes(pp->table, name);
+    const bool named = (length == 4 && memcmp(bytes, "NULL", 4) == 0) || (length == 5 && memcmp(bytes, "false", 5) == 0);
+    if (named)
+    {
+        PPDiagnosticMacroEvent* event = arena_push(&pp->arena, sizeof(PPDiagnosticMacroEvent), _Alignof(PPDiagnosticMacroEvent));
+        if (event != NULL)
+        {
+            const uint8_t builtin = macro != 0 ? pp->macros[macro].builtin : PP_BUILTIN_POISONED;
+            *event = (PPDiagnosticMacroEvent)
+            {
+                .previous = pp->diagnostic_macro_events,
+                .token = pp->output.count,
+                .name = name,
+                .defined = builtin != PP_BUILTIN_POISONED && builtin != PP_BUILTIN_DEFINED,
+            };
+            pp->diagnostic_macro_events = event;
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory recording diagnostic macro visibility");
+        }
+    }
+}
+
 // Sets `name`'s macro (0 for none: a poisoned name then gets its own record back, as pp_poison makes it).
 static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
 {
@@ -986,6 +1020,10 @@ static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
     else
     {
         pp->is_macro[name / 64] &= ~(1ull << (name % 64));
+    }
+    if (!pp->options.no_history)
+    {
+        pp_diagnostic_macro_change(pp, name, id);
     }
 }
 
@@ -3743,7 +3781,11 @@ BUSTER_INLINE bool pp_paste_with(Preprocessor* pp, PPToken left, PPToken right, 
                 { .location = left.location, .origin = left.origin },
                 { .location = right.location, .origin = right.origin },
             };
-            result->origin = pp_history_generated(pp, PP_GENERATED_PASTE, location, pp->history_spelling, sources, 2);
+            const bool pasted_left = (left.origin & ~BUSTER_PP_ORIGIN_INDEX) == BUSTER_PP_ORIGIN_GENERATED;
+            const PPGenerated* previous = pasted_left ? &pp->generated[(left.origin & BUSTER_PP_ORIGIN_INDEX) - 1] : NULL;
+            const uint32_t anchor = previous != NULL && previous->kind == PP_GENERATED_PASTE && previous->expansion == pp->history_current ?
+                                    previous->anchor : pp->history_spelling;
+            result->origin = pp_history_generated(pp, PP_GENERATED_PASTE, location, anchor, sources, 2);
         }
         else if (!pp->options.assembly)
         {
@@ -11105,7 +11147,7 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
         }
         else if (length != BUSTER_PP_NONE && !known)
         {
-            pp_diagnose_group(pp, option ? PP_WARNING_UNKNOWN_WARNING_OPTION : PP_WARNING_UNKNOWN_PRAGMAS, location, "%s%.*s%s",
+            pp_diagnose_group(pp, option ? PP_WARNING_UNKNOWN_WARNING_OPTION : PP_WARNING_UNKNOWN_PRAGMAS, tokens->locations[begin + 1], "%s%.*s%s",
                               option ? "unknown warning group '" : "pragma diagnostic expected option name (e.g. \"-W", (int)length, (const char*)name,
                               option ? "', ignored" : "\")");
         }
@@ -11124,7 +11166,7 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
     else
     {
         uint32_t diagnostic_location = begin < end ? tokens->locations[begin] : location;
-        const uint32_t range = pop && begin < end ? pp_find_range(pp, diagnostic_location) : BUSTER_PP_NONE;
+        const uint32_t range = begin < end && tokens->kinds[begin] == C_TOKEN_RAW_IDENTIFIER ? pp_find_range(pp, diagnostic_location) : BUSTER_PP_NONE;
         if (range != BUSTER_PP_NONE)
         {
             const PPRange* source = pp->ranges + range;
@@ -11323,13 +11365,17 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
                           uint32_t end, uint32_t location, bool from_operator)
 {
     const uint32_t file = pp_current_file(pp);
+    const uint32_t saved_origin = pp->diagnostic_origin;
+    const bool generated = from_operator && names_begin < operands;
+    const uint32_t diagnostic_location = generated ? names->locations[names_begin] : location;
+    pp->diagnostic_origin = generated ? pp_stack_token(names, names_begin).origin : saved_origin;
     switch (kind)
     {
         case PP_PRAGMA_ONCE:
         {
             if (begin < end)
             {
-                pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, location, "extra tokens at end of #pragma once directive");
+                pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, generated ? tokens->locations[begin] : location, "extra tokens at end of #pragma once directive");
             }
             if (file != BUSTER_PP_NONE && file != pp->main_file)
             {
@@ -11337,7 +11383,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             }
             else
             {
-                pp_diagnose_group(pp, PP_WARNING_PRAGMA_ONCE_OUTSIDE_HEADER, location, "#pragma once in main file");
+                pp_diagnose_group(pp, PP_WARNING_PRAGMA_ONCE_OUTSIDE_HEADER, diagnostic_location, "#pragma once in main file");
             }
         } break;
         case PP_PRAGMA_QUIET:
@@ -11394,7 +11440,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             }
             else
             {
-                pp_diagnose_group(pp, PP_WARNING_PRAGMA_SYSTEM_HEADER_OUTSIDE_HEADER, location, "#pragma system_header ignored in main file");
+                pp_diagnose_group(pp, PP_WARNING_PRAGMA_SYSTEM_HEADER_OUTSIDE_HEADER, generated && names_begin + 1 < operands ? names->locations[names_begin + 1] : location, "#pragma system_header ignored in main file");
             }
         } break;
         case PP_PRAGMA_DEPENDENCY:
@@ -11464,6 +11510,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             pp_emit_pragma(pp, names, names_begin, end, C_NAME_PRAGMA, location, from_operator);
         } break;
     }
+    pp->diagnostic_origin = saved_origin;
 }
 
 // A pragma's tokens [begin, end) of pp->arguments (after `pragma`), or an #ident's (`ident`): the ones the preprocessor
@@ -15547,6 +15594,7 @@ static void pp_history_record(Preprocessor* pp, bool report)
         pp->eval_method_uses = replay->eval_method_uses;
         pp->eval_method_use_count = replay->eval_method_use_count;
         pp->eval_method_use_capacity = replay->eval_method_use_capacity;
+        pp->diagnostic_macro_events = replay->diagnostic_macro_events;
         // The include stack the replay's diagnostics printed last, as the unit's own run would have left it: a later
         // diagnostic prints "In file included from" only for another one (pp_diagnostic_includes).
         pp->diagnostic_include_range = replay->diagnostic_include_range;
@@ -15641,6 +15689,27 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_history_ensure(Preprocessor* pp)
         pp_history_record(pp, false);
     }
     return pp->history != 0;
+}
+
+BUSTER_PREPROCESSOR_ENTRY bool pp_diagnostic_macro_defined(Preprocessor* pp, const char* name, uint32_t publication_token)
+{
+    bool defined = false;
+    if (pp_history_ensure(pp) && !pp->history_failed)
+    {
+        const IdentId id = intern_find(pp->table, (const uint8_t*)name, (uint32_t)strlen(name));
+        const PPDiagnosticMacroEvent* event = pp->diagnostic_macro_events;
+        bool found = false;
+        while (event != NULL && !found)
+        {
+            found = event->name == id && event->token <= publication_token;
+            if (found)
+            {
+                defined = event->defined;
+            }
+            event = event->previous;
+        }
+    }
+    return defined;
 }
 
 // A file's prepared token columns forgotten (pp_release_file_columns): the kinds, starts, values and leading-space

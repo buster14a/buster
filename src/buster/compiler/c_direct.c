@@ -2625,8 +2625,11 @@ typedef long (*CDirectTestAsmPointer)(void*);
 
 #if !__has_feature(memory_sanitizer)
 // The object's code of `name`, at its place in a copy of its section that may run, or NULL when the object has no
-// such function or relocates its section. `*mapping` and `*mapped` are the copy, for munmap. The copy starts 64 bytes
-// into its pages: UndefinedBehaviorSanitizer's check of a call through a pointer reads the 8 bytes before the function.
+// such function or relocates its section other than to one section's constants. `*mapping` and `*mapped` are the copy,
+// for munmap. The copy starts 64 bytes into its pages: UndefinedBehaviorSanitizer's check of a call through a pointer
+// reads the 8 bytes before the function. PC-relative references to another section's symbol (R_X86_64_PC32 against
+// .rodata, as a conversion to unsigned long loads 2^63) are resolved in the copy, which holds that section after the
+// code (#3659).
 static const void* c_direct_test_code(const char* path, const char* name, void** mapping, size_t* mapped)
 {
     const void* result = NULL;
@@ -2650,19 +2653,61 @@ static const void* c_direct_test_code(const char* path, const char* name, void**
     const Elf64_Ehdr* header = (const Elf64_Ehdr*)bytes;
     const bool headers = bytes != NULL && header->e_shoff + (uint64_t)header->e_shnum * sizeof(Elf64_Shdr) <= (uint64_t)size && sym.section < header->e_shnum;
     const Elf64_Shdr* table = headers ? (const Elf64_Shdr*)(bytes + header->e_shoff) : NULL;
-    bool relocated = false;
+    const Elf64_Shdr* relocations = NULL;
+    uint32_t relocation_tables = 0;
     for (uint16_t i = 0; headers && i < header->e_shnum; i += 1)
     {
-        relocated = relocated || ((table[i].sh_type == SHT_RELA || table[i].sh_type == SHT_REL) && table[i].sh_info == sym.section && table[i].sh_size != 0);
+        if ((table[i].sh_type == SHT_RELA || table[i].sh_type == SHT_REL) && table[i].sh_info == sym.section && table[i].sh_size != 0)
+        {
+            relocations = table + i;
+            relocation_tables += 1u;
+        }
     }
-    const Elf64_Shdr* section = headers && !relocated ? table + sym.section : NULL;
-    const bool fits = section != NULL && section->sh_type == SHT_PROGBITS && section->sh_offset + section->sh_size <= (uint64_t)size &&
-                      sym.value + sym.size <= section->sh_size;
-    const size_t length = fits ? (size_t)((64u + section->sh_size + 4095u) & ~(uint64_t)4095u) : 0u;
+    const Elf64_Shdr* section = headers ? table + sym.section : NULL;
+    bool fits = section != NULL && section->sh_type == SHT_PROGBITS && section->sh_offset + section->sh_size <= (uint64_t)size &&
+                sym.value + sym.size <= section->sh_size;
+    // One table of R_X86_64_PC32 entries, each against the symbol of one other section with contents.
+    const Elf64_Rela* entries = NULL;
+    uint64_t entry_count = 0;
+    uint16_t data_index = SHN_UNDEF;
+    if (fits && relocation_tables != 0)
+    {
+        fits = relocation_tables == 1u && relocations->sh_type == SHT_RELA && relocations->sh_link < header->e_shnum &&
+               relocations->sh_offset + relocations->sh_size <= (uint64_t)size;
+        const Elf64_Shdr* symbols = fits ? table + relocations->sh_link : NULL;
+        fits = fits && symbols->sh_offset + symbols->sh_size <= (uint64_t)size;
+        entries = fits ? (const Elf64_Rela*)(bytes + relocations->sh_offset) : NULL;
+        entry_count = fits ? relocations->sh_size / sizeof(Elf64_Rela) : 0u;
+        for (uint64_t k = 0; fits && k < entry_count; k += 1)
+        {
+            const uint64_t index = ELF64_R_SYM(entries[k].r_info);
+            const Elf64_Sym* target = (const Elf64_Sym*)(bytes + symbols->sh_offset) + index;
+            fits = ELF64_R_TYPE(entries[k].r_info) == R_X86_64_PC32 && index < symbols->sh_size / sizeof(Elf64_Sym) &&
+                   ELF64_ST_TYPE(target->st_info) == STT_SECTION && target->st_value == 0 && target->st_shndx != SHN_UNDEF &&
+                   target->st_shndx != sym.section && target->st_shndx < header->e_shnum &&
+                   (data_index == SHN_UNDEF || target->st_shndx == data_index) && entries[k].r_offset + 4u <= section->sh_size;
+            data_index = fits ? target->st_shndx : data_index;
+        }
+    }
+    const Elf64_Shdr* data = data_index != SHN_UNDEF ? table + data_index : NULL;
+    fits = fits && (data == NULL || (data->sh_type == SHT_PROGBITS && data->sh_addralign <= 64u && data->sh_offset + data->sh_size <= (uint64_t)size));
+    const uint64_t data_at = fits ? (64u + section->sh_size + 63u) & ~(uint64_t)63u : 0u;
+    const uint64_t data_size = data != NULL ? data->sh_size : 0u;
+    const size_t length = fits ? (size_t)((data_at + data_size + 4095u) & ~(uint64_t)4095u) : 0u;
     uint8_t* code = length != 0 ? (uint8_t*)mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : (uint8_t*)MAP_FAILED;
     if (code != (uint8_t*)MAP_FAILED)
     {
         memcpy(code + 64, bytes + section->sh_offset, (size_t)section->sh_size);
+        if (data != NULL)
+        {
+            memcpy(code + data_at, bytes + data->sh_offset, (size_t)data_size);
+        }
+        for (uint64_t k = 0; k < entry_count; k += 1)
+        {
+            // S + A - P: the section's copy, whose symbol's value is 0, plus the addend, from the field's place.
+            const int32_t field = (int32_t)((int64_t)data_at + entries[k].r_addend - (int64_t)(64u + entries[k].r_offset));
+            memcpy(code + 64 + entries[k].r_offset, &field, 4);
+        }
         if (mprotect(code, length, PROT_READ | PROT_EXEC) == 0)
         {
             result = code + 64 + sym.value;
@@ -3535,6 +3580,165 @@ static bool c_direct_test_unevaluated_registers(const char* obj_path)
     return ok;
 }
 
+// What the called function received: its first argument's bits (seven flags for the stack case) and its last.
+typedef struct CDirectTestFlagsSeen CDirectTestFlagsSeen;
+struct CDirectTestFlagsSeen
+{
+    uint64_t bits;
+    int last;
+};
+
+// MemorySanitizer can't see what uninstrumented code passes, so the functions are only compiled there, and the callees
+// left out.
+#if !__has_feature(memory_sanitizer)
+static CDirectTestFlagsSeen c_direct_test_flags_seen;
+
+static int c_direct_test_flags_bool(bool value, int last)
+{
+    c_direct_test_flags_seen = (CDirectTestFlagsSeen){ .bits = value, .last = last };
+    return 0;
+}
+
+static int c_direct_test_flags_long(long value, int last)
+{
+    c_direct_test_flags_seen = (CDirectTestFlagsSeen){ .bits = (uint64_t)value, .last = last };
+    return 0;
+}
+
+static int c_direct_test_flags_unsigned(unsigned long value, int last)
+{
+    c_direct_test_flags_seen = (CDirectTestFlagsSeen){ .bits = value, .last = last };
+    return 0;
+}
+
+static int c_direct_test_flags_double(double value, int last)
+{
+    uint64_t bits = 0;
+    memcpy(&bits, &value, 8);
+    c_direct_test_flags_seen = (CDirectTestFlagsSeen){ .bits = bits, .last = last };
+    return 0;
+}
+
+static int c_direct_test_flags_stack(bool b0, bool b1, bool b2, bool b3, bool b4, bool b5, bool b6, int last)
+{
+    const uint64_t bits = (uint64_t)b0 | (uint64_t)b1 << 1 | (uint64_t)b2 << 2 | (uint64_t)b3 << 3 | (uint64_t)b4 << 4 | (uint64_t)b5 << 5 | (uint64_t)b6 << 6;
+    c_direct_test_flags_seen = (CDirectTestFlagsSeen){ .bits = bits, .last = last };
+    return 0;
+}
+#endif
+
+// The callee is passed as an integer: every function pointer type goes in a register as one does.
+typedef int (*CDirectTestFlags)(uintptr_t callee, long x, double d, int a, int b);
+
+// A call's last argument that is a comparison stays in the flags while the earlier arguments are converted to their
+// parameters' types (#3659). Every conversion that sets the flags materializes it first: an integer's, a 128-bit
+// integer's and a floating value's to _Bool, an unsigned long's to double and a double's to unsigned long, and a
+// bit-field's extraction; the comparison of two ints or of two doubles, the last of eight arguments on the stack.
+// A conversion to __int128 does too, but the direct path passes an __int128 argument wrongly, and isn't run here.
+static bool c_direct_test_flags_arguments(const char* obj_path)
+{
+    static const char source[] =
+        "struct Bits { int v : 5; unsigned u : 7; };\n"
+        "int t_int(int (*f)(_Bool, int), long x, double d, int a, int b) { int i = (int)x; return f(i, a < b); }\n"
+        "int t_not(int (*f)(_Bool, int), long x, double d, int a, int b) { int i = (int)x; return f(i, !(a < b)); }\n"
+        "int t_long(int (*f)(_Bool, int), long x, double d, int a, int b) { return f(x, a == b); }\n"
+        "int t_char(int (*f)(_Bool, int), long x, double d, int a, int b) { signed char c = (signed char)x; return f(c, a >= b); }\n"
+        "int t_i128(int (*f)(_Bool, int), long x, double d, int a, int b) { __int128 w = x; return f(w, a < b); }\n"
+        "int t_double(int (*f)(_Bool, int), long x, double d, int a, int b) { return f(d, a < b); }\n"
+        "int t_float(int (*f)(_Bool, int), long x, double d, int a, int b) { float g = (float)d; return f(g, a > b); }\n"
+        "int t_to_double(int (*f)(double, int), long x, double d, int a, int b) { unsigned long u = (unsigned long)x; return f(u, a < b); }\n"
+        "int t_to_unsigned(int (*f)(unsigned long, int), long x, double d, int a, int b) { return f(d, a <= b); }\n"
+        "int t_bits(int (*f)(long, int), long x, double d, int a, int b) { struct Bits s = { 0, 0 }; s.v = (int)x; return f(s.v, a < b); }\n"
+        "int t_bits_bool(int (*f)(_Bool, int), long x, double d, int a, int b) { struct Bits s = { 0, 0 }; s.u = (unsigned)x; return f(s.u, a != b); }\n"
+        "int t_double_cmp(int (*f)(_Bool, int), long x, double d, int a, int b) { int i = (int)x; return f(i, d < a); }\n"
+        "int t_stack(int (*f)(_Bool, _Bool, _Bool, _Bool, _Bool, _Bool, _Bool, int), long x, double d, int a, int b)\n"
+        "{\n"
+        "    int i = (int)x;\n"
+        "    return f(i, i + 1, i - 1, i, i, i, i, a < b);\n"
+        "}\n";
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+#if !__has_feature(memory_sanitizer)
+    static const char* const names[] = {
+        "t_int", "t_not", "t_long", "t_char", "t_i128", "t_double", "t_float", "t_to_double", "t_to_unsigned", "t_bits", "t_bits_bool",
+        "t_double_cmp", "t_stack",
+    };
+    enum { count = sizeof(names) / sizeof(names[0]) };
+    void* mappings[count] = { 0 };
+    size_t mapped[count] = { 0 };
+    CDirectTestFlags code[count] = { 0 };
+    for (uint32_t i = 0; ok && i < (uint32_t)count; i += 1)
+    {
+        code[i] = (CDirectTestFlags)(uintptr_t)c_direct_test_code(obj_path, names[i], mappings + i, mapped + i);
+        ok = code[i] != NULL;
+    }
+    static const long xs[] = { -5, -2, -1, 0, 1, 2, 7, 15 };
+    // Each double, for the unsigned long, is one it holds; a NaN is true.
+    static const double ds[] = { 0.0, -0.0, 0.5, 3.0, 1e19, 1.5e19, -2.5, __builtin_nan("") };
+    enum { unsigned_ds = 6 };
+    for (uint32_t k = 0; ok && k < 9u * (uint32_t)(sizeof(xs) / sizeof(xs[0])); k += 1)
+    {
+        const int a = (int)(k % 3u);
+        const int b = (int)(k / 3u % 3u);
+        const long x = xs[k / 9u];
+        const double d = ds[k / 9u];
+        const int i = (int)x;
+        const struct { signed v : 5; unsigned u : 7; } bits = { (signed)x, (unsigned)x };
+        const double u = (double)(unsigned long)x;
+        uint64_t u_bits = 0;
+        memcpy(&u_bits, &u, 8);
+        const struct
+        {
+            uintptr_t callee;
+            uint64_t bits;
+            int last;
+        } expected[count] = {
+            { (uintptr_t)c_direct_test_flags_bool, i != 0, a < b },
+            { (uintptr_t)c_direct_test_flags_bool, i != 0, !(a < b) },
+            { (uintptr_t)c_direct_test_flags_bool, x != 0, a == b },
+            { (uintptr_t)c_direct_test_flags_bool, (signed char)x != 0, a >= b },
+            { (uintptr_t)c_direct_test_flags_bool, x != 0, a < b },
+            { (uintptr_t)c_direct_test_flags_bool, d != 0.0, a < b },
+            { (uintptr_t)c_direct_test_flags_bool, (float)d != 0.0f, a > b },
+            { (uintptr_t)c_direct_test_flags_double, u_bits, a < b },
+            { (uintptr_t)c_direct_test_flags_unsigned, k / 9u < unsigned_ds ? (uint64_t)d : 0u, a <= b },
+            { (uintptr_t)c_direct_test_flags_long, (uint64_t)(long)bits.v, a < b },
+            { (uintptr_t)c_direct_test_flags_bool, bits.u != 0, a != b },
+            { (uintptr_t)c_direct_test_flags_bool, i != 0, d < a },
+            { (uintptr_t)c_direct_test_flags_stack, (uint64_t)(i != 0) * 0x79u | (uint64_t)(i + 1 != 0) << 1 | (uint64_t)(i - 1 != 0) << 2, a < b },
+        };
+        for (uint32_t f = 0; ok && f < (uint32_t)count; f += 1)
+        {
+            // The conversion of a double to unsigned long runs only on doubles it holds.
+            if (f != 8u || k / 9u < unsigned_ds)
+            {
+                c_direct_test_flags_seen = (CDirectTestFlagsSeen){ .bits = UINT64_MAX, .last = -1 };
+                code[f](expected[f].callee, x, d, a, b);
+                ok = c_direct_test_flags_seen.bits == expected[f].bits && c_direct_test_flags_seen.last == expected[f].last;
+                if (!ok)
+                {
+                    fprintf(stderr, "test-direct: %s(%ld, %g, %d, %d) passed %#llx and %d, not %#llx and %d\n", names[f], x, d, a, b,
+                            (unsigned long long)c_direct_test_flags_seen.bits, c_direct_test_flags_seen.last, (unsigned long long)expected[f].bits,
+                            expected[f].last);
+                }
+            }
+        }
+    }
+    for (uint32_t i = 0; i < (uint32_t)count; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+    if (!ok)
+    {
+        fprintf(stderr, "test-direct: a call's comparison argument took an earlier conversion's flags\n");
+    }
+    return ok;
+}
+
 typedef int (*CDirectTestPick)(int, int);
 typedef double (*CDirectTestMix)(int);
 typedef long (*CDirectTestWide)(int);
@@ -4391,6 +4595,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL a sizeof operand's registers\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_flags_arguments(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL a call's comparison argument\n");
         failed += 1u;
     }
 
