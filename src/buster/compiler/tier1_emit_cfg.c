@@ -5101,6 +5101,10 @@ static uint32_t tier1_emit_cfg_callee_used(const Tier1CfgAllocation* cfg, uint32
 }
 
 #include "tier1_emit_exchange.c"
+#include "tier1_emit_recolor.c"
+#include "tier1_emit_recolor_cost.c"
+#include "tier1_emit_recolor_path.c"
+#include "tier1_emit_recolor_policy.c"
 
 // An allocation's outcome as the function's: a constraint the allocator met is TIER1_EMIT_ALLOCATION; and without fixed
 // ranges there are no splits, each class's temporary slot a frame row of its own, so an allocation with either is too.
@@ -5435,6 +5439,10 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 256u) != 0)
     {
         error = tier1_emit_cfg_exchange_weighted(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
+    }
+    if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 512u) != 0)
+    {
+        error = tier1_emit_cfg_recolor_parameters(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
     }
     // A leaf whose values took its callee-saved registers (tier1_emit_cfg_leaf) saves them as a function that calls does.
     emitted->callee_registers |= error == TIER1_EMIT_OK && emitted->cfg_input.avoided_general != 0 ? emitted->leaf_registers : 0;
