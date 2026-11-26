@@ -1478,6 +1478,7 @@ attempts, even when a later attempt completes. This is the native correctness
 and full measurement verdict; it does not certify the snapshot's separate
 deferred full hosted/sanitizer/fuzz run. It uses the existing ledger and does
 not detect missing past cycles or change admission, retry or recovery policy.
+The independent calendar observer below supplies that historical observation.
 
 **Capacity.** In late October main gained 31 to 82 first-parent commits a day.
 Nightly runs are bounded at 25 minutes, but PR jobs took 4 to 5 minutes. A
@@ -1500,6 +1501,141 @@ none, and a person dispatches `purpose: full` instead.
 - the ledger's publication token;
 - whether the coordinator's capacity drains the observed arrivals, which only
   enabled cycles will tell.
+
+### Independent calendar observer (#3627)
+
+`.github/workflows/nightly-observe.yml` observes closed nightly cycles on hosted
+runners at 10:17, 14:17 and 20:17 Europe/Madrid, and on manual dispatch. Its
+schedule and concurrency group are separate from the coordinator's; a green,
+failed, cancelled or missing coordinator does not decide its result. It reads
+the existing ledger, coverage artifacts and Actions run/job evidence through
+`tools/ci/nightly-observe.sh`; `nightly observe` makes the calendar and verdict
+decisions in C. It dispatches no work, changes no ledger row, and holds no
+hardware lock. Incomplete and unavailable observations remain visible in its
+job result, summary and retained artifacts.
+
+**Expected dates and deadlines.** Scheduled observation starts at the fixed
+date **2026-11-07**, the start of #3627's production-audit cohort. It enumerates
+every Madrid calendar date through the latest closed hardware window, including
+dates with no pin, no admission or no publication. After noon it still observes
+the window that ended that morning; the coordinator's switch to preparing
+tomorrow does not advance this observer past today's obligation. Calendar
+arithmetic uses Madrid's civil dates through both DST transitions. The limit
+is 1,024 cycles; exceeding it reports unavailable evidence rather than
+silently dropping the oldest dates. A manual `--since` subrange is diagnostic
+and is identified as a partial observation, not the scheduled history's pass.
+
+The **hardware completion deadline is 08:00 Europe/Madrid**. An immutable
+worker with the older 04:00-07:00 contract must still meet its own narrower
+window; its source is read as data, never edited or executed by the observer.
+The **publication/reporting grace is two hours**, ending at **10:00 Madrid**.
+That grace allows coverage evidence to arrive after hardware has finished; it
+never extends the measurement window. The native job's completion time and
+the coverage artifact's publication time are separate observations. A workflow's
+`updated_at` can include hosted reporting after measurement, so it cannot prove
+when hardware finished. A native job that completed late remains late even if
+its full record subsequently arrives. An on-time native job with a late record
+can gain confirmed measurement evidence while its reporting delay remains
+visible.
+
+**Evidence and verdicts.** Each expected date retains its pin SHA and
+coordinator, measured SHA, exact run/attempt, declared coverage, native
+qualification, hardware completion and publication observations. The latest
+admitted snapshot attempt decides the date's current measurement observation,
+as in the coordinator's snapshot report; a newer attempt awaiting evidence
+cannot inherit an earlier attempt's success. Earlier attempts and their
+failures, interruptions and recorded operator overrides remain in the report.
+
+| Observation | Meaning |
+| --- | --- |
+| `complete-at-pin` | A full native measurement of the cycle's original pin has matching evidence and met the hardware deadline. |
+| `complete-substitute` | A full native measurement of an eligible substitute has matching evidence, names the original pin and met the hardware deadline. |
+| `failed` | The admitted snapshot failed, was blocked or otherwise did not meet the full measurement obligation; the evidence identifies the cause. |
+| `interrupted` | The admitted snapshot was cancelled, timed out or otherwise ended without completing. |
+| `not-attempted` | The observed cycle has no admitted snapshot measurement; the report distinguishes a missing pin from preparation alone. |
+| `awaiting-evidence` | An admission is visible but its full, matching result cannot yet be established. |
+| `evidence-unavailable` | The overall report cannot substantiate its cohort because a source read failed, is stale, is incomplete, expired or malformed, or exceeded a collection limit. Affected dates remain `awaiting-evidence`; none supplies a pass. |
+
+A completed native measurement needs the exact attempt's valid coverage
+record: `purpose=snapshot`, its cycle's `admit` request, the matching pin and
+measured commit, `hardware=admit`, `coverage=full`, a full measurement
+selection, `native_evidence=run`, `native=passed`,
+`measurement_evidence=run` and a successful benchmark result. The matching
+native job must also succeed within the worker's window. Per-attempt job
+evidence and the attempt's start time prevent an inherited successful job from
+a previous attempt from qualifying a rerun. Missing or inconsistent identity
+remains unavailable evidence.
+
+The full selection is `measure=all`, or the existing snapshot convention
+`measure=-` with `changes_result=skipped`: snapshots skip the selector, and
+the native job defaults the missing selector output to `all`. The record
+preserves that absence rather than synthesizing a selector result. An explicit
+targeted selection, or a missing selection without a skipped selector, cannot
+prove the full measurement obligation. The workflow contract is checked by
+the C tool's source-policy fixtures.
+
+The snapshot's deferred full hosted/sanitizer/fuzz preparation is reported
+separately. An admitted snapshot may reuse plain hosted evidence and therefore
+have `scope=plain`; that says nothing about the full native measurement's
+coverage. A backlog's targeted success, its native smoke, a manual full run
+without the cycle's snapshot identity, and the coordinator's result cannot
+replace the daily obligation. The observer rereads coverage artifacts even
+when the coordinator already harvested a missing-record fallback for that
+attempt. A late record can therefore resolve awaiting evidence without
+rewriting the immutable ledger or hiding the earlier observation.
+
+**Collection and retention.** A current verdict requires a collection no more
+than 15 minutes old and a retained coordinator ledger artifact published no
+more than 36 hours old. The artifact's creation time supplies that publication
+timestamp; a failed or cancelled coordinator can still retain useful evidence.
+Collection has a 2,000-request and 720-second budget, with bounded input sizes
+and pagination. Partial listings, exhausted limits, unreadable jobs or
+artifacts, and stale sources are unavailable evidence, never empty successful
+observations. The report exposes its expected date range, collection time and
+source limitations so that its own stale output cannot be mistaken for a
+current pass. Multiple schedules permit later observation of a missed run;
+they do not guarantee delivery of GitHub schedules. If no fresh observer
+report exists, treat monitoring as unavailable and run the read-only observer
+manually.
+
+The workflow retains the report and its collected inputs for **90 days**.
+These are replay inputs and observation receipts, not another nightly ledger.
+Keep raw evidence needed longer in `buster-performance` before artifacts
+expire. Once required evidence expires, an old date remains unavailable
+unless retained inputs can substantiate it; the fixed start date does not
+move to erase that gap. Replaying inputs uses their recorded observation
+epoch and answers what was known then, not whether those inputs are fresh
+today. See [the commands and deterministic
+fixtures](commands/ci.md#observe-closed-nightly-calendar-cycles).
+
+**Bounded recovery.** First inspect the exact cycle, pin, run/attempt and
+failure, then record the operator's decision and reason on the associated
+issue or run discussion. Keep that decision linked to the original observer
+receipt and failed or interrupted attempt. The observer never retries a
+measurement itself.
+
+Within the original window, an operator may request **at most one full retry
+for that cycle**, after checking that no admission is still running and that
+the existing worker and coordinator bounds leave enough time in both windows.
+Retry the existing immutable snapshot through its normal checks, retaining
+its pin, full inventory and new attempt identity. Record the reason in the
+discussion; do not use an out-of-window `override` to make a retry fit. An
+early failure still consumes this retry allowance, and an unknown worker
+window or insufficient time leaves the obligation incomplete.
+
+After the hardware deadline, the missed calendar obligation stays missed.
+Link a later successful full run as recovery evidence on its actual date;
+neither it nor a later targeted completion repairs the earlier deadline.
+A lost date with no admission follows the same path. An immutable historical
+worker that contains a compiler or preparation failure remains historical:
+its owner fixes a new revision, and a later eligible full cycle demonstrates
+recovery. No recovery edits historical workers, weakens the inventory, widens
+the window, or suppresses the original failure or operator decision.
+
+The deterministic fixtures verify the observer's implementation without
+hardware. Production completion and timely report delivery still require
+separate observation after deployment; they are not established by these
+fixtures.
 
 ## Sanitizer builds and detection policy
 

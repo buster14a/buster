@@ -278,6 +278,10 @@ struct CheckInitDiagnostic
     // A rejected compound literal and the expression nodes depending on it have no value. The diagnostic driver
     // suppresses their derivative reports through this private mask; the original checked stream stays rejected.
     uint8_t* invalid_nodes;
+    // A file-scope definition whose initializer has no valid value does not get -Wmissing-variable-declarations.
+    // Token-indexed in output, only when that warning is selected and such an initializer was found (#2222).
+    // A nonconstant initializer or a relaxed pointer/integer conversion still permits that warning.
+    uint8_t* invalid_variable_definitions;
     CheckInitStatus status;
     TypeId failed_type;
     TypeId recovered_type;
@@ -634,6 +638,16 @@ static bool check_init_converted_nonconstant(const CheckInput* input, const Chec
     return check_init_value_nonconstant(stream, types, target, input->graph.operand0[initialize]);
 }
 
+// FinalizeDeclaration still checks a file-scope variable after a nonconstant initializer or a conversion clang
+// diagnoses but keeps. An initializer of no valid value instead marks the declaration invalid (#2222).
+static bool check_init_invalid_variable_definition(const TypeTable* types, const CheckStream* stream, CheckInitStatus status, TypeId target,
+                                                   uint32_t source, TypeId recovered)
+{
+    const bool relaxed = status == CHECK_INIT_INVALID && recovered == 0 && source != 0 &&
+                         check_init_recoverable_conversion(types, stream, target, source - 1);
+    return status != CHECK_INIT_OK && status != CHECK_INIT_NON_CONSTANT && !relaxed;
+}
+
 // Diagnose complete roots before before_token (exclusive). A report elsewhere in the unit no longer cuts the
 // scan: the declaration that holds it is excluded by its nodes' completeness instead, so a later declaration's
 // independent warnings survive (#992).
@@ -788,6 +802,7 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
     }
     bool recovered_elements = false;
     bool rejected_literal = false;
+    uint8_t* invalid_variable_definitions = NULL;
     CheckInitWarningCollector collector = { 0 };
     if (valid && !check_init_warning_collector(&collector, warnings, parser->tokens.count, scratch))
     {
@@ -911,6 +926,15 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
         bool discarded = poisoned || (placed && !eligible && (initialize >= stream->count || stream->diagnostics[initialize] != CHECK_DIAG_INCOMPATIBLE ||
                          !check_init_recoverable_conversion(types, stream, input->declared_types[declaration], input->graph.operand0[initialize]) ||
                          (static_storage && check_init_converted_nonconstant(input, stream, types, input->declared_types[declaration], initialize))));
+        // The initializer warning's declaration candidates are file-scope objects with external linkage. Compound
+        // literals never name one, and the counted_by-only walk has no warning publication to retain this for.
+        const bool variable = input->missing_variable_warnings && counted == NULL &&
+                              check_input_linkage(input->declaration_bits, declaration) == 2 &&
+                              !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
+        const bool relaxed = variable && placed && !eligible && !poisoned && initialize < stream->count &&
+                             stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
+                             check_init_recoverable_conversion(types, stream, input->declared_types[declaration], input->graph.operand0[initialize]);
+        bool invalid_variable = variable && (!placed || poisoned || (!eligible && !relaxed));
         bool initialized = false;
         if (eligible)
         {
@@ -936,12 +960,15 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
             initialized = accepted;
             if (!accepted)
             {
+                invalid_variable |= variable && check_init_invalid_variable_definition(types, stream, plan.status, plan.failed_type, plan.failed_source, 0);
                 discarded |= plan.status != CHECK_INIT_INVALID || plan.failed_source == 0 ||
                              !check_init_recoverable_conversion(types, stream, plan.failed_type, plan.failed_source - 1) ||
                              (static_storage && check_init_value_nonconstant(stream, types, plan.failed_type, plan.failed_source - 1));
                 for (uint32_t failure = failure_start; failure < sink.count; failure += 1)
                 {
                     const CheckInitFailure* rejected = failures + failure;
+                    invalid_variable |= variable && check_init_invalid_variable_definition(types, stream, rejected->status, rejected->failed_type,
+                                                                                            rejected->failed_source, rejected->recovered_type);
                     discarded |= rejected->recovered_type != 0 || !check_init_recoverable_conversion(types, stream, rejected->failed_type, rejected->failed_source - 1) ||
                                  (static_storage && check_init_value_nonconstant(stream, types, rejected->failed_type, rejected->failed_source - 1));
                 }
@@ -999,6 +1026,26 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
             }
             arena_pop_to(output, mark);
         }
+        if (valid && invalid_variable)
+        {
+            if (invalid_variable_definitions == NULL)
+            {
+                invalid_variable_definitions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->token_count);
+                valid = invalid_variable_definitions != NULL;
+                if (valid)
+                {
+                    memset(invalid_variable_definitions, 0, input->token_count);
+                }
+                else
+                {
+                    result->status = CHECK_INIT_RESOURCE;
+                }
+            }
+            if (valid)
+            {
+                invalid_variable_definitions[declaration] = 1;
+            }
+        }
         if (valid && placed && !initialized && discarded && compounds)
         {
             recovered_elements |= check_init_accepted_compound_commas(input, complete, rejected_compounds, declaration, begin, end, rejected_roots);
@@ -1042,6 +1089,19 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
         result->status = CHECK_INIT_RESOURCE;
     }
     result->failures = kept;
+    if (valid && invalid_variable_definitions != NULL)
+    {
+        result->invalid_variable_definitions = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, input->token_count);
+        if (result->invalid_variable_definitions != NULL)
+        {
+            memcpy(result->invalid_variable_definitions, invalid_variable_definitions, input->token_count);
+        }
+        else
+        {
+            valid = false;
+            result->status = CHECK_INIT_RESOURCE;
+        }
+    }
     if (valid && rejected_literal && stream->count != 0)
     {
         result->invalid_nodes = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, stream->count);
@@ -1080,6 +1140,7 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
         result->failures = NULL;
         result->rejected_roots = NULL;
         result->invalid_nodes = NULL;
+        result->invalid_variable_definitions = NULL;
     }
     if (scratch != 0)
     {

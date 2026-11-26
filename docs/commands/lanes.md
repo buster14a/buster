@@ -109,6 +109,10 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   last page, past its ranges, always does (the test says what the kernel
   did and the ticks: one before 6.7, one without huge pages for a file's
   pages, or a process with them off refuses);
+- the executable's compact writable startup state (#2886), where the static
+  lld link places it: the small arena and exit-helper globals share one 4 KB
+  page, each object begins on a cache line, the page stays within the linker's
+  `.bss` bounds, and the existing base-page advice covers it;
 - thread counts, which the teams and sessions checks compare: a thread in
   `/proc/self/task` counts unless its stat's flags say it has begun to exit
   (`PF_EXITING`), as a thread just joined may still be listed there. The

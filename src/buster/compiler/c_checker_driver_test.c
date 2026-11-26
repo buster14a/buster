@@ -9407,6 +9407,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_reserved_macro_driver_test.c"
 #include "c_check_unused_macros_driver_test.c"
 #include "c_check_gnu_line_marker_driver_test.c"
+#include "c_check_missing_variable_driver_test.c"
 #include "c_check_integer_overflow_driver_test.c"
 #include "c_check_gnu_empty_struct_driver_test.c"
 #include "c_check_unused_but_set_driver_test.c"
@@ -9639,6 +9640,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool lazy = false;
     bool sign_compare_only = false;
     bool common_warnings_only = false;
+    // --missing-variable-only: #2222's file-scope definitions, prior extern declarations and source-policy fixtures.
+    bool missing_variable_only = false;
     // --uninitialized-only: loop initialization diagnostics with an admitted two-lane reader (#1391).
     bool uninitialized_only = false;
     // --cpu-dispatch-only: the cpu_specific and cpu_dispatch section alone (#1447).
@@ -9692,6 +9695,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool type_sugar_only = false;
     // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
     bool asm_definitions_only = false;
+    // --tier1-asm-only: asm bodies and their register results, at both tiers against Clang (#2144).
+    bool tier1_asm_only = false;
     // --call-counts-only: the call argument count section alone (#1860).
     bool call_counts_only = false;
     // --fp-contract-only: scalar contraction's command-line, pragma and native result matrix alone (#1239).
@@ -9720,6 +9725,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--common-warnings-only") == 0)
         {
             common_warnings_only = true;
+        }
+        else if (strcmp(argv[i], "--missing-variable-only") == 0)
+        {
+            missing_variable_only = true;
         }
         else if (strcmp(argv[i], "--sign-compare-only") == 0)
         {
@@ -9833,6 +9842,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             asm_definitions_only = true;
         }
+        else if (strcmp(argv[i], "--tier1-asm-only") == 0)
+        {
+            tier1_asm_only = true;
+        }
         else if (strcmp(argv[i], "--call-counts-only") == 0)
         {
             call_counts_only = true;
@@ -9889,13 +9902,13 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     const uint32_t focuses = (uint32_t)common_warnings_only + (uint32_t)sign_compare_only + (uint32_t)uninitialized_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
-                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
+                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)tier1_asm_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
                              (uint32_t)float_precision_only + (uint32_t)reach_filter_only + (uint32_t)branch_truth_only +
                              (uint32_t)constant_logical_only + (uint32_t)quiet_roots_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only +
-                             (uint32_t)stack_protector_only + (uint32_t)cf_protection_only + (uint32_t)visibility_only;
+                             (uint32_t)stack_protector_only + (uint32_t)cf_protection_only + (uint32_t)visibility_only + (uint32_t)missing_variable_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10400,6 +10413,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_call_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_syntax_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
+    if (temporary && missing_variable_only)
+    {
+        check_test_driver_missing_variable(&test, clang, executable, directory);
+    }
     if (temporary && sign_compare_only)
     {
         check_test_driver_sign_compare(&test, clang, executable, directory);
@@ -10530,6 +10547,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_asm_definitions(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
+    if (temporary && tier1_asm_only)
+    {
+        check_test_driver_tier1_asm(&test, clang, executable, directory);
+    }
     if (temporary && fp_contract_only)
     {
         check_test_driver_fp_contract(&test, clang, executable, directory);
@@ -10639,6 +10660,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_cleanup_alignment(&test, clang, executable, directory);
             check_test_driver_cleanup_chains(&test, clang, executable, directory);
         }
+        if (!lazy)
+        {
+            check_test_driver_warning_suite(&test, clang, executable, directory, "driver/warnings/cleanup-recovery", true);
+        }
         if (!lazy && check_test_driver_takes_weighing(610))
         {
             check_test_driver_fp_contract(&test, clang, executable, directory);
@@ -10735,6 +10760,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_shift_counts(&test, clang, executable, directory);
             check_test_driver_conditions(&test, clang, executable, directory);
+            check_test_driver_missing_variable(&test, clang, executable, directory);
         }
         // Each of these checks is a unit of its own, of the weight it took on a 4-CPU Xeon VM (#3399). Grouped in two units,
         // the warnings' sweeps (one added with each warning) made one part the driver's longest by far, past parallel's

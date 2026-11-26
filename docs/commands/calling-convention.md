@@ -119,6 +119,28 @@ own and never against the other, at 16-, 32- and 64-byte vectors:
   (`BUSTER_ABI_COUNTED_ARGUMENTS`), past which it leaves a call to
   `abi_assign_lanes`.
 
+The ordinary fixture checks also cover transparent unions with a larger
+slot or different alignment whose first member is a wide vector or an
+atomic value (#1844, `abi_test_transparent_values`). The matrix uses
+16/32/64-byte target registers, unions aligned to 128 or packed and aligned
+to 2, available and exhausted argument registers, named variadic values
+and unnamed arguments. It checks exact 24/40/48/56-byte payloads as well as
+32/64-byte vectors, atomic integer and floating values, the x87 stack
+value, and atomic vectors supported by that target, through both assignment
+routes.
+
+The corresponding original runtime fixtures live in
+`tests/checker/programs/transparent-union-members/` and run from
+`test-checker`'s transparent-union section at x86-64, x86-64-v3 and x86-64-v4
+(`c_check_program_transparent_members_test.c`). They call Clang's harness,
+receive calls from it through pointers, and pass both converted member
+values and union objects. Every transported payload byte and the following
+arguments contribute to the result; the union's padding does not. The
+cases include packed wide members and atomic char, long, double, long
+double, 128-bit integer and vector members. Unsupported target profiles are
+still compiled for the ordinary wide records; atomic vector cases are
+enabled only where their register width is supported.
+
 With `--cross-check`, two fixtures first check #2113's SSE/SSEUP records of
 sizes no vector register has against clang in both directions, with Tier 0
 and Tier 1, by vector and scalar paths, at x86-64, x86-64-v3 and x86-64-v4
@@ -139,6 +161,7 @@ double>`); byval and overflow copies compare every C byte, and following
 scalars check the strides. Every target is compiled and
 linked; execution is skipped only when the host lacks its features. Run from
 the repository root so the fixture paths resolve.
+
 
 The remaining `--cross-check` runs need clang 23 and GCC 15 or later on `PATH` (or
 `--clang PATH` and `--gcc PATH`; 16.2.1 is the qualified 9700X version) and

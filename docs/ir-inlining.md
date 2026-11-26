@@ -321,6 +321,14 @@ labels name its first part, and its successors' phis name its last part as
 their predecessor. A debug region of a split block has no single block any
 more and becomes unavailable; regions of other blocks follow their new IDs.
 
+An asm body's scalar result projections (#2144, `IR_ASM_RESULT`) must stay in
+the producer call's block. A general expansion between the producer and any
+of its projections is therefore refused as `IR_INLINE_BODY`; calls before or
+after that interval and straight-line expansions remain eligible. A backwards
+64-node opcode scan finds the projection intervals and checks all call sites
+once, reusing the decision sweep's temporary bytes. Projection parents remap
+through the ordinary SSA operand table when another expansion moves them.
+
 The callee's operand columns are rewritten one of two ways. Any callee but the
 vector splice's goes a node at a time (`ir_inline_splice_scalar`) through
 `ir_inline_node`, which rebases rows by operation: a fallback, which #2924's

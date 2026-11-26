@@ -767,7 +767,7 @@ struct CheckProgram
     // -march=native reads, and code generation's check of target features takes them from here.
     PredefinesHost host;
     bool host_read;
-    // Per body of a selection (check_program_select_mode), whether clang's code generation emits its function where the
+    // Per body, where a selection or late-ABI metadata needs it, whether clang's code generation emits its function where the
     // unit defines it rather than when its emission first refers to it or at the unit's end (ASTContext::
     // DeclMustBeEmitted, as CodeGenModule::EmitGlobal asks it when the parser hands over the definition): an external
     // definition, by the selection's rules of GNU's and C99's inline functions, or a function with a used, constructor
@@ -776,9 +776,20 @@ struct CheckProgram
     // `extern int f(int);`) is no emission point, it queues the function for the unit's end, where the deferred ones
     // are emitted. Code generation's check of target features takes clang's order of emission from it (#775), and the
     // lowering of a lock-free query whose answer is its function's emission's takes that emission's place
-    // (CheckBuiltinAtomicEffect.late_completion); null in a program that no selection made, or in a unit without a
-    // target attribute, an x86 builtin's call (#148), such a query, or a symbol rename after an earlier use.
+    // (CheckBuiltinAtomicEffect.late_completion). A full program's late-transparent-union metadata computes the same
+    // answers before selection (#1844); otherwise a program that no selection made has none. Units without a target
+    // attribute, an x86 builtin's call (#148), such a query, a late symbol rename or weak declaration, a wide-vector ABI,
+    // or a late transparent union need no column.
     uint8_t* body_eager;
+    // Late transparent unions (#1844): the first eager code-generation point of each expression node and each
+    // referenced object, or BUSTER_CHECK_NONE where only deferred emission reaches it (or none does). The shared
+    // emission walk makes these immutable columns once after the controls, only where an attribute can follow an
+    // earlier classification; a selection shares them, since every eager definition is one of its roots. A function
+    // definition's own point is its closing brace plus one where body_eager is set, else the unit's end.
+    const uint32_t* abi_emission_nodes;
+    const uint32_t* abi_emission_objects;
+    // An emitted overload address's selected function type at its source node; null without overload candidates.
+    const TypeId* abi_emission_types;
     // For a unit with a redefine_extname after an earlier use, one byte per retained symbol pragma: whether an
     // earlier emitted reference had already fixed that object's original spelling. The selection owns this cold
     // view; the input's asm-label facts remain unchanged for syntax and type checks.
@@ -1120,6 +1131,8 @@ static void check_program_cpu_needed(const CheckProgram* program, uint8_t* neede
 // GNU's weak attribute and `#pragma weak` after a use (#1849, CheckProgram.weak_late_keys), in
 // c_check_program_symbol_pragma.c.
 static bool check_program_weak_late(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch);
+// Late transparent unions' code-generation points, defined after the emission walk in c_check_program_select.c.
+static bool check_program_abi_emission(CheckProgram* program, const CheckDataPrepared* data, Arena* output, Arena* scratch);
 static bool check_program_cpu_number(CheckProgram* program, Arena* output);
 static String8 check_program_cpu_version_features(const CheckProgram* program, const CheckInputAttribute* attribute, Arena* output);
 static uint64_t check_program_cpu_features_write(const CheckProgram* program, const CheckInputAttribute* attribute, char* text, uint64_t capacity);
@@ -7386,6 +7399,10 @@ static bool check_program_finish(CheckProgramRun* run)
     }
     valid = run->symbols ? valid && run->symbols_valid : check_program_symbols(run, needed, valid);
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_x86_diagnostics(program, stream, scratch))
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
+    }
+    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_abi_emission(program, options.prepared_data, output, scratch))
     {
         program->status = CHECK_PROGRAM_RESOURCE;
     }

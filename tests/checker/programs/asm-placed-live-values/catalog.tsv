@@ -24,7 +24,7 @@ asm-bodies	asm-bodies.c	-	asm-bodies
 # loop of live values.
 asm-hlt-body	asm-hlt-body.c	-	asm-hlt-body
 # Register outputs returned by their bodies' call rows (#2144): a `+r` int's shift by a "c" count, an `=r` long's, the
-# first of cpuid's four outputs (the others stored), an output named twice with a memory input of its object, a
+# four of cpuid's outputs, an output named twice with a memory input of its object, a
 # local whose address is taken, each in a loop of live values; beside outputs that keep their stores (a global, an
 # object through a pointer, a short), one under a statement expression 11 values deep, and an always_inline
 # function's spliced twice.

@@ -358,9 +358,9 @@ static const uint8_t ir_vectorize_kind_table[BUSTER_IR_OP_TABLE] = {
     [IR_INTRINSIC] = BUSTER_IR_VECTORIZE_KIND_INTRINSIC,
 };
 
-// Every row's admission kind: its opcode's in the table, and FORBID for a load or a store with any access flag
-// (volatile, atomic, a segment). 64 rows at a time: one two-register byte lookup of the opcodes and one compare of the
-// flags.
+// Every row's admission kind: its opcode's in the table, and FORBID for a load or a store with a semantic access flag
+// (volatile, atomic, a segment; COPY_PIECE is only a hint). 64 rows at a time: one two-register byte lookup of the
+// opcodes and one compare of the flags.
 static void ir_vectorize_kinds(const IrFunction* f, uint8_t* kinds)
 {
     const __m512i low = _mm512_loadu_si512(ir_vectorize_kind_table);
@@ -374,7 +374,7 @@ static void ir_vectorize_kinds(const IrFunction* f, uint8_t* kinds)
         const __m512i kind = _mm512_permutex2var_epi8(low, op, high);
         const __m512i base = _mm512_and_si512(kind, _mm512_set1_epi8(7));
         const __mmask64 memory = _mm512_cmpeq_epi8_mask(base, _mm512_set1_epi8(BUSTER_IR_VECTORIZE_KIND_LOAD)) | _mm512_cmpeq_epi8_mask(base, _mm512_set1_epi8(BUSTER_IR_VECTORIZE_KIND_STORE));
-        const __mmask64 flagged = memory & _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_IR_ACCESS_FLAGS));
+        const __mmask64 flagged = memory & _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_IR_ACCESS_FLAGS & ~BUSTER_IR_COPY_PIECE));
         const __m512i result = _mm512_mask_mov_epi8(kind, flagged, _mm512_setzero_si512());
         _mm512_mask_storeu_epi8(kinds + first, valid, result);
     }
@@ -738,7 +738,8 @@ static bool ir_vectorize_minmax(IrVectorizeWork* work, IrVectorizeLoop* plan, ui
         {
             const uint32_t arm = from != NULL ? from[keep_true ? 1 : 0] : head;
             valid = arm != head && ir_vectorize_in_block(f, arm, chosen) && ir_vectorize_in_block(f, head, lane) && f->op[lane] == IR_LOAD && f->op[chosen] == IR_LOAD &&
-                    f->flags[lane] == 0 && f->flags[chosen] == 0 && f->type[chosen] == IR_I32 && ir_vectorize_same(f, f->a[lane], f->a[chosen], BUSTER_IR_VECTORIZE_DEPTH);
+                    ((f->flags[lane] | f->flags[chosen]) & ~BUSTER_IR_COPY_PIECE) == 0 && f->type[chosen] == IR_I32 &&
+                    ir_vectorize_same(f, f->a[lane], f->a[chosen], BUSTER_IR_VECTORIZE_DEPTH);
             const uint32_t end = valid ? f->block_offsets[(uint64_t)head + 1] - 1 : 0;
             for (uint32_t i = lane + 1; valid && i < end; i += 1)
             {

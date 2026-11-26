@@ -419,7 +419,7 @@ _Static_assert(BUSTER_CHECK_TIER1_UNROLL_OUTCOMES == IR_UNROLL_OUTCOME_COUNT, "a
 // The pipeline's last steps on `function`, whose columns the lane owns: #2592's operand sink, in place, and the optimizer
 // (SCCP, dead-code removal, CFG cleanup and its merges as --tier1-passes= leaves them), whose function goes to `output`
 // and its verified analysis to `analyses` under `revision`. check_tier1_passes ends with them, and so does a candidate's
-// own code that the unroller changed after its summary (check_tier1_unroll_own).
+// own code that unrolling or COPY pairing changed after its summary (check_tier1_finish_own).
 static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunction* function, bool verified, bool certify, const CheckTier1Fault* fault, Arena* output, Arena* analyses,
                                                    IrVerifiedRevision* revision, CheckTier1Passes* passes)
 {
@@ -831,6 +831,16 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         passes->pre_moved = schedule_stats.moved;
         verified = false;
     }
+    // #2818: only pieces that survived SROA/promotion are widened, before the sink and final DCE/verification.
+    // A cached summary stays scalar for its callers' SROA; its own code pairs in check_tier1_finish_own.
+    if (stage == CHECK_TIER1_COMPILED && !input->summary)
+    {
+        uint32_t copy_pairs = 0;
+        const IrError error = ir_copy_pair(&wide.function, scratch, &copy_pairs);
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
+        stage = outcome.stage;
+        verified &= copy_pairs == 0;
+    }
     if (stage == CHECK_TIER1_COMPILED)
     {
         outcome = check_tier1_sink_optimize(lane, &wide.function, verified, certify, fault, output, analyses, revision, passes);
@@ -839,28 +849,53 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
 }
 
 
-// A candidate's own code from its summary (#2541) under --tier1-passes=+unroll (#2755): the summary skipped the unroller,
-// so that its callers' expansions unroll what they expand once and its size (which their decisions read) is the loop's
-// own. Its own code takes the unroller here, on the summary's optimized function (left as it is: the copy is in
-// steps[11]), and where a loop unrolled, the sink and the optimizer again, into steps[2] and steps[3] under a revision
-// of their own. Rerunning the whole pipeline instead (no summary) made -c of sqlite3.c 23% slower.
-static CheckTier1Outcome check_tier1_unroll_own(CheckTier1Lane* lane, bool certify, const CheckTier1Fault* fault, IrVerifiedRevision* revision, CheckTier1Passes* passes)
+// A candidate's own code from its summary (#2541): the summary skipped --tier1-passes=+unroll (#2755), so its callers
+// unroll what they expand once and its size remains the loop's own. It also skipped COPY pairing (#2818), so callers'
+// SROA still sees scalar pieces. The summary stays immutable: the unroller owns its columns in steps[11]; otherwise
+// only a function with marked i64 load candidates copies the columns that pairing and sinking change into steps[6].
+// A changed function takes the sink and final optimizer into steps[2]/steps[3] under its own revision. Rerunning the
+// whole pipeline instead (no summary) made -c of sqlite3.c 23% slower.
+static CheckTier1Outcome check_tier1_finish_own(CheckTier1Lane* lane, bool certify, const CheckTier1Fault* fault, IrVerifiedRevision* revision, CheckTier1Passes* passes)
 {
-    IrUnrollOptions options = ir_unroll_options();
-    IrUnrollResult unrolled = { 0 };
-    const IrCheck check = ir_optimize_unroll(&passes->optimized.function, &lane->steps[11], &lane->scratch, options, &unrolled);
-    const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
-    CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
-    for (uint32_t k = 0; check.error == IR_OK && k < IR_UNROLL_OUTCOME_COUNT; k += 1)
+    IrFunction function = passes->optimized.function;
+    bool changed = false;
+    CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_COMPILED, CHECK_TIER1_CAUSE_IR, 0, BUSTER_IR_NONE, 0, NULL);
+    if ((check_tier1_passes_on(lane) & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0)
     {
-        passes->unroll_outcomes[k] = (uint16_t)(unrolled.outcomes[k] < UINT16_MAX ? unrolled.outcomes[k] : UINT16_MAX);
+        const IrUnrollOptions options = ir_unroll_options();
+        IrUnrollResult unrolled = { 0 };
+        const IrCheck check = ir_optimize_unroll(&function, &lane->steps[11], &lane->scratch, options, &unrolled);
+        const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+        for (uint32_t k = 0; check.error == IR_OK && k < IR_UNROLL_OUTCOME_COUNT; k += 1)
+        {
+            passes->unroll_outcomes[k] = (uint16_t)(unrolled.outcomes[k] < UINT16_MAX ? unrolled.outcomes[k] : UINT16_MAX);
+        }
+        passes->unroll_copies = check.error == IR_OK ? unrolled.copies : 0;
+        passes->unroll_reductions = check.error == IR_OK ? unrolled.reductions : 0;
+        passes->unroll_added = check.error == IR_OK ? unrolled.added : 0;
+        changed = check.error == IR_OK && unrolled.outcomes[IR_UNROLL_UNROLLED] != 0;
+        function = changed ? unrolled.function : function;
     }
-    passes->unroll_copies = check.error == IR_OK ? unrolled.copies : 0;
-    passes->unroll_reductions = check.error == IR_OK ? unrolled.reductions : 0;
-    passes->unroll_added = check.error == IR_OK ? unrolled.added : 0;
-    if (outcome.stage == CHECK_TIER1_COMPILED && check.error == IR_OK && unrolled.outcomes[IR_UNROLL_UNROLLED] != 0)
+    if (outcome.stage == CHECK_TIER1_COMPILED && ir_copy_pair_candidates(&function))
     {
-        IrFunction function = unrolled.function;
+        if (!changed)
+        {
+            Tier1ScheduleIrOriginal copy = { 0 };
+            const bool copied = tier1_schedule_ir_copy(&function, &lane->steps[6], &copy);
+            outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, copied ? IR_OK : IR_ERROR_MEMORY, BUSTER_IR_NONE, 0, NULL);
+            function = copied ? copy.function : function;
+        }
+        if (outcome.stage == CHECK_TIER1_COMPILED)
+        {
+            uint32_t copy_pairs = 0;
+            const IrError error = ir_copy_pair(&function, &lane->scratch, &copy_pairs);
+            outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
+            changed |= copy_pairs != 0;
+        }
+    }
+    if (outcome.stage == CHECK_TIER1_COMPILED && changed)
+    {
         *revision = (IrVerifiedRevision){ 0 };
         outcome = check_tier1_sink_optimize(lane, &function, false, certify, fault, &lane->steps[2], &lane->steps[3], revision, passes);
     }
@@ -1102,12 +1137,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         revision.number = 1;
         passes.analysis.owner = &revision;
         passes.analysis.revision = revision.number;
-        // --tier1-passes=+unroll (#2755): the summary skipped the unroller; its own code takes it here.
-        if ((on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0)
-        {
-            outcome = check_tier1_unroll_own(lane, certify, fault, &revision, &passes);
-            stage = outcome.stage;
-        }
+        // The summary skipped unrolling and COPY pairing; only its own code takes these final steps.
+        outcome = check_tier1_finish_own(lane, certify, fault, &revision, &passes);
+        stage = outcome.stage;
     }
     const IrVerifiedAnalysis analysis = passes.analysis;
     const uint32_t pre_blocks = passes.pre_blocks;
