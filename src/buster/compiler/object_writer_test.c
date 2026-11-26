@@ -13,8 +13,8 @@
 //     for what the programs don't have) and a link without atoms, each unit's object built in memory with and without
 //     function sections, and again over bytes set to BUSTER_OBJECT_TEST_POISON, which must come out the same
 //     (object_build writes every byte). object_view_open reads each one back and checks the rules every object keeps:
-//     the header's fixed fields (EI_OSABI ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC or a section has
-//     SHF_GNU_RETAIN), section headers
+//     the header's fixed fields (EI_OSABI ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC or STB_GNU_UNIQUE,
+//     or a section has SHF_GNU_RETAIN), section headers
 //     and contents inside the file, aligned and apart, names in .shstrtab, one symbol table with its locals before
 //     sh_info, symbols inside their sections, extended indices exactly where st_shndx is SHN_XINDEX, and relocation
 //     sections tied to the symbol table and a section with contents, in offset order, against a symbol, over zero
@@ -549,22 +549,23 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
                      symbol->st_shndx, (unsigned long long)section, (unsigned long long)symbol->st_value, (unsigned long long)symbol->st_size);
         }
     }
-    // EI_OSABI: ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC or a section has SHF_GNU_RETAIN, as GNU as and
+    // EI_OSABI: ELFOSABI_GNU for STT_GNU_IFUNC, STB_GNU_UNIQUE or SHF_GNU_RETAIN, as GNU as and
     // LLVM mark it.
     bool ifunc = false;
+    bool unique = false;
     for (uint64_t i = 1; valid && i < view->symbol_count; i += 1)
     {
         ifunc = ifunc || ELF64_ST_TYPE(view->symbols[i].st_info) == STT_GNU_IFUNC;
+        unique = unique || ELF64_ST_BIND(view->symbols[i].st_info) == STB_GNU_UNIQUE;
     }
     bool retained = false;
     for (uint64_t i = 1; valid && i < view->section_count; i += 1)
     {
         retained = retained || (view->sections[i].sh_flags & SHF_GNU_RETAIN) != 0;
     }
-    if (valid && header->e_ident[EI_OSABI] != (ifunc || retained ? ELFOSABI_GNU : ELFOSABI_SYSV))
+    if (valid && header->e_ident[EI_OSABI] != (ifunc || unique || retained ? ELFOSABI_GNU : ELFOSABI_SYSV))
     {
-        snprintf(error, error_size, "EI_OSABI is %u, and the object has %s STT_GNU_IFUNC symbol and %s SHF_GNU_RETAIN section", header->e_ident[EI_OSABI],
-                 ifunc ? "an" : "no", retained ? "an" : "no");
+        snprintf(error, error_size, "EI_OSABI is %u, with IFUNC=%u, UNIQUE=%u, RETAIN=%u", header->e_ident[EI_OSABI], ifunc, unique, retained);
         valid = false;
     }
 
@@ -1382,6 +1383,7 @@ static const ObjectTestName readelf_bindings[] = {
     { "LOCAL", STB_LOCAL },
     { "GLOBAL", STB_GLOBAL },
     { "WEAK", STB_WEAK },
+    { "UNIQUE", STB_GNU_UNIQUE },
 };
 
 static const ObjectTestName readelf_visibilities[] = {

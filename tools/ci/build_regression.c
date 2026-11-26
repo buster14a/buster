@@ -1495,6 +1495,7 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
     const char* preprocessor = fuzz ? "main.c main_unit_frontend.c" : "main_unit_frontend.c";
     const char* executable = fuzz ? "main.c main_unit_dynamic.c main_unit_executable.c" : "main_unit_dynamic.c main_unit_executable.c";
     const OwnershipBoundary files[] = {
+        { "src/buster/compiler/assembly_output_cfi_test.c", "main_unit_assembler.c", true },
         { "src/buster/compiler/tier0_vector_baseline_test.inc", "main_unit_backend.c", true },
         { "src/buster/compiler/tier1_allocate_test_cases.c", "main_unit_backend.c", true },
         { "src/buster/compiler/tier1_schedule_fixture.c", "main_unit_backend.c", true },

@@ -29,7 +29,7 @@
 // address through its section's symbol would reach the resolver), and not into a string pool with a PC-relative kind or
 // an addend, since linkers split pools by string and the section's symbol would then name the wrong string. The fields
 // are already zero: link_add_code_fixups zeroes code's, and data's are zero, as GNU as writes them. An object that
-// defines an IFUNC, or has a section whose descriptor's flags have SHF_GNU_RETAIN (#147's retain attribute), is
+// defines an IFUNC or GNU unique symbol, or has a section whose descriptor's flags have SHF_GNU_RETAIN (#147's retain attribute), is
 // ELFOSABI_GNU, as GNU as and LLVM mark it (LLVM's markGnuAbi), and others ELFOSABI_SYSV.
 //
 // An absolute symbol (BUSTER_LINK_SOURCE_ABSOLUTE) is in no unit, so no object could define it as the link does:
@@ -223,7 +223,7 @@ struct ObjectUnits
     // names given to its local symbols without one among them.
     uint32_t* symbol_name_bytes;
     uint64_t* unit_name_bytes;
-    // Each unit's object's EI_OSABI: ELFOSABI_GNU if it defines an IFUNC, otherwise ELFOSABI_SYSV (and ELFOSABI_GNU
+    // Each unit's object's EI_OSABI: ELFOSABI_GNU if it defines an IFUNC or UNIQUE, otherwise ELFOSABI_SYSV (and ELFOSABI_GNU
     // where a section's descriptor has SHF_GNU_RETAIN, which object_build finds: ObjectBuilder.retained).
     uint8_t* unit_abi;
     // A TEXT atom's name, for its own section with function sections: its first named symbol at offset 0's, or 0.
@@ -441,6 +441,30 @@ static const uint32_t object_relocation_types[BUSTER_LINK_FIXUP_KINDS] = {
     [BUSTER_LINK_FIXUP_DTPOFF64] = R_X86_64_DTPOFF64,
 };
 
+// GNU .reloc's names for the same symbolic fixups. The assembly sink uses this escape where an ordinary data
+// expression would select another relocation (notably signed 32-bit addresses and relaxable GOT references).
+static const char* const object_relocation_names[BUSTER_LINK_FIXUP_KINDS] = {
+    [BUSTER_LINK_FIXUP_NONE] = "R_X86_64_NONE",
+    [BUSTER_LINK_FIXUP_CALL] = "R_X86_64_PLT32",
+    [BUSTER_LINK_FIXUP_CALL_GOT] = "R_X86_64_GOTPCRELX",
+    [BUSTER_LINK_FIXUP_LOAD_GOT] = "R_X86_64_REX_GOTPCRELX",
+    [BUSTER_LINK_FIXUP_GOTPCREL] = "R_X86_64_GOTPCREL",
+    [BUSTER_LINK_FIXUP_PC32] = "R_X86_64_PC32",
+    [BUSTER_LINK_FIXUP_TPOFF32] = "R_X86_64_TPOFF32",
+    [BUSTER_LINK_FIXUP_GOTTPOFF] = "R_X86_64_GOTTPOFF",
+    [BUSTER_LINK_FIXUP_ABS64] = "R_X86_64_64",
+    [BUSTER_LINK_FIXUP_PC64] = "R_X86_64_PC64",
+    [BUSTER_LINK_FIXUP_ABS32] = "R_X86_64_32",
+    [BUSTER_LINK_FIXUP_ABS32S] = "R_X86_64_32S",
+    [BUSTER_LINK_FIXUP_SIZE32] = "R_X86_64_SIZE32",
+    [BUSTER_LINK_FIXUP_SIZE64] = "R_X86_64_SIZE64",
+    [BUSTER_LINK_FIXUP_TLSGD] = "R_X86_64_TLSGD",
+    [BUSTER_LINK_FIXUP_TLSLD] = "R_X86_64_TLSLD",
+    [BUSTER_LINK_FIXUP_DTPOFF32] = "R_X86_64_DTPOFF32",
+    [BUSTER_LINK_FIXUP_TPOFF64] = "R_X86_64_TPOFF64",
+    [BUSTER_LINK_FIXUP_DTPOFF64] = "R_X86_64_DTPOFF64",
+};
+
 // The prefix of a relocation section's name: ".rela" and its section's, which .shstrtab shares.
 #define BUSTER_OBJECT_RELA_PREFIX ".rela"
 #define BUSTER_OBJECT_RELA_PREFIX_BYTES (sizeof(BUSTER_OBJECT_RELA_PREFIX) - 1)
@@ -536,19 +560,23 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
         prepared = atoms->unit[atom] < unit_count;
     }
     // The symbols' sources and types, 64 at a time: an absolute symbol, which no unit holds, refuses the link, an
-    // IFUNC makes its unit's object ELFOSABI_GNU and a common symbol leaves its atom to the linker (whose atoms and
-    // units are found below, since IFUNCs and commons are rare).
+    // IFUNC or UNIQUE makes its unit's object ELFOSABI_GNU and a common symbol leaves its atom to the linker (whose
+    // atoms and units are found below, since IFUNCs, unique symbols and commons are rare).
     uint64_t absolute = 0;
     uint64_t ifunc = 0;
+    uint64_t unique = 0;
     uint64_t common = 0;
     for (SymbolId first = 1; first < symbols->count; first += 64)
     {
         const uint64_t left = symbols->count - first;
         const __mmask64 valid = left >= 64 ? ~0ull : (1ull << left) - 1;
         const __m512i sources = _mm512_maskz_loadu_epi8(valid, symbols->source + first);
-        const __m512i types = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, symbols->flags + first), _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
+        const __m512i flags = _mm512_maskz_loadu_epi8(valid, symbols->flags + first);
+        const __m512i types = _mm512_and_si512(flags, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
+        const __m512i bindings = _mm512_and_si512(flags, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_BINDING));
         absolute |= _mm512_mask_cmpeq_epi8_mask(valid, sources, _mm512_set1_epi8(BUSTER_LINK_SOURCE_ABSOLUTE));
         ifunc |= _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC));
+        unique |= _mm512_mask_cmpeq_epi8_mask(valid, bindings, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_UNIQUE));
         common |= _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_COMMON));
     }
     prepared = prepared && absolute == 0;
@@ -686,16 +714,20 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
                 }
             }
         }
-        // The IFUNCs, if the link has one, 64 symbols' types at a time: each one in an atom makes its unit's object
-        // ELFOSABI_GNU, and a local one's relocations name it (BUSTER_OBJECT_SYMBOL_IFUNC).
-        for (SymbolId first = 1; ifunc != 0 && first < symbols->count; first += 64)
+        // IFUNCs and UNIQUE definitions make their unit's object ELFOSABI_GNU. A local IFUNC's relocations name it
+        // (BUSTER_OBJECT_SYMBOL_IFUNC); unique binding is global, so it never gets that relocation marker.
+        for (SymbolId first = 1; (ifunc | unique) != 0 && first < symbols->count; first += 64)
         {
             const uint64_t left = symbols->count - first;
             const __mmask64 valid = left >= 64 ? ~0ull : (1ull << left) - 1;
-            const __m512i types = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, symbols->flags + first), _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
-            for (uint64_t ifuncs = _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC)); ifuncs != 0; ifuncs &= ifuncs - 1)
+            const __m512i flags = _mm512_maskz_loadu_epi8(valid, symbols->flags + first);
+            const __m512i types = _mm512_and_si512(flags, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
+            const __m512i bindings = _mm512_and_si512(flags, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_BINDING));
+            uint64_t found = _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC)) |
+                             _mm512_mask_cmpeq_epi8_mask(valid, bindings, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_UNIQUE));
+            for (; found != 0; found &= found - 1)
             {
-                const SymbolId symbol = first + (SymbolId)__builtin_ctzll(ifuncs);
+                const SymbolId symbol = first + (SymbolId)__builtin_ctzll(found);
                 const AtomId atom = symbols->atom[symbol];
                 const bool local = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
                 if (atom != 0)

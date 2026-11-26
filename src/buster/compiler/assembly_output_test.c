@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// test-assembly-output (#1362's stage 1): the assembly sink (assembly_output.c) on hand-built units, whose instruction
+// test-assembly-output (#1362): the assembly sink (assembly_output.c) on hand-built units, whose instruction
 // records come from the assembler's matcher (asm_assemble_code on Intel text, independent of the sink's printer),
 // sized by branch sizing and encoded by the encoder into the atoms the link holds, as the emission does:
 //   - a unit of every piece the sink prints (calls to a local and an undefined function, RIP-relative data with
@@ -9,7 +9,8 @@
 //     in a function's middle, data with every data fixup it spells, a string pool with quotes and escapes, runs of
 //     zeros, zero-fill data, a common definition, weak, hidden and local symbols, a name GNU as reads only quoted),
 //     and the text of a small unit compared whole with its expected text;
-//   - the refusals, each by its reason (thread-local storage, section groups, unsupported common bindings and aliases,
+//   - TLS, groups, GNU unique objects, mixed source assembly and semantic unwind comparisons;
+//   - the refusals, each by its reason (invalid groups, unsupported common bindings and aliases,
 //     code without records, two symbols of one name, a name of the sink's prefix, a relocation GNU as encodes otherwise: an MPX
 //     bnd call), and the views that contradict themselves (records that
 //     aren't their atom's bytes, a symbol inside an instruction, a branch without a target);
@@ -18,7 +19,8 @@
 //   - the data rows' vector kernel (assembly_byte_row) against libc's formatting of random bytes;
 // and with --cross-check, GNU as assembles each printed unit, and its object must be the object writer's object of the
 // unit (object_test_same_as, the assembler tests' comparator) but for what an assembler resolves itself
-// (assembly_test_resolve: a PC-relative reference to a local symbol of the field's own section).
+// (assembly_test_resolve: a PC-relative reference to a local symbol of the field's own section) and equivalent CFI
+// encodings checked by the independent frame-rule interpreter. Runtime fixtures round-trip and execute both tiers.
 
 #define BUSTER_ASSEMBLY_TEST_SYMBOLS 64
 #define BUSTER_ASSEMBLY_TEST_ATOMS 32
@@ -370,6 +372,8 @@ static bool assembly_test_unlist_got(ObjectView* view, uint8_t* object)
     return found;
 }
 
+#include "assembly_output_cfi_test.c"
+
 // Our object (`ours`, `ours_size` bytes) against the reassembled object (`theirs`, which this changes): the same but for the
 // normalizations above. False, with the first difference, if they differ.
 static bool assembly_test_same_objects(AssemblyTest* test, const uint8_t* ours_bytes, uint64_t ours_size, String8 theirs, char* error, uint64_t error_size)
@@ -390,7 +394,8 @@ static bool assembly_test_same_objects(AssemblyTest* test, const uint8_t* ours_b
         // Buster can retain a relocation for a local call that GNU as resolves in place.
         assembly_test_resolve(&theirs_view, (uint8_t*)theirs.pointer);
         assembly_test_unlist_got(&theirs_view, (uint8_t*)theirs.pointer);
-        passed = object_test_same_as(&ours_view, &theirs_view, error, error_size);
+        passed = assembly_cfi_normalize(&ours_view, &theirs_view, &test->scratch, error, error_size) &&
+                 object_test_same_as(&ours_view, &theirs_view, error, error_size);
     }
     arena_pop_to(&test->scratch, mark);
     return passed;
@@ -552,6 +557,72 @@ static void assembly_test_program(AssemblyTest* test)
     arena_pop_to(&test->arena, mark);
 }
 
+static void assembly_test_mixed(AssemblyTest* test)
+{
+    const uint64_t mark = test->arena.length;
+    const uint64_t output_mark = test->output.length;
+    const uint64_t scratch_mark = test->scratch.length;
+    const String8 source = object_test_read_file(&test->arena, "tests/assembly-output/mixed.s");
+    AsmResult original = source.pointer != NULL ? asm_assemble(source, test->index, (AsmOptions){ .integrated = true, .keep_records = true }, &test->arena) :
+                                                (AsmResult){ .error = "missing mixed assembly fixture" };
+    AssemblyCode* code = original.error == NULL ? BUSTER_ARENA_PUSH_ARRAY(&test->arena, AssemblyCode, original.link.atoms.count) : NULL;
+    bool valid = code != NULL && original.record_span_count == original.link.atoms.count;
+    if (valid)
+    {
+        memset(code, 0, (uint64_t)original.link.atoms.count * sizeof(AssemblyCode));
+        for (AtomId a = 1; a < original.link.atoms.count; a += 1)
+        {
+            const AsmRecordSpan span = original.record_spans[a];
+            code[a].records = span.records;
+            code[a].offsets = span.offsets;
+            code[a].count = span.count;
+        }
+    }
+    assembly_test_check(test, valid, "retain matched records and byte offsets for mixed assembly", original.error);
+    const AssemblyView view = {
+        .link = &original.link,
+        .code = code,
+        .sections = original.object_options.atom_sections,
+        .temporary = original.object_options.temporary_symbols,
+        .source_name = BUSTER_S8("mixed.s"),
+        .code_count = original.link.atoms.count,
+        .section_count = original.object_options.atom_sections != NULL ? original.link.atoms.count : 0,
+        .temporary_count = original.object_options.temporary_symbols != NULL ? original.link.symbols.count : 0,
+    };
+    const AssemblyResult printed = valid ? assembly_print(&view, &test->output, &test->scratch) : (AssemblyResult){ .error = ASSEMBLY_INVALID };
+    assembly_test_check(test, printed.error == ASSEMBLY_OK, "print mixed records, local branches, RIP references and data relocations", printed.reason);
+    if (printed.error == ASSEMBLY_OK)
+    {
+        const Object expected = asm_object(&original, BUSTER_S8("mixed.s"), &test->scratch);
+        const String8 text = { .pointer = (char*)printed.bytes, .length = printed.length };
+        AsmResult rebuilt = asm_assemble(text, test->index, (AsmOptions){ 0 }, &test->scratch);
+        const Object actual = rebuilt.error == NULL ? asm_object(&rebuilt, BUSTER_S8("mixed.s"), &test->scratch) : (Object){ 0 };
+        char error[512] = { 0 };
+        const String8 actual_bytes = { .pointer = (char*)actual.bytes, .length = actual.size };
+        const bool same = expected.error == OBJECT_ERROR_NONE && rebuilt.error == NULL && actual.error == OBJECT_ERROR_NONE &&
+                          assembly_test_same_objects(test, expected.bytes, expected.size, actual_bytes, error, sizeof(error));
+        assembly_test_check(test, same, "Buster reassembles mixed records and fragments without changing object semantics", rebuilt.error != NULL ? rebuilt.error : error);
+        if (test->cross_check)
+        {
+            const bool gnu = expected.error == OBJECT_ERROR_NONE && assembly_test_against_as(test, "mixed", printed.bytes, printed.length, &expected, error, sizeof(error));
+            assembly_test_check(test, gnu, "GNU as reassembles mixed records and fragments without changing object semantics", error);
+        }
+        const AtomId atom = original.entry_atom;
+        if (atom != 0 && code[atom].count != 0)
+        {
+            uint32_t* offsets = original.record_spans[atom].offsets;
+            offsets[0] = (uint32_t)original.link.atoms.size[atom];
+            const uint64_t before = test->output.length;
+            const AssemblyResult invalid = assembly_print(&view, &test->output, &test->scratch);
+            assembly_test_check(test, invalid.error == ASSEMBLY_INVALID && test->output.length == before,
+                                "reject a mixed instruction extending beyond its atom without publishing output", invalid.reason);
+        }
+    }
+    arena_pop_to(&test->scratch, scratch_mark);
+    arena_pop_to(&test->output, output_mark);
+    arena_pop_to(&test->arena, mark);
+}
+
 // A small unit's whole text: a local function and a global datum.
 static void assembly_test_small(AssemblyTest* test)
 {
@@ -587,11 +658,306 @@ static void assembly_test_small(AssemblyTest* test)
     arena_pop_to(&test->arena, mark);
 }
 
+// A hand-built symbolic unit, including optional section descriptors, against both independent assembly readers.
+// Its original link and descriptors are the object writer's control; the text must preserve each ELF relationship.
+static void assembly_test_section_fixture(AssemblyTest* test, AssemblyFixture* fixture, const ObjectAtomSection* sections, const char* name, const char* const* pieces, uint32_t piece_count)
+{
+    AssemblyView view = assembly_fixture_view(fixture);
+    view.sections = sections;
+    view.section_count = sections != NULL ? fixture->link.atoms.count : 0;
+    const uint64_t output_mark = test->output.length;
+    const uint64_t scratch_mark = test->scratch.length;
+    const bool valid = fixture->valid && link_check(&fixture->link) == LINK_ERROR_NONE;
+    assembly_test_check(test, valid, "the section fixture's link", name);
+    const AssemblyResult result = valid ? assembly_print(&view, &test->output, &test->scratch) : (AssemblyResult){ .error = ASSEMBLY_INVALID };
+    assembly_test_check(test, result.error == ASSEMBLY_OK, "the section fixture prints", result.reason != NULL ? result.reason : name);
+    for (uint32_t i = 0; result.error == ASSEMBLY_OK && i < piece_count; i += 1)
+    {
+        assembly_test_check(test, assembly_test_contains(&result, pieces[i]), "the section fixture's text has a piece", pieces[i]);
+    }
+    if (result.error == ASSEMBLY_OK)
+    {
+        ObjectUnits units = { 0 };
+        ObjectSymbols symbols = { 0 };
+        const bool prepared = object_prepare(&units, &fixture->link, 1, &test->scratch) && object_map_symbols(&symbols, &fixture->link, &test->scratch);
+        const ObjectOptions options = {
+            .atom_sections = sections,
+            .atom_section_count = sections != NULL ? fixture->link.atoms.count : 0,
+        };
+        const Object object = prepared ? object_build(&fixture->link, &units, &symbols, 0, options, BUSTER_S8("fixture.c"), &test->scratch) :
+                                        (Object){ .error = OBJECT_ERROR_FULL };
+        const String8 source = {
+            .pointer = (char*)result.bytes,
+            .length = result.length,
+        };
+        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){ 0 }, &test->scratch);
+        const Object rebuilt = assembled.error == NULL ? asm_object(&assembled, BUSTER_S8("fixture.c"), &test->scratch) :
+                                                       (Object){ .error = OBJECT_ERROR_FULL };
+        char error[256] = { 0 };
+        const String8 bytes = {
+            .pointer = (char*)rebuilt.bytes,
+            .length = rebuilt.size,
+        };
+        const bool same = object.error == OBJECT_ERROR_NONE && assembled.error == NULL && rebuilt.error == OBJECT_ERROR_NONE &&
+                          assembly_test_same_objects(test, object.bytes, object.size, bytes, error, sizeof(error));
+        assembly_test_check(test, same, "Buster preserves the section fixture's object", assembled.error != NULL ? assembled.error : error);
+        if (test->cross_check)
+        {
+            const bool gnu = object.error == OBJECT_ERROR_NONE && assembly_test_against_as(test, name, result.bytes, result.length, &object, error, sizeof(error));
+            assembly_test_check(test, gnu, "GNU as preserves the section fixture's object", error);
+        }
+    }
+    arena_pop_to(&test->scratch, scratch_mark);
+    arena_pop_to(&test->output, output_mark);
+}
+
+// A PC-relative relocation's field addend may fit int64 even when its instruction-relative spelling doesn't.
+static void assembly_test_wide_code_addend(AssemblyTest* test)
+{
+    const uint64_t mark = test->arena.length;
+    AssemblyFixture fixture;
+    assembly_fixture_begin(&fixture, &test->arena);
+    const X86Instruction records[] = {
+        { .form = X86_FORM_LEA_R64_M, .reg = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_RIP },
+        { .form = X86_FORM_RET },
+    };
+    uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(BUSTER_ARRAY_LENGTH(records))];
+    uint32_t offsets[BUSTER_ARRAY_LENGTH(records) + 1];
+    const int64_t length = x86_encode(records, BUSTER_ARRAY_LENGTH(records), bytes, sizeof(bytes), offsets, NULL);
+    const AtomId atom = length > 0 ? link_add_atom(&fixture.link, BUSTER_LINK_CLASS_TEXT, 0, (uint64_t)length, bytes, 0) : 0;
+    fixture.valid = fixture.valid && atom != 0 && atom < BUSTER_ASSEMBLY_TEST_ATOMS;
+    if (fixture.valid)
+    {
+        fixture.code[atom] = (AssemblyCode){ .records = records, .count = BUSTER_ARRAY_LENGTH(records) };
+        assembly_fixture_define(&fixture, "wide_addend", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, atom, 0, (uint64_t)length);
+        assembly_fixture_fixup(&fixture, atom, 3, BUSTER_LINK_FIXUP_PC32, "wide_target", INT64_MAX);
+        static const char* const pieces[] = { "\t.long wide_target+9223372036854775807-.\n" };
+        assembly_test_section_fixture(test, &fixture, NULL, "code-addend", pieces, BUSTER_ARRAY_LENGTH(pieces));
+        fixture.code[atom].offsets = offsets;
+        assembly_test_section_fixture(test, &fixture, NULL, "mixed-addend", pieces, BUSTER_ARRAY_LENGTH(pieces));
+    }
+    assembly_test_check(test, fixture.valid, "construct wide instruction addend fixture", NULL);
+    assembly_fixture_end(&fixture);
+    arena_pop_to(&test->arena, mark);
+}
+
+static void assembly_test_groups(AssemblyTest* test)
+{
+    const uint64_t mark = test->arena.length;
+    AssemblyFixture fixture;
+    assembly_fixture_begin(&fixture, &test->arena);
+    ObjectAtomSection sections[BUSTER_ASSEMBLY_TEST_ATOMS] = { 0 };
+    uint32_t memberships[BUSTER_ASSEMBLY_TEST_ATOMS] = { 0 };
+    LinkGroup groups[6] = { 0 };
+    const AtomId function = assembly_fixture_function(test, &fixture, "pick", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_FUNCTION, 0, "mov eax, 17\nret\n");
+    const SymbolId pick = assembly_fixture_symbol(&fixture, "pick", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_FUNCTION);
+    groups[1] = (LinkGroup){
+        .name = fixture.link.symbols.name[pick],
+        .signature = pick,
+        .flags = BUSTER_LINK_GROUP_COMDAT,
+    };
+    groups[2] = (LinkGroup){
+        .name = link_add_name(&fixture.link, (const uint8_t*)"quoted group", sizeof("quoted group") - 1),
+        .flags = BUSTER_LINK_GROUP_COMDAT,
+    };
+    groups[3].name = link_add_name(&fixture.link, (const uint8_t*)"plain_signature", sizeof("plain_signature") - 1);
+    const SymbolId weak = assembly_fixture_symbol(&fixture, "weak group", BUSTER_LINK_SYMBOL_WEAK);
+    groups[4] = (LinkGroup){
+        .name = fixture.link.symbols.name[weak],
+        .signature = weak,
+        .flags = BUSTER_LINK_GROUP_COMDAT,
+    };
+    memberships[function] = 1;
+    const ObjectAtomSection shared = {
+        .name = BUSTER_S8(".shared"),
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC | SHF_WRITE,
+    };
+    const uint64_t zero = 0;
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        const AtomId atom = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, i == 3 ? 4 : 3, &zero, sizeof(zero));
+        sections[atom] = shared;
+        memberships[atom] = i == 0 || i == 3 ? 1 : i == 1 ? 2 : 0;
+        assembly_fixture_fixup(&fixture, atom, 0, BUSTER_LINK_FIXUP_ABS64, "pick", i);
+    }
+    // Equal descriptors rejoin their original section even after an identically named different identity.
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        const uint8_t byte = (uint8_t)(20 + i);
+        const AtomId atom = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, 0, &byte, 1);
+        sections[atom] = (ObjectAtomSection){
+            .name = BUSTER_S8(".identity"),
+            .type = SHT_PROGBITS,
+            .flags = SHF_ALLOC | SHF_WRITE | SHF_GNU_RETAIN,
+            .identity = i == 1 ? 2 : 1,
+        };
+        memberships[atom] = 1;
+    }
+    // Linked-order sections may belong to a group too. Distinct descriptors sharing the same linked atom stay apart.
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        const AtomId atom = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, 3, &zero, sizeof(zero));
+        sections[atom] = (ObjectAtomSection){
+            .name = BUSTER_S8(".entries"),
+            .type = SHT_PROGBITS,
+            .flags = SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER,
+            .link = function,
+            .identity = i + 1,
+        };
+        memberships[atom] = 1;
+        assembly_fixture_fixup(&fixture, atom, 0, BUSTER_LINK_FIXUP_ABS64, "pick", i);
+    }
+    static const char string[] = "grouped";
+    const AtomId strings = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_STRINGS, 0, string, sizeof(string));
+    const AtomId bss = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_BSS, 2, NULL, 19);
+    memberships[strings] = 2;
+    memberships[bss] = 2;
+    const uint8_t byte = 42;
+    const AtomId plain = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_RODATA, 0, &byte, 1);
+    sections[plain] = (ObjectAtomSection){
+        .name = BUSTER_S8(".plain"),
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC,
+        .identity = 7,
+    };
+    memberships[plain] = 3;
+    const AtomId weak_member = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_RODATA, 0, &byte, 1);
+    memberships[weak_member] = 4;
+    const AtomId signature = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_RODATA, 0, &byte, 1);
+    sections[signature] = (ObjectAtomSection){
+        .name = BUSTER_S8(".signature"),
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC,
+    };
+    groups[5] = (LinkGroup){
+        .name = link_add_name(&fixture.link, (const uint8_t*)".signature", sizeof(".signature") - 1),
+        .signature_atom = signature,
+        .flags = BUSTER_LINK_GROUP_COMDAT,
+    };
+    const AtomId member = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_RODATA, 0, &byte, 1);
+    memberships[member] = 5;
+    fixture.link.groups = (LinkGroups){
+        .data = groups,
+        .atom_groups = memberships,
+        .count = BUSTER_ARRAY_LENGTH(groups),
+        .atom_count = fixture.link.atoms.count,
+    };
+    static const char* const pieces[] = {
+        "\t.section .shared,\"awG\",@progbits,pick,comdat\n",
+        "\t.section .shared,\"awG\",@progbits,\"quoted group\",comdat\n",
+        "\t.section .shared,\"aw\",@progbits\n",
+        "\t.section .identity,\"awRG\",@progbits,pick,comdat,unique,",
+        "\t.section .entries,\"awoG\",@progbits,pick,pick,comdat,unique,",
+        "\t.section .rodata.str1.1,\"aMSG\",@progbits,1,\"quoted group\",comdat\n",
+        "\t.section .plain,\"aG\",@progbits,plain_signature,,unique,",
+        "\t.size \"weak group\", \"weak group\"-\"weak group\"\n",
+        "\t.section .rodata,\"aG\",@progbits,.signature,comdat\n",
+    };
+    assembly_test_section_fixture(test, &fixture, sections, "groups", pieces, BUSTER_ARRAY_LENGTH(pieces));
+    assembly_fixture_end(&fixture);
+    arena_pop_to(&test->arena, mark);
+}
+
+static void assembly_test_unique(AssemblyTest* test)
+{
+    const uint64_t mark = test->arena.length;
+    AssemblyFixture fixture;
+    assembly_fixture_begin(&fixture, &test->arena);
+    const uint32_t value = 42;
+    const uint8_t classes[] = { BUSTER_LINK_CLASS_DATA, BUSTER_LINK_CLASS_BSS, BUSTER_LINK_CLASS_TDATA, BUSTER_LINK_CLASS_TBSS };
+    static const char* const names[] = { "unique object", "unique_zero", "unique_tls", "unique_tls_zero" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(classes); i += 1)
+    {
+        const bool tls = link_class_is_tls(classes[i]);
+        const bool zero = object_class_is_zero_fill(classes[i]);
+        const AtomId atom = assembly_fixture_data(test, &fixture, classes[i], 2, zero ? NULL : &value, sizeof(value));
+        const uint8_t flags = BUSTER_LINK_SYMBOL_UNIQUE | (tls ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT) |
+                              (i == 0 ? BUSTER_LINK_SYMBOL_HIDDEN : BUSTER_LINK_SYMBOL_DEFAULT);
+        assembly_fixture_define(&fixture, names[i], flags, atom, 0, sizeof(value));
+    }
+    const uint64_t zero = 0;
+    const AtomId reference = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, 3, &zero, sizeof(zero));
+    assembly_fixture_fixup(&fixture, reference, 0, BUSTER_LINK_FIXUP_ABS64, names[0], 0);
+    static const char* const pieces[] = {
+        "\t.hidden \"unique object\"\n\t.type \"unique object\", @gnu_unique_object\n",
+        "\t.type unique_zero, @gnu_unique_object\n",
+        "\t.type unique_tls, @gnu_unique_object\n",
+        "\t.type unique_tls_zero, @gnu_unique_object\n",
+    };
+    assembly_test_section_fixture(test, &fixture, NULL, "unique", pieces, BUSTER_ARRAY_LENGTH(pieces));
+    assembly_fixture_end(&fixture);
+    arena_pop_to(&test->arena, mark);
+}
+
 // A unit the sink refuses or finds contradicting itself: a function and a datum, changed by `change` (below), which must
 // fail with `error` and the reason `reason`, leaving the output arena as it was.
+// Each represented data relocation retains its ELF kind and addend; TLS instructions also exercise the symbolic
+// instruction-field modifiers independently of C lowering and the compiler's generated accessor sequences.
+static void assembly_test_tls_fixups(AssemblyTest* test)
+{
+    const uint64_t mark = test->arena.length;
+    AssemblyFixture fixture;
+    assembly_fixture_begin(&fixture, &test->arena);
+    const uint32_t word = 42;
+    const AtomId initialized = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_TDATA, 2, &word, sizeof(word));
+    const AtomId zeroed = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_TBSS, 5, NULL, 64);
+    const uint8_t tls_flags = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_TLS;
+    assembly_fixture_define(&fixture, "tls_initialized", tls_flags, initialized, 0, sizeof(word));
+    assembly_fixture_define(&fixture, "tls_zero", BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_TLS, zeroed, 0, 64);
+    const SymbolId external = assembly_fixture_symbol(&fixture, "tls_external", tls_flags);
+    const SymbolId ordinary = assembly_fixture_symbol(&fixture, "ordinary_external", BUSTER_LINK_SYMBOL_GLOBAL);
+    assembly_fixture_function(test, &fixture, "tls_access", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 4,
+                              "mov eax, dword ptr fs:[tls_initialized@TPOFF]\n"
+                              "lea rax, [rax + tls_initialized@TPOFF]\n"
+                              "mov rcx, qword ptr [rip + tls_external@GOTTPOFF]\n"
+                              "lea rdi, [rip + tls_external@TLSGD]\n"
+                              "lea rdi, [rip + tls_initialized@TLSLD]\n"
+                              "lea rax, [rax + tls_initialized@DTPOFF]\nret\n");
+    uint8_t zeros[(BUSTER_LINK_FIXUP_KINDS - 1) * 8] = { 0 };
+    const AtomId data = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, 3, zeros, sizeof(zeros));
+    assembly_fixture_define(&fixture, "all_fixups", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, data, 0, sizeof(zeros));
+    for (uint8_t kind = 1; fixture.valid && kind < BUSTER_LINK_FIXUP_KINDS; kind += 1)
+    {
+        const bool tls = kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind >= BUSTER_LINK_FIXUP_TLSGD;
+        const int64_t addend = kind == BUSTER_LINK_FIXUP_ABS64 ? INT64_MIN + 1 : (kind & 1) != 0 ? -13 : 17;
+        fixture.valid = link_add_fixup(&fixture.link, data, (kind - 1) * 8, kind, tls ? external : ordinary, addend) != 0;
+    }
+    static const char* const pieces[] = {
+        "\t.section .tdata,\"awT\",@progbits\n",
+        "\t.section .tbss,\"awT\",@nobits\n",
+        "\t.type tls_external, @tls_object\n",
+        "tls_initialized@TPOFF",
+        "tls_external@GOTTPOFF(%rip)",
+        "tls_external@TLSGD(%rip)",
+        "tls_initialized@TLSLD(%rip)",
+        "tls_initialized@DTPOFF(%rax)",
+        "\t.reloc ., R_X86_64_32S, ordinary_external-13\n\t.long 0\n",
+        "\t.quad tls_external@DTPOFF+17\n",
+    };
+    assembly_test_section_fixture(test, &fixture, NULL, "tls-fixups", pieces, BUSTER_ARRAY_LENGTH(pieces));
+    static const char* const invalid[] = {
+        ".data\n.reloc ., R_X86_64_32S, external\n.long 1\n",
+        ".data\n.reloc ., R_X86_64_64, external\n.long 0\n",
+        ".bss\n.reloc ., R_X86_64_64, external\n.zero 8\n",
+        ".data\n.reloc ., R_X86_64_32S, external\n.long other\n",
+        ".data\n.reloc ., R_X86_64_UNKNOWN, external\n.long 0\n",
+        ".data\n.reloc .+4, R_X86_64_32S, external\n.quad 0\n",
+        ".data\n.reloc ., R_X86_64_32S, external+9223372036854775808\n.long 0\n",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
+    {
+        const uint64_t scratch_mark = test->scratch.length;
+        const AsmResult rejected = asm_assemble((String8){ .pointer = (char*)invalid[i], .length = strlen(invalid[i]) }, test->index, (AsmOptions){ 0 }, &test->scratch);
+        assembly_test_check(test, rejected.error != NULL, "invalid explicit relocation fields are diagnosed", invalid[i]);
+        arena_pop_to(&test->scratch, scratch_mark);
+    }
+    assembly_fixture_end(&fixture);
+    arena_pop_to(&test->arena, mark);
+}
+
 enum
 {
-    ASSEMBLY_TEST_TLS,
     ASSEMBLY_TEST_GROUP,
     ASSEMBLY_TEST_WEAK_COMMON,
     ASSEMBLY_TEST_ALIASED_COMMON,
@@ -601,7 +967,6 @@ enum
     ASSEMBLY_TEST_RECORDS,
     ASSEMBLY_TEST_INSIDE,
     ASSEMBLY_TEST_TARGETLESS,
-    ASSEMBLY_TEST_TLS_FIXUP,
     ASSEMBLY_TEST_BND_CALL,
     ASSEMBLY_TEST_CHANGES,
 };
@@ -613,9 +978,8 @@ static void assembly_test_refusal(AssemblyTest* test, uint32_t change, AssemblyE
     assembly_fixture_begin(&fixture, &test->arena);
     const AtomId function = assembly_fixture_function(test, &fixture, "f", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 4, "mov eax, 1\nadd eax, 2\nret\n");
     const uint32_t word = 5;
-    const AtomId data = assembly_fixture_data(test, &fixture, change == ASSEMBLY_TEST_TLS ? BUSTER_LINK_CLASS_TDATA : BUSTER_LINK_CLASS_DATA, 2, &word, sizeof(word));
-    const uint8_t type = change == ASSEMBLY_TEST_TLS ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
-    assembly_fixture_define(&fixture, "v", BUSTER_LINK_SYMBOL_GLOBAL | type, data, 0, sizeof(word));
+    const AtomId data = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, 2, &word, sizeof(word));
+    assembly_fixture_define(&fixture, "v", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, data, 0, sizeof(word));
     if (change == ASSEMBLY_TEST_WEAK_COMMON || change == ASSEMBLY_TEST_ALIASED_COMMON)
     {
         const AtomId common_atom = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_BSS, 2, 0, sizeof(word));
@@ -666,13 +1030,6 @@ static void assembly_test_refusal(AssemblyTest* test, uint32_t change, AssemblyE
     if (change == ASSEMBLY_TEST_BND_CALL)
     {
         assembly_fixture_function(test, &fixture, "g", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 4, "bnd call external\nret\n");
-    }
-    if (change == ASSEMBLY_TEST_TLS_FIXUP)
-    {
-        const uint64_t zero = 0;
-        const AtomId pointer = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, 3, &zero, sizeof(zero));
-        const SymbolId tls = assembly_fixture_symbol(&fixture, "tls", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_TLS);
-        fixture.valid = fixture.valid && link_add_fixup(&fixture.link, pointer, 0, BUSTER_LINK_FIXUP_DTPOFF64, tls, 0) != 0;
     }
     const AssemblyView view = assembly_fixture_view(&fixture);
     const uint64_t output_length = test->output.length;
@@ -1151,6 +1508,75 @@ static bool assembly_test_compare(AssemblyTest* test, const char* compiler, cons
     return passed;
 }
 
+// Inline templates exercise placed records, record helpers, naked bodies, directive fragments and file-scope code.
+// The executable checks their semantics independently of the object comparator at both tiers and with DWARF enabled.
+static void assembly_test_inline(AssemblyTest* test, const char* compiler)
+{
+    const char* source = "tests/assembly-output/inline.c";
+    char expected[PATH_MAX];
+    snprintf(expected, sizeof(expected), "%s/inline-expected.txt", test->directory);
+    const bool ready = access(source, R_OK) == 0 && object_write_file(expected, (const uint8_t*)"", 0) == OBJECT_ERROR_NONE;
+    assembly_test_check(test, ready, "prepare inline assembly round-trip fixture", source);
+    for (uint32_t debug = 0; ready && debug < 2; debug += 1)
+    {
+        AssemblyTest options = *test;
+        options.options[options.option_count++] = debug ? "-g" : "-g0";
+        for (uint32_t tier = 0; tier < 2; tier += 1)
+        {
+            for (uint32_t gnu = 0; gnu < (test->cross_check ? 2u : 1u); gnu += 1)
+            {
+                char name[64];
+                char error[512] = { 0 };
+                snprintf(name, sizeof(name), "inline-%u-%u-%u", debug, tier, gnu);
+                const bool same = assembly_test_c_program(&options, compiler, source, expected, name, tier != 0, gnu == 0, error, sizeof(error));
+                assembly_test_check(test, same, gnu ? "GNU as preserves inline assembly code, data, symbols and frames" :
+                                                    "Buster preserves inline assembly code, data, symbols and frames", error);
+            }
+        }
+    }
+    if (!test->keep)
+    {
+        unlink(expected);
+    }
+}
+
+// TLS accesses must retain all four models' semantics, and CFI must support an actual unwinder. Exercise both
+// reassemblers, both compiler tiers, debug information and PIC on independent executable fixtures.
+static void assembly_test_runtime_features(AssemblyTest* test, const char* compiler)
+{
+    static const char* const fixtures[] = { "tls", "multiversion", "cfi", "groups" };
+    char expected[PATH_MAX];
+    snprintf(expected, sizeof(expected), "%s/runtime-expected.txt", test->directory);
+    const bool ready = test->option_count + 2 <= BUSTER_ARRAY_LENGTH(test->options) && object_write_file(expected, (const uint8_t*)"", 0) == OBJECT_ERROR_NONE;
+    assembly_test_check(test, ready, "prepare assembly runtime fixtures", NULL);
+    for (uint32_t f = 0; ready && f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
+    {
+        char source[PATH_MAX];
+        snprintf(source, sizeof(source), "tests/assembly-output/%s.c", fixtures[f]);
+        for (uint32_t mode = 0; mode < 4; mode += 1)
+        {
+            AssemblyTest options = *test;
+            options.options[options.option_count++] = (mode & 1) != 0 ? "-g" : "-g0";
+            options.options[options.option_count++] = (mode & 2) != 0 ? "-fPIC" : "-fno-PIC";
+            for (uint32_t tier = 0; tier < 2; tier += 1)
+            {
+                for (uint32_t reader = 0; reader < (test->cross_check ? 2u : 1u); reader += 1)
+                {
+                    char name[96];
+                    char error[512] = { 0 };
+                    snprintf(name, sizeof(name), "%s-mode%u-tier%u-%s", fixtures[f], mode, tier, reader == 0 ? "buster" : "gnu");
+                    const bool passed = assembly_test_c_program(&options, compiler, source, expected, name, tier != 0, reader == 0, error, sizeof(error));
+                    assembly_test_check(test, passed, name, error);
+                }
+            }
+        }
+    }
+    if (!test->keep)
+    {
+        unlink(expected);
+    }
+}
+
 // Kernel-style extraction consumes the substituted source spelling. The raw variant intentionally
 // cannot assemble. The .ascii variant can, including the DWARF for the ordinary code beside it.
 static void assembly_test_markers(AssemblyTest* test, const char* compiler)
@@ -1337,10 +1763,16 @@ static int run_assembly_output_tests(int count, char** arguments)
     if (valid)
     {
         assembly_test_rows(&test);
+        assembly_test_cfi_rules(&test);
+        assembly_test_cfi_boundaries(&test);
         assembly_test_small(&test);
         assembly_test_program(&test);
-        assembly_test_refusal(&test, ASSEMBLY_TEST_TLS, ASSEMBLY_UNSUPPORTED, "thread-local storage");
-        assembly_test_refusal(&test, ASSEMBLY_TEST_GROUP, ASSEMBLY_UNSUPPORTED, "section groups");
+        assembly_test_groups(&test);
+        assembly_test_unique(&test);
+        assembly_test_mixed(&test);
+        assembly_test_wide_code_addend(&test);
+        assembly_test_tls_fixups(&test);
+        assembly_test_refusal(&test, ASSEMBLY_TEST_GROUP, ASSEMBLY_INVALID, "invalid section groups");
         assembly_test_refusal(&test, ASSEMBLY_TEST_WEAK_COMMON, ASSEMBLY_UNSUPPORTED, "a non-global common definition");
         assembly_test_refusal(&test, ASSEMBLY_TEST_ALIASED_COMMON, ASSEMBLY_UNSUPPORTED, "sharing an atom");
         assembly_test_refusal(&test, ASSEMBLY_TEST_UNCODED, ASSEMBLY_UNSUPPORTED, "without instruction records");
@@ -1349,7 +1781,6 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_refusal(&test, ASSEMBLY_TEST_RECORDS, ASSEMBLY_INVALID, "don't encode to their function's bytes");
         assembly_test_refusal(&test, ASSEMBLY_TEST_INSIDE, ASSEMBLY_INVALID, "a symbol inside an instruction");
         assembly_test_refusal(&test, ASSEMBLY_TEST_TARGETLESS, ASSEMBLY_INVALID, "a relative branch without a target");
-        assembly_test_refusal(&test, ASSEMBLY_TEST_TLS_FIXUP, ASSEMBLY_UNSUPPORTED, "thread-local storage");
         assembly_test_refusal(&test, ASSEMBLY_TEST_BND_CALL, ASSEMBLY_UNSUPPORTED, "GNU as encodes otherwise");
         assembly_test_patchable(&test, "tests/assembly-output/patchable.c", "patchable", test.cross_check);
         // GNU as refuses a section named after an ordinary symbol. Compare this spelling with direct object emission.
@@ -1363,8 +1794,13 @@ static int run_assembly_output_tests(int count, char** arguments)
             assembly_test_c_testsuite(&test, c_testsuite, subset);
         }
         char compiler[PATH_MAX];
-        const ssize_t length = compared_count != 0 || test.cross_check ? readlink("/proc/self/exe", compiler, sizeof(compiler) - 1) : 0;
+        const ssize_t length = readlink("/proc/self/exe", compiler, sizeof(compiler) - 1);
         compiler[length > 0 ? length : 0] = 0;
+        if (length > 0 && test.option_count < BUSTER_ARRAY_LENGTH(test.options))
+        {
+            assembly_test_inline(&test, compiler);
+            assembly_test_runtime_features(&test, compiler);
+        }
         if (test.cross_check)
         {
             assembly_test_check(&test, length > 0, "locate the compiler for offset marker tests", NULL);

@@ -330,15 +330,16 @@ Directives:
 
 | Purpose | Supported directives |
 | --- | --- |
-| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T/G` flags or linked-order `"awo"`, `@progbits`/`@nobits`/`@note`/`@init_array`/`@fini_array`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
-| Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`, prefixed by `@` or `%`), `.size`; `.comm` and `.lcomm` (below) |
+| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T/R/G` flags or linked-order `"awo"`, `@progbits`/`@nobits`/`@note`/`@init_array`/`@fini_array`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters), optional `unique,ID`; `.pushsection`/`.popsection` and `.previous` switch and return |
+| Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype/gnu_indirect_function/gnu_unique_object`, prefixed by `@` or `%`), `.size`; `.comm` and `.lcomm` (below) |
 | Constants | `.equ`/`.set` (absolute and defined before use, and either may reassign; or a symbol plus a constant, below), `.equiv` (rejects redefinition) |
 | Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (each with an optional fill byte: clang writes `.zero 16,63`) |
+| Explicit relocations | `.reloc ., R_X86_64_KIND, symbol+addend`, for the link representation's named relocation kinds, followed by a zero field of the required width |
 | Alignment | `.align`/`.balign` with power-of-two byte alignment, `.p2align`; optional byte fill and maximum skip (0 is none); `.nops` writes NOPs of a given length |
 | Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym`; numbered DWARF `.file` and `.loc`, which make GNU as's line table (below); LLVM's `.prefalign` is accepted but adds no alignment |
 | Unwind | `.cfi_startproc [simple]`, `.cfi_endproc`, CFA/register/offset rules, state save/restore, escapes, return column and signal-frame metadata |
 
-Each section is identified by its name and group, and keeps its own properties,
+Each section is identified by its name, group, linked symbol, retain flag and optional unique ID, and keeps its own properties,
 alignment, layout and atom, including
 `.text.*`, `.data.*`, `.rodata.*`, `.bss.*` and mergeable string sections.
 Redeclarations must preserve its properties; zero-fill sections accept only zero
@@ -363,7 +364,10 @@ Sections with the same name in different groups, and an ungrouped section of
 that name, remain distinct. Reopening one preserves its group and attributes;
 `.pushsection`, `.popsection` and `.previous` retain the full section identity.
 The same path handles executable `"axG"`, mergeable `"aMSG"` and TLS zero-fill
-groups. A uniquely named section can itself be a group signature; its section
+groups. Linked-order groups put the linked symbol before the group signature,
+as in `.section .entries,"awoG",@progbits,entry,signature,comdat`.
+The `R` flag preserves `SHF_GNU_RETAIN` and gives the object GNU's OSABI.
+A uniquely named section can itself be a group signature; its section
 symbol is used. Attributed section signatures, other linkage spellings and changes
 to an existing group's flags are diagnosed. Bare section-name expressions
 are diagnosed once multiple section identities have that name: GNU as versions
@@ -384,6 +388,25 @@ diagnosed when the name ultimately identifies multiple sections. Quote names
 such as `"123patch"` and `"."` to reference their sections. The unquoted `.`
 is the location counter. A defined ordinary COMDAT signature also takes
 precedence over a linked-order table with the same name.
+
+An explicit `unique,ID` is also accepted for ordinary and grouped sections.
+The ID is an unsigned 32-bit integer; `unique,0` differs from an omitted ID.
+Reusing the same ID and other identity fields reopens that section. A group
+without COMDAT selection leaves the linkage argument empty before its ID:
+`.section .plain,"aG",@progbits,signature,,unique,1`.
+
+`@gnu_unique_object` supplies both object type and GNU unique binding for a
+definition; a TLS section promotes its type to TLS. A subsequent `@object`
+preserves that binding, while another type restores the ordinary binding
+given by `.globl`, `.weak` or the local default. `.local` clears unique binding.
+Undefined unique declarations use ordinary global or weak binding. Unique
+definitions and `@gnu_indirect_function` definitions give the object GNU's OSABI.
+
+The assembly writer uses `.reloc` when a normal expression would choose a
+different ELF relocation kind. This escape accepts the current location,
+one symbol and a signed 64-bit addend. The following bytes must contain the
+entire zero-initialized field; zero-fill sections, overlapping fields and
+nonzero data are diagnosed. It does not accept an arbitrary relocation offset.
 
 `.set name, symbol + constant` (#1115: GCC's constant pools write one entry
 within another, `.set .LC4,.LC11+4`) is an alias, which may come before its
