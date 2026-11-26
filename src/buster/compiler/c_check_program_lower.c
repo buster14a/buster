@@ -4721,16 +4721,35 @@ static bool check_lower_integer_constant(uint8_t class, uint8_t facts, CheckCons
 // and facts `target_facts`, converts each arm to the target instead, where an arm is an integer constant
 // (check_lower_integer_constant, #2678): a conversion of the joined value follows the label where the arms meet, so it
 // can't fold into either arm's CONST, as it can in the arm. It goes there where it would fold into a constant of the
-// joined class (check_lower_constant_conversion's classes and facts) and the target is an integer's or _Bool's. A
-// floating target keeps the join's conversion: Tier 1 has no select of floating values, so its arms' constants would
-// take a branch where the join's integer select is a cmov (on the 9700X, `s += p[i] > 0 ? 3 : 1` into a double, a
-// coin's condition: 223.4 ms for 40.5 with the conversion after the join, in constant-arms-2678-2026-11-15), and Tier 0
-// writes each arm's floating CONST as a movabs and a movq, no fewer than its constant and the join's cvtsi2sd.
+// joined class (check_lower_constant_conversion's classes and facts). Floating targets additionally need the callers'
+// exactness proof below: Tier 1 selects floating values (#2842), but cannot speculate a conversion that may round.
 static bool check_lower_conditional_sinks(uint8_t joined, uint8_t joined_facts, uint8_t target, uint8_t target_facts)
 {
     uint8_t class = 0;
     uint64_t bits = 0;
-    return target >= BUSTER_TYPED_CLASS_I8 && target <= BUSTER_TYPED_CLASS_U64 && check_lower_constant_conversion(joined, joined_facts, target, target_facts, &class, &bits);
+    return check_lower_constant_conversion(joined, joined_facts, target, target_facts, &class, &bits);
+}
+
+// Whether every value of the joined integer class converts exactly, or the target is not floating. A floating sink
+// whose variable arm can round would leave an unsafe conversion in that arm and prevent if-conversion, replacing
+// an integer select and one conversion with a branch. Keep those joins unless both arms are exact constants. Logical
+// operators supply their own proof: both arms are 0 or 1, regardless of their promoted integer class.
+static bool check_lower_conditional_exact(uint8_t joined, uint8_t target)
+{
+    const bool floating = target == BUSTER_TYPED_CLASS_F32 || target == BUSTER_TYPED_CLASS_F64;
+    const uint8_t limit = target == BUSTER_TYPED_CLASS_F64 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U16;
+    return !floating || (joined >= BUSTER_TYPED_CLASS_I8 && joined <= limit);
+}
+
+// Normalize the checked payload as the source's CONST does, then prove both conversions fold before a wider integer
+// join moves to a floating class. A narrow signed constant's payload need not be sign-extended yet. Preserve the
+// conditional's common type: `c ? -1 : 2u` converts -1 to unsigned before double, yielding 4294967295.0, not -1.0.
+static bool check_lower_conditional_constant(uint8_t source, uint8_t source_facts, uint8_t joined, uint8_t joined_facts, uint8_t target, uint8_t target_facts, uint64_t bits)
+{
+    uint8_t class = 0;
+    return check_lower_constant_conversion(source, source_facts, source, source_facts, &class, &bits) &&
+           check_lower_constant_conversion(class, source_facts, joined, joined_facts, &class, &bits) &&
+           check_lower_constant_conversion(class, joined_facts, target, target_facts, &class, &bits);
 }
 
 // The entries of a signed division or remainder (`kind` DIV or MOD) by 2^k (`shift` k, 1 to the class's bits less 2) of
@@ -12812,18 +12831,34 @@ static __attribute__((noinline)) TypeId check_lower_conditional_target(CheckLowe
         {
             const CheckStream* stream = writer->program->stream;
             const CheckGraph* graph = &writer->program->input->graph;
+            const uint8_t joined = check_lower_value_class(writer, type);
+            const uint8_t joined_facts = check_lower_facts(writer, type);
+            const uint8_t converted = check_lower_value_class(writer, below.type);
+            const uint8_t converted_facts = check_lower_facts(writer, below.type);
+            const bool bounded = constant || check_lower_conditional_exact(joined, converted);
+            bool exact = true;
             for (uint32_t k = 0; k < 2; k += 1)
             {
                 const uint32_t arm = k == 0 ? b : c;
-                if (arm < stream->count && check_stream_constant_kind(stream, arm) == CHECK_CONSTANT_INTEGER)
+                if (arm < stream->count)
                 {
-                    const CheckValue value = check_stream_value(stream, arm);
-                    constant |= check_lower_integer_constant(check_lower_value_class(writer, value.type), check_lower_facts(writer, value.type), value.constant_kind,
-                                                             value.fault, value.flags, value.category, graph->ops[arm]);
+                    bool folds = false;
+                    if (check_stream_constant_kind(stream, arm) == CHECK_CONSTANT_INTEGER)
+                    {
+                        const CheckValue value = check_stream_value(stream, arm);
+                        const uint8_t source = check_lower_value_class(writer, value.type);
+                        const uint8_t source_facts = check_lower_facts(writer, value.type);
+                        folds = check_lower_integer_constant(source, source_facts, value.constant_kind, value.fault, value.flags, value.category, graph->ops[arm]);
+                        constant |= folds;
+                        if (!bounded && folds)
+                        {
+                            folds = check_lower_conditional_constant(source, source_facts, joined, joined_facts, converted, converted_facts, (uint64_t)value.integer);
+                        }
+                    }
+                    exact &= folds;
                 }
             }
-            if (constant && check_lower_conditional_sinks(check_lower_value_class(writer, type), check_lower_facts(writer, type), check_lower_value_class(writer, below.type),
-                                                          check_lower_facts(writer, below.type)))
+            if (constant && (bounded || exact) && check_lower_conditional_sinks(joined, joined_facts, converted, converted_facts))
             {
                 target = below.type;
                 writer->depth -= 1;

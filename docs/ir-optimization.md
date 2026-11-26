@@ -76,8 +76,9 @@ rows.
 Then only the rows the join's phis need, through their represented operands,
 move to the head's end, before its branch. Each needed row must be total:
 constants, copies, wrapping integer arithmetic, bitwise operations, integer
-comparisons, selects, integer and pointer conversions, addresses, shifts by
-an in-range constant, and floating negations (#2842, below). A plain load is speculated where the head made a plain
+comparisons, selects, integer and pointer conversions, exact integer-to-floating
+conversions, addresses, shifts by an in-range constant, and floating negations
+(#2842, below). A plain load is speculated where the head made a plain
 load or store of the same address, of at least its size, after its last
 release. A call, a stack restore or a lifetime marker counts as a release,
 since it could unmap or reuse the memory. Nothing else proves an address.
@@ -151,8 +152,14 @@ floating exception, so that a moved row sets no status flag C's code wouldn't
 have (the optimizer keeps the floating operations as roots for the same
 reason): of the total operations a copy, a select, a bitcast and a negation
 (C's `-x` and IEC 60559's negate are quiet) make one, besides a constant and a
-proven load. Floating arithmetic, comparisons and conversions have no cost:
-they stay in their arm, which then refuses the region, so `x < 0 ? -x : x` and
+proven load. An integer-to-floating conversion also moves when the full source
+range fits the destination's precision: through `i16` for `f32`, and through
+`i32` for `f64`. A zero extension proves the narrower unsigned range for either
+conversion, and a sign extension proves the narrower signed range only for
+`sitofp`; a zero extension between the sign extension and conversion removes
+that signed proof. These conversions cannot round or raise an exception.
+Unproven wider conversions, floating arithmetic and comparisons stay in their
+arm, which then refuses the region, so `x < 0 ? -x : x` and
 `s += p[i] > 0 ? 3.0 : 1.0` convert, and `c ? a / b : 1.0` or the outer test of
 `x < 0 ? 0 : x > 1 ? 1 : x` (its arm's comparison) stay branches. Each arm moves at most four non-constant rows, and
 its blocks hold at most 32 rows in all, needed or not. Each join takes at most

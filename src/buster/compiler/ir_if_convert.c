@@ -19,7 +19,7 @@
 // call, a stack release, a lifetime marker or an observable load), since no arm row writes. Then only the rows the
 // join's phis need, through represented operands, move to the head's end, before its branch. Each needed row must be
 // total: constants, copies, wrapping integer arithmetic, bitwise operations, integer comparisons, selects, integer and
-// pointer conversions, addresses, shifts by an in-range constant and floating negations; its values integers, pointers
+// pointer conversions, exact integer-to-floating conversions, addresses, shifts by an in-range constant and floating negations; its values integers, pointers
 // or (#2842) F32 and F64, which raise no floating exception there (ir_if_convert_value_type). A plain load is
 // speculated where the head made a plain access (a load or a store) of the same address and at least its size after its
 // last release (a call, a stack restore or a lifetime marker), which could unmap or reuse the memory; nothing else
@@ -229,6 +229,8 @@ static const uint8_t ir_if_convert_costs[BUSTER_IR_OP_TABLE] = {
     [IR_TRUNC] = 1,
     [IR_ZEXT] = 1,
     [IR_SEXT] = 1,
+    [IR_SITOFP] = 1,
+    [IR_UITOFP] = 1,
     [IR_INTTOPTR] = 1,
     [IR_PTRTOINT] = 1,
     [IR_BITCAST] = 1,
@@ -293,10 +295,10 @@ static bool ir_if_convert_scalar_type(uint32_t type)
 }
 
 // A row's or a phi's type the pass takes: the scalar ones, and since #2842 the floating values Tier 1 selects without a
-// branch (TIER1_RULE_FLOAT_BLEND), F32 and F64. Of the total operations only a copy, a select, a bitcast and a negation
+// branch (TIER1_RULE_FLOAT_BLEND), F32 and F64. Of the total operations a copy, a select, a bitcast and a negation
 // make one: none of them raises a floating exception (C's -x and IEC 60559's negate are quiet, the others move bits),
-// so a moved one sets no status flag C's code wouldn't have. The arithmetic, the comparisons and the conversions may,
-// and have no cost: they stay in their arms, which then refuse the region.
+// so a moved one sets no status flag C's code wouldn't have. Integer-to-floating conversions move only with the
+// exact-range proof below. Floating arithmetic, comparisons and the other conversions stay in their arms.
 static bool ir_if_convert_value_type(uint32_t type)
 {
     return ir_if_convert_scalar_type(type) || type == IR_F32 || type == IR_F64;
@@ -451,6 +453,33 @@ static bool ir_if_convert_accessed(const IrIfConvertWork* work, uint32_t first, 
     return found;
 }
 
+// Whether an integer-to-floating conversion is exact for every value of its operand, and therefore raises no flag
+// in any rounding mode (#2842). The integer's entire width must fit the target's precision. A zero extension exposes
+// a smaller unsigned range for either conversion; a sign extension does so only while the value is interpreted as
+// signed. In particular, sitofp(zext(sext x)) cannot use x's signed range: the zero extension made it unsigned.
+// Each extension strictly reduces the width, so this walk takes at most the integer type count's steps.
+static bool ir_if_convert_exact_float(const IrIfConvertWork* work, uint32_t i)
+{
+    const IrFunction* const f = work->function;
+    const uint32_t precision = f->type[i] == IR_F32 ? 24 : 53;
+    uint32_t value = work->alias[f->a[i]];
+    uint32_t bits = ir_type_bits[f->type[value]];
+    bool signed_value = f->op[i] == IR_SITOFP;
+    bool extending = true;
+    while (bits > precision && extending)
+    {
+        const uint32_t op = f->op[value];
+        extending = op == IR_ZEXT || (signed_value && op == IR_SEXT);
+        if (extending)
+        {
+            signed_value = signed_value && op == IR_SEXT;
+            value = work->alias[f->a[value]];
+            bits = ir_type_bits[f->type[value]];
+        }
+    }
+    return bits <= precision;
+}
+
 // An arm row's speculation cost, or BUSTER_IR_IF_CONVERT_UNSAFE. A load costs one where the head's access proves its
 // address; `proven` is the row after the head's last release (or its first).
 static uint32_t ir_if_convert_cost(const IrIfConvertWork* work, uint32_t i, uint32_t proven, uint32_t terminator)
@@ -464,6 +493,10 @@ static uint32_t ir_if_convert_cost(const IrIfConvertWork* work, uint32_t i, uint
     safe = safe && ((mask & 1) == 0 || ir_if_convert_value_type(f->type[f->a[i]]));
     safe = safe && ((mask & 2) == 0 || ir_if_convert_value_type(f->type[f->b[i]]));
     safe = safe && ((mask & 4) == 0 || ir_if_convert_value_type(f->type[f->c[i]]));
+    if (safe && (op == IR_SITOFP || op == IR_UITOFP))
+    {
+        safe = ir_if_convert_exact_float(work, i);
+    }
     if (safe && (op == IR_SHL || op == IR_LSHR || op == IR_ASHR))
     {
         const uint32_t count = work->alias[f->b[i]];

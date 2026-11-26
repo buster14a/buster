@@ -919,6 +919,108 @@ static void ir_if_convert_test_floating(IrOptimizeTest* test, Arena* input, Aren
     test->random = random;
 }
 
+// Integer conversions moved out of an arm must be exact for the entire source range (#2842). These fixtures check
+// the admission boundary independently of the frozen random stream, then execute both edges before and after the
+// pass. The mask's bits name signed/unsigned to F32, then signed/unsigned to F64. In particular an unsigned
+// conversion of a sign extension cannot borrow the narrow signed range, nor can a signed conversion through an
+// intervening zero extension. Wider conversions remain in the chosen arm so their rounding and exceptions do too.
+static void ir_if_convert_test_float_conversions(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    static const struct
+    {
+        uint8_t source;
+        uint8_t first;
+        uint8_t middle;
+        uint8_t second;
+        uint8_t wide;
+        uint8_t admitted;
+    } cases[] = {
+        { IR_I1, 0, 0, 0, 0, 15 },
+        { IR_I8, 0, 0, 0, 0, 15 },
+        { IR_I16, 0, 0, 0, 0, 15 },
+        { IR_I32, 0, 0, 0, 0, 12 },
+        { IR_I64, 0, 0, 0, 0, 0 },
+        { IR_I1, IR_ZEXT, IR_I32, 0, 0, 15 },
+        { IR_I16, IR_ZEXT, IR_I64, 0, 0, 15 },
+        { IR_I32, IR_ZEXT, IR_I64, 0, 0, 12 },
+        { IR_I16, IR_SEXT, IR_I64, 0, 0, 5 },
+        { IR_I32, IR_SEXT, IR_I64, 0, 0, 4 },
+        { IR_I8, IR_SEXT, IR_I32, IR_ZEXT, IR_I64, 12 },
+        { IR_I8, IR_ZEXT, IR_I32, IR_SEXT, IR_I64, 5 },
+        { IR_I1, IR_ZEXT, IR_I32, IR_ZEXT, IR_I64, 15 },
+    };
+    static const uint64_t parameters[] = {
+        0,
+        1,
+        126,
+        127,
+        254,
+        255,
+        32766,
+        32767,
+        65534,
+        65535,
+        UINT32_C(2147483646),
+        UINT32_C(2147483647),
+        UINT32_MAX - 1,
+        UINT32_MAX,
+        UINT64_C(9223372036854775806),
+        UINT64_C(9223372036854775807),
+        UINT64_MAX - 1,
+        UINT64_MAX,
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        for (uint32_t variant = 0; variant < 4; variant += 1)
+        {
+            const uint32_t type = variant < 2 ? IR_F32 : IR_F64;
+            const uint32_t op = (variant & 1) != 0 ? IR_UITOFP : IR_SITOFP;
+            const uint32_t expected = (cases[c].admitted >> variant) & 1;
+            for (uint32_t shape = 0; shape < 3; shape += 1)
+            {
+                IrFunction f = { 0 };
+                const bool twice = cases[c].second != 0;
+                const bool created = ir_if_convert_test_fixture(input, &f, type, shape, 1, twice ? 2 : 1, 1);
+                ir_optimize_test_expect(test, created, "integer-to-floating if-conversion fixture allocates");
+                if (created)
+                {
+                    f.parameter_types[1] = cases[c].source;
+                    f.type[1] = cases[c].source;
+                    uint32_t operand = 1;
+                    if (cases[c].first != 0)
+                    {
+                        ir_optimize_test_instruction(&f, 3, cases[c].first, cases[c].middle, operand, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        operand = 3;
+                    }
+                    if (twice)
+                    {
+                        ir_optimize_test_instruction(&f, 5, cases[c].second, cases[c].wide, operand, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        operand = 5;
+                    }
+                    ir_optimize_test_instruction(&f, 5 + twice, op, type, operand, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    const bool valid = ir_verify_complete(&f, scratch).error == IR_OK;
+                    IrIfConvertResult result = { 0 };
+                    const IrCheck check = ir_if_convert(&f, output, scratch, &result);
+                    const bool verified = valid && check.error == IR_OK && ir_verify_complete(&result.function, scratch).error == IR_OK;
+                    char description[192];
+                    snprintf(description, sizeof(description), "integer-to-floating if-conversion case %u, variant %u, shape %u admits only an exact source range", c, variant, shape);
+                    ir_optimize_test_expect(test, verified && result.regions == expected && result.selects == expected &&
+                                            (expected != 0 || (result.function.op == f.op && output->length == 0)), description);
+                    for (uint32_t p = 0; verified && p < BUSTER_ARRAY_LENGTH(parameters); p += 1)
+                    {
+                        const IrOptimizeExecution before = ir_optimize_test_execute(&f, scratch, parameters[p], 0);
+                        const IrOptimizeExecution after = ir_optimize_test_execute(&result.function, scratch, parameters[p], 0);
+                        ir_optimize_test_expect(test, before.status == 1 && after.status == 1 && before.value == after.value && before.effects == after.effects,
+                                                "exact integer-to-floating speculation preserves both edge results and effects");
+                    }
+                }
+                arena_pop_to(output, 0);
+                arena_pop_to(input, 0);
+            }
+        }
+    }
+}
+
 static void ir_if_convert_tests(IrOptimizeTest* test)
 {
     ir_if_convert_test_scans(test);
@@ -977,6 +1079,7 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
             }
         }
         ir_if_convert_test_floating(test, &input, &vector, &optimized, &scratch);
+        ir_if_convert_test_float_conversions(test, &input, &vector, &scratch);
         for (uint32_t kind = 0; kind < 19; kind += 1)
         {
             IrFunction f = { 0 };

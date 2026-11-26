@@ -2039,14 +2039,15 @@ struct NodeProducerExpected
 // The refusals that stand for what the walk's actions and the passes after it would say (#2850's gate against the
 // diagnostics), each with a body beside it that is taken. Taken: `present` and `calls` (an internal function the unit
 // defines, named; and the unit declares a function with a result's attribute, which is no unit's reason), `same` (one
-// enumeration's values stored, passed and compared), `kept`, `exact` and `halves` (a
-// conditional whose arms its conversion keeps: small integers to a floating type, floats to a double), `narrow` (a
+// enumeration's values stored, passed and compared), `halves` (a conditional whose float-to-double conversion stays
+// after its join), `narrow` (a
 // compound shift inside its operand's own width). A root that may be warned of: `mixed` (two enumerations' enumerators
 // compared), `stored` and `passed` (an enumeration's value to another's object and parameter), `armed` and `started` (a
 // conditional's floating arms converted to an integer, by a return and by an initialization), `inexact` (an integer arm
 // a float does not hold), `narrowed` (double arms to a float). A token's kind: `pragmatic` (a pragma in the body), `undefined` (an internal function the
 // unit does not define, named). The machine's: `shifted` (a compound shift by its operand's own width, the census's
-// constants'). Something said of it before the walk: `said` (a tag a prototype's list declares, -Wvisibility). An
+// constants'), `kept` and `exact` (the tasks now fold both integer arms into exact floating constants, #2842).
+// Something said of it before the walk: `said` (a tag a prototype's list declares, -Wvisibility). An
 // initialization of another form: `aligned` and `typed` (an object aligned past 8 bytes, by its attribute and by its
 // type, whose local is a frame object). A gate of the controls': `bounded` (a parameter whose array's bound the
 // function's entry evaluates).
@@ -8054,7 +8055,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // The refusals that stand for a diagnostic of the walk's or of a pass after it, each beside a body that is taken; and
     // the two units that take no body for a member's mark and for a result's attribute on a type.
     NodeProducerExpected produced_silent = {
-        .reasons = { [NODE_PRODUCER_TAKEN] = 7, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_GATE] = 1, [NODE_PRODUCER_MACHINE] = 1,
+        .reasons = { [NODE_PRODUCER_TAKEN] = 5, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_GATE] = 1, [NODE_PRODUCER_MACHINE] = 3,
                      [NODE_PRODUCER_INITIALIZER] = 2,
                      [NODE_PRODUCER_LOUD] = 7 },
     };

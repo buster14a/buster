@@ -535,6 +535,33 @@ static IrOptimizeExecution ir_optimize_test_execute_table(const IrFunction* f, A
                     const __int128 signed_value = values[a] >= modulus / 2 ? (__int128)values[a] - modulus : (__int128)values[a];
                     value = (uint64_t)signed_value;
                 } break;
+                case IR_SITOFP:
+                case IR_UITOFP:
+                {
+                    const uint32_t width = ir_type_bits[f->type[a]];
+                    if (width > 64 || (f->type[i] != IR_F32 && f->type[i] != IR_F64))
+                    {
+                        execution.status = 4;
+                        folded = false;
+                    }
+                    else
+                    {
+                        const __int128 modulus = (__int128)1 << width;
+                        const int64_t signed_value = (int64_t)(values[a] >= modulus / 2 ? (__int128)values[a] - modulus : (__int128)values[a]);
+                        if (f->type[i] == IR_F32)
+                        {
+                            const float number = op == IR_SITOFP ? (float)signed_value : (float)values[a];
+                            uint32_t bits = 0;
+                            memcpy(&bits, &number, sizeof(bits));
+                            value = bits;
+                        }
+                        else
+                        {
+                            const double number = op == IR_SITOFP ? (double)signed_value : (double)values[a];
+                            memcpy(&value, &number, sizeof(value));
+                        }
+                    }
+                } break;
                 case IR_ICMP:
                 {
                     switch (f->c[i])

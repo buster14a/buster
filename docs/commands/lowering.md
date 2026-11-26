@@ -214,7 +214,7 @@ A conditional's or a logical operator's value converted by its consumer meets
 its arms at a label, where no conversion folds, since a jump there brings the
 other arm's value. Where an arm is a constant (a conditional's arm by
 `check_lower_integer_constant`, a logical operator's 0 or 1) and the conversion
-is one that folds to an integer or `_Bool` (`check_lower_conditional_sinks`),
+is one that folds to an integer, `_Bool` or an exact floating value (`check_lower_conditional_sinks`),
 the conversion goes into the arms instead (`check_lower_conditional_target`,
 asked out of line by `check_lower_join` only where the task under the node's
 EXPRESSION is that conversion): its task, under the node's
@@ -225,13 +225,17 @@ logical operator writes its 0 or 1 in the target's class and converts its second
 operand's truth before the jump to the join. The join's JUMP_VALUE takes the
 target's class, and the other arm takes the CONVERT the join had. A known
 condition's single arm does the same; GNU's `x ?: y`, whose condition is its
-arm, keeps the join's. A floating target keeps it too: Tier 1 has no select of
-floating values, so the arms' floating constants would take a branch where the
-join's integer select is a `cmov` (on the 9700X, a `?:` of 3 and 1 summed into
-a `double` on a coin's condition took 223.4 ms for 40.5 with the conversion
-after the join, in `constant-arms-2678-2026-11-15`), and Tier 0 writes each
-arm's floating constant as a `movabs` and a `movq`, no fewer than its constant
-and the join's `cvtsi2sd`. The node machine leaves such a node to the tasks
+arm, keeps the join's. Tier 1 selects F32/F64 values without a branch (#2842).
+A floating target takes the arms where their conversions are exact: every
+joined integer through 32 bits fits F64, every one through 16 bits fits F32,
+and logical arms are always 0 or 1. Wider joins take it only when every
+evaluated arm is an integer constant whose two conversions fold exactly
+(`check_lower_conditional_constant`). The common type still comes first:
+`c ? -1 : 2u` returned as double yields 4294967295.0 for the true arm.
+Potentially rounding conversions stay after the integer join. Moving one
+into an arm would prevent if-conversion, since speculating it could set an
+inexact flag on a path that originally did not convert that value.
+The node machine leaves a sinking node to the tasks
 (`node_machine_sinks`), as it writes a record's conversion once, after its row.
 
 `tests/checker/constant-conversions` holds the regressions, which run natively
@@ -240,7 +244,9 @@ whose Tier 0 code has no `movslq` or `cvtsi2s` of a constant; every kind of
 conversion that folds, conditionals' and logical operators' arms among them,
 after which no integer CONST precedes a CONVERT on either lowering, and the node
 templates' entries are the tasks'; and the conversions that don't fold, a
-join's to `double` among them.
+join's potentially rounding conversion to F32/F64 among them. The Tier 1
+driver fixtures also check branchless code for exact mixed arms and logical
+truths, and guarded floating-environment behavior for inexact conversions.
 
 ## Conditions as branches (#2883)
 
