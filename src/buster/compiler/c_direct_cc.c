@@ -6138,6 +6138,67 @@ static __attribute__((cold, noinline)) void fast_expr_decided_logic(FastExprCtx*
       ((uint32_t)(v).is_lvalue & (uint32_t)(((v).type & BUSTER_FTYPE_VOL) != 0))) & \
      (uint32_t)(((v).marks & BUSTER_FVAL_MARK_UNUSED_RESULT) == 0))
 
+// #3577: whether the tokens [START, END) are a stack object, as the full pipeline's -Wreturn-stack-address finds it: a
+// name of a variable of the function's (a parameter's too; a static one's is FSYM_GLOBAL) that holds an array or a record,
+// through subscripts and members (`a[i]`, `s.b[i]`, `a[i][j]`), in parentheses. A pointer member's subscript (`s.p[i]`)
+// passes too, past what the full pipeline finds.
+static __attribute__((cold, noinline)) bool fast_cc_stack_object_tokens(const FastCCState* cc, uint32_t start, uint32_t end)
+{
+    uint32_t s = start;
+    uint32_t e = end;
+    while (s < e && cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e)
+    {
+        s += 1u;
+        e -= 1u;
+    }
+    const uint32_t id = s < e && cc->tk[s] == FTOK_IDENT ? cc->td[s] : 0u;
+    const uint32_t si = id != 0 && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+    const FastType t = si != 0 ? cc->syms[si].type : FTYPE_VOID;
+    bool result = si != 0 && cc->syms[si].kind == FSYM_LOCAL && (ftype_is_array(t) || ftype_is_record(t));
+    uint32_t p = s + 1u;
+    while (result && p < e)
+    {
+        const uint8_t k = cc->tk[p];
+        if (k == FTOK_LBRACKET)
+        {
+            p = fast_cc_group_end(cc, p);
+        }
+        else if (k == FTOK_DOT && p + 1u < e && cc->tk[p + 1u] == FTOK_IDENT)
+        {
+            p += 2u;
+        }
+        else
+        {
+            result = false;
+        }
+    }
+    return result && p == e;
+}
+
+// #3577: whether `&` at AMP, applied to a value whose operand ends at cc->pos, makes the value a return returns, as the
+// full pipeline's check_common_in_return walks up from it: through parentheses, casts, unary `-` and `~`, sizeof,
+// arithmetic, a comma's right operand, a conditional's arms and a compound literal's elements. A call's argument, a
+// subscript's index, `*`, `!`, a comparison, a logical operator and an assignment take it instead (an operator pending
+// below `&`), and so do a conditional's `?`, a comma, a subscript, a member operator or an assignment just after it. LOCAL:
+// the operand is a stack object's lvalue ([rbp + off]); otherwise its tokens are asked. An address the full pipeline lets
+// go past an operator this can't see leaves all the same (`(&x)[0]`).
+static __attribute__((cold, noinline)) bool fast_cc_stack_address_returned(const FastCCState* cc, const FastExprOp* ops, uint32_t osp, uint32_t amp, bool local)
+{
+    bool taken = false;
+    for (uint32_t i = 0; i < osp && !taken; i += 1u)
+    {
+        const uint32_t op = ops[i].op;
+        const uint32_t tok = op >= FEOP_TOK_BASE ? op - FEOP_TOK_BASE : 0u;
+        taken = op == FEOP_CALL || op == FEOP_SUBSCRIPT || op == FEOP_DEREF || op == FEOP_UNARY_BANG || (op >= FEOP_VA_START && op <= FEOP_VA_COPY) ||
+                (tok >= FTOK_LT && tok <= FTOK_SHR_ASSIGN);
+    }
+    const uint8_t next = cc->pos < cc->tcount ? cc->tk[cc->pos] : FTOK_EOF;
+    taken = taken || next == FTOK_QUESTION || next == FTOK_COMMA || next == FTOK_LBRACKET || next == FTOK_DOT || next == FTOK_ARROW ||
+            (next >= FTOK_LT && next <= FTOK_SHR_ASSIGN);
+    const bool stack = !taken && (local || fast_cc_stack_object_tokens(cc, amp + 1u, cc->pos));
+    return stack;
+}
+
 // #3577: whether a constant index past a complete array's bounds, at the subscript whose `[` is at LBRACKET (cc->pos is
 // past its `]`), is the full pipeline's -Warray-bounds: an array a name gives (in parentheses, or a row of one, `b[2][0]`)
 // or a string literal's, not a member's (`s->arr[5]` is quiet there, a trailing one's or not). ONE_PAST_ADDRESSED: the
@@ -6267,6 +6328,15 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
             // #3577: a misaligned member's address is the full pipeline's -Waddress-of-packed-member (which a cast to a
             // pointer it is aligned for, or a conversion to void *, quiets there: it leaves here all the same).
             if ((vlasting & BUSTER_FVAL_LASTING_UNALIGNED) != 0) { fast_cc_bail(cc, "the address of a misaligned member"); return; }
+            // #3577: a stack object's address that a return's value carries is the full pipeline's -Wreturn-stack-address,
+            // in a dead branch's or sizeof's operand too (fast_cc_stack_address_returned). The expression's first token
+            // follows its `return`.
+            if (ex->seq_start_pos != 0 && cc->tk[ex->seq_start_pos - 1u] == FTOK_KW_RETURN && v->kind != FVAL_GLOBAL &&
+                fast_cc_stack_address_returned(cc, ops, *osp_ptr, cur.lbl0, v->kind == FVAL_LOCAL))
+            {
+                fast_cc_bail(cc, "a stack object's address a return returns");
+                return;
+            }
             if ((vmarks & BUSTER_FVAL_MARK_REGISTER) != 0) { fast_cc_bail(cc, "address of register variable"); return; }
             const FastType pt = ftype_make_ptr(cc, v->type);
             // An object's address keeps its kind without code too (#3592's dead branches): a comparison's or a
@@ -7207,7 +7277,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             if (k == FTOK_TILDE) { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_UNARY_TILDE }; } cc->pos += 1u; continue; }
             if (k == FTOK_BANG)  { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_UNARY_BANG }; } cc->pos += 1u; continue; }
             if (k == FTOK_STAR)  { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_DEREF }; } cc->pos += 1u; continue; }
-            if (k == FTOK_AMP)   { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_ADDR }; } cc->pos += 1u; continue; }
+            if (k == FTOK_AMP)   { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_ADDR, .lbl0 = cc->pos }; } cc->pos += 1u; continue; }
             if (k == FTOK_INC)   { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_PRE_INC }; } cc->pos += 1u; continue; }
             if (k == FTOK_DEC)   { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_PRE_DEC }; } cc->pos += 1u; continue; }
 
@@ -10757,8 +10827,16 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             if (fast_cc_peek(cc) != FTOK_SEMI)
             {
                 FastVal rv = { 0 };
+                const uint32_t rv_start = cc->pos;
                 fast_cc_expr(cc, false, false, false, false, 0, &rv);
                 if (cc->bailout) { break; }
+                // #3577: a stack array the return returns whole (`return a;`, a row `return a[i];`, a compound literal's)
+                // decays to its address, the full pipeline's -Wreturn-stack-address (a local's member array, past it).
+                if (ftype_is_array(rv.type) && rv.kind != FVAL_GLOBAL && (rv.kind == FVAL_LOCAL || fast_cc_stack_object_tokens(cc, rv_start, cc->pos)))
+                {
+                    fast_cc_bail(cc, "a stack array a return returns");
+                    break;
+                }
                 if (ftype_is_void(ret_t) && !ftype_is_void(rv.type))
                 {
                     fast_cc_bail(cc, "return value in void func");

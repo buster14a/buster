@@ -4493,6 +4493,13 @@ static int c_direct_unit_tests(void)
         // array (a trailing one or not), a string's terminator, a dead branch's and sizeof's.
         "struct S { int arr[2]; int n; int d[1]; };\nint a[3];\n"
         "int bounded(struct S* s) { int* e = &a[3]; return *e + 2[a] + s->arr[5] + s->d[4] + \"abc\"[3] + (0 ? a[7] : 1) + (int)sizeof(a[9]); }\n",
+        // 15. Returns the full pipeline's -Wreturn-stack-address leaves alone: an address a call, `*`, a subscript, a
+        // comparison or an assignment takes; a static's, a pointer member's array, a parameter array, a pointer's member.
+        "struct T { int b[2]; int n; };\nint* g(int*);\nint* p;\n"
+        "int* r1(void) { int x = 0; return g(&x); }\nint r2(void) { int x = 1; return *&x; }\n"
+        "int r3(int* q) { int a[2] = { 0, 1 }; return q[&a[1] - a]; }\nint r4(int* q) { int x = 0; return q == &x; }\n"
+        "int* r5(void) { int x = 0; return p = &x; }\nint* r6(void) { static int s[2]; return s; }\n"
+        "int* r7(struct T* t) { return t->b; }\nint* r8(int a[2]) { return a; }\nint* r9(struct T* t) { return &t->n; }\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4614,6 +4621,17 @@ static int c_direct_unit_tests(void)
         "int b[2][3];\nint* f(void) { return b[2]; }\n",
         "int f(void) { return \"abc\"[5]; }\n",
         "int a[3];\nint f(void) { return (a)[5]; }\n",
+        // -Wreturn-stack-address: a local's, a parameter's and a member's address, through a cast, arithmetic, sizeof and
+        // a conditional's arm (a dead one too), an element at a variable index, a local array, a row, a compound literal.
+        "int* f(void) { int x = 0; return &x; }\n",
+        "long f(int y) { return -(long)&y & 4095; }\n",
+        "struct S { int a; };\nint* f(struct S s) { return &s.a; }\n",
+        "unsigned long f(void) { int x = 0; return sizeof(&x) + (unsigned long)x; }\n",
+        "int* f(void) { int x = 0; return 0 ? &x : 0; }\n",
+        "int* f(int i) { int a[4] = { 0 }; return &a[i]; }\n",
+        "char* f(void) { char s[] = \"abc\"; return s; }\n",
+        "int* f(int i) { int a[2][3] = { { 0 } }; return a[i]; }\n",
+        "int* f(void) { return (int[2]){ 1, 2 }; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
