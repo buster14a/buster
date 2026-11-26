@@ -162,7 +162,8 @@ static Tier1EmitRegionPathStatus tier1_emit_region_certify_result(const Tier1Cfg
     uint32_t metric = status != TIER1_REGION_PATH_OK ? 1 : 0;
     if (status == TIER1_REGION_PATH_OK)
     {
-        status = tier1_emit_region_path_gain(input, score->block_gains, score->edge_gains,
+        const int64_t* total_edges = score->total_edge_gains != 0 ? score->total_edge_gains : score->edge_gains;
+        status = tier1_emit_region_path_gain(input, score->block_gains, total_edges,
                                              scratch, BUSTER_TIER1_RECOLOR_ACTIVE_WORK, work, 0);
         metric = status != TIER1_REGION_PATH_OK ? 2 : 0;
     }

@@ -12,6 +12,8 @@ struct Tier1EmitRegionScore
     int64_t* preservation_gains;
     int64_t* block_gains;
     int64_t* edge_gains;
+    // Null retains the original total certificate. Opt-in batch control changes use copy-plus-branch gains.
+    int64_t* total_edge_gains;
 };
 
 static uint64_t tier1_emit_region_score_bytes(const Tier1CfgInput* input)
@@ -49,6 +51,8 @@ static bool tier1_emit_region_score_control(const Tier1SelectPlan* plan, const T
     }
     return ok;
 }
+
+#include "tier1_emit_region_branch_cost.c"
 
 static Tier1EmitError tier1_emit_region_score_initial(const Tier1CfgInput* input, const Tier1CfgAllocation* cfg,
                                                       const Tier1EmitRecolorModel* model, const Tier1EmitRegionArguments* arguments,
@@ -95,27 +99,32 @@ static Tier1EmitError tier1_emit_region_score_initial(const Tier1CfgInput* input
 
 // Output and scratch may be the same arena: all retained gains precede the nested resolver scratch mark. On
 // failure no result is published and output is restored. The accepted allocation/cache are always read-only.
-static Tier1EmitError tier1_emit_region_score_trial(const Tier1SelectPlan* plan, const Tier1CfgInput* input,
+static Tier1EmitError tier1_emit_region_score_trial_control(const Tier1SelectPlan* plan, const Tier1CfgInput* input,
                                                     const Tier1CfgAllocation* before, const Tier1EmitRegionProposal* proposal,
                                                     const Tier1EmitRecolorModel* model, const Tier1EmitRegionArguments* arguments,
                                                     const Tier1EmitEpochCache* cache, const Tier1EmitEpochTrial* epochs,
                                                     const Tier1EmitRecolorCost* current_cost, Arena* output, Arena* scratch,
-                                                    uint64_t* work, Tier1EmitRegionScore* result)
+                                                    uint64_t* work, bool conditional_control, Tier1EmitRegionScore* result)
 {
     const uint64_t mark = output->length;
     Tier1EmitRegionScore built = { .cost = *current_cost };
     bool ok = true;
     const bool valid = epochs->cache == cache && epochs->generation == cache->generation && cache->blocks == input->block_count &&
                        arguments->call_count == model->count && arguments->fragment_count == before->allocation.fragment_count &&
-                       proposal->edge_count <= input->edge_count && (proposal->temp_slots & ~before->temp_slots) == 0;
+                       proposal->edge_count <= input->edge_count && (proposal->temp_slots & ~before->temp_slots) == 0 &&
+                       (!conditional_control || (proposal->edge_count == input->edge_count &&
+                                                proposal->cfg.edge_placements == proposal->placements &&
+                                                proposal->cfg.edge_move_offsets == proposal->offsets));
     Tier1EmitError error = valid ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
     if (error == TIER1_EMIT_OK)
     {
-        error = tier1_emit_recolor_charge((uint64_t)input->block_count * 2 + input->edge_count + (uint64_t)epochs->block_count * 64 + proposal->edge_count, work) ? error : TIER1_EMIT_LIMIT;
+        error = tier1_emit_recolor_charge((uint64_t)input->block_count * 2 + input->edge_count + (uint64_t)epochs->block_count * 64 + proposal->edge_count +
+                                          (conditional_control ? (uint64_t)input->edge_count + 1 : 0), work) ? error : TIER1_EMIT_LIMIT;
     }
     built.preservation_gains = error == TIER1_EMIT_OK ? ir_allocate(output, (uint64_t)input->block_count + 1, 8, &ok) : 0;
     built.block_gains = error == TIER1_EMIT_OK && ok ? ir_allocate(output, (uint64_t)input->block_count + 1, 8, &ok) : 0;
     built.edge_gains = error == TIER1_EMIT_OK && ok ? ir_allocate(output, (uint64_t)input->edge_count + 1, 8, &ok) : 0;
+    built.total_edge_gains = error == TIER1_EMIT_OK && ok && conditional_control ? ir_allocate(output, (uint64_t)input->edge_count + 1, 8, &ok) : 0;
     error = error == TIER1_EMIT_OK && !ok ? TIER1_EMIT_MEMORY : error;
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < epochs->block_count; k += 1)
     {
@@ -143,7 +152,7 @@ static Tier1EmitError tier1_emit_region_score_trial(const Tier1SelectPlan* plan,
         const bool ordered = edge < input->edge_count && (k == 0 || proposal->edges[k - 1] < edge);
         const bool traffic = proposal->after_memory[k] <= proposal->before_memory[k] && proposal->after_recipes[k] == proposal->before_recipes[k];
         error = ordered && traffic ? error : TIER1_EMIT_INVALID;
-        if (error == TIER1_EMIT_OK)
+        if (error == TIER1_EMIT_OK && !conditional_control)
         {
             error = tier1_emit_region_score_control(plan, input, edge, before->edge_placements[edge], proposal->placements[k]) ? error : TIER1_EMIT_INVALID;
         }
@@ -156,6 +165,10 @@ static Tier1EmitError tier1_emit_region_score_trial(const Tier1SelectPlan* plan,
             built.cost.edges -= (__int128)model->edge_weights[edge] * gain;
         }
     }
+    if (error == TIER1_EMIT_OK && conditional_control)
+    {
+        error = tier1_emit_region_branch_gains(plan, input, before, &proposal->cfg, model, work, &built);
+    }
     if (error == TIER1_EMIT_OK)
     {
         *result = built;
@@ -165,4 +178,16 @@ static Tier1EmitError tier1_emit_region_score_trial(const Tier1SelectPlan* plan,
         arena_pop_to(output, mark);
     }
     return error;
+}
+
+// Existing sparse callers retain their original behavior and do not allocate a second edge column.
+static Tier1EmitError tier1_emit_region_score_trial(const Tier1SelectPlan* plan, const Tier1CfgInput* input,
+                                                    const Tier1CfgAllocation* before, const Tier1EmitRegionProposal* proposal,
+                                                    const Tier1EmitRecolorModel* model, const Tier1EmitRegionArguments* arguments,
+                                                    const Tier1EmitEpochCache* cache, const Tier1EmitEpochTrial* epochs,
+                                                    const Tier1EmitRecolorCost* current_cost, Arena* output, Arena* scratch,
+                                                    uint64_t* work, Tier1EmitRegionScore* result)
+{
+    return tier1_emit_region_score_trial_control(plan, input, before, proposal, model, arguments, cache, epochs,
+                                                 current_cost, output, scratch, work, false, result);
 }

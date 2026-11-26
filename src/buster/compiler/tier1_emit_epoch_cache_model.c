@@ -81,8 +81,8 @@ static Tier1EmitError tier1_emit_epoch_cache_events(Tier1EmitEpochCache* cache, 
                     const uint32_t q = allocation->starts[f];
                     const uint8_t kind = allocation->kinds[f];
                     const uint8_t previous = allocation->kinds[f - 1];
-                    error = q < input->position_count && (kind != BUSTER_TIER1_ALLOCATE_REGISTER ||
-                            (previous != BUSTER_TIER1_ALLOCATE_REGISTER && ((q - cache->base) & 1) == 0)) ? error : TIER1_EMIT_UNSUPPORTED;
+                    error = q < input->position_count && (kind != BUSTER_TIER1_ALLOCATE_REGISTER || (((q - cache->base) & 1) == 0 &&
+                            (previous != BUSTER_TIER1_ALLOCATE_REGISTER || cfg->intervals.classes[i] == BUSTER_TIER1_ALLOCATE_GPR))) ? error : TIER1_EMIT_UNSUPPORTED;
                     if (error == TIER1_EMIT_OK && pass == 0)
                     {
                         cache->transition_offsets[q + 1] += 1;

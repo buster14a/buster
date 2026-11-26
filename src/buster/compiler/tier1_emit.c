@@ -947,6 +947,16 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
             // (#141) has a recipe: their patterns are their classes' own, none a constant's, an address's or a copy of one.
             error = base_location != 0 ? TIER1_EMIT_ALLOCATION : tier1_emit_copy(result, &prepared->recipes, value, reg, (uint8_t)frame->base_register, buffer);
         }
+        else if (kind == BUSTER_TIER1_ALLOCATE_REGISTER && previous == BUSTER_TIER1_ALLOCATE_REGISTER)
+        {
+            // An allocation's interior GPR relocation, including the identity boundaries of an optional search
+            // template. Its producer must order noninterfering copies; arbitrary parallel cycles are not fragments.
+            const uint8_t from = allocation->registers[f - 1];
+            const uint32_t width = prepared->sizes[value];
+            const X86Instruction copy = { .reg = reg, .rm = from, .form = width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32 };
+            error = base_location == 0 && (position & 1) == 0 && (width == 4 || width == 8) ? error : TIER1_EMIT_ALLOCATION;
+            error = error == TIER1_EMIT_OK && from != reg && !tier1_emit_append_kind(buffer, copy, 'm') ? TIER1_EMIT_MEMORY : error;
+        }
         else if (kind == BUSTER_TIER1_ALLOCATE_REGISTER)
         {
             const bool reload = previous == BUSTER_TIER1_ALLOCATE_SPILL && allocation->spill_ids[value] < frame->count;
@@ -963,7 +973,7 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
         }
         tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, position), value);
         tier1_emit_transition_state(prepared, allocation, transitions, f, value);
-        result->transition_count += 1;
+        result->transition_count += kind != BUSTER_TIER1_ALLOCATE_REGISTER || previous != BUSTER_TIER1_ALLOCATE_REGISTER || allocation->registers[f - 1] != reg;
     }
     return error;
 }
@@ -1075,9 +1085,10 @@ static uint32_t tier1_emit_owed(const Tier1SelectPlan* plan, const Tier1EmitPrep
     for (uint32_t e = transitions->offsets[use]; e < transitions->offsets[use + 2]; e += 1)
     {
         const uint32_t f = transitions->fragments[e];
-        const bool general = tier1_emit_class(prepared, transitions->values[f]) == BUSTER_TIER1_ALLOCATE_GPR;
         const uint8_t from = allocation->registers[f - 1];
         const uint8_t to = allocation->registers[f];
+        const bool identity = allocation->kinds[f - 1] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && from == to;
+        const bool general = !identity && tier1_emit_class(prepared, transitions->values[f]) == BUSTER_TIER1_ALLOCATE_GPR;
         needed |= general && allocation->kinds[f - 1] == BUSTER_TIER1_ALLOCATE_REGISTER && from < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << from : 0;
         needed |= general && allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && to < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << to : 0;
     }
@@ -2241,6 +2252,15 @@ static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, cons
         emitted.code_originals = stats.originals;
         emitted.debug_definitions = reason == TIER1_CERT_EMITTED_OK ? definitions : NULL;
         emitted.debug_phis = reason == TIER1_CERT_EMITTED_OK ? phis : NULL;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+        const char* trace_env = getenv("BUSTER_TIER1_EXCHANGE_TRACE");
+        if (trace_env != NULL && (uint32_t)strtoul(trace_env, NULL, 10) == plan->function->instruction_count)
+        {
+            fprintf(stderr, "FINAL_CERTIFICATE instructions=%u allocation=%u code_checked=%u code_reason=%u code_reason_name=%s code_edits=%llu code_originals=%llu\n",
+                    plan->function->instruction_count, emitted.certified, emitted.code_checked, emitted.code_reason,
+                    tier1_cert_emitted_reason_name(reason), (unsigned long long)emitted.code_edits, (unsigned long long)emitted.code_originals);
+        }
+#endif
         if (reason >= TIER1_CERT_EMITTED_REFUSED)
         {
             tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | reason);

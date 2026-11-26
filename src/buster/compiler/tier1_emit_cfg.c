@@ -4008,6 +4008,8 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
     arena_pop_to(scratch, mark);
 }
 
+static const uint32_t* tier1_emit_cfg_parameter_rows(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* scratch);
+
 static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool certify, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     const IrFunction* function = plan->function;
@@ -4032,6 +4034,14 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     Tier1EmitError error = capacity <= UINT32_MAX && branch_capacity <= UINT32_MAX ? TIER1_EMIT_OK : TIER1_EMIT_LIMIT;
+    const uint32_t* parameter_rows = 0;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const char* row_setting = getenv("BUSTER_TIER1_PARAMETER_ROWS");
+    if (error == TIER1_EMIT_OK && row_setting != 0 && strcmp(row_setting, "1") == 0)
+    {
+        parameter_rows = tier1_emit_cfg_parameter_rows(plan, emitted, scratch);
+    }
+#endif
     Tier1SelectCode* code = &emitted->code;
     Tier1EmitBuffer buffer = { .capacity = (uint32_t)capacity, .branch_capacity = (uint32_t)branch_capacity };
     Tier1SelectRequests requests = { 0 };
@@ -4191,7 +4201,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 const uint8_t kind = allocation->kinds[f];
                 const uint8_t previous = allocation->kinds[f - 1];
                 const uint32_t q = allocation->starts[f];
-                error = kind != BUSTER_TIER1_ALLOCATE_REGISTER || (previous != BUSTER_TIER1_ALLOCATE_REGISTER && ((q - base) & 1) == 0) ? error : TIER1_EMIT_UNSUPPORTED;
+                error = kind != BUSTER_TIER1_ALLOCATE_REGISTER || (((q - base) & 1) == 0 &&
+                        (previous != BUSTER_TIER1_ALLOCATE_REGISTER || cfg->intervals.classes[i] == BUSTER_TIER1_ALLOCATE_GPR)) ? error : TIER1_EMIT_UNSUPPORTED;
                 error = kind != BUSTER_TIER1_ALLOCATE_SPILL || previous != BUSTER_TIER1_ALLOCATE_REMATERIALIZE ? error : TIER1_EMIT_ALLOCATION;
                 if (pass == 0)
                 {
@@ -4336,6 +4347,14 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         if (exit_rows != 0 && only < b)
         {
             memcpy(saves.rows, exit_rows + (uint64_t)only * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, sizeof(saves.rows));
+        }
+        if (parameter_rows != 0)
+        {
+            const __m512i additional = _mm512_loadu_si512(parameter_rows + (uint64_t)b * 16);
+            const __m512i previous = _mm512_loadu_si512(saves.rows);
+            const __m512i unknown = _mm512_set1_epi32((int)BUSTER_IR_NONE);
+            const __mmask16 known = _mm512_cmpneq_epi32_mask(additional, unknown) & _mm512_cmpeq_epi32_mask(previous, unknown);
+            _mm512_storeu_si512(saves.rows, _mm512_mask_mov_epi32(previous, known, additional));
         }
         if (emitted->entry_rows != 0)
         {
@@ -5215,7 +5234,10 @@ static uint32_t tier1_emit_cfg_callee_used(const Tier1CfgAllocation* cfg, uint32
 #include "tier1_emit_region_score.c"
 #include "tier1_emit_region_path_gain.c"
 #include "tier1_emit_region_policy.c"
+#include "tier1_emit_parameter_rows.c"
+#include "tier1_emit_parameter_partition.c"
 #include "tier1_emit_batch_policy.c"
+#include "tier1_emit_call_windows.c"
 
 // An allocation's outcome as the function's: a constraint the allocator met is TIER1_EMIT_ALLOCATION; and without fixed
 // ranges there are no splits, each class's temporary slot a frame row of its own, so an allocation with either is too.
@@ -5533,6 +5555,7 @@ static void tier1_emit_cfg_dump(const Tier1SelectPlan* plan, const Tier1EmitResu
 // straight-line path compiles as it did without it.
 static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
+    uint32_t retained_window_rows = 0;
     emitted->general = true;
     // A target without AVX512VL (#1281) has no EVEX form of a 16- or 32-byte vector: its moves, spills and kernels take
     // VEX ones, and machine rows their roles below xmm16.
@@ -5556,6 +5579,13 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     {
         error = tier1_emit_cfg_order_check(plan, options, emitted, &problem, output, scratch);
     }
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const char* partition_env = getenv("BUSTER_TIER1_PARTITION_PARAMETERS");
+    if (error == TIER1_EMIT_OK && partition_env != 0 && strcmp(partition_env, "1") == 0)
+    {
+        tier1_emit_cfg_partition_parameters(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
+    }
+#endif
     if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 256u) != 0)
     {
         error = tier1_emit_cfg_exchange_weighted(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
@@ -5572,6 +5602,14 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     {
         error = tier1_emit_cfg_batch_regions(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
     }
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const char* window_env = getenv("BUSTER_TIER1_CALL_WINDOWS");
+    const uint32_t window_mode = window_env == 0 ? 0 : strcmp(window_env, "1") == 0 ? 1 : strcmp(window_env, "2") == 0 ? 2 : 0;
+    if (error == TIER1_EMIT_OK && window_mode != 0)
+    {
+        tier1_emit_cfg_call_windows(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg, window_mode, &retained_window_rows);
+    }
+#endif
     // A leaf whose values took its callee-saved registers (tier1_emit_cfg_leaf) saves them as a function that calls does.
     emitted->callee_registers |= error == TIER1_EMIT_OK && emitted->cfg_input.avoided_general != 0 ? emitted->leaf_registers : 0;
     emitted->callee_used = error == TIER1_EMIT_OK ? tier1_emit_cfg_callee_used(&emitted->cfg, emitted->callee_registers) : 0;
@@ -5590,6 +5628,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     if (error == TIER1_EMIT_OK)
     {
         error = tier1_emit_cfg_saves(plan, scratch, emitted);
+        emitted->prepared.call_save_mask |= retained_window_rows;
     }
     if (error == TIER1_EMIT_OK)
     {

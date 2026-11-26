@@ -4670,7 +4670,8 @@ static bool check_program_emit_return(WorkerBudgetLease* leases, uint32_t count)
 
 #if defined(BUSTER_TIER1_MEASURE_KINDS)
 // Private measurement export, after the unit is valid and before lane storage is retired. The original #1189 kinds
-// format and classifier are unchanged. flock serializes complete units even when several units append concurrently.
+// format is retained; 'm' additionally identifies real interior allocation register copies. flock serializes complete
+// units even when several units append concurrently.
 static bool check_program_emit_measure_kinds(const CheckEmitRun* run, const CheckProgramCode* result, uint32_t count)
 {
     FILE* stream = fopen(run->measure_kinds_path, "a");
@@ -4691,7 +4692,7 @@ static bool check_program_emit_measure_kinds(const CheckEmitRun* run, const Chec
         for (uint32_t r = 0; valid && r < records; r += 1)
         {
             const uint8_t kind = counts->measure_kinds[r];
-            valid = kind != 0 && strchr("SLTUCReapfrjnhxtu", kind) != NULL;
+            valid = kind != 0 && strchr("SLTUCReapfrjnhxtum", kind) != NULL;
             stores += kind == 'T';
             loads += kind == 'U';
             moves += kind == 'e';

@@ -139,7 +139,7 @@ static Tier1EmitError tier1_emit_batch_candidate(const Tier1SelectPlan* plan, co
                                                  const Tier1EmitRegionArguments* arguments, const Tier1EmitEpochCache* cache,
                                                  const Tier1EmitRecolorCost* cost, uint32_t seed, uint8_t target, uint32_t used,
                                                  Arena* materialized, Arena* epoch_output, Arena* epoch_scratch, Arena* score_output,
-                                                 Arena* scratch, uint64_t* work, Tier1EmitBatchCandidate* result, uint32_t* reason)
+                                                 Arena* scratch, uint64_t* work, bool conditional_control, Tier1EmitBatchCandidate* result, uint32_t* reason)
 {
     const uint32_t value = cfg->intervals.values[seed];
     const uint8_t source = cfg->allocation.registers[cfg->allocation.fragment_offsets[seed]];
@@ -206,7 +206,7 @@ static Tier1EmitError tier1_emit_batch_candidate(const Tier1SelectPlan* plan, co
         *reason = error == TIER1_EMIT_OK ? 4 : *reason;
         for (uint32_t e = 0; error == TIER1_EMIT_OK && e < input->edge_count; e += 1)
         {
-            if (built.cfg.edge_placements[e] == TIER1_CFG_EDGE_SPLIT && cfg->edge_placements[e] != TIER1_CFG_EDGE_SPLIT)
+            if (!conditional_control && built.cfg.edge_placements[e] == TIER1_CFG_EDGE_SPLIT && cfg->edge_placements[e] != TIER1_CFG_EDGE_SPLIT)
             {
                 const uint32_t positions[2] = { input->block_starts[edges->edge_blocks[e] + 1] - 1, input->block_starts[input->successors[e]] };
                 for (uint32_t k = 0; error == TIER1_EMIT_OK && k < 2; k += 1)
@@ -249,7 +249,7 @@ static Tier1EmitError tier1_emit_batch_candidate(const Tier1SelectPlan* plan, co
         tier1_emit_batch_move_counts(cfg, e, before_memory + e, before_recipes + e);
         tier1_emit_batch_move_counts(&built.cfg, e, after_memory + e, after_recipes + e);
         error = after_memory[e] <= before_memory[e] && after_recipes[e] == before_recipes[e] &&
-                tier1_emit_region_score_control(plan, input, e, cfg->edge_placements[e], built.cfg.edge_placements[e]) ? error : TIER1_EMIT_INVALID;
+                (conditional_control || tier1_emit_region_score_control(plan, input, e, cfg->edge_placements[e], built.cfg.edge_placements[e])) ? error : TIER1_EMIT_INVALID;
     }
     if (error == TIER1_EMIT_OK)
     {
@@ -264,8 +264,8 @@ static Tier1EmitError tier1_emit_batch_candidate(const Tier1SelectPlan* plan, co
             .edge_count = count, .move_count = built.cfg.move_count, .temp_slots = built.cfg.temp_slots, .target = target,
         };
         *reason = 7;
-        error = tier1_emit_region_score_trial(plan, input, cfg, &proposal, model, arguments, cache, &built.epochs, cost,
-                                              score_output, scratch, work, &built.score);
+        error = tier1_emit_region_score_trial_control(plan, input, cfg, &proposal, model, arguments, cache, &built.epochs, cost,
+                                                      score_output, scratch, work, conditional_control, &built.score);
     }
     if (error == TIER1_EMIT_OK)
     {
@@ -279,11 +279,14 @@ static Tier1EmitError tier1_emit_cfg_batch_regions(const Tier1SelectPlan* plan, 
 {
     const uint64_t mark = scratch->length;
     const IrFunction* function = plan->function;
+    bool conditional_control = false;
 #if defined(BUSTER_TIER1_MEASURE_KINDS)
     const uint64_t previous_limit = tier1_emit_recolor_work_limit;
     tier1_emit_recolor_work_limit = tier1_emit_recolor_measure_limit();
     const char* trace_env = getenv("BUSTER_TIER1_EXCHANGE_TRACE");
     const bool trace = trace_env != 0 && (uint32_t)strtoul(trace_env, 0, 10) == function->instruction_count;
+    const char* branch_env = getenv("BUSTER_TIER1_BATCH_BRANCH_COST");
+    conditional_control = branch_env != 0 && strcmp(branch_env, "1") == 0;
 #endif
     const Tier1CfgAllocation original = *cfg;
     const Tier1CfgInput original_input = *input;
@@ -331,6 +334,10 @@ static Tier1EmitError tier1_emit_cfg_batch_regions(const Tier1SelectPlan* plan, 
     if (ok && bounded)
     {
         setup = tier1_emit_region_score_initial(&original_input, &original, &model, &arguments, &cache, scratch, &work, &current_cost);
+        if (setup == TIER1_EMIT_OK && conditional_control)
+        {
+            setup = tier1_emit_region_branch_initial(plan, &original_input, &original, &model, &work, &current_cost);
+        }
         bounded = setup != TIER1_EMIT_LIMIT;
         ok = setup == TIER1_EMIT_OK || !bounded;
     }
@@ -343,7 +350,8 @@ static Tier1EmitError tier1_emit_cfg_batch_regions(const Tier1SelectPlan* plan, 
                                            original.intervals.count + original_input.edge_count * UINT64_C(2) + moves * 3 + 16);
         bounded = tier1_emit_recolor_charge(publish_work, &work);
         ok = !bounded || (tier1_emit_region_arena(scratch, tier1_emit_epoch_trial_bytes(&cache), &epoch_output) &&
-             tier1_emit_region_arena(scratch, tier1_emit_region_score_bytes(input) + 20 * ((uint64_t)input->edge_count + 1) + 5 * 63, &score_output) &&
+             tier1_emit_region_arena(scratch, tier1_emit_region_score_bytes(input) + 20 * ((uint64_t)input->edge_count + 1) + 5 * 63 +
+                                    (conditional_control ? 8 * ((uint64_t)input->edge_count + 1) + 63 : 0), &score_output) &&
              tier1_emit_region_arena(scratch, bytes, &materialized[0]) && tier1_emit_region_arena(scratch, bytes, &materialized[1]));
     }
     Tier1CfgAllocation current = original;
@@ -389,7 +397,7 @@ static Tier1EmitError tier1_emit_cfg_batch_regions(const Tier1SelectPlan* plan, 
                 uint32_t reason = 0;
                 const Tier1EmitError changed = tier1_emit_batch_candidate(plan, emitted, &current_input, &current, &edges, &model, &arguments,
                     &cache, &current_cost, i, (uint8_t)target, used, &materialized[slot], &epoch_output, &epoch_scratch, &score_output,
-                    scratch, &work, &candidate, &reason);
+                    scratch, &work, conditional_control, &candidate, &reason);
                 trials += 1;
                 bounded = changed != TIER1_EMIT_LIMIT;
                 ok = changed != TIER1_EMIT_MEMORY && changed != TIER1_EMIT_ALLOCATION;
@@ -421,7 +429,7 @@ static Tier1EmitError tier1_emit_cfg_batch_regions(const Tier1SelectPlan* plan, 
                 uint32_t reason = 0;
                 Tier1EmitError changed = tier1_emit_batch_candidate(plan, emitted, &current_input, &current, &edges, &model, &arguments,
                     &cache, &current_cost, i, (uint8_t)chosen, used, &materialized[slot], &epoch_output, &epoch_scratch, &score_output,
-                    scratch, &work, &candidate, &reason);
+                    scratch, &work, conditional_control, &candidate, &reason);
                 bounded = changed != TIER1_EMIT_LIMIT;
                 ok = changed == TIER1_EMIT_OK || !bounded;
                 if (ok && bounded)
@@ -463,8 +471,8 @@ static Tier1EmitError tier1_emit_cfg_batch_regions(const Tier1SelectPlan* plan, 
 #if defined(BUSTER_TIER1_MEASURE_KINDS)
     if (trace)
     {
-        fprintf(stderr, "BATCH_REGION summary instructions=%u supported=%u bounded=%u selected=%u published=%u trials=%u owners=%u endpoint=%u materialize=%u closure=%u traffic=%u epochs=%u score=%u weighted=%u paths=%u work=%llu saving=%.12Lf preservation=%.12Lf\n",
-            function->instruction_count, ok, bounded, selected, published, trials, refused[1], refused[2], refused[3], refused[4], refused[5], refused[6], refused[7],
+        fprintf(stderr, "BATCH_REGION summary instructions=%u branch_cost=%u supported=%u bounded=%u selected=%u published=%u trials=%u owners=%u endpoint=%u materialize=%u closure=%u traffic=%u epochs=%u score=%u weighted=%u paths=%u work=%llu saving=%.12Lf preservation=%.12Lf\n",
+            function->instruction_count, conditional_control, ok, bounded, selected, published, trials, refused[1], refused[2], refused[3], refused[4], refused[5], refused[6], refused[7],
             weighted, paths, (unsigned long long)work, (long double)(tier1_emit_recolor_total(&initial_cost) - tier1_emit_recolor_total(&current_cost)) / (UINT64_C(1) << 32),
             (long double)(initial_cost.preservation - current_cost.preservation) / (UINT64_C(1) << 32));
     }

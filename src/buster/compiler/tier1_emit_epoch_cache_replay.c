@@ -3,10 +3,10 @@
 
 // The same ordered block state walk as the qualified full helper. Only immutable lookups have been cached. Owners
 // and owed reset, rows follow the actual carry parent, and sparse preloads restore persistent register-cell reads.
-static Tier1EmitError tier1_emit_epoch_cache_block(const Tier1EmitEpochCache* cache, const Tier1CfgAllocation* cfg,
-                                                  uint32_t block, const uint32_t* parent_rows, uint8_t* registers,
-                                                  uint32_t* stores, uint32_t* loads, uint32_t* exit_rows,
-                                                  uint64_t limit, uint64_t* work)
+static Tier1EmitError tier1_emit_epoch_cache_block_rows(const Tier1EmitEpochCache* cache, const Tier1CfgAllocation* cfg,
+                                                       uint32_t block, const uint32_t* parent_rows, uint8_t* registers,
+                                                       uint32_t* stores, uint32_t* loads, uint32_t* exit_rows,
+                                                       uint32_t* row_writes, uint64_t limit, uint64_t* work)
 {
     const Tier1SelectPlan* plan = cache->plan;
     const Tier1EmitResult* emitted = cache->emitted;
@@ -19,6 +19,7 @@ static Tier1EmitError tier1_emit_epoch_cache_block(const Tier1EmitEpochCache* ca
         .registers = registers,
     };
     Tier1EmitSaves saves;
+    uint32_t written = 0;
     const uint64_t initialization = 1 + BUSTER_TIER1_EMIT_LOCATIONS + 48 +
                                     (uint64_t)cache->preload_offsets[block + 1] - cache->preload_offsets[block] +
                                     cache->entry_offsets[block + 1] - cache->entry_offsets[block];
@@ -115,15 +116,20 @@ static Tier1EmitError tier1_emit_epoch_cache_block(const Tier1EmitEpochCache* ca
                 const uint32_t stored = saved & ~tier1_emit_kept(&saves, &transitions, saved);
                 tier1_emit_exchange_epoch_count(stores, stored);
                 tier1_emit_saved(&saves, &transitions, saved);
+                written |= saved;
             }
         }
         else if (error == TIER1_EMIT_OK && selected && plan->patterns[node].rule == TIER1_RULE_ASM)
         {
-            tier1_emit_fixed_rows(&saves, tier1_select_node_fixed(function, &plan->patterns[node]));
+            const uint32_t fixed = tier1_select_node_fixed(function, &plan->patterns[node]);
+            tier1_emit_fixed_rows(&saves, fixed);
+            written |= fixed;
         }
         else if (error == TIER1_EMIT_OK && selected && tier1_select_fixed_registers(plan->patterns[node].rule) != 0)
         {
-            tier1_emit_fixed_rows(&saves, tier1_select_fixed_registers(plan->patterns[node].rule));
+            const uint32_t fixed = tier1_select_fixed_registers(plan->patterns[node].rule);
+            tier1_emit_fixed_rows(&saves, fixed);
+            written |= fixed;
         }
         if (error == TIER1_EMIT_OK && fragment != BUSTER_TIER1_CFG_NONE && cache->dropped[node] == 0 &&
             tier1_emit_cfg_holds(emitted, node, registers[node]))
@@ -139,8 +145,20 @@ static Tier1EmitError tier1_emit_epoch_cache_block(const Tier1EmitEpochCache* ca
     if (error == TIER1_EMIT_OK)
     {
         _mm512_storeu_si512(exit_rows, _mm512_loadu_si512(saves.rows));
+        if (row_writes != 0)
+        {
+            *row_writes = written;
+        }
     }
     return error;
+}
+
+static Tier1EmitError tier1_emit_epoch_cache_block(const Tier1EmitEpochCache* cache, const Tier1CfgAllocation* cfg,
+                                                  uint32_t block, const uint32_t* parent_rows, uint8_t* registers,
+                                                  uint32_t* stores, uint32_t* loads, uint32_t* exit_rows,
+                                                  uint64_t limit, uint64_t* work)
+{
+    return tier1_emit_epoch_cache_block_rows(cache, cfg, block, parent_rows, registers, stores, loads, exit_rows, 0, limit, work);
 }
 
 static Tier1EmitError tier1_emit_epoch_cache_prepare(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted,
