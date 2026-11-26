@@ -18,6 +18,7 @@ void check(int* p)
     long* i = __builtin_expect(0, 0) ? 0 : 0;
     long* j = __builtin_expect(0, p) ? 0 : 0;
     long* k = (__builtin_expect(0, 0) ? 0 : 0);
+    long* l = ((__builtin_expect))(0, 0);
     a = __builtin_expect(0, p);
     take(__builtin_expect(0, p));
     (void)a;
@@ -31,4 +32,5 @@ void check(int* p)
     (void)i;
     (void)j;
     (void)k;
+    (void)l;
 }
