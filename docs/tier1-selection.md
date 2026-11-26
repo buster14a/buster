@@ -504,12 +504,21 @@ patterns are:
   truth values into `jbe` or `jb`, which are true for unordered operands as
   `!(a > b)` is: the unsigned conditions, whose negations the integer table
   already has. `==` and `!=` read the parity flag too, which one jump can't, so
-  a branch tests their truth value; a select's two `cmov`s can (#2922, above). The conversions from and to integers of 8
+  a branch tests their truth value; a select's two `cmov`s can (#2922, above).
+  Each of these comparison consumers can fold the normalized right operand's
+  single-use load (#2829); equality and inequality can also exchange their
+  operands to take a left-hand load. The load-ordering proof runs through the
+  final branch or select, including any intervening truth operations. If the
+  boolean result's register also supplies the memory base or index, its
+  initialization follows the comparison with a flags-preserving `mov`.
+  The conversions from and to integers of 8
   to 64 bits are `cvtsi2s*` and `cvtts*2si`, a narrow signed operand
   sign-extended into the scratch register first and an unsigned `I32` converted
   as its zero extension's 64 bits; the precisions convert by `cvtss2sd` and
   `cvtsd2ss`, and a bitcast is `movd` or `movq`. A signed 32- or 64-bit load
-  can feed `cvtsi2s*` directly. A float or double load can feed `cvtts*2si` directly
+  can feed `cvtsi2s*` directly. A float or double load can also feed the
+  precision-changing `cvtss2sd` or `cvtsd2ss` directly, retaining the
+  dependency-breaking zero before the conversion. A float or double load can feed `cvtts*2si` directly
   for signed 32- or 64-bit results and unsigned 32-bit results. The latter uses
   the 64-bit destination. A conversion to a floating value
   zeroes its destination first, and so does a resize into another register
@@ -533,6 +542,24 @@ patterns are:
   and an integral one no inexact; the half's truncation raises invalid exactly
   where the value is 2^64 or more. A return moves its value into xmm0. Still
   refused: a select of floating values.
+- Floating machine-row loads (#2829, `TIER1_RULE_FLOAT_ROW_LOAD`): a one-record
+  arithmetic, minimum, maximum, square root or conversion row can take its
+  r/m argument from memory when that argument is a single-use load of exactly
+  the form's memory width and passes the ordinary load-ordering proof. The
+  original form and operand order stay fixed, including NaN payload priority,
+  signed-zero behavior and MXCSR exceptions. The remaining register input and
+  the folded address become the kernel's effective uses; frame objects and
+  direct symbols use the normal frame and relocation paths. The producer's
+  row metadata remains immutable, and the emitted-code certificate regenerates
+  the selected memory kernel. A legacy packed form also requires the load's
+  alignment proof: folding an unaligned load into its aligned memory operand
+  could introduce a fault. A scalar one-argument square root or conversion
+  clears its destination with `xorps` and uses that zero as its merge source,
+  whose upper lanes the scalar result does not expose. Refused: multi-record
+  rows, masked or explicit-rounding records, any loaded value also needed as a
+  register or merge input, and a full-vector load feeding a narrower scalar
+  intrinsic memory operand. Each admitted form still passes the output target's
+  allowlist; this rule does not substitute a different instruction.
 - Long double (#141): `F80`, the x87's, whose baseline values the CFG consumer keeps in
   frame objects of their own, 16 bytes each, one per value, and computes on the
   x87 stack between them, leaving it empty after each node, as Tier 0 does
@@ -1465,6 +1492,21 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | the same at other lanes ([the SIMD IR guide](ir-simd.md)'s "Lanes") | `BINARY`, `COMPARE`, `SELECT` | the lanes' forms (`tier1_select_lane_forms`, `_compares`, `_blends`): `vpaddb` to `vpaddq`, `vpsubb` to `vpsubq`, `vpmullw`, `vpmullq`, `vpsllvw` to `vpsllvq`, `vpsrlv*`, `vpsrav*`, `vaddps` to `vdivpd`; `vpcmp[u]b` to `vpcmp[u]q`, `vcmpps` and `vcmppd` (the rows' EQ_OQ, NEQ_UQ, LT_OS, LE_OS, GT_OS and GE_OS); `vpblendmb` to `vpblendmq` |
 | `load`, `store` | `TIER1_RULE_FLOAT_LOAD`, `_STORE` and their `_ADDRESS` folds | `vmovdqu32` at the width, the address folded as a floating value's |
 | `phi` | `TIER1_RULE_PHI` | none: its edges' moves |
+
+Packed floating add, subtract, multiply and divide can consume a single-use
+right-hand load directly (#2829). The two factors of an FMA keep their original
+order: a loaded second factor uses 132 or 231, and a loaded addend uses 213,
+with the first factor saved when allocation would overwrite it. This preserves
+the priority of distinct NaN payloads. Same-width packed i32/f32 conversions
+can consume their input load too. Each fold uses the existing same-block,
+single-use proof, moves across no intervening memory access, store, call or
+fence, and keeps the original address and access width. A legacy SSE target
+retains an explicit unaligned load before packed arithmetic or conversion;
+folding an arbitrary vector address into those legacy forms would introduce an
+alignment fault. VEX and EVEX use their unaligned memory operands directly.
+`test-tier1-emit` checks these plans and target records, and compares their
+native results and MXCSR flags with the ordered register forms across rounding
+modes, destination aliases, unaligned inputs and guard-page boundaries.
 
 A masked operation (`tier1_select_masked_binary`) has four values: the
 operation's two operands, the mask and the passthrough `w` (`values[3]`, the

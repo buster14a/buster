@@ -1509,7 +1509,7 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
         .definition_location = defines && destination != UINT32_MAX ? tier1_cert_emitted_register(build, value, destination) : BUSTER_CERT_NONE,
     };
     bool valid = !defines || kernel->definition_location != BUSTER_CERT_NONE;
-    if (valid && (op == IR_CALL || op == IR_CALL_INDIRECT))
+    if (valid && tier1_select_function_call(function, node))
     {
         valid = tier1_cert_emitted_call(build, node, destination, kernel);
     }

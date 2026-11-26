@@ -149,6 +149,31 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
                 error = plan->effective_use_values[first + k] == function->extra[call.argument_first + skipped + k] ? error : TIER1_LIVENESS_INVALID;
             }
         }
+        else if (op == IR_CALL && !tier1_select_function_call(function, node) && plan->patterns[node].rule == TIER1_RULE_FLOAT_ROW_LOAD)
+        {
+            // A folded row (#2829) is an ordinary memory kernel: its remaining register input and address are its
+            // selected uses. Keep the original row/form and exact-width handoff checks, rather than requiring the
+            // row emitter's original argument list, which includes the load this kernel has covered.
+            const IrCall call = function->calls[function->b[node]];
+            const Tier0Operation* row = &function->rows[call.row - 1u];
+            const Tier1SelectPattern* pattern = &plan->patterns[node];
+            if (plan->covered[node] || row->record_count != 1 || pattern->immediate != row->records[0].form || pattern->fold_count == 0 ||
+                pattern->source_width != x86_form_description(row->records[0].form)->operand_bytes ||
+                pattern->width != (tier1_select_float_width(type) | tier1_select_vector_width(type)) || pattern->values[3] != BUSTER_IR_NONE)
+            {
+                error = TIER1_LIVENESS_INVALID;
+            }
+            uint32_t use = first;
+            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
+            {
+                if (pattern->values[operand] != BUSTER_IR_NONE)
+                {
+                    error = use < end && plan->effective_use_values[use] == pattern->values[operand] ? error : TIER1_LIVENESS_INVALID;
+                    use += 1;
+                }
+            }
+            error = use == end ? error : TIER1_LIVENESS_INVALID;
+        }
         else if (op == IR_CALL && !tier1_select_function_call(function, node))
         {
             // A row call's (#141) machine row, its index, and its arguments its effective uses in order.
@@ -213,6 +238,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             }
         }
         else if (plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_UNREACHABLE || plan->patterns[node].rule == TIER1_RULE_ROW ||
+                 plan->patterns[node].rule == TIER1_RULE_FLOAT_ROW_LOAD ||
                  plan->patterns[node].rule == TIER1_RULE_ASM)
         {
             error = TIER1_LIVENESS_INVALID;
