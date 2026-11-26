@@ -4,7 +4,8 @@
 // Remaining suppress recovery cases (#2332), read from original runtime programs. Compare complete ordered
 // diagnostics and status with Clang, including macro notes, warning policy and error limits. Invalid sources must
 // preserve an old output or leave an absent one absent; executable controls must retain their statement effects.
-// Runtime catalogue columns are path, decimal case count, hexadecimal accepted mask and hexadecimal executable mask.
+// Runtime catalogue columns are a path relative to the selected fixture root, decimal case count, hexadecimal
+// accepted mask and hexadecimal executable mask.
 
 static void check_test_driver_suppress_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -38,16 +39,17 @@ static void check_test_driver_suppress_recovery(CheckTest* test, const char* cla
     snprintf(saved, sizeof(saved), "%s/suppress-recovery.saved", directory);
     const bool saved_output = parse_test_write(saved, sentinel, sizeof(sentinel) - 1);
     check_test_expect(test, saved_output, "suppress recovery output sentinel initializes");
-    char source[256];
+    char relative[256];
     uint32_t cases = 0;
     unsigned long long accepted_cases = 0;
     unsigned long long executable_cases = 0;
     uint32_t rows = 0;
-    int fields = catalog != NULL && buffers && saved_output ? fscanf(catalog, "%255s %u %llx %llx", source, &cases, &accepted_cases, &executable_cases) : EOF;
+    int fields = catalog != NULL && buffers && saved_output ? fscanf(catalog, "%255s %u %llx %llx", relative, &cases, &accepted_cases, &executable_cases) : EOF;
     while (fields == 4 && cases != 0 && cases <= 64 && (cases == 64 || (accepted_cases >> cases) == 0) && (executable_cases & ~accepted_cases) == 0)
     {
         rows += 1;
-        const bool available = access(source, R_OK) == 0;
+        char source[PATH_MAX];
+        const bool available = check_test_fixture_path(source, sizeof(source), relative) && access(source, R_OK) == 0;
         check_test_expect(test, available, "suppress recovery runtime fixture is available and bounded");
         for (uint32_t c = 0; c < cases; c += 1)
         {
@@ -146,7 +148,7 @@ static void check_test_driver_suppress_recovery(CheckTest* test, const char* cla
                 }
             }
         }
-        fields = fscanf(catalog, "%255s %u %llx %llx", source, &cases, &accepted_cases, &executable_cases);
+        fields = fscanf(catalog, "%255s %u %llx %llx", relative, &cases, &accepted_cases, &executable_cases);
     }
     check_test_expect(test, rows != 0 && fields == EOF && catalog != NULL && !ferror(catalog), "suppress recovery catalogue is complete and well-formed");
     if (catalog != NULL)

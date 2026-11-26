@@ -263,6 +263,7 @@ static void fixture_path_controls(FixtureTest* test)
 static void fixture_checker_controls(FixtureTest* test);
 static void fixture_ir_controls(FixtureTest* test);
 static void fixture_driver_controls(FixtureTest* test);
+static void fixture_driver_root_controls(FixtureTest* test);
 
 int main(int argc, char** argv)
 {
@@ -288,6 +289,7 @@ int main(int argc, char** argv)
             fixture_checker_controls(&test);
             fixture_ir_controls(&test);
             fixture_driver_controls(&test);
+            fixture_driver_root_controls(&test);
             printf("runtime-fixtures: %u checks, %u failures\n", test.checks, test.failures);
             if (test.failures == 0)
             {
@@ -764,6 +766,47 @@ static bool fixture_checker_copy(FixtureTest* test, const char* root, const char
                        test_fixture_path(destination, sizeof(destination), root, relative) && fixture_copy_tree(test, source, destination);
     fixture_expect(test, valid, "copy checker fixture inventory under the selected root");
     return valid;
+}
+
+// The attribute recovery focus also reads path-valued suppress-recovery rows. Its private rows keep this contract
+// small while exercising a real source from the selected root, including failure and recovery after that file moves.
+static void fixture_driver_root_controls(FixtureTest* test)
+{
+    char root[PATH_MAX];
+    char original[PATH_MAX];
+    char path[PATH_MAX];
+    bool ready = test_fixture_path(root, sizeof(root), test->work, "driver-root-fixtures") &&
+                 test_fixture_path(original, sizeof(original), test->repo, "tests") && fixture_copy_tree(test, original, root);
+    fixture_expect(test, ready, "copy driver fixtures for an explicit-root recovery contract");
+    static const char suppress[] = "driver/suppress_macro_delimiters.c 1 0 0\n";
+    static const char label[] = "0 1 1\n";
+    static const char declaration[] = "0 1 1\n";
+    ready = ready && test_fixture_path(path, sizeof(path), root, "driver/suppress_recovery.cases") &&
+            fixture_write(test, path, suppress, sizeof(suppress) - 1) &&
+            test_fixture_path(path, sizeof(path), root, "driver/suppress_label_order.cases") &&
+            fixture_write(test, path, label, sizeof(label) - 1) &&
+            test_fixture_path(path, sizeof(path), root, "driver/attribute_declarations.cases") &&
+            fixture_write(test, path, declaration, sizeof(declaration) - 1);
+    const char* const arguments[] = {
+        test->compiler, "test-checker-driver", "--clang", test->clang, "--executable", test->compiler,
+        "--fixtures", root, "--attribute-recovery-only", "--in-process", NULL,
+    };
+    if (ready)
+    {
+        fixture_run(test, "driver recovery catalog paths resolve under the explicit root", arguments, 0, "0 failures");
+        ready = test_fixture_path(path, sizeof(path), root, "driver/suppress_macro_delimiters.c") && fixture_remove(test, path);
+        if (ready)
+        {
+            fixture_run(test, "driver recovery requires each source beneath the selected root", arguments, 1,
+                        "suppress recovery runtime fixture is available and bounded");
+            ready = test_fixture_path(original, sizeof(original), test->repo, "tests/driver/suppress_macro_delimiters.c") &&
+                    fixture_copy_tree(test, original, path);
+            if (ready)
+            {
+                fixture_run(test, "driver recovery passes after its explicit-root source is restored", arguments, 0, "0 failures");
+            }
+        }
+    }
 }
 
 static void fixture_warning_controls(FixtureTest* test, const char* root)

@@ -413,6 +413,8 @@ catalog's total. `tools/ci/runtime-fixtures.c`, run by the correctness inventory
 tests these contracts against an already built compiler using private copies
 of the data. A fixture edit or added ordinary case must leave Ninja with no
 compile, link or table-bake work; editing a runner still rebuilds its owner.
+The hosted producer checks those build dependencies synchronously before
+packing its product or starting runtime suites, using the focused mode below.
 
 The eleven `main.c` units share the compiler interfaces and the fixtures
 used across test families. Production bodies are limited to their consumers,
@@ -662,7 +664,9 @@ names, fixture names and explicit nonstandard roots seed a literal quoted-includ
 closure. Every active descendant is checked regardless of suffix, extension or
 directory, including headers, `.inc` files and generated fixture data. The
 default is exactly one unity owner. A shared root never exempts a new child or
-prefix. Important nonstandard paths also assert the command's exact owner.
+prefix. Any `tests/` path in those unity dependency records fails even with
+one owner: runtime data must not enter the compiler through an include or
+embedding. Important nonstandard paths also assert the command's exact owner.
 Production implementation boundaries have separate exact path/owner rows even
 when their filenames do not identify fixtures. A boundary may name several
 consumers; missing, added or substituted owners all fail. Configuration-specific
@@ -715,6 +719,31 @@ rebuild the compiler. The ordinary correctness inventory runs it against its
 own compiler, including on source-only PRs that do not trigger the separate
 build-regression workflow. Representative edit-plan checks remain in the full
 build regression to verify Ninja's actual invalidation behavior.
+
+`--runtime-fixtures-only [COMPILER]` first runs those ownership checks, then
+temporarily edits a runtime source, expected-output file and catalog, and adds
+a source/expected pair with its catalog row. After each edit, both Ninja's dry
+run and a real invocation must report no work; Ninja's command log and the
+compiler's inode, size and modification time must stay unchanged. The positive
+control edits the IR parser's C runner and requires a dry-run plan for BACKEND
+alone, followed by the link and bake, including configurations that generate
+the unit's native code in parts. That positive control builds nothing. The
+check restores every original byte and access/modification timestamp and
+removes its added files, including on ordinary failures and handled interrupts.
+It finally requires a clean graph again.
+
+Run this mutating mode on an **exclusive, already built checkout**:
+
+```sh
+/tmp/buster-build-regression --runtime-fixtures-only "$(./build.sh print-output --config Release)"
+```
+
+`tools/ci/hosted-product.sh ownership` runs it synchronously after the inventory's
+read-only ownership heading, before `pack` or any parallel correctness suites.
+Its complete log is retained in the product's ownership record. A failed check
+removes any earlier pass, so that product cannot be packed. The ordinary
+correctness inventory keeps its ownership heading read-only. The full build
+regression runs the fixture dependency probes after its own clean Release build.
 
 The [cleanup inventory](../build-dependency-cleanup.md) records completed packets,
 necessary sharing, remaining production boundaries and validation limits.
