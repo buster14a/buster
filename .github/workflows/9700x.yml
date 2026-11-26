@@ -1,22 +1,17 @@
 name: Paired Benchpress loop benchmarks for PRs 3646 and 3633
 on:
   workflow_dispatch:
+    inputs:
+      pr:
+        description: PR to measure
+        required: true
+        type: choice
+        options: ['3646', '3633']
 permissions:
   contents: read
 jobs:
   loops:
-    if: github.repository_id == '1421805693' && github.ref == 'refs/heads/measure/loop-pairs-9700x-6b0809fc'
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - pr: 3646
-            revision: 3bb1ff6b83667f6b26afc402605623c1191d3bd6
-            passes: +vectorize
-          - pr: 3633
-            revision: e5826bec05a4be4b8e92e7ab903c05ce336bfa74
-            passes: +vectorize,+unroll
+    if: github.repository_id == '1421805693'
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -28,8 +23,8 @@ jobs:
       BUSTER_HOST_ARCH: znver5
       BUSTER_DEBUG_INFO: '0'
       BASE_SHA: 8e4d32879e17b7d9548cad54257a2f8461328366
-      HEAD_SHA: ${{ matrix.revision }}
-      PASSES: ${{ matrix.passes }}
+      HEAD_SHA: ${{ inputs.pr == '3646' && '3bb1ff6b83667f6b26afc402605623c1191d3bd6' || 'e5826bec05a4be4b8e92e7ab903c05ce336bfa74' }}
+      PASSES: ${{ inputs.pr == '3646' && '+vectorize' || '+vectorize,+unroll' }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
@@ -112,5 +107,5 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: loop-pairs-pr${{ matrix.pr }}
+          name: loop-pairs-pr${{ inputs.pr }}
           path: ${{ runner.temp }}/loop-evidence-${{ github.run_id }}
