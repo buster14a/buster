@@ -1,0 +1,308 @@
+name: Interpreter 2758 hosted evidence
+
+# Temporary measurement workflow; remove before merging the implementation.
+# Each candidate probes and works on the same hosted VM. An unsupported CPU
+# records missing evidence; it does not claim a sanitizer or performance pass.
+on:
+  pull_request:
+    paths: [.github/workflows/interpreter-2758-evidence.yml]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: interpreter-2758-evidence-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  BUSTER_HOST_ARCH: vector
+  BUSTER_SANITIZER_OPTIMIZATION: '3'
+  BUSTER_DEBUG_INFO: '0'
+  BUSTER_LINKER: lld
+  BUSTER_PARALLEL_CODEGEN: auto
+  BUSTER_PARALLEL_CPUS: '4'
+  BUSTER_ORACLE_CACHE: check
+  BASE_REVISION: 8e4d32879e17b7d9548cad54257a2f8461328366
+  BASE_TREE: 8bf0a22e6067a7698ca6257d3e6cbe40f49b108a
+  BASE_RUN: '45779319802'
+
+jobs:
+  prepare-hosted-tools:
+    uses: ./.github/workflows/prepare-hosted-tools.yml
+
+  compare:
+    name: ${{ matrix.sanitizer }}, candidate ${{ matrix.candidate }}
+    needs: prepare-hosted-tools
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [memory, address, thread]
+        candidate: [1, 2, 3]
+        include:
+          - sanitizer: memory
+            artifact: '15098445611'
+            digest: c968476b5d82cd0fa7dc15ebc63aba527e8659cbfd1fe889257e47918fd43095
+          - sanitizer: address
+            artifact: '15097554139'
+            digest: aff205c5e15ea0ebaac98cd04f6314895c388b040ba893d483c2db37de0241ad
+          - sanitizer: thread
+            artifact: '15097299102'
+            digest: 77a78d957e6397a3f8e8b1c3c217f33ee7fd0d13e59d91786c5819811b7d5d4c
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_SANITIZER: ${{ matrix.sanitizer }}
+      BUSTER_VECTOR_CONFIGURATIONS: ${{ matrix.sanitizer }}
+      BUSTER_VECTOR_ITEMS: 'm1 a1 t1'
+      CANDIDATE: ${{ matrix.candidate }}
+      BASE_DIGEST: ${{ matrix.digest }}
+      BASE_ARTIFACT: ${{ matrix.artifact }}
+      EVIDENCE: ${{ runner.temp }}/interpreter-2758
+    steps:
+      - name: Check out the exact PR head
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Probe this runner before installing or executing the products
+        id: probe
+        run: |
+          mkdir -p "$EVIDENCE/metadata"
+          git rev-parse HEAD 'HEAD^{tree}' > "$EVIDENCE/metadata/head-revision-tree"
+          cp .github/workflows/interpreter-2758-evidence.yml "$EVIDENCE/metadata/workflow.yml"
+          bash tools/ci/vector-draw.sh probe 1 "$CANDIDATE" | tee "$EVIDENCE/vector-probe.log"
+          cp "$RUNNER_TEMP/vector-draw/record" "$RUNNER_TEMP/vector-draw/features" "$EVIDENCE/metadata/"
+
+      - name: Report unsupported CPU as missing evidence
+        if: steps.probe.outputs.verdict != 'qualified'
+        run: |
+          printf 'unsupported CPU; no compiler execution, sanitizer qualification or timing evidence\n' > "$EVIDENCE/status"
+          printf '### %s candidate %s: unsupported CPU\n\nNo compiler tests or measurements ran.\n' "$BUSTER_SANITIZER" "$CANDIDATE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore verified hosted release inputs
+        if: steps.probe.outputs.verdict == 'qualified'
+        uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
+
+      - name: Install the official toolchain and test tools
+        if: steps.probe.outputs.verdict == 'qualified'
+        run: bash tools/ci/setup-hosted.sh 2>&1 | tee "$EVIDENCE/setup.log"
+
+      - name: Record host and prove every enabled sanitizer detector
+        if: steps.probe.outputs.verdict == 'qualified'
+        run: |
+          bash tools/ci/sanitizers.sh host > "$EVIDENCE/metadata/host"
+          clang --version > "$EVIDENCE/metadata/clang"
+          bash tools/ci/sanitizers.sh configure "$EVIDENCE/build-reports"
+          bash tools/ci/sanitizers.sh probe "$EVIDENCE/probes" 2>&1 | tee "$EVIDENCE/probes.log"
+
+      - name: Download this sanitizer's exact-main hosted product
+        if: steps.probe.outputs.verdict == 'qualified'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: buster14a/buster
+          run-id: 45779319802
+          github-token: ${{ github.token }}
+          name: vector-product-O3-1-${{ matrix.sanitizer }}-${{ matrix.digest }}
+          path: ${{ runner.temp }}/base-download
+
+      - name: Verify baseline archive, every file and exact source identity
+        if: steps.probe.outputs.verdict == 'qualified'
+        run: |
+          archive="$RUNNER_TEMP/base-download/product.tar.zst"
+          mkdir -p "$EVIDENCE/base" "$RUNNER_TEMP/base-product"
+          printf '%s  %s\n' "$BASE_DIGEST" "$archive" | sha256sum --check --strict | tee "$EVIDENCE/base/archive-check"
+          tar --zstd -tf "$archive" > "$EVIDENCE/base/archive-paths"
+          tar --zstd -tvf "$archive" > "$EVIDENCE/base/archive-listing"
+          if grep -qEv '^product(/|$)' "$EVIDENCE/base/archive-paths" ||
+             grep -Eq '(^|/)\.\.(/|$)' "$EVIDENCE/base/archive-paths" ||
+             grep -qEv '^[-d]' "$EVIDENCE/base/archive-listing"; then
+            echo 'Invalid product archive paths or entry types' >&2
+            exit 1
+          fi
+          tar --zstd -xf "$archive" -C "$RUNNER_TEMP/base-product" --no-same-owner
+          product="$RUNNER_TEMP/base-product/product"
+          (cd "$product" && sha256sum --check --strict files.sha256) > "$EVIDENCE/base/files-check"
+          cp -R "$product/identity" "$product/provenance" "$product/files.sha256" "$product/compile_commands.json" "$EVIDENCE/base/"
+          test "$(awk -F '\t' '$1 == "repository" { print $2 }' "$product/identity/summary")" = 1421805693
+          test "$(awk -F '\t' '$1 == "run" { print $2 }' "$product/identity/summary")" = "$BASE_RUN"
+          test "$(awk -F '\t' '$1 == "revision" { print $2 }' "$product/identity/summary")" = "$BASE_REVISION"
+          test "$(awk -F '\t' '$1 == "tree" { print $2 }' "$product/identity/summary")" = "$BASE_TREE"
+          test "$(awk -F '\t' '$1 == "row" { print $2 }' "$product/identity/summary")" = "vector $BUSTER_SANITIZER O3"
+          printf 'run\t%s\nartifact\t%s\narchive-sha256\t%s\n' "$BASE_RUN" "$BASE_ARTIFACT" "$BASE_DIGEST" > "$EVIDENCE/base/download"
+          printf 'BASE_COMPILER=%s\n' "$product/bin/compiler" >> "$GITHUB_ENV"
+
+      - name: Build the complete HEAD Release product with the hosted settings
+        if: steps.probe.outputs.verdict == 'qualified'
+        run: |
+          {
+            bash tools/build-preprocessor-pragma-oracle.sh "$RUNNER_TEMP/preprocessor-pragma-oracle"
+            bash tools/clang-server/build.sh "$RUNNER_TEMP/clang-server"
+            ./build.sh --config Release --jobs 4
+          } 2>&1 | tee "$EVIDENCE/build.log"
+          compiler=$(./build.sh print-output --config Release)
+          test -x "$compiler"
+          {
+            printf 'BUSTER_COMPILER=%s\nHEAD_COMPILER=%s\n' "$compiler" "$compiler"
+            printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$RUNNER_TEMP/preprocessor-pragma-oracle"
+            printf 'BUSTER_CLANG_SERVER=%s\n' "$RUNNER_TEMP/clang-server"
+          } >> "$GITHUB_ENV"
+
+      - name: Preserve HEAD identity and check equal build settings
+        if: steps.probe.outputs.verdict == 'qualified'
+        run: |
+          bash tools/ci/hosted-product.sh ownership 2>&1 | tee "$EVIDENCE/ownership.log"
+          bash tools/ci/hosted-product.sh pack "$RUNNER_TEMP/head-product" 2>&1 | tee "$EVIDENCE/head-product.log"
+          cp -R "$RUNNER_TEMP/head-product/record" "$EVIDENCE/head"
+          cp build/compile_commands.json "$EVIDENCE/head/"
+          tar --zstd -xOf "$RUNNER_TEMP/head-product/product.tar.zst" product/files.sha256 > "$EVIDENCE/head/files.sha256"
+          for field in row host-flags toolchain; do
+            cmp <(awk -F '\t' -v key="$field" '$1 == key' "$EVIDENCE/base/identity/summary") \
+                <(awk -F '\t' -v key="$field" '$1 == key' "$EVIDENCE/head/identity/summary")
+          done
+          for file in configuration compile-flags sanitizer-flags sources target probe; do
+            cmp "$EVIDENCE/base/identity/$file" "$EVIDENCE/head/identity/$file"
+          done
+          bash tools/ci/fetch-c-testsuite.sh build/c-testsuite 2>&1 | tee "$EVIDENCE/c-testsuite-fetch.log"
+          git -C build/c-testsuite rev-parse HEAD > "$EVIDENCE/metadata/c-testsuite-revision"
+          test "$(cat "$EVIDENCE/metadata/c-testsuite-revision")" = 5c7275656d751de0e68b2d340a95b5681858ed07
+          cp tests/c-testsuite/subset.txt "$EVIDENCE/metadata/subset.txt"
+
+      - name: Run HEAD interpreter, IR, native and link regressions
+        if: steps.probe.outputs.verdict == 'qualified'
+        run: |
+          run_focused()
+          (
+            label=$1
+            shift
+            directory="$EVIDENCE/focused/$label"
+            mkdir -p "$directory/tmp"
+            GITHUB_ENV="$directory/sanitizer.env" bash tools/ci/sanitizers.sh configure "$directory/reports"
+            set -a
+            . "$directory/sanitizer.env"
+            set +a
+            export TMPDIR="$directory/tmp"
+            printf '%q ' "$HEAD_COMPILER" "$@" > "$directory/command"
+            printf '\n' >> "$directory/command"
+            status=0
+            "$HEAD_COMPILER" "$@" > "$directory/stdout" 2> "$directory/stderr" || status=$?
+            printf '%s\n' "$status" > "$directory/status"
+            cat "$directory/stdout" "$directory/stderr"
+            bash tools/ci/sanitizers.sh audit "$directory/reports"
+            test "$status" -eq 0
+          )
+          for command in test-interpreter test-ir-interpreter test-interpreter-native test-interpreter-link; do
+            run_focused "$command" "$command"
+          done
+          run_focused source-controls test-ssa-source --typed --tier1 --self-test --keep
+          run_focused generated-48 test-ssa-source --typed --tier1 --generate 48 --clang clang --keep
+          run_focused generated-lifetimes-24 test-ssa-source --tier1 --generate 24 --seed 141 --lifetimes --clang clang --keep
+
+      # time-runs discards child stdout/stderr. Bash's time keeps complete
+      # diagnostics and three-form step counts for every measured execution.
+      - name: Compare one pair for 00040 and the full 220-program subset
+        if: steps.probe.outputs.verdict == 'qualified'
+        run: |
+          mapfile -t subset < <(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+          test "${#subset[@]}" -eq 220
+          run_case()
+          (
+            label=$1 side=$2 expected=$3
+            shift 3
+            directory="$EVIDENCE/runs/$label"
+            mkdir -p "$directory/tmp"
+            GITHUB_ENV="$directory/sanitizer.env" bash tools/ci/sanitizers.sh configure "$directory/reports"
+            set -a
+            . "$directory/sanitizer.env"
+            set +a
+            export TMPDIR="$directory/tmp"
+            compiler=$HEAD_COMPILER
+            if [ "$side" = base ]; then
+              compiler=$BASE_COMPILER
+              export BUSTER_CLANG_SERVER="$RUNNER_TEMP/base-product/product/bin/clang-server"
+              export BUSTER_PPF_PRAGMA_ORACLE="$RUNNER_TEMP/base-product/product/bin/preprocessor-pragma-oracle"
+            fi
+            printf '%q ' "$compiler" test-ssa-source --typed --tier1 --keep "$@" > "$directory/command"
+            printf '\n' >> "$directory/command"
+            TIMEFORMAT=$'real_seconds\t%3R\nuser_seconds\t%3U\nsystem_seconds\t%3S'
+            status=0
+            { time "$compiler" test-ssa-source --typed --tier1 --keep "$@" > "$directory/stdout" 2> "$directory/stderr"; } 2> "$directory/time.tsv" || status=$?
+            printf '%s\n' "$status" > "$directory/status"
+            cat "$directory/time.tsv" "$directory/stdout" "$directory/stderr"
+            bash tools/ci/sanitizers.sh audit "$directory/reports" > "$directory/audit"
+            test "$status" -eq 0
+            awk -v expected="$expected" '
+              /^test-ssa-source: totals / {
+                count++
+                for (i = 3; i <= NF; i++) { split($i, field, "="); values[field[1]] = field[2] }
+                forms = split(values["steps"], steps, "/")
+                bad = values["files"] != expected || values["programs"] != expected || values["passed"] != expected ||
+                      values["native_programs"] != expected || values["native_passed"] != expected ||
+                      values["left_out"] != 0 || values["failed"] != 0 || values["failures"] != 0 || values["unbuilt"] != 0 || forms != 3
+              }
+              END { exit count != 1 || bad }
+            ' "$directory/stdout"
+            sed -n -E '/^test-ssa-source: file=.* native=/s/ \([^)]*\)$//p; /^test-ssa-source: file=.* functions=.* steps=/p; /^test-ssa-source: totals /p' \
+              "$directory/stdout" > "$directory/semantics"
+            mapfile -t kept < <(find "$directory/tmp" -mindepth 1 -maxdepth 1 -type d -name 'ssa-source-*')
+            test "${#kept[@]}" -eq 1
+            (
+              cd "${kept[0]}"
+              find . -mindepth 2 -maxdepth 2 -type f \( -path './run-*-memory/ssa-source.out' -o -path './run-*-ssa/ssa-source.out' \
+                -o -path './run-*-typed/ssa-source.out' -o -path './run-*-tier1-vector/output' -o -path './run-*-tier1-scalar/output' \) \
+                -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
+            ) > "$directory/outputs.sha256"
+            test "$(wc -l < "$directory/outputs.sha256")" -eq "$((expected * 5))"
+          )
+          order=(base head)
+          if [ "$CANDIDATE" = 2 ]; then order=(head base); fi
+          printf 'candidate\t%s\norder\t%s\n' "$CANDIDATE" "${order[*]}" > "$EVIDENCE/metadata/run-order"
+          for workload in 00040 full220; do
+            files=(build/c-testsuite/tests/single-exec/00040.c)
+            expected=1
+            if [ "$workload" = full220 ]; then files=("${subset[@]}"); expected=220; fi
+            for side in "${order[@]}"; do
+              run_case "$workload-$side" "$side" "$expected" "${files[@]}"
+            done
+            for result in semantics outputs.sha256; do
+              cmp "$EVIDENCE/runs/$workload-base/$result" "$EVIDENCE/runs/$workload-head/$result"
+            done
+          done
+          printf 'passed: one base/head pair per workload; equal statuses, three-form counts and output bytes\n' > "$EVIDENCE/status"
+          printf '### %s candidate %s: comparisons passed\n\nOne pair each for 00040 and all 220 programs, in %s order, with equal statuses, three-form step counts and output hashes. Hosted timing is diagnostic screening; other qualified candidates provide independent repeats.\n' \
+            "$BUSTER_SANITIZER" "$CANDIDATE" "${order[*]}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Audit all real execution reports, including failed steps
+        if: ${{ always() && steps.probe.outputs.verdict == 'qualified' }}
+        run: |
+          status=0
+          while IFS= read -r -d '' reports; do
+            bash tools/ci/sanitizers.sh audit "$reports" || status=1
+          done < <(find "$EVIDENCE" -type d \( -name reports -o -name build-reports \) -print0)
+          if [ "$status" -ne 0 ]; then printf 'failed: sanitizer diagnostics were emitted\n' > "$EVIDENCE/status"; fi
+          exit "$status"
+
+      - name: Retain evidence and hashes without executable payloads
+        if: always()
+        run: |
+          mkdir -p "$EVIDENCE"
+          test -f "$EVIDENCE/status" || printf 'incomplete: inspect the failing step and retained evidence\n' > "$EVIDENCE/status"
+          (cd "$EVIDENCE" && find . -type f -perm /111 -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum) > "$EVIDENCE/omitted-executables.sha256"
+          find "$EVIDENCE" -type f -perm /111 -delete
+          (cd "$EVIDENCE" && find . -type f ! -name evidence.sha256 -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum) > "$EVIDENCE/evidence.sha256"
+
+      - name: Upload logs, identities, reports and every retained result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: interpreter-2758-${{ matrix.sanitizer }}-candidate-${{ matrix.candidate }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/interpreter-2758/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
