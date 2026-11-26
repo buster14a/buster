@@ -438,3 +438,5 @@ weak-alias-object-lazy	weak-alias-object-lazy.c	overload-none	a weak object alia
 weak-alias-function-overload	weak-alias-function-overload.c	overload-tables	weak function clone selection initializes overload tables inside constant queries (#2449)
 quadratic-switches	quadratic-switches.c	-	switches nested 200 deep, a constant switch whose dropped arms a label keeps, and blocks holding an outer switch's case (#2995; the program tests run it and count check_control_enterable's work)
 nullptr-casts	nullptr-casts.c	gnu23	C23 nullptr_t: null pointer constants cast to it, and its static objects
+lazy-arrow-swizzles	lazy-arrow-swizzles.c	-	lazy vector arrow metadata beside ordinary record members and constant queries (#2278)
+lazy-arrow-swizzle-duplicate	lazy-arrow-swizzle-duplicate.c	rejected	a lazy arrow swizzle with repeated lanes is not writable (#2278)

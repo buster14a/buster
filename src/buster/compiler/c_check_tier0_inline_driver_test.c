@@ -7,8 +7,8 @@
 // its own arguments (its levels), arguments of ?: and of a statement expression (their starts), a callee without
 // arguments as another's argument (two insertions at one entry), parameters of four classes (bindings one after its
 // argument), a callee with a loop, one with two returns and one whose result returns in memory, with two returns too
-// (calls by default; with --tier0-inline-shapes, step 5, each return a jump to the copy's end, the hidden pointer the
-// call's object), one with a variable-length array (refused, a call), a cycle of two (its closing call a call), a callee
+// (calls by default; --tier0-inline-shapes admits both shapes, but its home check keeps pressured loops outlined,
+// #2841), one with a variable-length array (refused, a call), a cycle of two (its closing call a call), a callee
 // through a pointer, a pointer parameter, long double, a struct argument and result in registers, a chain of wrappers
 // (_mm256_mask_add_epi32's), intrinsics of 16, 32 and 64 bytes, and a callee that calls a runtime function (an __int128
 // division's __divti3), which a caller in another part, with no runtime call of its own, takes by its final symbol (the
@@ -17,8 +17,8 @@
 // --tier0-no-inline and --tier0-inline-shapes with and without --scalar: each runs as clang -O0's build does where the
 // host has x86-64-v4, the builds with and without --scalar make the same bytes, and the control's differ. The object leaves out the callees spliced at every call (#1398 step 3) and keeps those a call or an address
 // still refers to (the cycle's, the variable-length array's, the one whose address is taken, and by default the two
-// returns' and the result in memory's), as the control keeps every one; and it is the same bytes by 4 lanes and without
-// holding the callees' code for the last pass (--tier0-no-hold).
+// returns' and the result in memory's), as the control keeps every one. With and without shapes, it is the same bytes
+// by 4 lanes, without holding the callees' code for the last pass (--tier0-no-hold), and by windows of one token.
 //
 // The lanes' fixture (#1398's review): a chain of 20 always_inline functions, past the expansion's depth bound, and a
 // cycle of two, reached from 40 roots at every depth, which the lanes take in an order their timing decides. Two
@@ -393,11 +393,11 @@ static void check_test_driver_tier0_inline(CheckTest* test, const char* clang, c
     check_test_expect(test, made[5] && made[6] && check_test_driver_same_files(objects[5], objects[6]) && !check_test_driver_same_files(objects[0], objects[5]),
                       "--tier0-inline-shapes splices more calls, the same object with and without --scalar");
     // The callees left out (#1398 step 3): those spliced at every call, wrappers among them, and with step 5's shapes
-    // (build 5) the two returns' and the result in memory's; the others a kept call or an address refers to, and the
-    // noinline function. The control defines them all.
-    static const char* const spliced[] = { "swap", "twist", "mixf", "seven", "sum_to", "bump", "ld", "quot", "ping", "_mm512_add_epi32", "_mm256_mask_add_epi32", "_mm_slli_epi32" };
-    static const char* const shaped[] = { "sgn", "widen" };
-    static const char* const still_called[] = { "add3", "vla", "pong", "kept" };
+    // (build 5) sgn's two returns. The shapes' home check retains sum_to and widen in the pressured scalars caller
+    // (#2841), while the default still splices sum_to. The control defines every callee.
+    static const char* const spliced[] = { "swap", "twist", "mixf", "seven", "bump", "ld", "quot", "ping", "_mm512_add_epi32", "_mm256_mask_add_epi32", "_mm_slli_epi32" };
+    static const char* const shaped[] = { "sgn" };
+    static const char* const still_called[] = { "add3", "vla", "pong", "kept", "widen" };
     static const uint32_t checked[] = { 0, 2, 5 };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(checked); c += 1)
     {
@@ -419,29 +419,47 @@ static void check_test_driver_tier0_inline(CheckTest* test, const char* clang, c
         {
             left = left && (check_test_elf_defined(&elf, shaped[k]) == 0) == (build == 5);
         }
+        left = left && (check_test_elf_defined(&elf, "sum_to") == 0) == (build == 0);
         check_test_expect(test, kept && left, build == 0 ? "Tier 0's object leaves out the callees it spliced at every call and keeps the referenced ones" :
                                               build == 2 ? "--tier0-no-inline's object defines every callee" :
-                                                           "--tier0-inline-shapes' object leaves out the two returns' and the result in memory's callees too");
+                                                           "--tier0-inline-shapes' object leaves out sgn but retains both loop callees to preserve their homes");
         arena_release(&arena);
     }
-    // The last pass's code is the lanes' (#1398 step 3): the same object by 4 lanes and with every callee's code made on
-    // its lane.
-    char by_lanes[512];
-    char unheld[512];
-    snprintf(by_lanes, sizeof(by_lanes), "%s/tier0-inline-lanes4.o", directory);
-    snprintf(unheld, sizeof(unheld), "%s/tier0-inline-unheld.o", directory);
-    char* lanes_arguments[] = { (char*)executable, "-march=x86-64-v4", "--lanes", "4", "-c", "-o", by_lanes, unit, NULL };
-    char* unheld_arguments[] = { (char*)executable, "-march=x86-64-v4", "--tier0-no-hold", "-c", "-o", unheld, unit, NULL };
-    text = NULL;
-    const bool lanes_built = made[0] && check_test_driver_spawn(lanes_arguments, &text) == 0;
-    free(text);
-    text = NULL;
-    const bool unheld_built = made[0] && check_test_driver_spawn(unheld_arguments, &text) == 0;
-    free(text);
-    const bool same = lanes_built && unheld_built && check_test_driver_same_files(objects[0], by_lanes) && check_test_driver_same_files(objects[0], unheld);
-    unlink(by_lanes);
-    unlink(unheld);
-    check_test_expect(test, same, "Tier 0's inlining fixture is the same object by 4 lanes and with --tier0-no-hold");
+    // The last pass's code is the lanes' (#1398 step 3). The shapes' home guard must also make the same decisions
+    // across lanes, without held callees and across emission windows (#2841).
+    static const char* const options[][2] = { { "--lanes", "4" }, { "--tier0-no-hold", NULL }, { "--emit-window=1", NULL } };
+    for (uint32_t shapes = 0; shapes < 2; shapes += 1)
+    {
+        const uint32_t build = shapes != 0 ? 5 : 0;
+        bool same = made[build];
+        for (uint32_t variant = 0; variant < BUSTER_ARRAY_LENGTH(options); variant += 1)
+        {
+            char object[512];
+            snprintf(object, sizeof(object), "%s/tier0-inline-identity-%u-%u.o", directory, shapes, variant);
+            char* arguments[12] = { (char*)executable, "-march=x86-64-v4", (char*)options[variant][0] };
+            uint32_t count = 3;
+            if (options[variant][1] != NULL)
+            {
+                arguments[count++] = (char*)options[variant][1];
+            }
+            if (shapes != 0)
+            {
+                arguments[count++] = "--tier0-inline-shapes";
+            }
+            arguments[count++] = "-c";
+            arguments[count++] = "-o";
+            arguments[count++] = object;
+            arguments[count++] = unit;
+            arguments[count] = NULL;
+            text = NULL;
+            const bool built = made[build] && check_test_driver_spawn(arguments, &text) == 0;
+            free(text);
+            same = same && built && check_test_driver_same_files(objects[build], object);
+            unlink(object);
+        }
+        check_test_expect(test, same, shapes != 0 ? "Tier 0's shapes fixture is the same object by 4 lanes, with --tier0-no-hold and by windows of one token" :
+                                                  "Tier 0's inlining fixture is the same object by 4 lanes, with --tier0-no-hold and by windows of one token");
+    }
     for (uint32_t build = 0; build < 7; build += 1)
     {
         if (made[build])

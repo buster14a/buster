@@ -81,11 +81,30 @@ and the code generator gives `abi_assign` and `abi_va_arg` the member's type
 (`check_lower_passed_as`; the checker guide's "Transparent unions (#147)").
 A union aligned or packed otherwise than its member has a slot of its own
 (`AbiTable.transparent`): the per-call kernel, `abi_assign_lanes`, assigns
-the member's registers (its eightbytes, a pair's two or a 16-byte vector's
-one), and where clang has none for them the union's byval slot, or the
-member's alignment for a member in memory; past 16 bytes every location of
-the member's own (registers, eightbytes' slots, or a pair's or vector's value
-slot) carries the union's first 16 bytes (`BUSTER_ABI_FLAG_FIRST`, #1844).
+the member's registers (its eightbytes, a pair's two or a vector's one), and
+where clang has none for them the union's byval slot, or the member's
+alignment for an aggregate member in memory. An atomic scalar instead keeps
+its uncounted value's registers and overflow slot; an atomic long double
+keeps its 16-byte stack slot. These value slots never copy the larger union
+whole. Named wide vector arguments of variadic calls also occupy their
+vector value's slot, while unnamed wide aggregate members use a byval slot
+of the union's bytes.
+
+The locations preserve the member's transport independently of the union's
+object size. Eightbyte pairs and split values past 16 bytes carry only the
+first 16 (`BUSTER_ABI_FLAG_FIRST`, #1844). A single scalar or vector uses
+`PREFIX` when the union's slot is larger than its payload: bit 7 of the
+location's flags tags the exact byte count in bits 0–6, with no independent
+flags. This includes LLVM's 24/40/48/56-byte vector payloads; their value
+slots round up to 32/64 bytes. `abi_location_flags` and
+`abi_location_size` decode the tagged form for Tier 0, Tier 1 and the
+interpreter's native bridge, keeping `AbiLocation` eight bytes. A packed
+union that changes alignment without growing preserves the full member
+payload. Unsupported member representations, such as an atomic vector
+LLVM splits beyond the target's registers, retain their existing named
+boundary. Signatures arranged before a late transparent attribute use
+ordinary ABI aliases; these extra rows belong to the code generator and
+are not additional types in `TypeTable`.
 A member in memory may be `LARGER` (#3400): `getIndirectResult` reads its C
 size and alignment, not its copy's, and the byval slot is the union's bytes
 (a union is never `LARGER`: clang lays it out in its own bytes), so a `GROWN`

@@ -850,6 +850,7 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "kr_warning_system", CHECK_ATTESTED_FIELD_AMBIENT },
     { "relaxed_tokens", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "pedantic_escapes", CHECK_ATTESTED_FIELD_AMBIENT },
+    { "missing_variable_warnings", CHECK_ATTESTED_FIELD_AMBIENT },
     { "kr_warning_errors", CHECK_ATTESTED_FIELD_AMBIENT },
     { "x86_range_severities", CHECK_ATTESTED_FIELD_AMBIENT },
     { "x86_range_quiet", CHECK_ATTESTED_FIELD_AMBIENT },

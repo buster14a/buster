@@ -1631,6 +1631,197 @@ static void tier1_code_certificate_store(Tier1EmitTest* test)
     arena_pop_to(&test->input, 0);
 }
 
+static __attribute__((no_sanitize("function"))) void tier1_code_certificate_copy_call(void* code, uint64_t* destination, uint64_t low, uint64_t high)
+{
+    void (*copy)(uint64_t*, uint64_t, uint64_t);
+    memcpy(&copy, &code, sizeof(copy));
+    copy(destination, low, high);
+}
+
+// A local copy's paired load (#2818) is one source definition and two concrete records. Both must be regenerated at
+// their own frame displacement; neither is an independent value-preserving edit. Its halves are just-built i64s at
+// offsets 24 and 32, copied by one v4i32 store. The native check catches misplaced halves and excess output stores;
+// the mutations require the certificate to reject either load changed, an incorrect merge, or a narrowed store.
+static void tier1_code_certificate_copy_halves(Tier1EmitTest* test, bool pointer)
+{
+    const IrSizes sizes = { .instruction_count = 12, .block_count = 1, .slot_count = 1, .address_count = 2, .parameter_count = 3 };
+    IrFunction function;
+    const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+    if (created)
+    {
+        function.result_type = IR_VOID;
+        function.parameter_types[0] = IR_PTR;
+        function.parameter_types[1] = IR_I64;
+        function.parameter_types[2] = IR_I64;
+        function.incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 3 };
+        function.slots[0] = (IrSlot){ .size = 64, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+        function.addresses[0] = (IrAddress){ .offset = 24, .scale = 1 };
+        function.addresses[1] = (IrAddress){ .offset = 32, .scale = 1 };
+        function.block_offsets[1] = 12;
+        tier1_select_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 2, IR_PARAM, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 3, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 4, IR_ADDRESS, IR_PTR, 3, BUSTER_IR_NONE, 0);
+        tier1_select_test_node(&function, 5, IR_STORE, IR_VOID, 4, 1, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 6, IR_ADDRESS, IR_PTR, 3, BUSTER_IR_NONE, 1);
+        tier1_select_test_node(&function, 7, IR_STORE, IR_VOID, 6, 2, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 8, IR_ADDRESS, IR_PTR, 3, BUSTER_IR_NONE, 0);
+        tier1_select_test_node(&function, 9, IR_LOAD, IR_V4I32, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 10, IR_STORE, IR_VOID, 0, 9, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 11, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function.alignment_log2[5] = 3;
+        function.alignment_log2[7] = 3;
+        function.alignment_log2[9] = 3;
+        function.alignment_log2[10] = 3;
+        function.flags[9] = BUSTER_IR_COPY_PIECE;
+        function.flags[10] = BUSTER_IR_COPY_PIECE;
+    }
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the paired local-copy certificate fixture is valid IR");
+    IrDominance dominance;
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned && plan.patterns[9].stack_object == 0, "the paired local-copy load selects a folded frame address");
+    Tier1EmitDiagnostic diagnostic = { 0 };
+    const Tier1EmitOptions options = {
+        .register_mask = tier1_liveness_register_mask(),
+        .vector_register_mask = 1u << 14,
+        .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+        .certify = true,
+        .diagnostic = &diagnostic,
+    };
+    Tier1EmitResult emitted = { 0 };
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.frame.frame_pointer == pointer;
+    if (!certified)
+    {
+        fprintf(stderr, "tier1-emit: local-copy certificate: emission=%u cause=%u detail=%u node=%u checked=%u reason=%u\n", (unsigned)error, (unsigned)diagnostic.cause, diagnostic.error, node,
+                emitted.code_checked, emitted.code_reason);
+    }
+    tier1_emit_test_expect(test, certified, "a paired local-copy load and its vector store pass the emitted-code certificate");
+    uint32_t first = UINT32_MAX;
+    uint32_t stores = UINT32_MAX;
+    uint32_t loads = 0;
+    uint32_t store_count = 0;
+    for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
+    {
+        if (emitted.origins[r] == tier1_origin(TIER1_ORIGIN_NODE, 9))
+        {
+            first = loads == 0 ? r : first;
+            loads += 1;
+        }
+        if (emitted.origins[r] == tier1_origin(TIER1_ORIGIN_NODE, 10))
+        {
+            stores = r;
+            store_count += 1;
+        }
+    }
+    const bool paired = certified && loads == 2 && store_count == 1 && first + 1 < emitted.code.count && emitted.origins[first + 1] == tier1_origin(TIER1_ORIGIN_NODE, 9);
+    int32_t offset = 0;
+    const bool placed = paired && tier1_emit_cfg_object(&function, &emitted, 0, &offset);
+    const X86Instruction low = paired ? emitted.code.records[first] : (X86Instruction){ 0 };
+    const X86Instruction high = paired ? emitted.code.records[first + 1] : (X86Instruction){ 0 };
+    const bool sse = certified && emitted.prepared.sse;
+    const bool shaped = placed && low.form == (sse ? X86_FORM_MOVSD_X_XM64 : X86_FORM_VMOVSD_X_M64) && high.form == (sse ? X86_FORM_MOVHPS_X_M64 : X86_FORM_VMOVHPS_X_X_M64) &&
+                        low.reg == 14 && high.reg == low.reg && high.vvvv == (sse ? 0 : low.reg) && low.rm == emitted.frame.base_register && high.rm == low.rm &&
+                        low.mode == BUSTER_X86_MEMORY_BASE && high.mode == low.mode && low.displacement == (int64_t)offset + 24 && high.displacement == (int64_t)offset + 32;
+    tier1_emit_test_expect(test, shaped, "both local-copy halves use their own resolved frame offsets and one extended xmm register");
+    uint32_t refused = 0;
+    for (uint32_t mutation = 0; shaped && mutation < 10; mutation += 1)
+    {
+        const uint32_t r = mutation == 9 ? stores : first + (mutation & 1);
+        X86Instruction record = emitted.code.records[r];
+        if (mutation < 2)
+        {
+            record.displacement += mutation == 0 ? 8 : -8;
+        }
+        else if (mutation < 4)
+        {
+            record.rm = X86_REGISTER_RAX;
+        }
+        else if (mutation < 6)
+        {
+            record.reg ^= 1;
+        }
+        else if (mutation < 8)
+        {
+            record = (X86Instruction){ .form = X86_FORM_MOVAPS_X_XM, .reg = low.reg, .rm = low.reg };
+        }
+        else
+        {
+            record.form = mutation == 8 ? high.form : X86_FORM_MOVSD_XM64_X;
+            record.vvvv = mutation == 8 && !sse ? low.reg : 0;
+        }
+        const bool rejected = tier1_code_certificate_refuses(test, &plan, &emitted, r, record, UINT32_MAX);
+        tier1_emit_test_expect(test, rejected, "a corrupted local-copy load, missing half, or narrowed store is refused");
+        refused += rejected;
+    }
+    if (shaped && !sse)
+    {
+        X86Instruction wrong_merge = high;
+        wrong_merge.vvvv ^= 1;
+        tier1_emit_test_expect(test, tier1_code_certificate_refuses(test, &plan, &emitted, first + 1, wrong_merge, UINT32_MAX), "a paired VEX load that merges another register's low half is refused");
+    }
+    if (shaped)
+    {
+        const uint32_t origin = emitted.origins[first + 1];
+        emitted.origins[first + 1] = tier1_origin(TIER1_ORIGIN_MOVE, 2 * 9 + 1);
+        tier1_emit_test_expect(test, tier1_code_certificate_refused(test, &plan, &emitted), "a paired high-half load cannot be relabeled as an independent move");
+        emitted.origins[first + 1] = origin;
+    }
+    tier1_emit_test_expect(test, refused == 10, "every concrete local-copy corruption was exercised and refused");
+    tier1_emit_test_expect(test, !shaped || !tier1_code_certificate_refused(test, &plan, &emitted), "the original local-copy kernel is certified after restoring every mutation");
+    void* executable = MAP_FAILED;
+    uint64_t bytes = 0;
+    if (shaped && tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+    {
+        uint64_t random = UINT64_C(0x2818);
+        for (uint32_t sample = 0; sample < 32; sample += 1)
+        {
+            uint64_t output[4] = { UINT64_C(0x123456789abcdef0), 0, 0, UINT64_C(0xfedcba9876543210) };
+            const uint64_t a = tier1_emit_test_random(&random);
+            const uint64_t b = tier1_emit_test_random(&random);
+            tier1_code_certificate_copy_call(executable, output + 1, a, b);
+            tier1_emit_test_expect(test, output[0] == UINT64_C(0x123456789abcdef0) && output[1] == a && output[2] == b && output[3] == UINT64_C(0xfedcba9876543210),
+                                   "the complete local-copy kernel copies both halves and leaves neighboring bytes unchanged");
+        }
+    }
+    if (executable != MAP_FAILED)
+    {
+        munmap(executable, bytes);
+    }
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
+static void tier1_code_certificate_copy_targets(Tier1EmitTest* test)
+{
+    static const X86Architecture architectures[] = { X86_ARCH_BASELINE, X86_ARCH_V3, X86_ARCH_V4, X86_ARCH_ZNVER5 };
+    uint8_t allowed[X86_FORM_COUNT];
+    uint8_t native[X86_FORM_COUNT];
+    uint8_t* const saved_allowed = test->allowed;
+    const uint8_t* const saved_native = test->native_allowed;
+    const X86Target host = x86_target_native();
+    x86_target_forms(&host, native);
+    test->allowed = allowed;
+    test->native_allowed = native;
+    for (uint32_t target = 0; target < BUSTER_ARRAY_LENGTH(architectures); target += 1)
+    {
+        const X86Target policy = { .architecture = architectures[target] };
+        x86_target_forms(&policy, allowed);
+        for (uint32_t pointer = 0; pointer < 2; pointer += 1)
+        {
+            tier1_code_certificate_copy_halves(test, pointer != 0);
+        }
+    }
+    test->allowed = saved_allowed;
+    test->native_allowed = saved_native;
+}
+
 // The literal pool (#2744): l(p) stores c0 + c1 at p, two vector constants of four doublewords that no broadcast makes
 // ({ 1, 2, 3, 4 } and { 16, 32, 48, 64 }), each its literal's rip-relative load. Its code is certified. Then each of
 // these is refused, one at a time, everything put back after: a literal's bytes changed, its width, a load's reference's
@@ -2927,6 +3118,7 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     tier1_code_certificate_narrow(test, &counts);
     tier1_code_certificate_exchange(test, &counts);
     tier1_code_certificate_store(test);
+    tier1_code_certificate_copy_targets(test);
     tier1_code_certificate_realigned(test, &counts);
     for (uint32_t pointer = 0; pointer < 2; pointer += 1)
     {

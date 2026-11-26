@@ -991,7 +991,6 @@ static void ir_sroa_widen_address(IrUnrollEmit* emit, uint32_t at, uint32_t base
 // `slot` is the new slot a ret returns.
 static void ir_sroa_widen_emit(const IrFunction* f, const IrSroaWork* work, IrUnrollEmit* emit, const uint32_t* map, uint32_t i, uint8_t kind, uint32_t chunks, uint32_t slot)
 {
-    IrFunction* view = emit->view;
     uint32_t at = map[i] - ir_sroa_widen_inserted(kind, kind == BUSTER_IR_SROA_WIDEN_RET ? IR_VOID : (f->op[i] == IR_LOAD ? f->type[i] : f->type[f->b[i]]),
                                                   kind == BUSTER_IR_SROA_WIDEN_RET ? 0 : work->offsets[f->a[i]], kind == BUSTER_IR_SROA_WIDEN_RET ? 0 : ir_sroa_access_bytes(f, i), chunks);
     const uint32_t base = map[f->a[i]];
@@ -1030,7 +1029,6 @@ static void ir_sroa_widen_emit(const IrFunction* f, const IrSroaWork* work, IrUn
         const uint64_t offset = work->offsets[f->a[i]];
         const uint32_t bytes = ir_sroa_access_bytes(f, i);
         const uint32_t shift = (uint32_t)(offset & 7) * 8;
-        const uint8_t flags = view->flags[map[i]];
         if (bytes == 8)
         {
             // The eightbyte's bits: an f64's or a ptr's converted to or from the i64.
@@ -1106,8 +1104,8 @@ static void ir_sroa_widen_emit(const IrFunction* f, const IrSroaWork* work, IrUn
                 ir_unroll_put(emit, map[i], IR_STORE, IR_VOID, pointer, merged, BUSTER_IR_NONE);
             }
         }
-        // A plain access (ir_sroa_widen admits no other) keeps its flags, none.
-        view->flags[map[i]] = flags;
+        // Widening admits ordinary accesses only. Its changed width/value shape drops COPY_PIECE as ir_unroll_put
+        // clears the flags: a replaced load is now a conversion, and the new accesses need no copy-pairing hint.
     }
 }
 
@@ -1181,7 +1179,7 @@ static IrCheck ir_sroa_widen(const IrFunction* function, Arena* output, Arena* s
                     {
                         const uint32_t type = op == IR_LOAD ? f->type[i] : f->type[f->b[i]];
                         const uint32_t bytes = ir_sroa_access_bytes(f, i);
-                        const bool fits = f->flags[i] == 0 && ir_sroa_widen_type(type) && size <= BUSTER_IR_SROA_WIDEN_BYTES && offset < size && bytes <= size - offset &&
+                        const bool fits = (f->flags[i] & ~BUSTER_IR_COPY_PIECE) == 0 && ir_sroa_widen_type(type) && size <= BUSTER_IR_SROA_WIDEN_BYTES && offset < size && bytes <= size - offset &&
                                           (offset & 7) + bytes <= 8;
                         widen[root] |= !fits;
                         if (fits)
@@ -1496,7 +1494,7 @@ static __attribute__((unused)) IrError ir_sroa_scalarize(const IrFunction* funct
                     const uint32_t k = part >> BUSTER_IR_SCALARIZE_PART_SHIFT;
                     const bool address = f->op[i] == IR_ADDRESS && k == 0 && parts[i] != BUSTER_IR_SCALARIZE_NONE;
                     const uint8_t reg = ir_sroa_scalar_register(&f->passed[f->parameter_passed - 1 + p], k);
-                    const bool load = f->op[i] == IR_LOAD && operand.position == 0 && blocks[i] == 0 && f->flags[i] == 0 && ir_sroa_scalar_load(reg, f->type[i]);
+                    const bool load = f->op[i] == IR_LOAD && operand.position == 0 && blocks[i] == 0 && (f->flags[i] & ~BUSTER_IR_COPY_PIECE) == 0 && ir_sroa_scalar_load(reg, f->type[i]);
                     refused[p] |= !address && !load;
                 }
             }
@@ -1526,7 +1524,7 @@ static __attribute__((unused)) IrError ir_sroa_scalarize(const IrFunction* funct
                 for (uint32_t s = a + 1; slot && s < i; s += 1)
                 {
                     const uint32_t w = f->b[s];
-                    stored |= f->op[s] == IR_STORE && f->a[s] == a && f->flags[s] == 0 && f->type[w] == IR_I64 && (blocks[w] != blocks[a] || w < a);
+                    stored |= f->op[s] == IR_STORE && f->a[s] == a && (f->flags[s] & ~BUSTER_IR_COPY_PIECE) == 0 && f->type[w] == IR_I64 && (blocks[w] != blocks[a] || w < a);
                 }
                 matched[stored ? f->a[a] : f->slot_count] += 1;
                 scalar_result = undefined || stored;

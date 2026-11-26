@@ -679,7 +679,13 @@ static void ir_lower_test_fold_function(uint64_t* digest, const IrFunction* f)
     const uint64_t count = f->instruction_count;
     ir_lower_test_fold_bytes(digest, f->op, count);
     ir_lower_test_fold_bytes(digest, f->type, count);
-    ir_lower_test_fold_bytes(digest, f->flags, count);
+    // #2818 adds a nonsemantic copy-selection hint. Keep the frozen baseline's semantic flags byte for byte; the
+    // dedicated copy-piece fixture below checks the new hint on every access and every size independently.
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t flags = (f->op[i] == IR_LOAD || f->op[i] == IR_STORE) ? (uint8_t)(f->flags[i] & ~BUSTER_IR_COPY_PIECE) : f->flags[i];
+        ir_lower_test_fold_bytes(digest, &flags, 1);
+    }
     ir_lower_test_fold_bytes(digest, f->alignment_log2, count);
     ir_lower_test_fold_bytes(digest, f->a, count * 4);
     ir_lower_test_fold_bytes(digest, f->b, count * 4);
@@ -744,7 +750,7 @@ static void ir_lower_test_fold_function(uint64_t* digest, const IrFunction* f)
 }
 
 // The lowering of `source`, which the verifier must accept, outside the digest: for the long double programs, whose
-// calls of C functions go through their addresses, which are the host's and move with its build.
+// calls use host addresses, and new contracts checked structurally without changing the frozen historical corpus.
 static bool ir_lower_test_lower_unfolded(IrLowerTestTally* tally, const Tier0Function* source, IrType result_type, uint32_t symbols, Arena* output, Arena* scratch, IrFunction* function, uint64_t seed, uint32_t index)
 {
     const IrCheck lowered = ir_lower_typed(source, result_type, symbols, output, scratch, function);
@@ -1990,6 +1996,182 @@ static void ir_lower_test_failures(IrLowerTestTally* tally)
     arena_release(&scratch);
 }
 
+static void ir_lower_test_asm_rejected(IrLowerTestTally* tally, const Tier0Function* source, Arena* output, Arena* scratch, const char* message)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    IrFunction function = { .instruction_count = 123 };
+    ir_lower_test_expect(tally, tier0_validate(source).error != TIER0_OK, message, 0, 0);
+    const IrCheck check = ir_lower_typed(source, IR_I64, 1, output, scratch, &function);
+    ir_lower_test_expect(tally, check.error != IR_OK && function.instruction_count == 123 && output->length == output_mark && scratch->length == scratch_mark,
+                         "malformed asm result lowering rolls back and preserves output", 0, 0);
+}
+
+// Scalar primary and secondary outputs, including mixed GPR/XMM widths, lower to one effectful body call and typed
+// projections of its snapshot (#2144). Malformed bundles must fail before replay can attach a projection to a call.
+static void ir_lower_test_asm_results(IrLowerTestTally* tally)
+{
+    uint8_t kinds[10] = {
+        BUSTER_TYPED_CALL, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_X86, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_X86, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_X86, BUSTER_TYPED_SET_LOCAL,
+    };
+    uint8_t classes[10] = { 0 };
+    uint64_t values[10] = { 0, 0, 0, 1, 1, 2, 0, 0, 0, 1 };
+    uint8_t local_classes[3] = { 0 };
+    const uint8_t local_flags[3] = { 0 };
+    Tier0Operation operations[2] = { 0 };
+    Tier0AsmBody body = { 0 };
+    const SymbolId target = BUSTER_TIER0_CALL_ASM_TARGET;
+    const uint32_t first = 0;
+    const uint32_t count = 0;
+    const uint32_t call_asm = 1;
+    const uint8_t variadic = 0;
+    const AbiCall call = { 0 };
+    Tier0Function source = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = 8,
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 3,
+        .call_targets = &target,
+        .call_first = &first,
+        .call_argument_counts = &count,
+        .call_variadic = &variadic,
+        .calls = &call,
+        .call_count = 1,
+        .call_asm = &call_asm,
+        .asm_bodies = &body,
+        .asm_body_count = 1,
+        .operations = operations,
+        .operation_count = 2,
+        .vectors = true,
+    };
+    Arena output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    for (uint32_t variant = 0; variant < 4; variant += 1)
+    {
+        const bool floating = variant >= 2;
+        const bool wide = (variant & 1) != 0;
+        const uint32_t primary = floating ? 16 : X86_REGISTER_RAX;
+        const uint32_t second = X86_REGISTER_RDX;
+        const uint32_t third = floating ? X86_REGISTER_RCX : 16;
+        const uint32_t bits = 1u << primary | 1u << second | 1u << third;
+        local_classes[0] = floating ? (wide ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32) : (wide ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32);
+        local_classes[1] = BUSTER_TYPED_CLASS_I64;
+        local_classes[2] = floating ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_F64;
+        classes[0] = classes[1] = classes[6] = classes[7] = local_classes[0];
+        classes[2] = classes[3] = classes[8] = classes[9] = local_classes[1];
+        classes[4] = classes[5] = local_classes[2];
+        operations[0] = (Tier0Operation){ .result_class = local_classes[1], .asm_result = (uint8_t)(second + 1) };
+        operations[1] = (Tier0Operation){ .result_class = local_classes[2], .asm_result = (uint8_t)(third + 1) };
+        body = (Tier0AsmBody){
+            .block = BUSTER_TIER0_ASM_NO_BLOCK,
+            .touched = bits,
+            .result = (uint8_t)(primary + 1),
+            .result_registers = bits,
+            .result_wide = (wide ? 1u << primary : 0) | 1u << second | (floating ? 0 : 1u << third),
+        };
+        const IrType type = floating ? (wide ? IR_F64 : IR_F32) : (wide ? IR_I64 : IR_I32);
+        IrFunction function = { 0 };
+        if (ir_lower_test_lower_unfolded(tally, &source, type, 1, &output, &scratch, &function, 0, variant))
+        {
+            uint32_t parent = BUSTER_IR_NONE;
+            uint32_t projections = 0;
+            bool snapshots = function.asm_body_count == 1 && function.asm_bodies[0].result == body.result &&
+                             function.asm_bodies[0].result_registers == bits && function.asm_bodies[0].result_wide == body.result_wide;
+            for (uint32_t i = 0; i < function.instruction_count; i += 1)
+            {
+                if (function.op[i] == IR_CALL)
+                {
+                    snapshots &= parent == BUSTER_IR_NONE && function.type[i] == type;
+                    parent = i;
+                }
+                else if (function.op[i] == IR_ASM_RESULT)
+                {
+                    const uint32_t reg = function.b[i];
+                    snapshots &= function.a[i] == parent && (reg == second || reg == third) &&
+                                 function.type[i] == (reg == second ? IR_I64 : floating ? IR_I32 : IR_F64);
+                    projections |= 1u << reg;
+                }
+            }
+            ir_lower_test_expect(tally, snapshots && parent != BUSTER_IR_NONE && projections == (1u << second | 1u << third),
+                                 "asm results preserve the body, primary type and secondary snapshot identities", 0, variant);
+        }
+        arena_pop_to(&output, 0);
+    }
+    // A stable all-integer primary fixture for rejection checks and legacy single-result normalization.
+    body = (Tier0AsmBody){
+        .block = BUSTER_TIER0_ASM_NO_BLOCK,
+        .touched = 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << 16,
+        .result = X86_REGISTER_RAX + 1,
+        .result_registers = 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << 16,
+        .result_wide = 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << 16,
+    };
+    local_classes[0] = local_classes[1] = BUSTER_TYPED_CLASS_I64;
+    local_classes[2] = BUSTER_TYPED_CLASS_F64;
+    classes[0] = classes[1] = classes[2] = classes[3] = classes[6] = classes[7] = classes[8] = classes[9] = BUSTER_TYPED_CLASS_I64;
+    classes[4] = classes[5] = BUSTER_TYPED_CLASS_F64;
+    operations[0] = (Tier0Operation){ .result_class = BUSTER_TYPED_CLASS_I64, .asm_result = X86_REGISTER_RDX + 1 };
+    operations[1] = (Tier0Operation){ .result_class = BUSTER_TYPED_CLASS_F64, .asm_result = 17 };
+    const Tier0AsmBody valid_body = body;
+    kinds[4] = BUSTER_TYPED_CONST;
+    ir_lower_test_asm_rejected(tally, &source, &output, &scratch, "asm bundle with a missing projection accepted");
+    kinds[4] = BUSTER_TYPED_X86;
+    operations[1].asm_result = operations[0].asm_result;
+    ir_lower_test_asm_rejected(tally, &source, &output, &scratch, "asm bundle with a duplicate projection accepted");
+    operations[1].asm_result = 17;
+    operations[0].result_class = classes[2] = classes[3] = local_classes[1] = BUSTER_TYPED_CLASS_I32;
+    ir_lower_test_asm_rejected(tally, &source, &output, &scratch, "asm bundle with a wrong-width projection accepted");
+    operations[0].result_class = classes[2] = classes[3] = local_classes[1] = BUSTER_TYPED_CLASS_I64;
+    source.count = 10;
+    ir_lower_test_asm_rejected(tally, &source, &output, &scratch, "asm projection outside its bundle accepted");
+    source.count = 8;
+    body.touched &= ~(1u << X86_REGISTER_RDX);
+    ir_lower_test_asm_rejected(tally, &source, &output, &scratch, "asm result outside the touched mask accepted");
+    body = valid_body;
+    body.result_registers &= ~(1u << X86_REGISTER_RAX);
+    body.result_wide &= ~(1u << X86_REGISTER_RAX);
+    ir_lower_test_asm_rejected(tally, &source, &output, &scratch, "asm result mask missing the primary accepted");
+    body = valid_body;
+    body.result_wide |= 1u << X86_REGISTER_RCX;
+    ir_lower_test_asm_rejected(tally, &source, &output, &scratch, "asm width mask naming an undeclared register accepted");
+    body = valid_body;
+    kinds[6] = BUSTER_TYPED_JUMP;
+    classes[6] = BUSTER_TYPED_CLASS_VOID;
+    values[6] = 2;
+    ir_lower_test_asm_rejected(tally, &source, &output, &scratch, "branch into an asm projection accepted");
+    kinds[6] = BUSTER_TYPED_LOCAL;
+    classes[6] = BUSTER_TYPED_CLASS_I64;
+    values[6] = 0;
+    kinds[7] = BUSTER_TYPED_JUMP_VALUE;
+    values[7] = 3;
+    ir_lower_test_asm_rejected(tally, &source, &output, &scratch, "value branch into an asm projection's store accepted");
+    values[7] = 1;
+    ir_lower_test_asm_rejected(tally, &source, &output, &scratch, "value branch into an asm primary's store accepted");
+    kinds[7] = BUSTER_TYPED_RETURN;
+    values[7] = 0;
+    body.result_registers = body.result_wide = 0;
+    kinds[2] = BUSTER_TYPED_LOCAL;
+    classes[2] = BUSTER_TYPED_CLASS_I64;
+    values[2] = 0;
+    kinds[3] = BUSTER_TYPED_RETURN;
+    classes[3] = BUSTER_TYPED_CLASS_I64;
+    values[3] = 0;
+    source.count = 4;
+    IrFunction function = { 0 };
+    if (ir_lower_test_lower_unfolded(tally, &source, IR_I64, 1, &output, &scratch, &function, 0, 4))
+    {
+        ir_lower_test_expect(tally, function.asm_body_count == 1 && function.asm_bodies[0].result == body.result &&
+                                  function.asm_bodies[0].result_registers == (1u << X86_REGISTER_RAX) && function.asm_bodies[0].result_wide == (1u << X86_REGISTER_RAX),
+                             "legacy single asm result normalizes to explicit IR masks", 0, 4);
+    }
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 // A variadic definition's frame (#148): long f(long n, ...), whose va_list's overflow_arg_area takes the overflow area's
 // address and whose result is the register save area's second general slot, its first unnamed argument. Both paths
 // give the IR its frame and its three anchors as their slots, which promotion keeps and an all-integer call fills; each
@@ -3034,6 +3216,57 @@ static void ir_lower_test_objects(IrLowerTestTally* tally)
 // one load and one store per piece: up to BUSTER_TIER0_COPY_NARROW_BYTES, of the widest integer that fits what remains;
 // past it, since a global isn't a local (#2693), of 16 bytes, the last ending at the end.
 #define BUSTER_IR_LOWER_TEST_COPY_SPAN (BUSTER_TIER0_MAX_COPY_BYTES + 8)
+
+static void ir_lower_test_copy_flags(IrLowerTestTally* tally)
+{
+    const uint8_t kinds[] = { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_COPY, BUSTER_TYPED_RETURN };
+    const uint8_t classes[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID };
+    const uint8_t local_classes[] = { BUSTER_TYPED_CLASS_VOID };
+    const uint8_t local_flags[] = { BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
+    const uint32_t local_sizes[] = { BUSTER_TIER0_MAX_COPY_BYTES };
+    const uint8_t local_alignments[] = { 3 };
+    Arena output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    for (uint32_t observable = 0; observable < 2; observable += 1)
+    {
+        for (uint32_t size = 1; size <= BUSTER_TIER0_MAX_COPY_BYTES; size += 1)
+        {
+            const uint64_t values[] = { 1, 0, size | (observable ? BUSTER_TYPED_ACCESS_VOLATILE : 0), 0 };
+            const Tier0Function source = {
+                .kinds = kinds,
+                .classes = classes,
+                .values = values,
+                .count = 4,
+                .local_classes = local_classes,
+                .local_flags = local_flags,
+                .local_count = 1,
+                .local_sizes = local_sizes,
+                .local_alignments = local_alignments,
+                // Validation strips access marks only when the typed producer advertises them.
+                .volatiles = observable != 0,
+            };
+            IrFunction f = { 0 };
+            bool exact = ir_lower_typed(&source, IR_VOID, 2, &output, &scratch, &f).error == IR_OK;
+            uint32_t loads = 0;
+            uint32_t stores = 0;
+            const uint32_t expected = size / 8 + (uint32_t)__builtin_popcount(size % 8);
+            const uint8_t flags = observable ? BUSTER_IR_VOLATILE : size > BUSTER_TIER0_COPY_NARROW_BYTES ? BUSTER_IR_COPY_PIECE : 0;
+            for (uint32_t i = 0; exact && i < f.instruction_count; i += 1)
+            {
+                const bool load = f.op[i] == IR_LOAD;
+                const bool store = f.op[i] == IR_STORE;
+                loads += load;
+                stores += store;
+                exact = (!load && !store) || (f.flags[i] == flags && !ir_vector_type(load ? f.type[i] : f.type[f.b[i]]));
+            }
+            ir_lower_test_expect(tally, exact && loads == expected && stores == expected,
+                                 "only nonvolatile local copies larger than 32 bytes mark their scalar pieces", size, observable);
+            arena_pop_to(&output, 0);
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+}
 
 static void ir_lower_test_copies(IrLowerTestTally* tally)
 {
@@ -5392,6 +5625,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_region_lifetimes(&tally);
         ir_lower_test_cas_parameter(&tally);
         ir_lower_test_failures(&tally);
+        ir_lower_test_asm_results(&tally);
         ir_lower_test_local_roles(&tally);
         ir_lower_test_aggregates(&tally);
         ir_lower_test_ignored_scan(&tally);
@@ -5399,6 +5633,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_empty_stack(&tally);
         ir_lower_test_narrow(&tally);
         ir_lower_test_objects(&tally);
+        ir_lower_test_copy_flags(&tally);
         ir_lower_test_copies(&tally);
         ir_lower_test_stack(&tally);
         ir_lower_test_indirect_jump(&tally);

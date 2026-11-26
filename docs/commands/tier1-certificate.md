@@ -95,6 +95,14 @@ requirements. [Command index](README.md).
   predecessor-associated phi operands or removing an actual copy into that
   carrier must be refused. Ordinary definitions receive no phi claims, and
   enabling source metadata must leave instructions and branch targets intact.
+  The local-copy fixture (#2818) checks a flagged `v4i32` load's two records
+  (`movsd`/`movhps`, or their VEX forms) as one source definition, followed by
+  one vector store. At x86-64, x86-64-v3, x86-64-v4 and znver5, with and without
+  a frame pointer, it checks both halves' resolved frame displacements and
+  executes the complete function against guarded output bytes. Changing either
+  load's displacement, base or destination, omitting a half, using the wrong
+  VEX merge source, narrowing the store or relabeling the high half as a move
+  must be refused.
 
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's

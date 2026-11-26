@@ -103,6 +103,22 @@ itself. Leaving a block's subtree undoes its entries and counts, by an undo log,
 so a sibling subtree sees its dominator's state. Counting writes rather than
 clearing entries keeps a store's work constant whatever the table holds.
 
+The undo log has at most one record per memory event (#2826). A store records
+its key's old entry and its class; undo subtracts the class and family's two
+increments and restores the entry. A write or lifetime marker records only
+its class, and a load that changes an entry records only that entry. A load
+that reuses an entry records nothing. The two epochs are saved in the traversal
+frame, and their next unused number keeps increasing across siblings.
+The root and its final-child chain record nothing: once their subtree ends,
+no subsequent block needs their inherited state. A child before another
+sibling, and every descendant of a frame that must restore, still logs and
+restores all its changes. This preserves the traversal and forwarding order.
+
+On the x86-64 host an undo record is 24 bytes, replacing the old 32-byte record
+per counter or entry change: a store needs 24 bytes instead of 96. The bound
+is the event count, without the old two extra records per block for epochs.
+Single-block functions and dominator chains write no undo records.
+
 Across a block boundary an entry survives where no path from the block's
 immediate dominator D to the block, without D again, may write that kind's
 memory (`ir_memory_clear`). Every such path ends at a predecessor P that D
@@ -114,6 +130,24 @@ diamond whose arms write nothing takes the value from before it, a loop's
 header takes nothing across a latch that writes, and a loop's exit takes the
 header's value. SCCP's unreachable blocks are walked (their writes count) but
 forward nothing.
+
+The equations use each predecessor's **last barrier** instead of repeatedly
+walking its dominator ancestors (#2826). For each memory kind a block's barrier
+is its own reverse-postorder rank if it writes that memory or its entry is not
+clear; otherwise it inherits its immediate dominator's barrier. A reachable
+predecessor's barrier must be at or before D's rank. This excludes D's own
+writes, which the inherited walk state already contains. The ranks increase
+along every dominator chain, so this is exactly the same path test.
+
+The initial barriers account for each block's writes with all entries clear.
+Each reverse-postorder sweep then updates a join's clear bits and propagates
+the new barriers to its dominator descendants. A back edge may read the prior
+sweep's barrier, which can only delay losing a clear bit. When no bit changes,
+the summaries and the original greatest-fixed-point equations agree. A sweep
+visits the reachable blocks and join predecessors once, independent of
+dominator depth; acyclic graphs need one sweep. The summaries cost eight bytes
+per block. CFG-unreachable predecessors are skipped, while CFG-reachable
+blocks that SCCP ruled out still contribute writes, as before.
 
 ## The vector phases
 

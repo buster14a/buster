@@ -193,6 +193,10 @@ struct Tier1EmitPrepared
     // frame), and the callee-saved registers they touch, which its prologue saves.
     uint32_t asm_count;
     uint32_t asm_callee;
+    // Secondary result snapshots by producer node (#2144). The lists contain IR_ASM_RESULT nodes only; each body's
+    // primary result is its own node. Null without asm bodies.
+    uint32_t* asm_result_heads;
+    uint32_t* asm_result_next;
     // The widest vector a value of the function is (#141), 16, 32 or 64 bytes, or 0 without one: the vector class's
     // call-save rows and temporary slot take that width, and its moves of them that width's forms.
     uint32_t vector_bytes;

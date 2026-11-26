@@ -313,6 +313,8 @@ enum
     CHECK_WARNING_ID_SWITCH_BOOL,
     CHECK_WARNING_ID_CHAR_SUBSCRIPTS,
     CHECK_WARNING_ID_SIZEOF_ARRAY_ARGUMENT,
+    // A file-scope definition with external linkage and no preceding non-defining declaration (#2222).
+    CHECK_WARNING_ID_MISSING_VARIABLE_DECLARATIONS,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -633,6 +635,8 @@ typedef enum CheckWarningEventKind
     // An object's acting tentative definition, an array of unknown bound at the unit's end (#2238): "tentative array
     // definition assumed to have one element", at its name.
     CHECK_WARNING_EVENT_TENTATIVE_ARRAY,
+    // A file-scope variable definition without an earlier extern declaration (#2222); payload.name is its identifier.
+    CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS,
     // swift_newtype's and swift_wrapper's argument other than `struct` or `enum` (#1447, check_input_swift_newtype_parse),
     // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
     // or "(null)" for another token, as clang streams the token's IdentifierInfo.
@@ -699,6 +703,9 @@ typedef enum CheckWarningEventKind
     // T from smaller integer type S", payload.second_type the cast's type (its value type, unqualified) and payload.data its
     // typedef's spelling, payload.first_type the operand's type after its lvalue conversion and payload.name its spelling.
     CHECK_WARNING_EVENT_INT_TO_POINTER_CAST,
+    // A braced initializer's pointer conversion (#3563). first_type is the destination, second_type the source
+    // before decay, data its graph node, token the initializer's first token, detail the selected member (or 0).
+    CHECK_WARNING_EVENT_INITIALIZER_POINTER,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -793,6 +800,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_ATTRIBUTE_HERE,
     // "member 'm' declared 'const' here" (#2168), payload.name the member's name.
     CHECK_WARNING_NOTE_CONST_MEMBER,
+    // Suggest internal linkage at the definition's written type specifier (#2222).
+    CHECK_WARNING_NOTE_DECLARE_STATIC,
     // "use '=' to turn this equality comparison into an assignment" (payload.data BUSTER_CHECK_UNUSED_EQUALITY), or "use '|='
     // to turn this inequality comparison into an or-assignment" (BUSTER_CHECK_UNUSED_INEQUALITY).
     CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT,

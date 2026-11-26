@@ -598,6 +598,285 @@ static uint32_t check_program_data_point(const CheckProgram* program, const Chec
     return point;
 }
 
+// Whether a transparent attribute can follow code generation's classification of any signature. A unit without the
+// attribute history has no work here. Its latest activation is compared with the earliest possible definition or
+// initializer emission; deferred definitions may make this conservative, and the exact walk below leaves them out.
+static bool check_program_abi_late(const CheckProgram* program, const CheckDataPrepared* data)
+{
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = input != NULL ? &input->graph : NULL;
+    uint32_t activation = 0;
+    uint32_t first = BUSTER_CHECK_NONE;
+    if (graph != NULL && graph->transparent_unions != NULL && program->parser != NULL)
+    {
+        __m512i latest = _mm512_setzero_si512();
+        for (uint32_t tag = 0; tag < graph->tag_completion_count; tag += 16)
+        {
+            const __mmask16 live = (__mmask16)_bzhi_u32(0xffff, graph->tag_completion_count - tag < 16 ? graph->tag_completion_count - tag : 16);
+            latest = _mm512_max_epu32(latest, _mm512_maskz_loadu_epi32(live, graph->transparent_unions + tag));
+        }
+        activation = _mm512_reduce_max_epu32(latest);
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            const uint32_t point = program->parser->tree.parents[program->bodies[b].opening] + 1;
+            first = point < first ? point : first;
+        }
+        for (uint32_t d = 0; data != NULL && d < data->count; d += 1)
+        {
+            const uint32_t point = data->reference_counts[d] != 0 ? data->objects[d].token : BUSTER_CHECK_NONE;
+            first = point < first ? point : first;
+        }
+        for (uint32_t p = 0; data == NULL && program->initializers != NULL && p < program->initializers->count; p += 1)
+        {
+            const uint32_t token = program->initializers->declaration_tokens[p];
+            const bool stored = token < input->token_count && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC);
+            first = stored && token < first ? token : first;
+        }
+        for (uint32_t a = 0; a < program->alias_count; a += 1)
+        {
+            const CheckProgramAlias* alias = program->aliases + a;
+            const TypeId type = alias->token < input->token_count ? input->declared_types[alias->token] : 0;
+            const bool function = alias->kind != CHECK_PROGRAM_WEAKREF && type_kind(program->types, type_strip_aligned(program->types, type)) == BUSTER_TYPE_KIND_FUNCTION;
+            first = function && alias->token < first ? alias->token : first;
+        }
+    }
+    return activation > first;
+}
+
+// The function leaf that contributes an emitted static address, retaining its declaration-time function type.
+// Constant emission sees the retained address, not its evaluation: f in `f ? g : h` isn't emitted when g is the
+// retained value, nor are an overwritten write's references. Pointer casts likewise don't classify their target
+// function types. The walk visits each node once per retained value; it publishes only that value's function leaves.
+static void check_program_abi_initializer(const CheckProgram* program, const CheckInitPart* part, uint32_t point, uint32_t epoch,
+                                          uint32_t* seen, uint32_t* stack, uint32_t* nodes, TypeId* types)
+{
+    const CheckGraph* graph = &program->input->graph;
+    uint32_t depth = 0;
+    if (part->node < graph->count && part->value.constant_kind == CHECK_CONSTANT_ADDRESS)
+    {
+        stack[depth++] = part->node;
+        seen[part->node] = epoch;
+        if (types != NULL && part->overload_candidate != 0 && part->overload_candidate <= graph->overload_candidate_count)
+        {
+            nodes[part->node] = point < nodes[part->node] ? point : nodes[part->node];
+            types[part->node] = graph->overload_candidates[part->overload_candidate - 1].type;
+        }
+    }
+    while (depth != 0)
+    {
+        const uint32_t node = stack[--depth];
+        const CheckOp op = graph->ops[node];
+        const CheckValue value = check_stream_value(program->stream, node);
+        if (op == CHECK_OP_VALUE && value.category == CHECK_FUNCTION && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object == part->value.object)
+        {
+            nodes[node] = point < nodes[node] ? point : nodes[node];
+        }
+        else if (op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF && op != CHECK_OP_BUILTIN_QUERY)
+        {
+            uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            bool truth = false;
+            if (op == CHECK_OP_CONDITIONAL && check_program_runtime_truth(program, node, operands[0], &truth))
+            {
+                operands[0] = BUSTER_CHECK_NONE;
+                operands[truth ? 2 : 1] = BUSTER_CHECK_NONE;
+            }
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+            {
+                const uint32_t child = operands[i];
+                const CheckOverloadResult* selected = child < graph->count && types != NULL ? check_program_overload_address(program, node, i) : NULL;
+                if (selected != NULL && selected->object == part->value.object)
+                {
+                    nodes[child] = point < nodes[child] ? point : nodes[child];
+                    types[child] = selected->type;
+                }
+                if (child < graph->count && seen[child] != epoch)
+                {
+                    seen[child] = epoch;
+                    stack[depth++] = child;
+                }
+            }
+        }
+    }
+}
+
+// A source program may be lowered directly, without preparing a static-data emission view. Its declaration history
+// and retained initializer references are still available: build only those two cold views, without changing the
+// const type table or preparing strings and data layout. The caller releases every column with its scratch mark.
+static bool check_program_abi_data(const CheckProgram* program, CheckDataPrepared* data, Arena* output, Arena* scratch)
+{
+    const CheckInput* input = program->input;
+    const CheckInitializers* initializers = program->initializers;
+    const uint32_t plans = initializers != NULL ? initializers->count : 0;
+    uint64_t reference_capacity = 0;
+    for (uint32_t p = 0; p < plans; p += 1)
+    {
+        reference_capacity += initializers->plans[p].count;
+    }
+    bool valid = reference_capacity <= UINT32_MAX;
+    uint64_t* keys = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)input->token_count + 1) : NULL;
+    uint64_t* sorting = keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)input->token_count + 1) : NULL;
+    data->objects = sorting != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataObject, (uint64_t)plans + 1) : NULL;
+    data->reference_offsets = data->objects != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)plans + 1) : NULL;
+    data->reference_counts = data->reference_offsets != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)plans + 1) : NULL;
+    data->references = data->reference_counts != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, reference_capacity + 1) : NULL;
+    valid = valid && data->references != NULL;
+    uint32_t varying = 0;
+    for (uint32_t first = 0; valid && first < input->token_count; first += 64)
+    {
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, input->token_count, BUSTER_CHECK_BITS_STATIC);
+        for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            if (input->declarations[token] == token)
+            {
+                const uint32_t object = input->objects[token];
+                keys[data->declaration_count++] = (uint64_t)object << 32 | token;
+                varying |= object;
+            }
+        }
+    }
+    data->declaration_keys = valid ? c_bindings_sort(keys, sorting, data->declaration_count, varying) : NULL;
+    for (uint32_t p = 0; valid && p < plans; p += 1)
+    {
+        const uint32_t token = initializers->declaration_tokens[p];
+        if (token < input->token_count && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
+        {
+            const CheckInitializer* plan = initializers->plans + p;
+            uint32_t* references = NULL;
+            uint32_t count = 0;
+            const uint8_t* live = NULL;
+            valid = check_initializer_references_live(program->types, plan, scratch, output, &references, &count, &live) == CHECK_INIT_OK;
+            if (valid)
+            {
+                const uint32_t d = data->count++;
+                data->objects[d] = (CheckDataObject){
+                    .type = plan->type,
+                    .object = input->objects[token],
+                    .initializer = check_sparse_get(input->initializer_nodes, token),
+                    .token = token,
+                    .initializer_plan = plan,
+                    .live_kept = true,
+                    .live_parts = live,
+                    .live_count = count,
+                };
+                data->reference_offsets[d] = data->reference_count;
+                data->reference_counts[d] = count;
+                if (count != 0)
+                {
+                    memcpy(data->references + data->reference_count, references, (uint64_t)count * sizeof(uint32_t));
+                    data->reference_count += count;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+// The immutable source points used to reproduce clang's per-signature ABI classification cache after a late
+// transparent_union attribute (#1844). Taking a function's address, even as a discarded expression, classifies it;
+// an indirect call also classifies its complete actual signature, with no named-function reference to follow.
+// The emission walk records both, excluding sizeof, dead if arms and un-emitted statements. Eager bodies' points
+// are their closing braces, so an attribute inside a body precedes every classification in that body. Static data
+// references use their initializer's emission point: file-scope internal data remains deferred even when an earlier
+// body names it. All deferred points are the unit's end, and need no walk because every attribute is then active.
+static bool check_program_abi_emission(CheckProgram* program, const CheckDataPrepared* data, Arena* output, Arena* scratch)
+{
+    const uint64_t temporary = scratch->length;
+    const bool needed = program->abi_emission_objects == NULL && check_program_abi_late(program, data);
+    CheckDataPrepared fallback = { 0 };
+    bool valid = true;
+    if (needed && data == NULL)
+    {
+        valid = check_program_abi_data(program, &fallback, output, scratch);
+        data = &fallback;
+    }
+    if (needed && valid)
+    {
+        const uint64_t mark = output->length;
+        const CheckGraph* graph = &program->input->graph;
+        uint32_t* nodes = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)graph->count + 1);
+        uint32_t* objects = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)program->object_count + 1);
+        TypeId* types = graph->overload_candidate_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, TypeId, (uint64_t)graph->count + 1) : NULL;
+        uint32_t* seen = NULL;
+        uint32_t* stack = NULL;
+        uint32_t epoch = 0;
+        uint8_t* eager = program->body_eager;
+        if (eager == NULL && program->body_count != 0)
+        {
+            eager = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, program->body_count);
+            for (uint32_t b = 0; eager != NULL && b < program->body_count; b += 1)
+            {
+                eager[b] = check_program_body_eager(program, data, program->bodies + b);
+            }
+        }
+        valid = nodes != NULL && objects != NULL && (graph->overload_candidate_count == 0 || types != NULL) && (program->body_count == 0 || eager != NULL);
+        if (valid)
+        {
+            memset(nodes, 0xff, ((uint64_t)graph->count + 1) * sizeof(uint32_t));
+            memset(objects, 0xff, ((uint64_t)program->object_count + 1) * sizeof(uint32_t));
+            if (types != NULL)
+            {
+                memset(types, 0, ((uint64_t)graph->count + 1) * sizeof(TypeId));
+            }
+            CheckProgram view = *program;
+            view.body_eager = eager;
+            CheckProgramUses uses = { .first = objects, .abi_nodes = nodes, .abi_types = types };
+            valid = check_program_symbol_bodies(&view, &uses, scratch);
+            for (uint32_t d = 0; valid && d < data->count; d += 1)
+            {
+                const CheckDataObject* object = data->objects + d;
+                const uint32_t point = check_program_token_emitted(program, object->token) ? check_program_data_point(&view, object) : BUSTER_CHECK_NONE;
+                const CheckInitializer* plan = object->initializer_plan;
+                if (point != BUSTER_CHECK_NONE && plan != NULL && data->reference_counts[d] != 0 && seen == NULL)
+                {
+                    seen = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)graph->count + 1);
+                    stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)graph->count + 1);
+                    valid = seen != NULL && stack != NULL;
+                    if (valid)
+                    {
+                        memset(seen, 0, ((uint64_t)graph->count + 1) * sizeof(uint32_t));
+                    }
+                }
+                for (uint32_t p = 0; valid && point != BUSTER_CHECK_NONE && plan != NULL && data->reference_counts[d] != 0 && p < plan->count; p += 1)
+                {
+                    const CheckInitPart* part = plan->parts + p;
+                    if (part->kind == CHECK_INIT_VALUE && (object->live_parts == NULL || object->live_parts[p] != 0))
+                    {
+                        epoch += 1;
+                        if (epoch == 0)
+                        {
+                            memset(seen, 0, ((uint64_t)graph->count + 1) * sizeof(uint32_t));
+                            epoch = 1;
+                        }
+                        check_program_abi_initializer(program, part, point, epoch, seen, stack, nodes, types);
+                    }
+                }
+                for (uint32_t r = 0; point != BUSTER_CHECK_NONE && r < data->reference_counts[d]; r += 1)
+                {
+                    const uint32_t target = data->references[data->reference_offsets[d] + r];
+                    if (target < program->object_count)
+                    {
+                        objects[target] = point < objects[target] ? point : objects[target];
+                    }
+                }
+            }
+        }
+        if (valid)
+        {
+            program->body_eager = eager;
+            program->abi_emission_nodes = nodes;
+            program->abi_emission_objects = objects;
+            program->abi_emission_types = types;
+        }
+        else
+        {
+            arena_pop_to(output, mark);
+        }
+    }
+    arena_pop_to(scratch, temporary);
+    return valid;
+}
+
 // The first emitted reference of each renamed object, for the rare unit with a source-time rename after a parsed use.
 // A selected body's compact references are candidates; the shared emission walk excludes dead statements. Deferred bodies are
 // emitted at the unit's end; an eager body's references appear when its complete definition is handed to codegen,
@@ -1301,7 +1580,7 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
     const uint32_t definitions = valid ? (uint32_t)definitions64 : 0;
     // Code generation reads CheckProgram.body_eager for target features, an x86 builtin's call (#148), a lock-free
     // query whose answer is its function's emission's (CheckBuiltinAtomicEffect.late_completion), a symbol pragma
-    // after an earlier use, and a late weak declaration (#1849). Other units make none. check_program_body_eager reads each selected body's declarations
+    // after an earlier use, a late weak declaration (#1849), and a late transparent union (#1844). Other units make none. check_program_body_eager reads each selected body's declarations
     // up to its definition, rather than the definitions' flags, which hold the unit's final ones.
     bool late = false;
     for (uint32_t i = 0; full->stream != 0 && i < full->stream->atomic_count; i += 1)
@@ -1315,7 +1594,8 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
     }
     // A unit with a vector wider than 128 bits too, whose direct calls take the AVX calling-convention check (#2367).
     const bool eager_needed = full->attribute_keys != 0 || (full->stream != 0 && full->stream->x86_count != 0) || late || symbol_pragmas ||
-                              full->weak_late_count != 0 || (full->types != 0 && check_target_feature_abi_unit(full->types));
+                              full->weak_late_count != 0 || check_program_abi_late(full, data) ||
+                              (full->types != 0 && check_target_feature_abi_unit(full->types));
     const uint32_t reference_capacity = valid ? (uint32_t)references64 : 0;
     uint64_t* order = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
     uint64_t* sorting = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
@@ -1900,6 +2180,9 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
     }
     // Late weak declarations' bindings (#1849), of the selection that stands.
     valid = valid && (full->weak_late_count == 0 || check_program_weak_bindings(&candidate.program, &candidate.data, output, scratch));
+    // A provisional selection precedes the controls. The completed program makes these columns once and the exact
+    // selection shares them; this fallback serves an already-complete program made without prepared static data.
+    valid = valid && (full->controls == NULL || check_program_abi_emission(&candidate.program, &candidate.data, output, scratch));
     if (valid)
     {
         candidate.defined_functions = full->body_count;

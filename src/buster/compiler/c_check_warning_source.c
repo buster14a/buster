@@ -124,12 +124,15 @@ static inline __attribute__((always_inline)) bool check_warning_null_event(const
                 }
                 token = parent;
             }
-            if (parentheses || parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST || parser->tokens.names[original_first] == C_NAME_GENERIC ||
+            // A call's syntax root is its closing parenthesis, but the zero-valued expression begins at its callee
+            // (#2914). This also covers folded bit builtins and a call retained after a default-error argument.
+            const uint8_t role = parser->tree.roles[token];
+            if (parentheses || role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_CALL || parser->tokens.names[original_first] == C_NAME_GENERIC ||
                 parser->tokens.names[original_first] == C_NAME_BUILTIN_CHOOSE_EXPR)
             {
                 token = original_first;
             }
-            else if (parser->tree.roles[token] == PARSE_ROLE_CLOSE_TERNARY || parser->tree.roles[token] == PARSE_ROLE_OPEN_TERNARY)
+            else if (role == PARSE_ROLE_CLOSE_TERNARY || role == PARSE_ROLE_OPEN_TERNARY)
             {
                 token = original_first;
                 for (uint32_t steps = 0; steps < original_end - original_first; steps += 1)
@@ -141,7 +144,8 @@ static inline __attribute__((always_inline)) bool check_warning_null_event(const
                     }
                     token = parent;
                 }
-                if (parser->tree.roles[token] == PARSE_ROLE_CLOSE_GROUP)
+                const uint8_t condition_role = parser->tree.roles[token];
+                if (condition_role == PARSE_ROLE_CLOSE_GROUP || condition_role == PARSE_ROLE_CLOSE_CALL)
                 {
                     token = original_first;
                 }

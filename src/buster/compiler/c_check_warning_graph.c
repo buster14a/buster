@@ -15,7 +15,10 @@ static uint32_t check_warning_graph_first(const CheckGraph* graph, const Parser*
     {
         uint32_t token = graph->tokens[node];
         const uint8_t role = parser->tree.roles[token];
-        if (role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_KEYWORD)
+        // A builtin's graph carries its arguments without an ordinary call's callee operand (#2914). Recover its
+        // written callee here so reader and graph null-conversion events use the same source span and token.
+        const bool builtin = role == PARSE_ROLE_CLOSE_CALL && graph->ops[node] != CHECK_OP_CALL;
+        if (role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_KEYWORD || builtin)
         {
             uint32_t open = token;
             while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
@@ -24,7 +27,11 @@ static uint32_t check_warning_graph_first(const CheckGraph* graph, const Parser*
             }
             if (parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token)
             {
-                token = role == PARSE_ROLE_CLOSE_KEYWORD && open != 0 ? open - 1 : open;
+                token = (role == PARSE_ROLE_CLOSE_KEYWORD || builtin) && open != 0 ? open - 1 : open;
+                while (builtin && token != 0 && parser->tokens.kinds[token] == PARSE_KIND_R_PAREN)
+                {
+                    token -= 1;
+                }
             }
         }
         first = token < first ? token : first;

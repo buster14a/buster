@@ -272,6 +272,10 @@ struct Tier1CertEmittedBuild
     // The resources each of the code's records writes (BUSTER_X86_RESOURCE_*), by record: one x86_instructions_effects
     // call over them all, which the walks read record by record (#2924: a call a record cost more than the column).
     const uint64_t* writes;
+    // Rebuilt from the IR, independently of the emitter's lists: result projections are defined at their producer's
+    // body boundary, even when their own IR positions occur later in the block.
+    uint32_t* asm_result_heads;
+    uint32_t* asm_result_next;
     // Optional per-node scalar definition candidates. They are usable only after the complete decoded program
     // passes tier1_certificate_check; a kernel's matching bytes alone do not prove its operands' provenance.
     Tier1DebugDefinition* debug_definitions;
@@ -2028,7 +2032,7 @@ static bool tier1_cert_emitted_silent(const Tier1EmitResult* emitted, const Tier
     const uint32_t value = emitted->node_values[node];
     const bool selected = !plan->covered[node] && op != IR_PHI && !tier1_select_entry_parameter(function, node);
     const bool recomputed = value != BUSTER_TIER1_CFG_NONE && emitted->cfg_input.rematerializable != 0 && emitted->cfg_input.rematerializable[value] != 0;
-    return !selected || op == IR_BR || op == IR_CBR || op == IR_BR_INDIRECT || recomputed;
+    return !selected || op == IR_BR || op == IR_CBR || op == IR_BR_INDIRECT || op == IR_ASM_RESULT || recomputed;
 }
 
 static Tier1Origin tier1_cert_emitted_kind(uint32_t origin)
@@ -2943,7 +2947,9 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
 // are one ORIGINAL of no definition, whose uses are its register operands (#2144, IrAsmBody.locations), each read in its
 // own register, where the operands' moves before it left it: they read the block's memory too, which isn't a value the
 // allocation keeps, and kill every register the body touches (IrAsmBody.touched and .masks: callee-saved ones too, which
-// the prologue saved) and the frame bytes their stores write.
+// the prologue saved) and the frame bytes their stores write. Then the declared scalar results are defined in their
+// fixed registers, from which the following moves must prove their allocated homes. The projections are found from
+// the IR independently of the emitter's lists; their later IR positions emit no additional definitions.
 static bool tier1_cert_emitted_asm(Tier1CertEmittedBuild* build, uint32_t node, uint32_t r, uint32_t end)
 {
     const IrFunction* function = build->plan->function;
@@ -2990,8 +2996,19 @@ static bool tier1_cert_emitted_asm(Tier1CertEmittedBuild* build, uint32_t node, 
         valid = value != BUSTER_TIER1_CFG_NONE && tier1_cert_emitted_add_use(&kernel, value, tier1_cert_emitted_register(build, value, where));
     }
     valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
-    // The emitted records, each now its placement's.
-    return valid && tier1_cert_emitted_originals(build, node, &kernel, emitted->code.records + r, body->count);
+    // The emitted records, each now its placement's. Every result snapshot is defined in the declared fixed register
+    // after the body kills its touched registers and before any of the result transfers or restores are decoded.
+    valid = valid && tier1_cert_emitted_originals(build, node, &kernel, emitted->code.records + r, body->count);
+    for (uint32_t result = valid && body->result != 0 ? node : BUSTER_IR_NONE; valid && result != BUSTER_IR_NONE;
+         result = result == node ? build->asm_result_heads[node] : build->asm_result_next[result])
+    {
+        const uint32_t reg = result == node ? body->result - 1u : function->b[result];
+        const uint32_t value = emitted->node_values[result];
+        const uint32_t where = reg < 16 ? reg : 32 * BUSTER_TIER1_ALLOCATE_VECTOR + reg - 16;
+        const uint32_t location = value != BUSTER_TIER1_CFG_NONE ? tier1_cert_emitted_register(build, value, where) : BUSTER_CERT_NONE;
+        valid = value != BUSTER_TIER1_CFG_NONE && tier1_cert_emitted_define(build, result, value, location);
+    }
+    return valid;
 }
 
 // The function's own aggregate result's records [r, end) (#789, #1284; tier1_emit_cfg_aggregate_result's, before its
@@ -3355,7 +3372,7 @@ static bool tier1_cert_emitted_flush(Tier1CertEmittedBuild* build, uint32_t* cur
             // no records, a copy that vanishes. Either claim is checked: a left-out value's uses need its recomputations,
             // and a vanished copy's operand must be in its register.
             const IrFunction* f = function;
-            const bool selected = !plan->covered[n] && f->op[n] != IR_PHI && !tier1_select_entry_parameter(f, n) && f->op[n] != IR_BR && f->op[n] != IR_CBR && f->op[n] != IR_BR_INDIRECT;
+            const bool selected = !plan->covered[n] && f->op[n] != IR_PHI && f->op[n] != IR_ASM_RESULT && !tier1_select_entry_parameter(f, n) && f->op[n] != IR_BR && f->op[n] != IR_CBR && f->op[n] != IR_BR_INDIRECT;
             const bool kept = selected && build->emitted->dropped[n] == 0;
             valid = row ? tier1_cert_emitted_row(build, n, record, record) : body ? tier1_cert_emitted_asm(build, n, record, record) : !kept || (tier1_cert_emitted_kernel(build, n, &kernel) && kernel.count == 0);
             silent = row || body || !kept;
@@ -3528,6 +3545,36 @@ static Tier1CertEmittedReason tier1_certificate_emitted_records(const Tier1Selec
     build.frame_unit = BUSTER_CERT_EMITTED_VECTOR_UNIT + (build.wide ? 32 * 64 : 16 * 16) + 8 * 8;
     tally.reason = emitted->origins != 0 && emitted->block_records != 0 && emitted->stub_records != 0 && emitted->dropped != 0 ? tier1_cert_emitted_supported(plan, emitted) : TIER1_CERT_EMITTED_ORIGIN;
     bool valid = tally.reason == TIER1_CERT_EMITTED_OK;
+    if (valid && function->asm_body_count != 0)
+    {
+        build.asm_result_heads = arena_push_array(scratch, (uint64_t)count + 1, 4, 4);
+        build.asm_result_next = arena_push_array(scratch, (uint64_t)count + 1, 4, 4);
+        valid = (build.asm_result_heads != 0 && build.asm_result_next != 0) || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX);
+        if (valid)
+        {
+            memset(build.asm_result_heads, 0xff, ((uint64_t)count + 1) * 4);
+            memset(build.asm_result_next, 0xff, ((uint64_t)count + 1) * 4);
+            // Find the sparse projection rows 64 operation bytes at a time; only their parent links are scalar.
+            for (uint32_t first = 0; first < count; first += 64)
+            {
+                const uint32_t remaining = count - first;
+                const __mmask64 active = remaining >= 64 ? (__mmask64)-1 : ((__mmask64)1 << remaining) - 1;
+                const __m512i op = _mm512_maskz_loadu_epi8(active, function->op + first);
+                uint64_t pending = _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_ASM_RESULT));
+                while (pending != 0)
+                {
+                    const uint32_t node = first + (uint32_t)__builtin_ctzll(pending);
+                    pending &= pending - 1;
+                    if (!plan->covered[node])
+                    {
+                        const uint32_t producer = function->a[node];
+                        build.asm_result_next[node] = build.asm_result_heads[producer];
+                        build.asm_result_heads[producer] = node;
+                    }
+                }
+            }
+        }
+    }
     // The blocks' records in layout order, every record of one.
     for (uint32_t b = 0; valid && b < blocks; b += 1)
     {
