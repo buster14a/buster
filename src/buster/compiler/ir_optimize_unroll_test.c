@@ -1456,13 +1456,13 @@ static bool ir_unroll_test_vector_agree(IrVectorizeTest* random, const IrUnrollV
             }
             memcpy(left, initial, BUSTER_IR_VECTORIZE_TEST_BUFFER);
             memcpy(right, initial, BUSTER_IR_VECTORIZE_TEST_BUFFER);
-            const InterpreterResult original = ir_vectorize_test_run(before, left, arguments, count, execution);
-            const InterpreterResult unrolled = ir_vectorize_test_run(after, right, moved, count, execution);
+            const InterpreterResult original = ir_vectorize_test_run(before, left, BUSTER_IR_VECTORIZE_TEST_BUFFER, arguments, count, execution);
+            const InterpreterResult unrolled = ir_vectorize_test_run(after, right, BUSTER_IR_VECTORIZE_TEST_BUFFER, moved, count, execution);
             agree = original.status == INTERPRETER_OK && unrolled.status == INTERPRETER_OK &&
                 original.value.low == unrolled.value.low && original.value.high == unrolled.value.high &&
                 memcmp(left, right, BUSTER_IR_VECTORIZE_TEST_BUFFER) == 0;
             memcpy(right, initial, BUSTER_IR_VECTORIZE_TEST_BUFFER);
-            const InterpreterResult cleaned = ir_vectorize_test_run(optimized, right, moved, count, execution);
+            const InterpreterResult cleaned = ir_vectorize_test_run(optimized, right, BUSTER_IR_VECTORIZE_TEST_BUFFER, moved, count, execution);
             agree = agree && cleaned.status == INTERPRETER_OK && original.value.low == cleaned.value.low &&
                 original.value.high == cleaned.value.high && memcmp(left, right, BUSTER_IR_VECTORIZE_TEST_BUFFER) == 0;
             if (!agree)

@@ -4289,7 +4289,9 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
 - **Direct one-pass parser, type checker, and SysV AMD64 emitter (`c_direct_types.c`, `c_direct_cc.c`, `c_direct_x86.c`):**
   uses compact 32-bit `FastType` handles, AVX-512 `vpcmpeqd` 16-wide struct-member search (`<= 64` fields, hash table
   above), iterative operator-precedence expression compilation directly into x86-64 machine bytes, lazy `EFLAGS`
-  comparisons, and a single-`writev` ELF64 writer (with `.eh_frame` unwind tables and `R_X86_64_REX_GOTPCRELX` for
+  comparisons (materialized by `fval_flush_flags` before any instruction that sets the flags, a conversion's or a
+  bit-field's extraction included: a call's last argument can still be one while the earlier ones are converted,
+  #3659), and a single-`writev` ELF64 writer (with `.eh_frame` unwind tables and `R_X86_64_REX_GOTPCRELX` for
   PIC/external symbols). Hot functions are placed in `.text.buster_checker` (2 MB huge-page code segment).
 - **Busy-host memory policy (`#672`/`#1561`):** allocates two `mmap` arenas (32 MiB + 6 MiB) with zero-initialized
   tables (no full-table `memset`s) and advises `MAP_STACK` + `MADV_NOHUGEPAGE` when `arena_pages_busy` is set,

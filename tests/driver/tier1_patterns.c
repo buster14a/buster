@@ -28,6 +28,8 @@
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
+// - #3641's vectors constructed from runtime lanes and constants: no memory construction, with the lane bytes checked
+//   independently on zero, high-bit and unequal inputs, including required zero tails and observable effects;
 // - #2784's str_gsub loop, whose body precedes its header: no value stored back where the instruction before loaded
 //   it from, as a range that waits in its slot (#2768) and is evicted after its reload did;
 // - #2843's conditional sums whose arm is a load's extension to 64 bits while the comparison reads the load (#2838's
@@ -614,6 +616,107 @@ __attribute__((noinline)) void patterns_whole_volatile(patterns_wrapper* out, co
     *out = r;
 }
 
+#elif defined(BUSTER_TIER1_CONSTRUCT_SUBJECT)
+
+typedef unsigned long long patterns_u64x8 __attribute__((vector_size(64)));
+typedef unsigned int patterns_u32x16 __attribute__((vector_size(64)));
+typedef unsigned short patterns_u16x32 __attribute__((vector_size(64)));
+typedef unsigned char patterns_u8x64 __attribute__((vector_size(64)));
+
+__attribute__((noinline)) void patterns_construct_lane0(patterns_u64x8* out, unsigned long long x)
+{
+    *out = (patterns_u64x8){ x };
+}
+
+__attribute__((noinline)) void patterns_construct_pair(patterns_u64x8* out, unsigned long long x, unsigned long long y)
+{
+    *out = (patterns_u64x8){ x, y, x, y, x, y, x, y };
+}
+
+// Intrinsic-style wrappers introduce their construction through inline expansion instead of the caller's own IR.
+static __attribute__((always_inline)) inline patterns_u64x8 patterns_construct_inline_value(unsigned long long x, unsigned long long y)
+{
+    return (patterns_u64x8){ x, y };
+}
+
+__attribute__((noinline)) void patterns_construct_inlined(patterns_u64x8* out, unsigned long long x, unsigned long long y)
+{
+    *out = patterns_construct_inline_value(x, y);
+}
+
+__attribute__((noinline)) void patterns_construct_mixed(patterns_u64x8* out, unsigned long long x, unsigned long long y)
+{
+    *out = (patterns_u64x8){ 0x0123456789abcdefull, x, 0, ~0ull, y, 0x8000000000000000ull, x, 0 };
+}
+
+// A pointer keeps the ABI's stack arguments out of the construction's stack-memory shape check. Permuting its lanes
+// prevents a whole-vector load of the source from satisfying the fixture in place of distinct scalar construction.
+__attribute__((noinline)) void patterns_construct_all(patterns_u64x8* out, const unsigned long long* p)
+{
+    *out = (patterns_u64x8){ p[0], p[2], p[4], p[6], p[1], p[3], p[5], p[7] };
+}
+
+__attribute__((noinline)) void patterns_construct_ends(patterns_u64x8* out, unsigned long long x, unsigned long long y)
+{
+    *out = (patterns_u64x8){ x, 0, 0, 0, 0, 0, 0, y };
+}
+
+__attribute__((noinline)) void patterns_construct_splat(patterns_u64x8* out, unsigned long long x)
+{
+    *out = (patterns_u64x8){ x, x, x, x, x, x, x, x };
+}
+
+__attribute__((noinline)) void patterns_construct_constant(patterns_u64x8* out)
+{
+    *out = (patterns_u64x8){ 0, 1, ~0ull, 0x8000000000000000ull, 0x0123456789abcdefull, 0, 1, 9 };
+}
+
+__attribute__((noinline)) void patterns_construct_u32(patterns_u32x16* out, unsigned int x, unsigned int y)
+{
+    *out = (patterns_u32x16){ x, 0, y, 0x80000000u };
+}
+
+__attribute__((noinline)) void patterns_construct_u16(patterns_u16x32* out, unsigned short x, unsigned short y)
+{
+    *out = (patterns_u16x32){ x, 0, y, 0x8000u };
+}
+
+__attribute__((noinline)) void patterns_construct_u8(patterns_u8x64* out, unsigned char x, unsigned char y)
+{
+    *out = (patterns_u8x64){ x, 0, y, 0x80u };
+}
+
+// Eight separate volatile reads must remain even though all read the same address. Their count is checked in the
+// disassembly as well as their bytes being checked natively.
+__attribute__((noinline)) void patterns_construct_volatile(patterns_u64x8* out, const volatile unsigned long long* p)
+{
+    *out = (patterns_u64x8){ *p, *p, *p, *p, *p, *p, *p, *p };
+}
+
+__attribute__((noinline)) void patterns_construct_effects(patterns_u64x8* out, volatile unsigned long long* p, unsigned long long x)
+{
+    const unsigned long long a = *p;
+    *p = a + 1;
+    const unsigned long long b = *p;
+    *p = b + 1;
+    *out = (patterns_u64x8){ a, x, b, x, 0, 0, 0, 0 };
+}
+
+void patterns_construct_mutate(patterns_u64x8* p, unsigned long long x);
+unsigned long long patterns_construct_step(volatile unsigned long long* p);
+
+__attribute__((noinline)) void patterns_construct_call(patterns_u64x8* out, volatile unsigned long long* p, unsigned long long x, unsigned long long y)
+{
+    *out = (patterns_u64x8){ x, patterns_construct_step(p), y };
+}
+
+__attribute__((noinline)) void patterns_construct_escape(patterns_u64x8* out, unsigned long long x, unsigned long long y)
+{
+    patterns_u64x8 value = { x };
+    patterns_construct_mutate(&value, y);
+    *out = value;
+}
+
 #elif defined(BUSTER_TIER1_PATTERNS_ORACLE)
 
 #include <limits.h>
@@ -707,6 +810,185 @@ void patterns_whole_union(patterns_lanes* out, const patterns_vector* p);
 unsigned long long patterns_whole_member(const patterns_vector* p);
 void patterns_whole_override(patterns_lanes* out, const patterns_vector* p);
 void patterns_whole_volatile(patterns_wrapper* out, const patterns_vector* p);
+typedef unsigned long long patterns_u64x8 __attribute__((vector_size(64)));
+typedef unsigned int patterns_u32x16 __attribute__((vector_size(64)));
+typedef unsigned short patterns_u16x32 __attribute__((vector_size(64)));
+typedef unsigned char patterns_u8x64 __attribute__((vector_size(64)));
+void patterns_construct_lane0(patterns_u64x8* out, unsigned long long x);
+void patterns_construct_pair(patterns_u64x8* out, unsigned long long x, unsigned long long y);
+void patterns_construct_inlined(patterns_u64x8* out, unsigned long long x, unsigned long long y);
+void patterns_construct_mixed(patterns_u64x8* out, unsigned long long x, unsigned long long y);
+void patterns_construct_all(patterns_u64x8* out, const unsigned long long* p);
+void patterns_construct_ends(patterns_u64x8* out, unsigned long long x, unsigned long long y);
+void patterns_construct_splat(patterns_u64x8* out, unsigned long long x);
+void patterns_construct_constant(patterns_u64x8* out);
+void patterns_construct_u32(patterns_u32x16* out, unsigned int x, unsigned int y);
+void patterns_construct_u16(patterns_u16x32* out, unsigned short x, unsigned short y);
+void patterns_construct_u8(patterns_u8x64* out, unsigned char x, unsigned char y);
+void patterns_construct_volatile(patterns_u64x8* out, const volatile unsigned long long* p);
+void patterns_construct_effects(patterns_u64x8* out, volatile unsigned long long* p, unsigned long long x);
+void patterns_construct_call(patterns_u64x8* out, volatile unsigned long long* p, unsigned long long x, unsigned long long y);
+void patterns_construct_escape(patterns_u64x8* out, unsigned long long x, unsigned long long y);
+
+unsigned long long patterns_construct_step(volatile unsigned long long* p)
+{
+    const unsigned long long before = *p;
+    *p = before + 0x100000001ull;
+    return before ^ 0xfedcba9876543210ull;
+}
+
+void patterns_construct_mutate(patterns_u64x8* p, unsigned long long x)
+{
+    (*p)[0] ^= 0x8000000000000000ull;
+    (*p)[7] = x;
+}
+
+// Specify the expected little-endian lane bytes without a vector initializer or a vector load/store in the oracle.
+static bool patterns_construct_bytes(const char* name, const void* actual, const unsigned long long* lanes, unsigned width)
+{
+    unsigned char expected[64];
+    for (unsigned b = 0; b < sizeof(expected); b += 1)
+    {
+        expected[b] = (unsigned char)(lanes[b / width] >> ((b % width) * 8));
+    }
+    const bool valid = memcmp(actual, expected, sizeof(expected)) == 0;
+    if (!valid)
+    {
+        const unsigned char* bytes = actual;
+        unsigned first = 0;
+        while (first < sizeof(expected) && bytes[first] == expected[first])
+        {
+            first += 1;
+        }
+        if (first < sizeof(expected))
+        {
+            fprintf(stderr, "vector construction %s byte %u: expected=%02x actual=%02x\n", name, first, expected[first], bytes[first]);
+        }
+    }
+    return valid;
+}
+
+static bool patterns_construct_runs(void)
+{
+    static const unsigned long long inputs[] = {
+        0,
+        1,
+        ~0ull,
+        0x8000000000000000ull,
+        0x0123456789abcdefull,
+        0xfedcba9876543210ull,
+        0x80ff800080008000ull,
+        0x7f007fff7fffffffull,
+    };
+    bool valid = true;
+    for (unsigned i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i += 1)
+    {
+        const unsigned long long x = inputs[i];
+        for (unsigned j = 0; j < sizeof(inputs) / sizeof(inputs[0]); j += 1)
+        {
+            const unsigned long long y = inputs[j];
+            patterns_u64x8 result;
+            unsigned long long lanes[64] = { x };
+            memset(&result, 0x5a, sizeof(result));
+            patterns_construct_lane0(&result, x);
+            valid = patterns_construct_bytes("lane0", &result, lanes, 8) && valid;
+
+            lanes[1] = y;
+            patterns_construct_inlined(&result, x, y);
+            valid = patterns_construct_bytes("inlined", &result, lanes, 8) && valid;
+
+            for (unsigned l = 0; l < 8; l += 1)
+            {
+                lanes[l] = (l & 1) != 0 ? y : x;
+            }
+            patterns_construct_pair(&result, x, y);
+            valid = patterns_construct_bytes("pair", &result, lanes, 8) && valid;
+
+            lanes[0] = 0x0123456789abcdefull;
+            lanes[1] = x;
+            lanes[2] = 0;
+            lanes[3] = ~0ull;
+            lanes[4] = y;
+            lanes[5] = 0x8000000000000000ull;
+            lanes[6] = x;
+            lanes[7] = 0;
+            patterns_construct_mixed(&result, x, y);
+            valid = patterns_construct_bytes("mixed", &result, lanes, 8) && valid;
+
+            unsigned long long source[8];
+            for (unsigned l = 0; l < 8; l += 1)
+            {
+                source[l] = inputs[(i + l) % 8] ^ y;
+            }
+            for (unsigned l = 0; l < 8; l += 1)
+            {
+                lanes[l] = source[(l % 4) * 2 + l / 4];
+            }
+            patterns_construct_all(&result, source);
+            valid = patterns_construct_bytes("all", &result, lanes, 8) && valid;
+
+            memset(lanes, 0, sizeof(lanes));
+            lanes[0] = x;
+            lanes[7] = y;
+            patterns_construct_ends(&result, x, y);
+            valid = patterns_construct_bytes("ends", &result, lanes, 8) && valid;
+
+            for (unsigned l = 0; l < 8; l += 1)
+            {
+                lanes[l] = x;
+            }
+            patterns_construct_splat(&result, x);
+            valid = patterns_construct_bytes("splat", &result, lanes, 8) && valid;
+            volatile unsigned long long observed = x;
+            patterns_construct_volatile(&result, &observed);
+            valid = patterns_construct_bytes("volatile", &result, lanes, 8) && observed == x && valid;
+
+            memset(lanes, 0, sizeof(lanes));
+            lanes[0] = x;
+            lanes[1] = y;
+            lanes[2] = x + 1;
+            lanes[3] = y;
+            patterns_construct_effects(&result, &observed, y);
+            valid = patterns_construct_bytes("effects", &result, lanes, 8) && observed == x + 2 && valid;
+
+            memset(lanes, 0, sizeof(lanes));
+            observed = x;
+            lanes[0] = x;
+            lanes[1] = x ^ 0xfedcba9876543210ull;
+            lanes[2] = y;
+            patterns_construct_call(&result, &observed, x, y);
+            valid = patterns_construct_bytes("call", &result, lanes, 8) && observed == x + 0x100000001ull && valid;
+
+            memset(lanes, 0, sizeof(lanes));
+            lanes[0] = x ^ 0x8000000000000000ull;
+            lanes[7] = y;
+            patterns_construct_escape(&result, x, y);
+            valid = patterns_construct_bytes("escape", &result, lanes, 8) && valid;
+
+            memset(lanes, 0, sizeof(lanes));
+            lanes[0] = x;
+            lanes[2] = y;
+            patterns_u32x16 dwords;
+            lanes[3] = 0x80000000u;
+            patterns_construct_u32(&dwords, (unsigned int)x, (unsigned int)y);
+            valid = patterns_construct_bytes("u32", &dwords, lanes, 4) && valid;
+            patterns_u16x32 words;
+            lanes[3] = 0x8000u;
+            patterns_construct_u16(&words, (unsigned short)x, (unsigned short)y);
+            valid = patterns_construct_bytes("u16", &words, lanes, 2) && valid;
+            patterns_u8x64 bytes;
+            lanes[3] = 0x80u;
+            patterns_construct_u8(&bytes, (unsigned char)x, (unsigned char)y);
+            valid = patterns_construct_bytes("u8", &bytes, lanes, 1) && valid;
+        }
+    }
+    patterns_u64x8 constant;
+    const unsigned long long lanes[8] = { 0, 1, ~0ull, 0x8000000000000000ull, 0x0123456789abcdefull, 0, 1, 9 };
+    patterns_construct_constant(&constant);
+    valid = patterns_construct_bytes("constant", &constant, lanes, 8) && valid;
+    puts(valid ? "Tier 1 vector construction bytes/effects: pass" : "Tier 1 vector construction bytes/effects: FAIL");
+    return valid;
+}
 
 #define BUSTER_PATTERNS_A(i) (((i) >> 2) & 7)
 #define BUSTER_PATTERNS_B(i) (((i) >> 5) & 7)
@@ -1252,6 +1534,7 @@ int main(void)
     memset(&united, 0x5a, sizeof(united));
     patterns_whole_override(&united, &vector);
     valid = memcmp(united.q, overridden, sizeof(overridden)) == 0 && valid;
+    valid = patterns_construct_runs() && valid;
     puts(valid ? "Tier 1 patterns native oracle: pass" : "Tier 1 patterns native oracle: FAIL");
     return valid ? 0 : 1;
 }
@@ -1269,7 +1552,7 @@ int main(void)
 #include <sys/wait.h>
 #include <unistd.h>
 
-static bool patterns_run(char* const arguments[], const char* output)
+static bool patterns_run(char* const arguments[], const char* output, const char* diagnostics)
 {
     const pid_t child = fork();
     bool valid = child >= 0;
@@ -1281,6 +1564,16 @@ static bool patterns_run(char* const arguments[], const char* output)
             if (descriptor < 0 || dup2(descriptor, STDOUT_FILENO) < 0)
             {
                 perror("patterns output");
+                _exit(126);
+            }
+            close(descriptor);
+        }
+        if (diagnostics != NULL)
+        {
+            const int descriptor = open(diagnostics, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (descriptor < 0 || dup2(descriptor, STDERR_FILENO) < 0)
+            {
+                perror("patterns diagnostics");
                 _exit(126);
             }
             close(descriptor);
@@ -1323,6 +1616,11 @@ typedef enum PatternsKind
     PATTERNS_CLEARED,
     PATTERNS_GSUB,
     PATTERNS_ARMS,
+    PATTERNS_CONSTRUCT,
+    PATTERNS_CONSTRUCT_ALL,
+    PATTERNS_CONSTRUCT_INLINED,
+    PATTERNS_CONSTRUCT_VOLATILE,
+    PATTERNS_SEMANTIC,
 } PatternsKind;
 
 typedef struct PatternsFunction PatternsFunction;
@@ -1372,6 +1670,21 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_arms_signed", PATTERNS_ARMS },
     { "patterns_arms_unsigned", PATTERNS_ARMS },
     { "patterns_arms_half", PATTERNS_ARMS },
+    { "patterns_construct_lane0", PATTERNS_CONSTRUCT },
+    { "patterns_construct_pair", PATTERNS_CONSTRUCT },
+    { "patterns_construct_inlined", PATTERNS_CONSTRUCT_INLINED },
+    { "patterns_construct_mixed", PATTERNS_CONSTRUCT },
+    { "patterns_construct_all", PATTERNS_CONSTRUCT_ALL },
+    { "patterns_construct_ends", PATTERNS_CONSTRUCT },
+    { "patterns_construct_splat", PATTERNS_CONSTRUCT },
+    { "patterns_construct_constant", PATTERNS_SEMANTIC },
+    { "patterns_construct_u32", PATTERNS_CONSTRUCT },
+    { "patterns_construct_u16", PATTERNS_CONSTRUCT },
+    { "patterns_construct_u8", PATTERNS_CONSTRUCT },
+    { "patterns_construct_volatile", PATTERNS_CONSTRUCT_VOLATILE },
+    { "patterns_construct_effects", PATTERNS_SEMANTIC },
+    { "patterns_construct_call", PATTERNS_SEMANTIC },
+    { "patterns_construct_escape", PATTERNS_SEMANTIC },
 };
 
 #define BUSTER_PATTERNS_COUNT (sizeof(patterns_functions) / sizeof(patterns_functions[0]))
@@ -1399,6 +1712,67 @@ struct PatternsBody
 static bool patterns_memory(const char* operand)
 {
     return strchr(operand, '(') != NULL;
+}
+
+static bool patterns_mentions_output_pointer(const char* operands)
+{
+    return strstr(operands, "%rdi") != NULL || strstr(operands, "%edi") != NULL || strstr(operands, "%di") != NULL;
+}
+
+// Eight distinct input values occupy every available caller-saved general register. The output pointer may spill
+// while the independent 128-bit pairs are built. Admit precisely that pointer's save/restore, never a scalar lane's
+// store or a vector reload: it must still be the incoming rdi when saved, be restored from the identical slot, and
+// feed the sole vector output store without being changed again. Every other constructor must use no stack memory.
+static bool patterns_output_pointer_spill(const PatternsBody* body)
+{
+    unsigned stack_indices[2] = { 0, 0 };
+    unsigned stack_count = 0;
+    unsigned vector_stores = 0;
+    unsigned vector_store = 0;
+    for (unsigned i = 0; i < body->count; i += 1)
+    {
+        const PatternsInstruction* instruction = &body->instructions[i];
+        const char* operands = instruction->operands;
+        const bool stack = strstr(operands, "(%rsp") != NULL || strstr(operands, "(%rbp") != NULL;
+        if (stack)
+        {
+            if (stack_count < 2)
+            {
+                stack_indices[stack_count] = i;
+            }
+            stack_count += 1;
+        }
+        const char* comma = strrchr(operands, ',');
+        if (strncmp(instruction->operation, "vmov", 4) == 0 && operands[0] == '%' && comma != NULL && patterns_memory(comma + 1))
+        {
+            vector_store = i;
+            vector_stores += 1;
+        }
+    }
+    bool valid = stack_count == 2 && vector_stores == 1 && stack_indices[0] < stack_indices[1] && stack_indices[1] < vector_store;
+    if (valid)
+    {
+        const PatternsInstruction* save = &body->instructions[stack_indices[0]];
+        const PatternsInstruction* restore = &body->instructions[stack_indices[1]];
+        const char* store_destination = strrchr(body->instructions[vector_store].operands, ',');
+        valid = strcmp(save->operation, "mov") == 0 && strcmp(restore->operation, "mov") == 0 &&
+                strncmp(save->operands, "%rdi,", 5) == 0 && store_destination != NULL && strcmp(store_destination + 1, "(%rdi)") == 0;
+        if (valid)
+        {
+            const char* slot = save->operands + 5;
+            const size_t length = strlen(slot);
+            valid = strlen(restore->operands) == length + 5 && strncmp(restore->operands, slot, length) == 0 && strcmp(restore->operands + length, ",%rdi") == 0;
+        }
+        for (unsigned i = 0; valid && i < stack_indices[0]; i += 1)
+        {
+            valid = !patterns_mentions_output_pointer(body->instructions[i].operands);
+        }
+        for (unsigned i = stack_indices[1] + 1; valid && i < vector_store; i += 1)
+        {
+            valid = !patterns_mentions_output_pointer(body->instructions[i].operands);
+        }
+    }
+    return valid;
 }
 
 #define BUSTER_PATTERNS_REGISTERS 16u
@@ -1693,7 +2067,7 @@ static bool patterns_pair_self_test(void)
     return valid;
 }
 
-static bool patterns_shape(const PatternsFunction* function, const PatternsBody* body)
+static bool patterns_shape(const PatternsFunction* function, const PatternsBody* body, bool expanded)
 {
     unsigned sets = 0;
     unsigned moves = 0;
@@ -1719,6 +2093,12 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     unsigned zeros = 0;
     // Moves of a register into another (#2843).
     unsigned copies = 0;
+    // The constructors have no stack arguments: stack memory can only be temporary construction or a spill. The
+    // frame pointer's push/pop and register-only frame setup remain permitted.
+    unsigned stack_accesses = 0;
+    unsigned source_loads = 0;
+    unsigned vector_stores = 0;
+    unsigned calls = 0;
     for (unsigned i = 0; i < body->count; i += 1)
     {
         const PatternsInstruction* instruction = &body->instructions[i];
@@ -1731,6 +2111,11 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         parity += strncmp(operation, "cmovp", 5) == 0 || strncmp(operation, "cmovnp", 6) == 0;
         shifts += (strncmp(operation, "shl", 3) == 0 || strncmp(operation, "shr", 3) == 0 || strncmp(operation, "sar", 3) == 0) && strncmp(operands, "$0x0,", 5) == 0;
         const bool move = strncmp(operation, "mov", 3) == 0 && strncmp(operation, "movz", 4) != 0 && strncmp(operation, "movs", 4) != 0;
+        const bool stack_memory = strstr(operands, "(%rsp") != NULL || strstr(operands, "(%rbp") != NULL;
+        stack_accesses += stack_memory;
+        source_loads += strncmp(operation, "lea", 3) != 0 && comma != NULL && patterns_memory(operands) && !patterns_memory(destination) && !stack_memory && strstr(operands, "%rip") == NULL;
+        vector_stores += strncmp(operation, "vmov", 4) == 0 && operands[0] == '%' && patterns_memory(destination);
+        calls += strncmp(operation, "call", 4) == 0;
         immediates += move && operands[0] == '$' && patterns_memory(destination);
         zeros += move && strncmp(operands, "$0x0,", 5) == 0 && patterns_memory(destination);
         registers += move && operands[0] == '%' && patterns_memory(destination);
@@ -1806,17 +2191,31 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_ARMS:
         valid = valid && moves >= 1 && copies == 0;
         break;
+    case PATTERNS_CONSTRUCT:
+        valid = valid && stack_accesses == 0 && vector_stores == 1 && calls == 0;
+        break;
+    case PATTERNS_CONSTRUCT_ALL:
+        valid = valid && (stack_accesses == 0 || patterns_output_pointer_spill(body)) && vector_stores == 1 && calls == 0;
+        break;
+    case PATTERNS_CONSTRUCT_INLINED:
+        valid = valid && (!expanded || (stack_accesses == 0 && vector_stores == 1 && calls == 0));
+        break;
+    case PATTERNS_CONSTRUCT_VOLATILE:
+        valid = valid && source_loads == 8;
+        break;
+    case PATTERNS_SEMANTIC:
+        break;
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u parity-cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u register-copies=%u r11=%u\n",
-                function->name, body->definitions, sets, moves, parity, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back, copies, scratch);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u parity-cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u register-copies=%u r11=%u stack-accesses=%u source-loads=%u vector-stores=%u calls=%u\n",
+                function->name, body->definitions, sets, moves, parity, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back, copies, scratch, stack_accesses, source_loads, vector_stores, calls);
 
     }
     return valid;
 }
 
-static bool patterns_shapes(const char* path)
+static bool patterns_shapes(const char* path, bool expanded)
 {
     static PatternsBody bodies[BUSTER_PATTERNS_COUNT];
     memset(bodies, 0, sizeof(bodies));
@@ -1844,11 +2243,40 @@ static bool patterns_shapes(const char* path)
         else if (current < BUSTER_PATTERNS_COUNT)
         {
             PatternsInstruction instruction = { 0 };
-            const int fields = sscanf(line, " %llx: %31s %95s", &instruction.address, instruction.operation, instruction.operands);
-            if (fields >= 2 && bodies[current].count < BUSTER_PATTERNS_INSTRUCTIONS)
+            int consumed = 0;
+            const int fields = sscanf(line, " %llx:%n", &instruction.address, &consumed);
+            if (fields == 1 && consumed > 0)
             {
-                bodies[current].instructions[bodies[current].count] = instruction;
-                bodies[current].count += 1;
+                const char* cursor = line + consumed;
+                cursor += strspn(cursor, " \t");
+                // GNU objdump annotates some encodings, e.g. `{evex} vpinsrq ...`. Those prefixes are not mnemonics;
+                // skipping them must not discard the real operands, including any forbidden stack-memory operand.
+                while (valid && *cursor == '{')
+                {
+                    const char* close = strchr(cursor, '}');
+                    valid = close != NULL && (close[1] == ' ' || close[1] == '\t');
+                    if (valid)
+                    {
+                        cursor = close + 1;
+                        cursor += strspn(cursor, " \t");
+                    }
+                }
+                const size_t operation_length = strcspn(cursor, " \t\r\n");
+                valid = valid && operation_length != 0 && operation_length < sizeof(instruction.operation);
+                if (valid)
+                {
+                    memcpy(instruction.operation, cursor, operation_length);
+                    cursor += operation_length;
+                    cursor += strspn(cursor, " \t");
+                    const size_t operands_length = strcspn(cursor, " \t\r\n");
+                    valid = operands_length < sizeof(instruction.operands) && bodies[current].count < BUSTER_PATTERNS_INSTRUCTIONS;
+                    if (valid)
+                    {
+                        memcpy(instruction.operands, cursor, operands_length);
+                        bodies[current].instructions[bodies[current].count] = instruction;
+                        bodies[current].count += 1;
+                    }
+                }
             }
         }
     }
@@ -1859,9 +2287,62 @@ static bool patterns_shapes(const char* path)
     }
     for (unsigned i = 0; i < BUSTER_PATTERNS_COUNT; i += 1)
     {
-        valid = patterns_shape(&patterns_functions[i], &bodies[i]) && valid;
+        valid = patterns_shape(&patterns_functions[i], &bodies[i], expanded) && valid;
     }
     return valid;
+}
+
+static bool patterns_report_value(const char* line, const char* name, unsigned long long* value)
+{
+    const char* field = strstr(line, name);
+    char* end = NULL;
+    errno = 0;
+    const unsigned long long parsed = field != NULL ? strtoull(field + strlen(name), &end, 10) : 0;
+    const bool valid = field != NULL && end != field + strlen(name) && errno != ERANGE && (*end == '\t' || *end == '\n');
+    if (valid)
+    {
+        *value = parsed;
+    }
+    return valid;
+}
+
+static bool patterns_report(const char* path, bool constructors, bool expanded)
+{
+    unsigned minimum_functions = 0;
+    for (unsigned i = 0; i < BUSTER_PATTERNS_COUNT; i += 1)
+    {
+        const bool constructor = strncmp(patterns_functions[i].name, "patterns_construct_", strlen("patterns_construct_")) == 0;
+        minimum_functions += constructor == constructors;
+    }
+    FILE* stream = fopen(path, "r");
+    bool valid = stream != NULL;
+    unsigned reports = 0;
+    char line[16384];
+    while (valid && fgets(line, sizeof(line), stream) != NULL)
+    {
+        fputs(line, stderr);
+        if (strncmp(line, "tier1\tfunctions=", strlen("tier1\tfunctions=")) == 0)
+        {
+            unsigned long long functions = 0;
+            unsigned long long requested = 0;
+            unsigned long long compiled = 0;
+            unsigned long long fallbacks = 0;
+            unsigned long long inlined = 0;
+            valid = patterns_report_value(line, "\tfunctions=", &functions) &&
+                    patterns_report_value(line, "\trequested=", &requested) &&
+                    patterns_report_value(line, "\tcompiled=", &compiled) &&
+                    patterns_report_value(line, "\tfallbacks=", &fallbacks) &&
+                    patterns_report_value(line, "\tinlined=", &inlined) &&
+                    functions >= minimum_functions && requested == functions && compiled == functions && fallbacks == 0 && (!constructors || (expanded ? inlined != 0 : inlined == 0));
+            reports += 1;
+        }
+    }
+    if (stream != NULL)
+    {
+        valid = !ferror(stream) && valid;
+        valid = fclose(stream) == 0 && valid;
+    }
+    return valid && reports == 1;
 }
 
 int main(int argc, char** argv)
@@ -1876,40 +2357,77 @@ int main(int argc, char** argv)
     const bool created = valid && mkdtemp(directory) != NULL;
     valid = valid && created;
     char subject[128];
+    char constructors[128];
     char oracle[128];
     char program[128];
     char assembly[128];
+    char report[128];
+    char constructor_report[128];
     // All paths have a fixed, bounded prefix and fixed suffixes, smaller than their buffers.
     snprintf(subject, sizeof(subject), "%s/subject.o", directory);
+    snprintf(constructors, sizeof(constructors), "%s/constructors.o", directory);
     snprintf(oracle, sizeof(oracle), "%s/oracle.o", directory);
     snprintf(program, sizeof(program), "%s/program", directory);
     snprintf(assembly, sizeof(assembly), "%s/assembly.txt", directory);
+    snprintf(report, sizeof(report), "%s/report.txt", directory);
+    snprintf(constructor_report, sizeof(constructor_report), "%s/constructor-report.txt", directory);
     char source[] = "tests/driver/tier1_patterns.c";
     if (valid)
     {
         char* arguments[] = { argv[2], "-std=gnu17", "-O2", "-DBUSTER_TIER1_PATTERNS_ORACLE", "-c", source, "-o", oracle, NULL };
-        valid = patterns_run(arguments, NULL);
+        char* reference[] = { argv[2], "-std=gnu17", "-O2", "-DBUSTER_TIER1_PATTERNS_SUBJECT", "-c", source, "-o", subject, NULL };
+        char* construct_reference[] = { argv[2], "-std=gnu17", "-O2", "-march=znver5", "-DBUSTER_TIER1_CONSTRUCT_SUBJECT", "-c", source, "-o", constructors, NULL };
+        char* link[] = { argv[2], oracle, subject, constructors, "-o", program, NULL };
+        char* execute[] = { program, NULL };
+        valid = patterns_run(arguments, NULL, NULL) && patterns_run(reference, NULL, NULL) && patterns_run(construct_reference, NULL, NULL) && patterns_run(link, NULL, NULL) && patterns_run(execute, NULL, NULL);
+        printf("Tier 1 patterns Clang subject: %s\n", valid ? "pass" : "FAIL");
     }
     for (unsigned scalar = 0; valid && scalar < 2; scalar += 1)
     {
         // Fresh outputs: an unsuccessful command must never reuse the preceding path's files.
         // Pin the existing baseline output target: #2932's check is of a scalar recurrence, before vectorization.
         unlink(subject);
-        unlink(program);
-        unlink(assembly);
+        unlink(report);
+        // The existing scalar-pattern fixtures retain their original output target. Only the vector-construction
+        // unit targets Zen 5; enabling that ISA globally would vectorize the older scalar-loop shape fixtures.
         char* compile[] = { argv[1], "--tier1", "--tier1-strict", "--verify", "--lanes", "1", "--tier1-report", "-march=x86-64", "-std=gnu17", "-DBUSTER_TIER1_PATTERNS_SUBJECT", "-c", source, "-o", subject, scalar ? "--scalar" : NULL, NULL };
-        char* link[] = { argv[2], oracle, subject, "-o", program, NULL };
-        char* execute[] = { program, NULL };
-        char* disassemble[] = { "objdump", "-d", "--no-show-raw-insn", subject, NULL };
-        valid = patterns_run(compile, NULL) && patterns_run(link, NULL) && patterns_run(execute, NULL) && patterns_run(disassemble, assembly) && patterns_shapes(assembly);
+        valid = patterns_run(compile, NULL, report) && patterns_report(report, false, false);
+        for (unsigned disabled = 0; valid && disabled < 2; disabled += 1)
+        {
+            unlink(constructors);
+            unlink(program);
+            unlink(assembly);
+            unlink(constructor_report);
+            const bool expanded = disabled == 0;
+            char* construct[] = { argv[1], "--tier1", "--tier1-strict", "--verify", "--lanes", "1", "--tier1-report", "-march=znver5", "-std=gnu17", "-DBUSTER_TIER1_CONSTRUCT_SUBJECT", "-c", source, "-o", constructors, NULL, NULL, NULL };
+            unsigned argument = sizeof(construct) / sizeof(construct[0]) - 3;
+            if (scalar)
+            {
+                construct[argument++] = "--scalar";
+            }
+            if (!expanded)
+            {
+                construct[argument++] = "--tier1-passes=-inline";
+            }
+            char* link[] = { argv[2], oracle, subject, constructors, "-o", program, NULL };
+            char* execute[] = { program, NULL };
+            char* disassemble[] = { "objdump", "-d", "--no-show-raw-insn", subject, constructors, NULL };
+            valid = patterns_run(construct, NULL, constructor_report) && patterns_report(constructor_report, true, expanded) &&
+                    patterns_run(link, NULL, NULL) && patterns_run(execute, NULL, NULL) &&
+                    patterns_run(disassemble, assembly, NULL) && patterns_shapes(assembly, expanded);
+            printf("Tier 1 construction %s inline-%s: %s\n", scalar ? "scalar" : "default", expanded ? "on" : "off", valid ? "pass" : "FAIL");
+        }
         printf("Tier 1 patterns %s: %s\n", scalar ? "scalar" : "default", valid ? "pass" : "FAIL");
     }
     if (valid)
     {
         unlink(subject);
+        unlink(constructors);
         unlink(oracle);
         unlink(program);
         unlink(assembly);
+        unlink(report);
+        unlink(constructor_report);
         valid = rmdir(directory) == 0;
     }
     if (!valid && created)

@@ -658,7 +658,7 @@ static void tier1_float_unsigned_run(Tier1EmitTest* test, const void* code, uint
 static void tier1_float_unsigned_i32_storage(Tier1EmitTest* test)
 {
     const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .parameter_count = 2 };
-    const uint8_t registers[] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RAX, 16, 0 };
+    const uint8_t registers[] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RAX, BUSTER_TIER1_EMIT_VECTOR_LOCATION, 0 };
     for (uint32_t target = IR_F32; target <= IR_F64; target += 1)
     {
         IrFunction function;
@@ -866,7 +866,7 @@ static void tier1_float_unsigned_dword_memory(Tier1EmitTest* test)
                 .condition = BUSTER_TIER1_FLOAT_FROM_UNSIGNED,
                 .width = (uint8_t)width,
                 .source_width = 4,
-                .destination = 23,
+                .destination = BUSTER_TIER1_EMIT_VECTOR_LOCATION + 7,
                 .unsigned_dword_memory_forms = (uint8_t)allowed,
                 .memory = { .rm = X86_REGISTER_RDI, .index = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = -13 },
             };
@@ -897,7 +897,7 @@ static void tier1_float_unsigned_i64_forms(Tier1EmitTest* test)
         for (uint32_t width = 4; width <= 8; width += 4)
         {
             const Tier1SelectHoles holes = { .rule = TIER1_RULE_FLOAT_CONVERT_WIDE, .scale = BUSTER_TIER1_FLOAT_FROM_UNSIGNED,
-                .source_width = 8, .width = (uint8_t)width, .left = X86_REGISTER_R9, .destination = 16 + 7,
+                .source_width = 8, .width = (uint8_t)width, .left = X86_REGISTER_R9, .destination = BUSTER_TIER1_EMIT_VECTOR_LOCATION + 7,
                 .unsigned_i64_float_forms = (uint8_t)mask };
             X86Instruction rows[32];
             const uint32_t count = tier1_select_fixed(&holes, rows);
@@ -934,7 +934,7 @@ static void tier1_float_conversion_loads(Tier1EmitTest* test)
         const uint32_t source = cases[k].source;
         const uint32_t target = cases[k].target;
         const uint8_t registers[] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX,
-                                      from_integer ? X86_REGISTER_RAX : 19, from_integer ? 20 : X86_REGISTER_R9, 0 };
+                                      from_integer ? X86_REGISTER_RAX : BUSTER_TIER1_EMIT_VECTOR_LOCATION + 3, from_integer ? BUSTER_TIER1_EMIT_VECTOR_LOCATION + 4 : X86_REGISTER_R9, 0 };
         IrFunction function;
         const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
         tier1_emit_test_expect(test, created, "create a scalar conversion with a loaded operand");
@@ -971,7 +971,7 @@ static void tier1_float_conversion_loads(Tier1EmitTest* test)
                         const bool memory = (record.mode & BUSTER_X86_MODE_MEMORY) != 0;
                         const uint16_t form = from_integer ? tier1_select_float_forms(target == IR_F32 ? 4 : 8)->from_integer[source == IR_I64] :
                                                              tier1_select_float_forms(source == IR_F32 ? 4 : 8)->to_integer[target == IR_I64 || cases[k].op == IR_FPTOUI];
-                        tier1_emit_test_expect(test, records.count == (from_integer ? 2 : 1) && record.form == form && record.reg == (registers[4] & 15),
+                        tier1_emit_test_expect(test, records.count == (from_integer ? 2 : 1) && record.form == form && record.reg == (from_integer ? 4 : X86_REGISTER_R9),
                                                "convert at the original register width directly into the destination");
                         tier1_emit_test_expect(test, !from_integer || (records.records[0].form == X86_FORM_XORPS_X_XM128 && records.records[0].reg == record.reg),
                                                "clear the upper-lane dependency of an integer-to-float conversion");
@@ -1030,7 +1030,8 @@ static void tier1_float_fma_addend_addresses(Tier1EmitTest* test)
                 tier1_emit_test_expect(test, selected, "select a folded FMA addend address");
                 for (uint8_t x = 1; selected && x <= 3; x += 1)
                 {
-                    const uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, 17, 18, X86_REGISTER_RDX, 19, (uint8_t)(16 + x), 0 };
+                    const uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, BUSTER_TIER1_EMIT_VECTOR_LOCATION + 1, BUSTER_TIER1_EMIT_VECTOR_LOCATION + 2, X86_REGISTER_RDX,
+                                                   BUSTER_TIER1_EMIT_VECTOR_LOCATION + 3, (uint8_t)(BUSTER_TIER1_EMIT_VECTOR_LOCATION + x), 0 };
                     const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 6);
                     const Tier1SelectRecords records = tier1_select_expand(&holes);
                     const bool separate = x == 1;
@@ -1165,7 +1166,8 @@ static void tier1_float_fma_loads(Tier1EmitTest* test)
                                       "only an eligible second multiplicand or addend becomes a memory operand");
                 for (uint8_t x = 1; folded && addend && x <= 3; x += 1)
                 {
-                    const uint8_t registers[7] = { X86_REGISTER_RDI, 17, 18, 19, 20, (uint8_t)(16 + x), 0 };
+                    const uint8_t registers[7] = { X86_REGISTER_RDI, BUSTER_TIER1_EMIT_VECTOR_LOCATION + 1, BUSTER_TIER1_EMIT_VECTOR_LOCATION + 2, BUSTER_TIER1_EMIT_VECTOR_LOCATION + 3,
+                                                   BUSTER_TIER1_EMIT_VECTOR_LOCATION + 4, (uint8_t)(BUSTER_TIER1_EMIT_VECTOR_LOCATION + x), 0 };
                     const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 5);
                     const Tier1SelectRecords records = tier1_select_expand(&holes);
                     const bool keep_a = x == 1 && shape != 6;
@@ -1179,7 +1181,8 @@ static void tier1_float_fma_loads(Tier1EmitTest* test)
                 }
                 for (uint8_t x = 1; folded && !addend && x <= 3; x += 1)
                 {
-                    const uint8_t registers[7] = { X86_REGISTER_RDI, 17, 18, 19, 20, (uint8_t)(16 + x), 0 };
+                    const uint8_t registers[7] = { X86_REGISTER_RDI, BUSTER_TIER1_EMIT_VECTOR_LOCATION + 1, BUSTER_TIER1_EMIT_VECTOR_LOCATION + 2, BUSTER_TIER1_EMIT_VECTOR_LOCATION + 3,
+                                                   BUSTER_TIER1_EMIT_VECTOR_LOCATION + 4, (uint8_t)(BUSTER_TIER1_EMIT_VECTOR_LOCATION + x), 0 };
                     const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 5);
                     const Tier1SelectRecords records = tier1_select_expand(&holes);
                     const bool copy = x == 3;
@@ -1234,7 +1237,8 @@ static void tier1_float_fma_factor_addresses(Tier1EmitTest* test)
                 tier1_emit_test_expect(test, selected, "select a folded FMA factor address");
                 for (uint8_t x = 1; selected && x <= 3; x += 1)
                 {
-                    const uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, 17, 18, X86_REGISTER_RDX, 19, (uint8_t)(16 + x), 0 };
+                    const uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, BUSTER_TIER1_EMIT_VECTOR_LOCATION + 1, BUSTER_TIER1_EMIT_VECTOR_LOCATION + 2, X86_REGISTER_RDX,
+                                                   BUSTER_TIER1_EMIT_VECTOR_LOCATION + 3, (uint8_t)(BUSTER_TIER1_EMIT_VECTOR_LOCATION + x), 0 };
                     const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 6);
                     const Tier1SelectRecords records = tier1_select_expand(&holes);
                     const X86Instruction memory = records.records[x == 3];

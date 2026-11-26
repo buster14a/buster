@@ -591,7 +591,12 @@ The decoding:
   (`tier1_cert_emitted_unchanged`, #2963). A general register the records
   give back is not killed: one holding its own value at the run's end, followed
   through their 64-bit `mov`s between general registers (the compare-exchange's
-  save of rax in the scratch register and its restore, #1059). A call's sequence is checked
+  save of rax in the scratch register and its restore, #1059). A gather or scatter's
+  `kmovw` save and restore similarly preserve the mask's low two bytes (#2808).
+  The decoder follows their provenance through the general register, invalidating
+  it on intervening writes. The restored mask's upper six bytes remain clobbered:
+  a byte or word mask survives, while a wider live mask still fails the proof.
+  This preservation does not apply to an asm body or a call. A call's sequence is checked
   against the IR (its target's reference, `al`, its result's extension), its
   arguments read in their ABI registers and outgoing slots (a value passed
   twice at each of its locations), then every register the SysV ABI lets the

@@ -1352,7 +1352,8 @@ static void check_warning_graph_char_subscript(CheckInputReader* reader, const C
             .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
             .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
             .completion = graph->source_positions[node],
-            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            // The char-typed operand is the left one in c[a]; retained for its diagnostic range (#2376).
+            .payload = { .token = graph->tokens[index] },
         };
         check_input_warning_once(reader, &event);
     }

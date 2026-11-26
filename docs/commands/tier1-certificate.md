@@ -110,6 +110,19 @@ requirements. [Command index](README.md).
   load's displacement, base or destination, omitting a half, using the wrong
   VEX merge source, narrowing the store or relabeling the high half as a move
   must be refused.
+  The upper-vector fixtures (#3625, `tier1_upper_certificate_test.c`) certify
+  real allocations using registers 16 through 31 at 16, 32 and 64 bytes. They
+  corrupt full-width caller saves and restores, with and without a frame
+  pointer, and phi edge copies: narrowing either side, omitting both sides
+  of a save, aliasing a register through four bits, assigning register 32 or
+  using a VEX form with an upper register must be refused. The call proof
+  kills all 32 vector registers. A row scratch consistently renamed onto a
+  distinct live upper value must fail value-flow checking; placing an allocated
+  value in a reserved scratch register must fail the allocation certificate.
+  Row roles are bounded by each actual form's encoding. The decoder validates
+  the original records before VEX canonicalization, so normalization cannot
+  erase an illegal unused operand; a mutation of that operand checks this
+  boundary too.
 
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's

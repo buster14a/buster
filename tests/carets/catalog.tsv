@@ -1,8 +1,8 @@
 buster-fixtures v1 carets
 # test-carets' cases (c_caret_test.c; #2376): ID, FILE, FLAGS, OPTIONS, NAME, tab-separated. Each command line runs as
 # ours and as clang's, carets on by default; their exit statuses and standard errors must be the same bytes, or with
-# FLAGS `prefix` clang's error must start ours (ours adds its usage text). No diagnostic here has a fix-it or a line of
-# scratch space, which a later piece of #2376 adds; those with highlighted ranges are below.
+# FLAGS `prefix` clang's error must start ours (ours adds its usage text). Scratch allocation line numbers alone are
+# normalized, including their source gutter; columns, excerpt bytes, ranges and fix-its remain exact.
 directives	directives.c	-	-fsyntax-only	preprocessor and checker diagnostics at a line's start, middle and end, with a note
 directives-preprocessed	directives.c	-	-E -o /dev/null	the same diagnostics under -E
 directives-compiled	directives.c	-	-c -o /dev/null	the same diagnostics under -c
@@ -47,3 +47,38 @@ ranges-include-angled	ranges-include-angled.c	-	-E -o /dev/null	an angled header
 ranges-assignments	ranges-assignments.c	-	-fsyntax-only	the expression assigned to, a register variable's operand, a conversion's source
 ranges-members	ranges-members.c	-	-fsyntax-only	an unknown attribute's name with its scope, a member access's base and name
 ranges-members-c23	ranges-members.c	-	-fsyntax-only -std=gnu23	the same in C23, whose '::' is one token
+# Fix-it insertions, replacements and removals, including independent hints on attached notes.
+fixits-conditions	fixits-conditions.c	-	-fsyntax-only -Wparentheses-equality	assignment and comparison suggestions with two boundary inserts
+fixits-conditions-quiet	fixits-conditions.c	-	-fsyntax-only -Wparentheses-equality -w	suppressed warnings leave no hints
+fixits-conditions-no-carets	fixits-conditions.c	-	-fsyntax-only -Wparentheses-equality -fno-caret-diagnostics	fix-it metadata leaves diagnostics without carets unchanged
+fixits-conditions-carets-again	fixits-conditions.c	-	-fsyntax-only -Wparentheses-equality -fno-caret-diagnostics -fcaret-diagnostics	reenabling carets restores fix-it lines
+fixits-typos	fixits-typos.c	-	-fsyntax-only	typo replacements belong to the correct primary or declaration note
+fixits-semicolon	fixits-semicolon.c	-	-fsyntax-only	parser insertions and extraneous-token removal
+fixits-sizeof	fixits-sizeof.c	-	-std=gnu17 -fsyntax-only	missing type parentheses retain the complete declarator boundary
+fixits-multiline	fixits-multiline.c	-	-fsyntax-only -Wparentheses-equality	fix-it endpoints on different lines widen the snippet
+fixits-multiline-lines-0	fixits-multiline.c	-	-fsyntax-only -Wparentheses-equality -fcaret-diagnostics-max-lines=0	zero retains Clang's snippet-limit behavior
+fixits-multiline-lines-1	fixits-multiline.c	-	-fsyntax-only -Wparentheses-equality -fcaret-diagnostics-max-lines=1	fix-it snippets respect a one-line limit
+fixits-multiline-lines-2	fixits-multiline.c	-	-fsyntax-only -Wparentheses-equality -fcaret-diagnostics-max-lines=2	fix-it snippets respect a two-line limit
+fixits-columns	fixits-columns.c	-	-fsyntax-only	tab and Unicode source columns align fix-it text
+fixits-columns-no-numbers	fixits-columns.c	-	-fsyntax-only -fno-diagnostics-show-line-numbers	fix-it text without line-number gutters
+fixits-macros	fixits-macros.c	-	-fsyntax-only	caller spellings and complete macro boundaries are editable
+fixits-initializers	fixits-initializers.c	-	-std=gnu17 -fsyntax-only -Wuninitialized	initializer suggestions follow type and declaration-visible macros
+fixits-initializers-eager	fixits-initializers.c	-	-std=gnu17 -fsyntax-only -Wuninitialized -H	eager history preserves the same initializer macro visibility
+fixits-initializers-header	fixits-initializers-header.c	-	-std=gnu17 -fsyntax-only -Wuninitialized	included macro definitions choose pointer and Boolean initializers
+fixits-initializers-prelude	fixits-initializers-prelude.c	-	-std=gnu17 -fsyntax-only -Wuninitialized -DNULL=0 -Dfalse=0	prelude macro state and push-pop restoration survive deferred replay
+fixits-ignored	fixits-ignored.c	-	-fsyntax-only	ignored warnings do not attach their hints to later diagnostics
+ranges-extra-warnings	ranges-extra-warnings.c	-	-fsyntax-only	unused operands, array bounds and returned local ranges
+# Generated spellings and macro expansion notes.
+scratch-pastes	scratch-pastes.c	-	-fsyntax-only	pasted tokens and their operand ranges through nested and forwarded expansions
+scratch-pragma	scratch-pragma.c	-	-fsyntax-only	_Pragma spellings include their leading space and caret
+scratch-pragma-preprocessed	scratch-pragma.c	-	-E -o /dev/null	_Pragma excerpts under preprocessing alone
+scratch-pragma-no-numbers	scratch-pragma.c	-	-fsyntax-only -fno-diagnostics-show-line-numbers	_Pragma excerpts without gutters
+scratch-pragma-diagnostics	scratch-pragma-diagnostics.c	-	-fsyntax-only	malformed and ignored pragma operands retain expansion origins
+scratch-pragma-diagnostics-preprocessed	scratch-pragma-diagnostics.c	-	-E -o /dev/null	pragma operand excerpts under preprocessing alone
+scratch-generated	scratch-generated.c	-	-fsyntax-only	stringification and builtin generated spellings
+fixits-conversions	fixits-conversions.c	-	-fsyntax-only	address and dereference repairs preserve expression grouping
+ranges-const-notes	ranges-const-notes.c	-	-fsyntax-only	const declaration notes and lvalue-cast operands have independent ranges
+fixits-warning-events	fixits-warning-events.c	-	-std=gnu17 -fsyntax-only -Wall -Wmissing-variable-declarations	retained logical, absolute-value and linkage suggestions
+ranges-warning-events	ranges-warning-events.c	-	-std=gnu17 -fsyntax-only -Wall -Wextra -Wpedantic -Wmissing-variable-declarations	retained warning operand ranges
+fixits-string-plus	fixits-string-plus.c	-	-fsyntax-only	string addition suggestions insert indexing at the correct boundaries
+ranges-operands	ranges-operands.c	-	-fsyntax-only	invalid unary, binary, conditional, subscript and call operands
