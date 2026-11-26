@@ -340,6 +340,33 @@ static uint32_t tier1_allocation_preferred(const Tier1AllocationInput* columns, 
     return kept != 0 ? kept : pool;
 }
 
+// Private bit 64 applies only to nonrecipes that already avoid a legal caller register. It changes neither hot
+// recipes' residency nor a range with no call preference. Required users of every kind may establish a callee.
+static uint32_t tier1_allocation_fresh_preserved(const Tier1AllocationInput* columns, uint32_t interval, uint32_t fresh)
+{
+    const uint32_t avoided = columns->avoided_registers != 0 ? columns->avoided_registers[interval] : 0;
+    const uint32_t caller = columns->clobber_registers[columns->classes[interval]];
+    const bool targeted = tier1_allocation_spill_kind(columns, interval) != BUSTER_TIER1_ALLOCATE_REMATERIALIZE &&
+                          (avoided & columns->allowed_registers[interval] & caller) != 0;
+    return targeted ? fresh : 0;
+}
+
+static uint32_t tier1_allocation_preserved_avoidance(const Tier1AllocationInput* columns, uint32_t interval, uint32_t fresh)
+{
+    const uint32_t avoided = columns->avoided_registers != 0 ? columns->avoided_registers[interval] : 0;
+    return avoided | tier1_allocation_fresh_preserved(columns, interval, fresh);
+}
+
+static uint32_t tier1_allocation_preferred_preserved(const Tier1AllocationInput* columns, uint32_t interval, uint32_t pool, uint32_t fresh)
+{
+    const uint32_t new_registers = tier1_allocation_fresh_preserved(columns, interval, fresh);
+    const uint32_t kept = pool & ~tier1_allocation_preserved_avoidance(columns, interval, fresh);
+    // If the soft call preference avoids the caller and the cost preference avoids every fresh callee, keep a
+    // free caller before paying for a new callee. Pressure still falls back to the complete free pool.
+    const uint32_t established = pool & ~new_registers;
+    return kept != 0 ? kept : established != 0 ? established : pool;
+}
+
 // An interval's hinted register at its start: the register its alternate interval opened with, where its value holds
 // that one still, a settled place, and it is among `free`'s; else tier1_allocation_value_hint_registered's, whose
 // *registered says whether it is a register hint alone (#2646).
@@ -622,6 +649,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
     // As in tier1_allocate_scan: column pointers in registers, and registers freed at end events. An evicted interval
     // has no register (regs is UINT8_MAX) until a required use reloads it, so the active[r] check guards its end.
     const Tier1AllocationInput columns = *input;
+    const bool account_preserved = (tier1_measure_experiment() & 64u) != 0 && columns.clobber_registers[class] != 0;
     uint32_t active[32];
     for (uint32_t r = 0; r < 32; r += 1)
     {
@@ -636,6 +664,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
         }
     }
     uint32_t occupied = 0;
+    uint32_t required_registers = 0;
     // The registers the intervals starting at claims_at continue in (their hints), each claimed by the first of them
     // that wants it while it is free: an interval without one there takes another, so that it doesn't push a value
     // that keeps its register into another one, and that one's value into a third, as layout order would.
@@ -651,6 +680,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
         const bool clobber_event = use_event && use >= columns.use_count;
         const uint32_t interval = clobber_event ? UINT32_MAX : use_event ? use_intervals[use] : events[e] >> 1;
         const bool end_event = !use_event && (events[e] & 1) == 0;
+        const uint32_t fresh = account_preserved ? columns.registers[class] & ~columns.clobber_registers[class] & ~required_registers : 0;
         if (clobber_event)
         {
             // Each recomputable value in a clobbered register leaves it, as an eviction does: a recomputation, no store,
@@ -681,7 +711,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             {
                 const uint32_t other = events[k] >> 1;
                 // A register it avoids (#2767) is no claim where it may take another.
-                const uint32_t claimable = columns.classes[other] == class ? tier1_allocation_preferred(&columns, other, ~occupied & allowed[other] & ~claimed) : 0;
+                const uint32_t claimable = columns.classes[other] == class ? tier1_allocation_preferred_preserved(&columns, other, ~occupied & allowed[other] & ~claimed, fresh) : 0;
                 const uint8_t want = columns.classes[other] == class ? tier1_allocation_start_hint(&columns, last, other, claimable) : UINT8_MAX;
                 const bool unused = columns.use_offsets[other] == columns.use_offsets[other + 1] && !tier1_allocation_required_at(&columns, other, claims_at);
                 const bool resting = unused && (tier1_allocation_spill_kind(&columns, other) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE || want == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
@@ -717,9 +747,9 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             }
             bool registered = false;
             const uint8_t follow = use_event ? tier1_allocation_value_hint_registered(&columns, last, interval, &registered) :
-                                               tier1_allocation_start_hint_registered(&columns, last, interval, tier1_allocation_preferred(&columns, interval, ~occupied & allowed[interval] & ~others), &registered);
+                                               tier1_allocation_start_hint_registered(&columns, last, interval, tier1_allocation_preferred_preserved(&columns, interval, ~occupied & allowed[interval] & ~others, fresh), &registered);
             // A register the interval avoids (#2767) is taken only as the last free one, never from a recipe.
-            const uint32_t avoided = columns.avoided_registers != 0 ? columns.avoided_registers[interval] : 0;
+            const uint32_t avoided = tier1_allocation_preserved_avoidance(&columns, interval, fresh);
             const bool recomputed = tier1_allocation_spill_kind(&columns, interval) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
             // An unused recipe may keep an unclaimed free register, preserving a hoisted definition without taking
             // a continuing value's register. It never evicts one; an unused value last in memory stays there, and so
@@ -760,7 +790,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             //   register after its call, and the fetch swapped the two through r11. Not where its hint names another value's
             //   range (tier1_cfg_body_hints, #2784): that value's slot says nothing of this one's.
             const uint8_t first = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT ? tier1_allocation_firsts(&columns, last)[columns.values[interval]] : UINT8_MAX;
-            const bool settled = first < 32 && ((tier1_allocation_preferred(&columns, interval, open) >> first) & 1) != 0;
+            const bool settled = first < 32 && ((tier1_allocation_preferred_preserved(&columns, interval, open, fresh) >> first) & 1) != 0;
             const bool memory = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && !use_event && !required;
             // Without hints (`last` null) there are no hint values to read, and no memory hint.
             const bool own = memory && columns.hint_values[interval] == columns.values[interval] && (named == UINT32_MAX || columns.values[named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT] == columns.values[interval]);
@@ -770,7 +800,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             }
             else if (open != 0 || (free != 0 && required))
             {
-                const uint32_t pool = tier1_allocation_preferred(&columns, interval, open != 0 ? open : free);
+                const uint32_t pool = tier1_allocation_preferred_preserved(&columns, interval, open != 0 ? open : free, fresh);
                 const uint32_t hint_pool = idle ? pool : free;
                 chosen = (uint32_t)__builtin_ctz(pool);
                 if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((hint_pool >> columns.hints[interval]) & 1) != 0)
@@ -853,6 +883,15 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             else if (last != 0 && !use_event && !recomputed)
             {
                 last[columns.values[interval]] = BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+            }
+        }
+        if (account_preserved && !clobber_event && !end_event && columns.classes[interval] == class)
+        {
+            const uint32_t position = use_event ? columns.use_positions[use] : columns.starts[interval];
+            const uint32_t held = regs[interval];
+            if (held < 32 && active[held] == interval && tier1_allocation_required_at(&columns, interval, position))
+            {
+                required_registers |= 1u << held;
             }
         }
     }
@@ -1356,6 +1395,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         for (uint32_t class = 0; error == TIER1_ALLOCATION_OK && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
         {
             bool regular = color;
+            const bool account_preserved = (tier1_measure_experiment() & 64u) != 0 && columns.use_required != 0 && columns.clobber_registers[class] != 0;
             uint32_t class_count = 0;
             uint32_t class_event_count = 0;
             int32_t live = 0;
@@ -1367,6 +1407,8 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                     // An interval that avoids registers (#2767) is the scan's without hints: the rule alone takes each level's
                     // register, where the hinted copy swaps it for another free one as it does for a hint.
                     regular &= allowed[i] == columns.registers[class] && (hinted || columns.avoided_registers == 0 || (columns.avoided_registers[i] & allowed[i]) == 0);
+                    // Only a class with an actual bit-64 target needs the required-use activation scan.
+                    regular &= !account_preserved || tier1_allocation_fresh_preserved(&columns, i, columns.registers[class] & ~columns.clobber_registers[class]) == 0;
                     // A recomputable interval a clobber reaches (#2574) leaves its register there, which only the scan does.
                     if (regular && columns.clobber_registers[class] != 0 && tier1_allocation_spill_kind(&columns, i) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
                     {

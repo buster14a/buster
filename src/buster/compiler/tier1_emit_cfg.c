@@ -5100,6 +5100,8 @@ static uint32_t tier1_emit_cfg_callee_used(const Tier1CfgAllocation* cfg, uint32
     return used;
 }
 
+#include "tier1_emit_exchange.c"
+
 // An allocation's outcome as the function's: a constraint the allocator met is TIER1_EMIT_ALLOCATION; and without fixed
 // ranges there are no splits, each class's temporary slot a frame row of its own, so an allocation with either is too.
 static Tier1EmitError tier1_emit_cfg_allocated(Tier1CfgError allocated, const Tier1CfgAllocation* cfg)
@@ -5218,7 +5220,8 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
             *crossing = moved;
         }
     }
-    return tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
+    error = tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
+    return error == TIER1_EMIT_OK && (tier1_measure_experiment() & 128u) != 0 ? tier1_emit_cfg_exchange(plan, emitted, output, scratch, input, cfg) : error;
 }
 
 // The CFG consumer's allocation (#2538): the intervals prepared once for both problems, which have the same ones without
@@ -5289,7 +5292,8 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
     {
         tier1_cfg_release(&order.prepared, scratch);
     }
-    return tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
+    error = tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
+    return error == TIER1_EMIT_OK && (tier1_measure_experiment() & 128u) != 0 ? tier1_emit_cfg_exchange(plan, emitted, output, scratch, input, cfg) : error;
 }
 
 // --verify's check of the one-call order (#2538): today's order, tier1_emit_cfg_two_calls, run after it on the problem as
