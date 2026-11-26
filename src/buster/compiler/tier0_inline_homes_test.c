@@ -457,7 +457,10 @@ static void tier0_inline_homes_test_tails(Tier0InlineTestTally* tally)
         const uint8_t local_class = BUSTER_TYPED_CLASS_U64;
         Tier0Home home = { .is_register = 1 };
         uint32_t references = 1;
-        const Tier0Job job = { .homes = &home, .references = &references };
+        const Tier0Job job = {
+            .homes = &home,
+            .references = &references,
+        };
         for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
         {
             const uint32_t count = counts[c];
@@ -466,7 +469,11 @@ static void tier0_inline_homes_test_tails(Tier0InlineTestTally* tally)
             memset(kinds, BUSTER_TYPED_CONST, count);
             memset(values, 0, (uint64_t)count * sizeof(uint64_t));
             const Tier0Function function = {
-                .kinds = kinds, .values = values, .count = count, .local_classes = &local_class, .local_count = 1,
+                .kinds = kinds,
+                .values = values,
+                .count = count,
+                .local_classes = &local_class,
+                .local_count = 1,
             };
             uint32_t locals[BUSTER_TIER0_INLINE_REGISTER_HOMES];
             tier0_inline_test_expect(tally, !tier0_inline_has_loop(&function) && tier0_inline_loop_homes(&function, &job, locals) == 0,

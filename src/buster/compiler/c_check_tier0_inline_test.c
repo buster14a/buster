@@ -33,8 +33,9 @@ struct Tier0InlineTestTally
 
 // The driver fixture's spliced streams at x86-64-v4, without and with --tier0-inline-shapes. Both splice ping into
 // pong and its outside caller. The driver also checks the resulting symbols and runs each build against clang -O0.
+// With shapes, sgn's returns splice, while the home check keeps sum_to and widen outlined in scalars (#2841).
 #define BUSTER_TIER0_INLINE_TEST_DIGEST UINT64_C(0x7bbcb0712d3152a4)
-#define BUSTER_TIER0_INLINE_TEST_SHAPES_DIGEST UINT64_C(0x76ae9999c2a427d6)
+#define BUSTER_TIER0_INLINE_TEST_SHAPES_DIGEST UINT64_C(0x4a950a7e02bea723)
 
 static void tier0_inline_test_expect(Tier0InlineTestTally* tally, bool condition, const char* file, uint32_t body, const char* message)
 {
