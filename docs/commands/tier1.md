@@ -482,7 +482,13 @@ designator moves to another member after the vector's keep their eight. In
 and a running last match), a `cmov` of the parity flag and no `setcc` must be
 left, and in a conditional scale by `==` (`c = p[i] == t ? c * 3 : c + 1`),
 whose accumulator recurs through the select's values by an operation, the truth
-value's `setcc`s and no parity `cmov`. In #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be
+value's `setcc`s and no parity `cmov`. In #2932's two-arm accumulations,
+`if (p[i] == t) c += 5; else c += 1`, integer and floating equality choose the
+increment independently of the accumulator. The shape check follows the
+returned register through the loop and requires exactly one arithmetic
+operation and no conditional move on that dependency. The execution oracle
+covers empty loops, both outcomes, unsigned wraparound, NaNs and signed zeros.
+In #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be
 stored back into the memory the instruction before loaded it from:
 #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be stored back
 into the memory the instruction before loaded it from. In #2843's conditional
