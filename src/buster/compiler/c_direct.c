@@ -4562,6 +4562,18 @@ static int c_direct_unit_tests(void)
         "    long* a = p; long long* b = q; const long* c = p; const long long* d = &gll; long* e = v; glp = p;\n"
         "    return *a + *b + *c + *d + *e + *gllp;\n"
         "}\n",
+        // 23. musl's long double helpers, checked where defined and never emitted: <math.h>'s __islessl (a call of
+        // __fpclassifyl, dead arms of float and double, a void cast, a comparison of two), libm.h's fp_barrierl and
+        // fp_force_evall, a typedef's, a const local's and a long double parameter's call.
+        "int __fpclassifyl(long double);\nunsigned __fb(float);\nunsigned long long __db(double);\nvoid takes(long double);\n"
+        "#define ISNAN(x) (sizeof(x) == sizeof(float) ? (__fb(x) & 0x7fffffff) > 0x7f800000 : \\\n"
+        "    sizeof(x) == sizeof(double) ? (__db(x) & -1ULL >> 1) > 0x7ffULL << 52 : __fpclassifyl(x) == 0)\n"
+        "static inline int __islessl(long double __x, long double __y)\n"
+        "{ return !(ISNAN((__x)) ? ((void)(__y), 1) : ISNAN((__y))) && __x < __y; }\n"
+        "static inline long double fp_barrierl(long double x) { volatile long double y = x; return y; }\n"
+        "static inline void fp_force_evall(long double x) { volatile long double y; y = x; }\n"
+        "typedef long double ld;\nstatic inline ld kept(ld a, ld b) { const ld c = a; takes(b); if (a != b) { return c; } return b; }\n"
+        "int helpers(int x) { return x + 1; }\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4785,6 +4797,19 @@ static int c_direct_unit_tests(void)
         "void f(unsigned long* p) { unsigned long long* q = p; (void)q; }\n",
         "long long x;\nlong* p = &x;\n",
         "long long a[2];\nlong* p = a;\n",
+        // A long double in a checked inline body is taken only as a copy, a void cast, a comparison of two and a long
+        // double parameter's argument: its arithmetic, a conversion to double, a comparison with an int and a call with a
+        // double parameter leave, and so do a _Complex double's body, an emitted body (a call of fp_barrierl) and a
+        // function with external linkage.
+        "static inline long double f(long double x) { return x + x; }\nint g(void) { return 0; }\n",
+        "static inline double f(long double x) { return x; }\nint g(void) { return 0; }\n",
+        "static inline int f(long double x) { return x < 1; }\nint g(void) { return 0; }\n",
+        "void h(double);\nstatic inline void f(long double x) { h(x); }\nint g(void) { return 0; }\n",
+        "static inline void f(_Complex double x) { volatile _Complex double y; y = x; }\nint g(void) { return 0; }\n",
+        "static inline long double fp_barrierl(long double x) { volatile long double y = x; return y; }\n"
+        "double g(double d) { return (double)fp_barrierl(d); }\n",
+        "static inline void fp_force_evall(long double x) { volatile long double y; y = x; }\nvoid g(double d) { fp_force_evall(d); }\n",
+        "long double fp(long double x) { volatile long double y = x; return y; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

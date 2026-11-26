@@ -305,7 +305,15 @@ definitions with external linkage are emitted as the unit's end decides from
 all the function's declarations (#3595). Such a definition that names a static
 function or object (`-Wstatic-in-inline`), or that the unit's end decides and
 declares a modifiable static local (`-Wstatic-local-in-inline`), is the full
-pipeline's.
+pipeline's. A long double, which the direct path doesn't compile, is taken in a
+checked body whose code is dropped (`fast_cc_checked_long_double`, its type the
+16-byte scalar with `BUSTER_FTYPE_SCALAR_LONG`, unlike `_Float128`'s and
+`_Complex`'s): as a parameter, a local, the return type, a copy to its own type,
+a void cast, a comparison of two (checked as two doubles') and a long double
+parameter's argument, whose rules are a double's. Anything else leaves, and so
+does such a body where it is emitted. musl's `<math.h>` defines `__islessl` and
+its kin this way, and its `libm.h` `fp_barrierl` and `fp_force_evall`: 53 of
+musl's units, which main's direct path compiled, take it again.
 
 `tests/` alone doesn't show that: many families of warnings appear there only
 in files that leave the direct path for another reason first (the flags each

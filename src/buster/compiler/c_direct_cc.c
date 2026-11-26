@@ -2650,6 +2650,34 @@ static uint32_t fval_to_xmm(FastExprCtx* ex, FastVal* v, bool consume)
     return fval_alloc_xmm(ex);
 }
 
+// #3577: whether a checked inline body (fast_cc_check_body, whose code is dropped) takes A and B, each a long double
+// (BUSTER_FTYPE_LONG_DOUBLE, whatever its qualifiers), without code. The operations that ask are a copy to its own type
+// (an initializer, an assignment, a return, a call's argument for a long double parameter), a cast to void and a
+// comparison of two; the full pipeline's rules for them are a double's, and none has a default warning for a long
+// double that a double lacks. A long double anywhere else leaves, as before, and so does any body that is emitted (musl's
+// <math.h> defines __islessl and its kin, and its libm.h fp_barrierl and fp_force_evall, which a unit rarely calls).
+static __attribute__((cold, noinline)) bool fast_cc_checked_long_double(const FastCCState* cc, FastType a, FastType b)
+{
+    return cc->checking != 0 && BUSTER_FTYPE_UNQUAL(a) == BUSTER_FTYPE_LONG_DOUBLE && BUSTER_FTYPE_UNQUAL(b) == BUSTER_FTYPE_LONG_DOUBLE;
+}
+
+// #3577: a checked inline body's long double converts to its own type, or to void (a cast's), without code.
+static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_convert(FastExprCtx* ex, FastVal* v, FastType dst_type)
+{
+    const bool to_void = ftype_is_void(dst_type);
+    const bool taken = fast_cc_checked_long_double(ex->cc, v->type, to_void ? v->type : dst_type);
+    if (taken && to_void)
+    {
+        fval_release(ex, v);
+        *v = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
+    }
+    else if (taken)
+    {
+        v->type = ftype_unqual(dst_type);
+    }
+    return taken;
+}
+
 // Convert FastVal `*v` in-place to `dst_type` (all scalar/pointer/float/bool C17 conversions, including exact u64<->fp!).
 static BUSTER_DIRECT_HOT void fval_convert(FastExprCtx* ex, FastVal* v, FastType dst_type)
 {
@@ -2657,7 +2685,7 @@ static BUSTER_DIRECT_HOT void fval_convert(FastExprCtx* ex, FastVal* v, FastType
     FastObj* obj = cc->obj;
     if (ftype_is_unsupported(dst_type) || ftype_is_unsupported(v->type))
     {
-        fast_cc_bail(cc, "unsupported scalar conversion");
+        if (!fast_cc_checked_long_double_convert(ex, v, dst_type)) { fast_cc_bail(cc, "unsupported scalar conversion"); }
         return;
     }
     if (ftype_is_void(dst_type))
@@ -3276,6 +3304,20 @@ static void fast_cc_check_static_initializer(FastCCState* cc, FastType target, c
     }
 }
 
+// #3577: a checked inline body's long double stores into a long double without code (fast_cc_checked_long_double); its
+// result is the value as sizeof's compile gives it.
+static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_store(FastExprCtx* ex, FastVal* lhs, FastVal* rhs, bool release_lhs, FastVal* out_res)
+{
+    const bool taken = fast_cc_checked_long_double(ex->cc, lhs->type, rhs->type);
+    if (taken)
+    {
+        fval_release(ex, rhs);
+        if (release_lhs) { fval_release(ex, lhs); }
+        if (out_res != NULL) { *out_res = (FastVal){ .type = ftype_unqual(lhs->type), .kind = FVAL_REG }; }
+    }
+    return taken;
+}
+
 // Store rvalue `rhs` into lvalue `lhs` (scalar, float, bitfield, or struct copy).
 // Releases `lhs` if `release_lhs`, leaves converted stored rvalue in `*out_res` (if non-NULL).
 static BUSTER_DIRECT_HOT void fval_store(FastExprCtx* ex, FastVal* lhs, FastVal* rhs, bool release_lhs, FastVal* out_res)
@@ -3284,7 +3326,7 @@ static BUSTER_DIRECT_HOT void fval_store(FastExprCtx* ex, FastVal* lhs, FastVal*
     FastObj* obj = cc->obj;
     if (ftype_is_unsupported(lhs->type) || ftype_is_unsupported(rhs->type))
     {
-        fast_cc_bail(cc, "unsupported type store");
+        if (!fast_cc_checked_long_double_store(ex, lhs, rhs, release_lhs, out_res)) { fast_cc_bail(cc, "unsupported type store"); }
         return;
     }
     if (BUSTER_FAST_CONV_OWN(lhs->type, rhs) == 0)
@@ -4415,16 +4457,30 @@ static __attribute__((cold, noinline)) void fast_cc_address_sum(FastVal* v, cons
     }
 }
 
+// #3577: a checked inline body compares two long doubles as two doubles (fast_cc_checked_long_double): the checks are a
+// floating comparison's, and the code is dropped.
+static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_compare(const FastCCState* cc, uint8_t op, FastVal* lhs, FastVal* rhs)
+{
+    const bool taken = ((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0 && fast_cc_checked_long_double(cc, lhs->type, rhs->type);
+    if (taken)
+    {
+        lhs->type = FTYPE_F64;
+        rhs->type = FTYPE_F64;
+    }
+    return taken;
+}
+
 static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, FastVal* lhs, FastVal* rhs, FastVal* out)
 {
     FastCCState* cc = ex->cc;
     FastObj* obj = cc->obj;
-    const FastType lt = ftype_decay(cc, lhs->type);
-    const FastType rt = ftype_decay(cc, rhs->type);
+    FastType lt = ftype_decay(cc, lhs->type);
+    FastType rt = ftype_decay(cc, rhs->type);
     if (ftype_is_unsupported(lt) || ftype_is_unsupported(rt))
     {
-        fast_cc_bail(cc, "unsupported type binary op");
-        return;
+        if (!fast_cc_checked_long_double_compare(cc, op, lhs, rhs)) { fast_cc_bail(cc, "unsupported type binary op"); return; }
+        lt = FTYPE_F64;
+        rt = FTYPE_F64;
     }
     // #3577: the operands C allows each operator, and the comparisons and operands the full pipeline questions: two integer
     // scalars (no enum, pointer or record) that aren't a bit-field are every operator's operands, and are questioned only
@@ -6167,6 +6223,19 @@ static __attribute__((cold, noinline)) bool fast_cc_library_call_clean(const Fas
     return clean;
 }
 
+// #3577: a checked inline body's long double argument for a long double parameter (fast_cc_checked_long_double) is
+// passed without code: the call's checks have read it, and the call takes a placeholder in its place.
+static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_argument(FastExprCtx* ex, FastVal* arg, FastType pt)
+{
+    const bool taken = fast_cc_checked_long_double(ex->cc, arg->type, pt);
+    if (taken)
+    {
+        fval_release(ex, arg);
+        *arg = (FastVal){ .type = FTYPE_I64, .kind = FVAL_IMM };
+    }
+    return taken;
+}
+
 static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc, uint32_t outer_arg_sp, FastVal* out)
 {
     FastCCState* cc = ex->cc;
@@ -6344,8 +6413,13 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         const uint32_t void_argument = (uint32_t)((args[i].type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
         if (((uint32_t)ftype_is_unsupported(pt) | (uint32_t)ftype_is_unsupported(args[i].type) | void_argument) != 0)
         {
-            fast_cc_bail(cc, "unsupported call arg type, or a void argument");
-            return;
+            // #3577: a checked inline body passes a long double for a long double parameter without code.
+            if (((uint32_t)(i >= fn->count) | void_argument) != 0 || !fast_cc_checked_long_double_argument(ex, &args[i], pt))
+            {
+                fast_cc_bail(cc, "unsupported call arg type, or a void argument");
+                return;
+            }
+            pt = FTYPE_I64;
         }
         if (!ftype_is_record(pt))
         {
@@ -9146,6 +9220,30 @@ static void fast_cc_store_expr_to_val(FastCCState* cc, FastVal dst, bool stop_at
     fast_cc_reset_tmps(cc);
 }
 
+// #3577: a checked inline body's long double local (fast_cc_checked_long_double) is initialized as a scalar is, a
+// copy whose code is dropped; any other unsupported type leaves.
+static __attribute__((cold, noinline)) int32_t fast_cc_checked_long_double_local(FastCCState* cc, FastType t, uint32_t extra_align)
+{
+    int32_t off = 0;
+    if (!fast_cc_checked_long_double(cc, t, t))
+    {
+        fast_cc_bail(cc, "unsupported local var type");
+    }
+    else
+    {
+        off = fast_cc_alloc_local(cc, ftype_size(cc, t), extra_align > ftype_align(cc, t) ? extra_align : ftype_align(cc, t));
+        const bool br = fast_cc_peek(cc) == FTOK_LBRACE;
+        if (br) { cc->pos += 1u; }
+        fast_cc_store_expr_to_val(cc, (FastVal){ .type = t, .kind = FVAL_LOCAL, .off = off }, true);
+        if (br)
+        {
+            if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
+            if (fast_cc_peek(cc) == FTOK_RBRACE) { cc->pos += 1u; }
+        }
+    }
+    return off;
+}
+
 // Compile initializer for a local variable `var_type` (which may be an incomplete array `int a[] = {...}` or `char s[] = "..."`).
 // Allocates the local's stack slot and returns its `[rbp + off]` offset!
 static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, FastType* io_type, uint32_t extra_align)
@@ -9162,7 +9260,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
     };
 
     FastType root_t = *io_type;
-    if (ftype_is_unsupported(root_t)) { fast_cc_bail(cc, "unsupported local var type"); return 0; }
+    if (ftype_is_unsupported(root_t)) { return fast_cc_checked_long_double_local(cc, root_t, extra_align); }
     uint32_t al = ftype_align(cc, root_t);
     if (extra_align > al) { al = extra_align; }
 
@@ -11039,7 +11137,9 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     if (!ftype_is_func(fn_t)) { fast_cc_bail(cc, "compile non-func"); return; }
     const FastComplexType* fn = cc->ctypes + (fn_t & BUSTER_FTYPE_CIDX_MASK);
     const FastType ret_t = ftype_unqual(fn->inner);
-    if (ftype_is_unsupported(ret_t)) { fast_cc_bail(cc, "unsupported return type"); return; }
+    // #3577: a checked inline body's long double (fast_cc_checked_long_double) is its return type, a parameter's or a
+    // local's, and takes the code of an 8-byte integer's, which is dropped.
+    if (ftype_is_unsupported(ret_t) && !fast_cc_checked_long_double(cc, ret_t, ret_t)) { fast_cc_bail(cc, "unsupported return type"); return; }
 
     // 1. AVX-512 body prescan: verify matching '}' and reject unsupported extensions BEFORE emitting any bytes!
     const FastBodyScan scan = fast_cc_prescan_body(cc, cc->pos);
@@ -11130,7 +11230,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     for (uint32_t i = 0; i < pcnt && !cc->bailout; i += 1)
     {
         const FastType pt = cc->param_types[fn->start + i];
-        if (ftype_is_unsupported(pt)) { fast_cc_bail(cc, "unsupported param type"); break; }
+        if (ftype_is_unsupported(pt) && !fast_cc_checked_long_double(cc, pt, pt)) { fast_cc_bail(cc, "unsupported param type"); break; }
         const uint32_t recorded = i < param_count ? cc->param_names[param_names_start + i] : 0u;
         const uint32_t pname = recorded & BUSTER_FPARAM_NAME_MASK;
         const uint8_t array_param = (uint8_t)(recorded >> 31);
@@ -12046,7 +12146,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     // object of incomplete type is the full pipeline's error.
                     const uint32_t initialized = (uint32_t)(fast_cc_peek(cc) == FTOK_ASSIGN);
                     const uint32_t incomplete = BUSTER_FAST_OBJECT_INCOMPLETE(cc, dr.type, initialized);
-                    if (((uint32_t)ds.is_unsupported_type | (uint32_t)ftype_is_unsupported(dr.type) | incomplete) != 0)
+                    if (((uint32_t)ds.is_unsupported_type | (uint32_t)ftype_is_unsupported(dr.type) | incomplete) != 0 &&
+                        (incomplete != 0 || !fast_cc_checked_long_double(cc, dr.type, dr.type)))
                     {
                         fast_cc_bail(cc, incomplete != 0 ? "object of incomplete type" : "unsupported local var type");
                         break;
@@ -12594,7 +12695,14 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     }
                     else { fast_cc_bail(cc, "too many inline functions"); break; }
                     // #3577: checked here, in its own scope, whether used or not.
-                    if ((use_flags & BUSTER_FSYM_UNSUPPORTED) != 0) { fast_cc_bail(cc, "unsupported type in an inline definition"); break; }
+                    // (A long double return type is checked there, fast_cc_checked_long_double; the symbol keeps its flag, and
+                    // a use of it leaves.)
+                    if ((use_flags & BUSTER_FSYM_UNSUPPORTED) != 0 &&
+                        BUSTER_FTYPE_UNQUAL(cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].inner) != BUSTER_FTYPE_LONG_DOUBLE)
+                    {
+                        fast_cc_bail(cc, "unsupported type in an inline definition");
+                        break;
+                    }
                     // (Its __PRETTY_FUNCTION__ reads the definition's tokens, as the compile does.)
                     cc->cur_func_decl_pos = tu_loop_pos;
                     cc->cur_func_declared = declared;

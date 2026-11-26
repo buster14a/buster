@@ -49,6 +49,9 @@ typedef enum FastScalarKind
 #define BUSTER_FTYPE_SCALAR_MASK     UINT32_C(0x0000001f)
 #define BUSTER_FTYPE_SCALAR_CHAR     UINT32_C(0x00000400)
 #define BUSTER_FTYPE_SCALAR_LONG     UINT32_C(0x00000800)
+// #3577: a long double, among the 16-byte scalars the direct path doesn't compile (FTYPE_UNSUP16: _Float128 and _Complex
+// too), is the one with the long mark: a checked inline body takes it without code (fast_cc_check_body).
+#define BUSTER_FTYPE_LONG_DOUBLE     (FTYPE_UNSUP16 | BUSTER_FTYPE_SCALAR_LONG)
 
 #define BUSTER_FTYPE_CIDX_MASK       UINT32_C(0x000fffff)
 #define BUSTER_FTYPE_PTR_SH          20u
@@ -1580,7 +1583,7 @@ static FastType fast_cc_parse_simple_typename_leaf(FastCCState* cc, bool* out_ok
         else if (saw_float) { base = FTYPE_F32; }
         else if (saw_double)
         {
-            base = saw_long ? FTYPE_UNSUP16 : FTYPE_F64;
+            base = saw_long ? BUSTER_FTYPE_LONG_DOUBLE : FTYPE_F64;
         }
         else if (saw_char)
         {
@@ -2545,7 +2548,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     else if (saw_float) { res = FTYPE_F32; }
     else if (saw_double)
     {
-        res = saw_long ? FTYPE_UNSUP16 : FTYPE_F64;
+        res = saw_long ? BUSTER_FTYPE_LONG_DOUBLE : FTYPE_F64;
         if (saw_long) { sp->is_long_double = 1u; sp->is_unsupported_type = 1u; }
     }
     else if (saw_char)
@@ -2573,7 +2576,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
         else if (sp->attr.mode_size == 2u) { res = u ? FTYPE_U16 : FTYPE_I16; }
         else if (sp->attr.mode_size == 4u) { res = u ? FTYPE_U32 : FTYPE_I32; }
         else if (sp->attr.mode_size == 8u) { res = u ? FTYPE_U64 : FTYPE_I64; }
-        else { sp->is_unsupported_type = 1u; }
+        else { sp->is_unsupported_type = 1u; res &= ~BUSTER_FTYPE_SCALAR_LONG; }
     }
 
     if (sp->is_const) { res = ftype_with_const(res); }
@@ -3931,7 +3934,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     else if (saw_float) { res = FTYPE_F32; }
     else if (saw_double)
     {
-        res = saw_long ? FTYPE_UNSUP16 : FTYPE_F64;
+        res = saw_long ? BUSTER_FTYPE_LONG_DOUBLE : FTYPE_F64;
         if (saw_long) { sp->is_long_double = 1u; sp->is_unsupported_type = 1u; }
     }
     else if (saw_char)
@@ -3960,7 +3963,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
         else if (sp->attr.mode_size == 2u) { res = u ? FTYPE_U16 : FTYPE_I16; }
         else if (sp->attr.mode_size == 4u) { res = u ? FTYPE_U32 : FTYPE_I32; }
         else if (sp->attr.mode_size == 8u) { res = u ? FTYPE_U64 : FTYPE_I64; }
-        else { sp->is_unsupported_type = 1u; }
+        else { sp->is_unsupported_type = 1u; res &= ~BUSTER_FTYPE_SCALAR_LONG; }
     }
 
     if (sp->is_const) { res = ftype_with_const(res); }
