@@ -4653,6 +4653,9 @@ static int c_direct_unit_tests(void)
         "int abs(int);\nint f(_Bool b) { return abs(b); }\n",
         "int abs(int);\nint f(double d) { return abs(d); }\n",
         "double fabs(double);\ndouble f(int x) { return fabs(x); }\n",
+        // -Wempty-body: an if's empty statement on its condition's line, and a switch's.
+        "int f(int x) { if (x); return x; }\n",
+        "int f(int x) { switch (x); return x; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

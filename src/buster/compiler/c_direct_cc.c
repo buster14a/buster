@@ -10684,6 +10684,9 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             fast_cc_reset_tmps(cc);
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) after if cond"); break; }
             cc->pos += 1u;
+            // #3577: an empty statement on the condition's line is the full pipeline's -Wempty-body (`if (x);`); the
+            // tokens don't say their lines, nor where an empty macro stood, so any `;` here leaves.
+            if (fast_cc_peek(cc) == FTOK_SEMI) { fast_cc_bail(cc, "an if's empty statement"); break; }
             // A constant condition's dead branch is checked without code where it's simple enough (#3592): musl's
             // FORCE_EVAL of a double has a long double branch, a call of fp_force_evall.
             const uint32_t constant = cc->branch_constant * (uint32_t)(cc->dead == 0);
@@ -10891,6 +10894,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             fast_cc_reset_tmps(cc);
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) after switch"); break; }
             cc->pos += 1u;
+            // #3577: an empty statement is the full pipeline's -Wempty-body (`switch (x);`), as an if's is.
+            if (fast_cc_peek(cc) == FTOK_SEMI) { fast_cc_bail(cc, "a switch's empty statement"); break; }
             const uint32_t disp_lbl = fast_label_new(obj);
             const uint32_t brk_lbl = fast_label_new(obj);
             x86_jmp_label(obj, disp_lbl);
