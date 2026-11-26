@@ -70,6 +70,7 @@ struct AssemblyCfiCie
     int64_t data_alignment;
     uint64_t code_alignment;
     uint32_t return_register;
+    bool signal;
 };
 
 typedef struct AssemblyCfiProgram AssemblyCfiProgram;
@@ -208,8 +209,11 @@ static bool assembly_cfi_cie(const uint8_t* bytes, uint64_t size, uint64_t offse
     reader.end = reader.valid ? reader.at + length : reader.at;
     const uint64_t id = assembly_cfi_integer(&reader, 4);
     const uint64_t version = assembly_cfi_integer(&reader, 1);
-    const uint64_t augmentation = assembly_cfi_integer(&reader, 3);
+    const uint64_t augmentation = assembly_cfi_integer(&reader, 2);
+    const uint64_t suffix = assembly_cfi_integer(&reader, 1);
     *cie = (AssemblyCfiCie){ 0 };
+    cie->signal = suffix == 'S';
+    reader.valid = reader.valid && (suffix == 0 || (cie->signal && assembly_cfi_integer(&reader, 1) == 0));
     cie->code_alignment = assembly_cfi_leb(&reader, false);
     cie->data_alignment = (int64_t)assembly_cfi_leb(&reader, true);
     const uint64_t return_register = version == 1 ? assembly_cfi_integer(&reader, 1) : assembly_cfi_leb(&reader, false);
@@ -346,7 +350,7 @@ static bool assembly_cfi_same_frame(const AssemblyCfiFrame* a, const AssemblyCfi
     {
         x.row = first.initial;
         y.row = second.initial;
-        valid = first.return_register == second.return_register && assembly_cfi_next(&x) && assembly_cfi_next(&y);
+        valid = first.return_register == second.return_register && first.signal == second.signal && assembly_cfi_next(&x) && assembly_cfi_next(&y);
     }
     uint64_t pc = 0;
     while (valid)
@@ -444,6 +448,67 @@ static void assembly_test_cfi_rules(AssemblyTest* test)
     assembly_test_check(test, !assembly_cfi_same_frame(&a, &changed), "CFI comparison rejects a changed target", NULL);
     second[sizeof(second_cie)] = 0x0f;
     assembly_test_check(test, !assembly_cfi_same_frame(&a, &b), "CFI comparison refuses an unsupported expression", NULL);
+    second[sizeof(second_cie)] = second_program[0];
+    uint8_t signal_first[sizeof(first) + 1];
+    uint8_t signal_second[sizeof(second) + 1];
+    memcpy(signal_first, first, 11);
+    memcpy(signal_first + 12, first + 11, sizeof(first) - 11);
+    memcpy(signal_second, second, 11);
+    memcpy(signal_second + 12, second + 11, sizeof(second) - 11);
+    signal_first[11] = signal_second[11] = 'S';
+    signal_first[0] += 1;
+    signal_second[0] += 1;
+    const AssemblyCfiFrame signal_a = {
+        .target = a.target,
+        .bytes = signal_first,
+        .section_size = sizeof(signal_first),
+        .program = sizeof(first_cie) + 1,
+        .end = sizeof(signal_first),
+        .size = a.size,
+    };
+    const AssemblyCfiFrame signal_b = {
+        .target = b.target,
+        .bytes = signal_second,
+        .section_size = sizeof(signal_second),
+        .program = sizeof(second_cie) + 1,
+        .end = sizeof(signal_second),
+        .size = b.size,
+    };
+    assembly_test_check(test, assembly_cfi_same_frame(&signal_a, &signal_b), "CFI comparison accepts equivalent signal frames", NULL);
+    assembly_test_check(test, !assembly_cfi_same_frame(&a, &signal_b), "CFI comparison rejects changed signal-frame metadata", NULL);
+}
+
+static bool assembly_test_same_objects(AssemblyTest* test, const uint8_t* bytes, uint64_t size, String8 theirs, char* error, uint64_t error_size);
+static bool assembly_test_against_as(AssemblyTest* test, const char* name, const uint8_t* text, uint64_t length, const Object* object, char* error, uint64_t error_size);
+
+static void assembly_test_cfi_object(AssemblyTest* test, AssemblyFixture* fixture, const AssemblyView* view, const char* name)
+{
+    const uint64_t output_mark = test->output.length;
+    const uint64_t scratch_mark = test->scratch.length;
+    const AssemblyResult printed = fixture->valid ? assembly_print(view, &test->output, &test->scratch) : (AssemblyResult){ .error = ASSEMBLY_INVALID };
+    ObjectUnits units = { 0 };
+    ObjectSymbols symbols = { 0 };
+    const bool prepared = printed.error == ASSEMBLY_OK && object_prepare(&units, &fixture->link, 1, &test->scratch) &&
+                          object_map_symbols(&symbols, &fixture->link, &test->scratch);
+    const Object original = prepared ? object_build(&fixture->link, &units, &symbols, 0, (ObjectOptions){ 0 }, BUSTER_S8("fixture.c"), &test->scratch) :
+                                      (Object){ .error = OBJECT_ERROR_FULL };
+    AsmResult assembled = printed.error == ASSEMBLY_OK ?
+                          asm_assemble((String8){ .pointer = (char*)printed.bytes, .length = printed.length }, test->index,
+                                       (AsmOptions){ .integrated = true }, &test->scratch) : (AsmResult){ .error = "CFI fixture did not print" };
+    const Object rebuilt = assembled.error == NULL ? asm_object(&assembled, BUSTER_S8("fixture.c"), &test->scratch) :
+                                                   (Object){ .error = OBJECT_ERROR_FULL };
+    char error[256] = { 0 };
+    const String8 bytes = { .pointer = (char*)rebuilt.bytes, .length = rebuilt.size };
+    const bool same = original.error == OBJECT_ERROR_NONE && rebuilt.error == OBJECT_ERROR_NONE &&
+                      assembly_test_same_objects(test, original.bytes, original.size, bytes, error, sizeof(error));
+    assembly_test_check(test, same, "Buster preserves generated and source unwind rules", assembled.error != NULL ? assembled.error : error);
+    if (test->cross_check && original.error == OBJECT_ERROR_NONE && printed.error == ASSEMBLY_OK)
+    {
+        const bool gnu = assembly_test_against_as(test, name, printed.bytes, printed.length, &original, error, sizeof(error));
+        assembly_test_check(test, gnu, "GNU as preserves generated and source unwind rules", error);
+    }
+    arena_pop_to(&test->scratch, scratch_mark);
+    arena_pop_to(&test->output, output_mark);
 }
 
 static void assembly_test_cfi_boundaries(AssemblyTest* test)
@@ -516,6 +581,7 @@ static void assembly_test_cfi_boundaries(AssemblyTest* test)
     const AssemblyResult replaced = fixture.valid ? assembly_print(&view, &test->output, &test->scratch) : (AssemblyResult){ .error = ASSEMBLY_INVALID };
     assembly_test_check(test, replaced.error == ASSEMBLY_OK, "a generated unwind table is covered by its published frame", replaced.reason);
     arena_pop_to(&test->output, output_mark);
+    assembly_test_cfi_object(test, &fixture, &view, "cfi");
     for (uint32_t mutation = 0; fixture.valid && mutation < 5; mutation += 1)
     {
         view.cfi_atom = mutation == 0 ? atom : mutation == 1 ? fixture.link.atoms.count : unwind;
@@ -527,6 +593,20 @@ static void assembly_test_cfi_boundaries(AssemblyTest* test)
         assembly_test_check(test, refused.error == ASSEMBLY_INVALID && test->output.length == output_mark && test->scratch.length == scratch_mark,
                             "an uncovered or invalid replacement unwind table fails transactionally", refused.reason);
     }
+    view.cfi_atom = unwind;
+    fixture.link.atoms.unit[unwind] = 0;
+    code->frame_enabled = true;
+    code->frame_size = 6;
+    code->frame_count = BUSTER_ARRAY_LENGTH(rows);
+    assembly_fixture_function(test, &fixture, "signal_frame", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 0,
+                              "push rbp\nmov rbp,rsp\npop rbp\nret\n");
+    uint8_t source_table[sizeof(table)];
+    memcpy(source_table, table, sizeof(table));
+    memmove(source_table + 12, source_table + 11, 23);
+    source_table[11] = 'S';
+    const AtomId source_unwind = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_EH_FRAME, 3, source_table, sizeof(source_table));
+    assembly_fixture_fixup(&fixture, source_unwind, 48, BUSTER_LINK_FIXUP_PC32, "signal_frame", 0);
+    assembly_test_cfi_object(test, &fixture, &view, "cfi-coexist");
     assembly_fixture_end(&fixture);
     arena_pop_to(&test->arena, mark);
 }

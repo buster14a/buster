@@ -543,6 +543,8 @@ table unless a relocation needs the symbol itself, such as certain string-pool
 references. Ordinary named locals remain visible.
 
 CFI emits `.eh_frame` with GNU-as-compatible CIE/FDE bytes and PC32 relocations.
+An explicitly declared `.eh_frame` keeps its bytes and relocations; generated
+CFI follows them, with padding and relocation offsets relative to the section.
 `.cfi_sections` before the first procedure chooses `.eh_frame`, `.debug_frame`
 or both; GCC and Clang write `.cfi_sections .debug_frame` for `-g` without
 unwind tables (#1115). `.debug_frame` follows GNU as's form: CIEs of version 1

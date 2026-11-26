@@ -197,9 +197,12 @@ static void asm_test_compatibility(AsmTest* test, const char* directory, bool cr
         ".section .entries,\"awoG\",@progbits,section_target,entry_group,comdat,unique,0\n.quad section_target\n"
         ".section .plain,\"aG\",@progbits,plain_group,,unique,0\n.byte 4\n",
         // Retain is part of GNU's section identity, including when the name is a default section's.
-        ".section .data,\"awR\",@progbits\n.byte 1\n.data\n.byte 2\n"
+        ".section .data,\"awR\",@progbits\nretained_bytes: .byte 1\n.data\n.byte 2\n"
         ".section .data,\"awR\",@progbits\n.byte 3\n"
         ".section .retained,\"awR\",@progbits\n.byte 4\n.section .retained\n.byte 5\n",
+        // CFI appends to an already selected unwind section, with its alignment measured from that section's start.
+        ".section .eh_frame,\"a\",@unwind\n.p2align 3\n.text\nf: .cfi_startproc\nret\n.cfi_endproc\n",
+        ".section .eh_frame,\"a\",@unwind\n.byte 1\n.text\nf: .cfi_startproc\nret\n.cfi_endproc\n",
         ".data\nexpr: .long 1<<4,64>>3,1+2<<3,(1+2)<<3,3*2<<2,32>>1*2\n"
         ".long 1==1,1!=1,1<>2,1<2,2>1,2<=2,3>=4,0xffffffffffffffff<0\n"
         ".long 1||0&&0,0||2&&3,!0,!9,1!2,4+1==5,1|2+4,1==2+3\n"

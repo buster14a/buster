@@ -506,7 +506,7 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
         }
     }
 
-    // Each symbol: locals before sh_info and globals and weaks from it, a name inside .strtab, and a section index that
+    // Each symbol: locals before sh_info and globals, weaks and uniques from it, a name inside .strtab, and a section index that
     // is reserved or names a section, through .symtab_shndx exactly when st_shndx is SHN_XINDEX.
     if (valid)
     {
@@ -527,7 +527,7 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
         // Reserved by st_shndx itself: an index read from .symtab_shndx can be any number, SHN_COMMON's among them.
         const bool extended = symbol->st_shndx == SHN_XINDEX;
         const bool reserved = !extended && (section == SHN_UNDEF || section == SHN_ABS || section == SHN_COMMON);
-        bool symbol_valid = i < first_global ? binding == STB_LOCAL : binding == STB_GLOBAL || binding == STB_WEAK;
+        bool symbol_valid = i < first_global ? binding == STB_LOCAL : binding == STB_GLOBAL || binding == STB_WEAK || binding == STB_GNU_UNIQUE;
         symbol_valid = symbol_valid && object_view_string(view->symbol_names, view->symbol_names_size, symbol->st_name) != 0 && (symbol->st_other & ~3u) == 0;
         symbol_valid = symbol_valid && extended == (view->extended_indices != 0 && view->extended_indices[i] != 0) &&
                        (!extended || view->extended_indices[i] >= SHN_LORESERVE);
@@ -3181,10 +3181,12 @@ static bool object_test_same_section_identity(const ObjectView* a, uint64_t i, c
     const uint64_t b_data = b_section->sh_type == SHT_RELA ? b_section->sh_info : j;
     const bool a_ordered = a_data < a->section_count && (a->sections[a_data].sh_flags & SHF_LINK_ORDER) != 0;
     const bool b_ordered = b_data < b->section_count && (b->sections[b_data].sh_flags & SHF_LINK_ORDER) != 0;
+    const bool a_retained = a_data < a->section_count && (a->sections[a_data].sh_flags & SHF_GNU_RETAIN) != 0;
+    const bool b_retained = b_data < b->section_count && (b->sections[b_data].sh_flags & SHF_GNU_RETAIN) != 0;
     bool same = a_section->sh_type == b_section->sh_type &&
                 object_test_same_string(object_view_section_name(a, i), object_view_section_name(b, j)) &&
                 object_test_same_string(object_test_section_group(a, i), object_test_section_group(b, j)) &&
-                a_ordered == b_ordered;
+                a_retained == b_retained && a_ordered == b_ordered;
     if (same && a_ordered)
     {
         const uint32_t a_link = a->sections[a_data].sh_link;
@@ -3200,12 +3202,10 @@ static bool object_test_same_section_identity(const ObjectView* a, uint64_t i, c
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static uint64_t object_test_matching_section(const ObjectView* view, const ObjectView* source, uint64_t index)
 {
-    // Repeated linked-order names can even refer to the same code section. Pair their occurrences in object order.
-    const Elf64_Shdr* section = &source->sections[index];
-    const uint64_t data = section->sh_type == SHT_RELA ? section->sh_info : index;
-    const bool ordered = data < source->section_count && (source->sections[data].sh_flags & SHF_LINK_ORDER) != 0;
+    // Repeated names with explicit unique IDs can have identical ELF attributes, as linked-order sections can even
+    // refer to the same code section. Pair their occurrences in object order.
     uint64_t occurrence = 0;
-    for (uint64_t i = 1; ordered && i < index; i += 1)
+    for (uint64_t i = 1; i < index; i += 1)
     {
         occurrence += object_test_same_section_identity(source, i, source, index);
     }

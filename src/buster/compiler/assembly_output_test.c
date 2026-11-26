@@ -903,17 +903,36 @@ static void assembly_test_tls_fixups(AssemblyTest* test)
     const AtomId initialized = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_TDATA, 2, &word, sizeof(word));
     const AtomId zeroed = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_TBSS, 5, NULL, 64);
     const uint8_t tls_flags = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_TLS;
-    assembly_fixture_define(&fixture, "tls_initialized", tls_flags, initialized, 0, sizeof(word));
+    const SymbolId initialized_symbol = assembly_fixture_define(&fixture, "tls_initialized", tls_flags, initialized, 0, sizeof(word));
     assembly_fixture_define(&fixture, "tls_zero", BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_TLS, zeroed, 0, 64);
     const SymbolId external = assembly_fixture_symbol(&fixture, "tls_external", tls_flags);
     const SymbolId ordinary = assembly_fixture_symbol(&fixture, "ordinary_external", BUSTER_LINK_SYMBOL_GLOBAL);
     assembly_fixture_function(test, &fixture, "tls_access", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 4,
                               "mov eax, dword ptr fs:[tls_initialized@TPOFF]\n"
                               "lea rax, [rax + tls_initialized@TPOFF]\n"
-                              "mov rcx, qword ptr [rip + tls_external@GOTTPOFF]\n"
-                              "lea rdi, [rip + tls_external@TLSGD]\n"
-                              "lea rdi, [rip + tls_initialized@TLSLD]\n"
-                              "lea rax, [rax + tls_initialized@DTPOFF]\nret\n");
+                              "mov rcx, qword ptr [rip + tls_external@GOTTPOFF]\nret\n");
+    // Dynamic TLS accessors add their ABI-specific fields directly, as check_program_emit_tls_atoms does:
+    // link_add_code_fixups deliberately accepts only the ordinary generated-code relocation families.
+    static const X86Instruction records[] = {
+        { .form = X86_FORM_LEA_R64_M, .reg = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_RIP },
+        { .form = X86_FORM_LEA_R64_M, .reg = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_RIP },
+        { .form = X86_FORM_LEA_R64_M, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_DISP32 },
+        { .form = X86_FORM_RET },
+    };
+    uint8_t* code_bytes = BUSTER_ARENA_PUSH_ARRAY(&test->arena, uint8_t, BUSTER_X86_ENCODER_CAPACITY(BUSTER_ARRAY_LENGTH(records)));
+    uint32_t offsets[BUSTER_ARRAY_LENGTH(records) + 1];
+    const int64_t code_size = code_bytes != NULL ? x86_encode(records, BUSTER_ARRAY_LENGTH(records), code_bytes,
+                                                             BUSTER_X86_ENCODER_CAPACITY(BUSTER_ARRAY_LENGTH(records)), offsets, NULL) : -1;
+    const AtomId dynamic = code_size > 0 ? link_add_atom(&fixture.link, BUSTER_LINK_CLASS_TEXT, 4, (uint64_t)code_size, code_bytes, 0) : 0;
+    fixture.valid = fixture.valid && dynamic != 0 && dynamic < BUSTER_ASSEMBLY_TEST_ATOMS;
+    if (fixture.valid)
+    {
+        fixture.code[dynamic] = (AssemblyCode){ .records = records, .count = BUSTER_ARRAY_LENGTH(records) };
+        assembly_fixture_define(&fixture, "tls_dynamic", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, dynamic, 0, (uint64_t)code_size);
+        fixture.valid = link_add_fixup(&fixture.link, dynamic, offsets[1] - 4, BUSTER_LINK_FIXUP_TLSGD, external, -4) != 0 &&
+                        link_add_fixup(&fixture.link, dynamic, offsets[2] - 4, BUSTER_LINK_FIXUP_TLSLD, initialized_symbol, -4) != 0 &&
+                        link_add_fixup(&fixture.link, dynamic, offsets[3] - 4, BUSTER_LINK_FIXUP_DTPOFF32, initialized_symbol, 0) != 0;
+    }
     uint8_t zeros[(BUSTER_LINK_FIXUP_KINDS - 1) * 8] = { 0 };
     const AtomId data = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, 3, zeros, sizeof(zeros));
     assembly_fixture_define(&fixture, "all_fixups", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, data, 0, sizeof(zeros));
