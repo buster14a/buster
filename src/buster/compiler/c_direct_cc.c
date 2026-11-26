@@ -10046,6 +10046,9 @@ static __attribute__((noinline)) bool fast_cc_decl_attributes_valid(const FastCC
     valid &= linked | (uint32_t)((spec->weak | decl->weak | spec->visibility | decl->visibility) == 0);
     valid &= (deprecated ^ 1u) | function | object;
     valid &= (function ^ 1u) | (uint32_t)((spec->mode_size | decl->mode_size) == 0);
+    // #3577: and a declarator's mode this path can't give (fast_cc_mode_type) is a typedef's alone, whose uses are
+    // refused.
+    valid &= (uint32_t)(entity == FDECL_TYPEDEF) | (uint32_t)(decl->mode_size != BUSTER_FMODE_UNMODELED);
     valid &= (definition ^ 1u) | (uint32_t)((spec->noreturn | decl->noreturn | spec->nonnull | decl->nonnull) == 0);
     if ((valid & format) != 0)
     {
@@ -12050,7 +12053,9 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                         const bool again = prev != 0 && cc->syms[prev].kind == FSYM_TYPEDEF && cc->syms[prev].scope_depth == cc->scope_depth &&
                                            fast_cc_types_identical(cc, cc->syms[prev].type, dr.type);
                         // #3577: one with an alignment of its own (fast_cc_aligned_typedef).
-                        uint8_t aligned = 0;
+                        // (And one with a mode this path doesn't model, BUSTER_FMODE_UNMODELED.)
+                        uint8_t aligned = (uint8_t)(BUSTER_FSYM_ALIGNED * ((uint32_t)(ds.attr.mode_size == BUSTER_FMODE_UNMODELED) |
+                                                                           (uint32_t)(dr.attr.mode_size == BUSTER_FMODE_UNMODELED)));
                         FastType typedef_type = dr.type;
                         if (!fast_cc_typedef_alignment_natural(cc, ds.attr.aligned, dr.attr.aligned, dr.type))
                         {
@@ -12737,7 +12742,9 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     const uint32_t prev = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                     const bool again = prev != 0 && cc->syms[prev].kind == FSYM_TYPEDEF && cc->syms[prev].scope_depth == 0 &&
                                        fast_cc_types_identical(cc, cc->syms[prev].type, dr.type);
-                    uint8_t aligned = 0;
+                    // (And one with a mode this path doesn't model, BUSTER_FMODE_UNMODELED.)
+                    uint8_t aligned = (uint8_t)(BUSTER_FSYM_ALIGNED * ((uint32_t)(ds.attr.mode_size == BUSTER_FMODE_UNMODELED) |
+                                                                       (uint32_t)(dr.attr.mode_size == BUSTER_FMODE_UNMODELED)));
                     FastType typedef_type = dr.type;
                     if (!fast_cc_typedef_alignment_natural(cc, ds.attr.aligned, dr.attr.aligned, dr.type))
                     {

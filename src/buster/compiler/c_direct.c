@@ -4574,6 +4574,15 @@ static int c_direct_unit_tests(void)
         "static inline void fp_force_evall(long double x) { volatile long double y; y = x; }\n"
         "typedef long double ld;\nstatic inline ld kept(ld a, ld b) { const ld c = a; takes(b); if (a != b) { return c; } return b; }\n"
         "int helpers(int x) { return x + 1; }\n",
+        // 24. Mode attributes, on a declarator (glibc's register_t, a member's, a local's) and among the specifiers: an
+        // 8-byte mode is long, a 1-byte one a signed char's size, as the asserted sizes and pointers say; and glibc's
+        // __cfloat128, whose mode this path doesn't model, unused.
+        "typedef int register_t __attribute__ ((__mode__ (__word__)));\ntypedef unsigned int __attribute__((mode(DI))) udi;\n"
+        "typedef _Complex float __cfloat128 __attribute__ ((__mode__ (__TC__)));\n"
+        "struct M { int a __attribute__((mode(QI))); int b __attribute__((mode(DI))); };\n"
+        "_Static_assert(sizeof(register_t) == 8 && sizeof(udi) == 8 && sizeof(struct M) == 16, \"mode sizes\");\n"
+        "long moded(register_t r, udi u, struct M* m) { long* p = &r; unsigned long* q = &u; short h __attribute__((mode(HI))) = 7;\n"
+        "    _Static_assert(sizeof(h) == 2, \"HI\"); return *p + (long)*q + m->a + m->b + h; }\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4810,6 +4819,20 @@ static int c_direct_unit_tests(void)
         "double g(double d) { return (double)fp_barrierl(d); }\n",
         "static inline void fp_force_evall(long double x) { volatile long double y; y = x; }\nvoid g(double d) { fp_force_evall(d); }\n",
         "long double fp(long double x) { volatile long double y = x; return y; }\n",
+        // A mode this path doesn't model (TI, TF) on a declarator, a used typedef's, a member's; a declarator's mode on a
+        // pointer; register_t's pointer as a long long's.
+        "typedef int ti __attribute__((mode(TI)));\nint f(void) { return sizeof(ti); }\n",
+        "struct S { int a __attribute__((mode(TI))); };\nint f(void) { return sizeof(struct S); }\n",
+        "long long x __attribute__((mode(TI)));\n",
+        "typedef float __attribute__((mode(TF))) tf;\nint f(void) { return sizeof(tf); }\n",
+        "struct S { int __attribute__((mode(TI))) a; int b; };\nint f(void) { return sizeof(struct S); }\n",
+        "int* p __attribute__((mode(DI)));\n",
+        "typedef int register_t __attribute__ ((__mode__ (__word__)));\nregister_t r;\nlong long* q = &r;\n",
+        // Unused, and still the full pipeline's error: a floating mode on an int, a mode on a pointer's declarator, an
+        // unknown mode.
+        "typedef int sf __attribute__((mode(SF)));\nint f(void) { return 0; }\n",
+        "typedef int* ip __attribute__((mode(DI)));\nint f(void) { return 0; }\n",
+        "typedef int oi __attribute__((mode(OI)));\nint f(void) { return 0; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

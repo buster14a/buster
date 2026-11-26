@@ -145,7 +145,11 @@ typedef enum FastSymKind
 #define BUSTER_FSYM_UNUSED_RESULT 0x10u // __attribute__((warn_unused_result)): a discarded call is -Wunused-result
 #define BUSTER_FSYM_REGISTER    0x20u // a register variable: taking its address is an error
 #define BUSTER_FSYM_PURE        0x40u // __attribute__((const)) or ((pure)): a discarded call is -Wunused-value
-#define BUSTER_FSYM_ALIGNED     0x80u // a typedef with an alignment of its own, which this path keeps none of: a use is refused
+#define BUSTER_FSYM_ALIGNED     0x80u // a typedef with an alignment of its own, which this path keeps none of, or with a mode it
+                                      // doesn't model (#3577, BUSTER_FMODE_UNMODELED): a use is refused
+// #3577: a mode attribute's size this path doesn't model (TI, TF, TC, XF, HF, the vector modes): the specifiers' type keeps
+// its base kind, unsupported, and is refused where its size would count.
+#define BUSTER_FMODE_UNMODELED  16u
 // A symbol's push_marks (#3577), the value marks (c_direct_cc.c's BUSTER_FVAL_MARK_*) a use by name gives without a
 // branch: an enumerator's is a nonliteral, a library function the driver calls const or pure is pure; and until a
 // function's purity is asked (fast_cc_library_pure_query, at its first use), UNASKED, a mark no use by name carries.
@@ -1047,8 +1051,9 @@ struct FastAttrInfo
     uint8_t visibility;   // STV_DEFAULT / STV_HIDDEN (also "internal", as clang emits it) / STV_PROTECTED
     uint8_t visibility_set; // a visibility attribute gave it; the last one of a list counts
     uint8_t gnu_inline;
-    uint8_t mode_size;    // 0=none, 1/2/4/8/16 (for __attribute__((__mode__(...))))
+    uint8_t mode_size;    // 0=none, 1/2/4/8, or BUSTER_FMODE_UNMODELED (for __attribute__((__mode__(...))))
     uint8_t mode_float;
+    uint8_t mode_quiet;   // #3577: an unmodeled mode the full pipeline takes quietly on its class's types (fast_cc_mode_type)
     // What the declaration that carries the list must check against what it declares (#3577): attributes of
     // functions alone, and the ones whose uses or calls the full pipeline checks.
     uint8_t present;        // any attribute: the declaration then checks the list (fast_cc_decl_attributes_valid)
@@ -1288,7 +1293,15 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
                     else if (mlen == 7u && memcmp(ms, "pointer", 7) == 0) { attr->mode_size = 8u; }
                     else if (mlen == 2u && memcmp(ms, "SF", 2) == 0) { attr->mode_size = 4u; attr->mode_float = 1u; }
                     else if (mlen == 2u && memcmp(ms, "DF", 2) == 0) { attr->mode_size = 8u; attr->mode_float = 1u; }
-                    else { attr->mode_size = 16u; } // TI/TC/XF etc. (only in unused glibc typedefs!)
+                    else
+                    {
+                        // TI/TC/XF etc. (only in unused glibc typedefs!): #3577: TI an integer's, TF, XF, KF and HF a
+                        // floating type's, TC a _Complex's, as the full pipeline takes them quietly (fast_cc_mode_type).
+                        attr->mode_size = BUSTER_FMODE_UNMODELED;
+                        attr->mode_quiet = (uint8_t)(mlen != 2u ? 0u : memcmp(ms, "TI", 2) == 0 ? 1u :
+                                                     (memcmp(ms, "TF", 2) == 0 || memcmp(ms, "XF", 2) == 0 || memcmp(ms, "KF", 2) == 0 ||
+                                                      memcmp(ms, "HF", 2) == 0) ? 2u : memcmp(ms, "TC", 2) == 0 ? 3u : 0u);
+                    }
                     cc->pos += 2u;
                 }
                 else if (kind == FATTR_VISIBILITY)
@@ -2381,6 +2394,50 @@ struct FastDeclaratorResult
     FastAttrInfo attr;
 };
 
+// #3577: what a mode attribute makes of BASE (the specifiers' type, or a declarator's base), as clang and the full pipeline
+// make it: QI, HI, SI, DI, word and pointer on an integer give an integer of that size and the base's signedness (an
+// 8-byte one long, where main's direct path gave long long), SF and DF on a float or a double that floating type. A mode
+// whose size this path doesn't model (BUSTER_FMODE_UNMODELED) is one the full pipeline takes quietly only in the pairs
+// mode_quiet names (TI on an integer; TF, XF, KF and HF on a floating type; TC on a _Complex, glibc's __cfloat128): then
+// *UNMODELED is set and the base is returned without its long mark, refused where its size would count. Anything else (a
+// class that isn't the type's, an unknown or vector mode, a _Bool's, an enum's, a record's) is the full pipeline's error
+// or warning, or a type this path doesn't model, and leaves.
+static __attribute__((cold, noinline)) FastType fast_cc_mode_type(FastCCState* cc, FastType base, const FastAttrInfo* attr, bool* unmodeled)
+{
+    const FastType quals = base & (BUSTER_FTYPE_CONST | BUSTER_FTYPE_VOL);
+    const FastType t = BUSTER_FTYPE_UNQUAL(base);
+    const uint32_t kind = t & BUSTER_FTYPE_SCALAR_MASK;
+    const bool scalar = (t & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0;
+    const bool integer = scalar && kind >= FTYPE_I8 && kind <= FTYPE_U64;
+    const bool floating = scalar && (kind == FTYPE_F32 || kind == FTYPE_F64);
+    FastType res = t;
+    *unmodeled = false;
+    if (attr->mode_size == BUSTER_FMODE_UNMODELED)
+    {
+        *unmodeled = (attr->mode_quiet == 1u && integer) || (attr->mode_quiet == 2u && (floating || t == BUSTER_FTYPE_LONG_DOUBLE)) ||
+                     (attr->mode_quiet == 3u && t == FTYPE_UNSUP16);
+        res = t & ~BUSTER_FTYPE_SCALAR_LONG;
+        if (!*unmodeled) { fast_cc_bail(cc, "a mode the full pipeline refuses or this path doesn't model"); }
+    }
+    else if (attr->mode_float != 0 ? !floating : !integer)
+    {
+        fast_cc_bail(cc, "a mode whose class isn't its type's");
+    }
+    else if (attr->mode_float != 0)
+    {
+        res = attr->mode_size == 4u ? FTYPE_F32 : FTYPE_F64;
+    }
+    else
+    {
+        const bool u = (kind & 1u) != 0;
+        res = attr->mode_size == 1u ? (u ? FTYPE_U8 : FTYPE_I8) :
+              attr->mode_size == 2u ? (u ? FTYPE_U16 : FTYPE_I16) :
+              attr->mode_size == 4u ? (u ? FTYPE_U32 : FTYPE_I32) :
+                                      ((u ? FTYPE_U64 : FTYPE_I64) | BUSTER_FTYPE_SCALAR_LONG);
+    }
+    return res | quals;
+}
+
 // Level 5: Leaf declaration specifiers (handles scalars, typedefs, enums, attributes, _Alignas, and existing/forward
 // struct/union tags — NEVER calls fast_cc_parse_record_iter so the call graph stays strictly acyclic!).
 static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState* cc, FastDeclSpecs* out_specs)
@@ -2568,15 +2625,12 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     }
     if (saw_complex != 0) { res = FTYPE_UNSUP16; }
 
+    // #3577: a mode's type (fast_cc_mode_type); a member's or a parameter's size counts, so an unmodeled one leaves.
     if (sp->attr.mode_size != 0)
     {
-        const bool u = saw_unsigned != 0;
-        if (sp->attr.mode_float) { res = sp->attr.mode_size == 4u ? FTYPE_F32 : FTYPE_F64; }
-        else if (sp->attr.mode_size == 1u) { res = u ? FTYPE_U8 : FTYPE_I8; }
-        else if (sp->attr.mode_size == 2u) { res = u ? FTYPE_U16 : FTYPE_I16; }
-        else if (sp->attr.mode_size == 4u) { res = u ? FTYPE_U32 : FTYPE_I32; }
-        else if (sp->attr.mode_size == 8u) { res = u ? FTYPE_U64 : FTYPE_I64; }
-        else { sp->is_unsupported_type = 1u; res &= ~BUSTER_FTYPE_SCALAR_LONG; }
+        bool unmodeled = false;
+        res = fast_cc_mode_type(cc, res, &sp->attr, &unmodeled);
+        if (unmodeled) { fast_cc_bail(cc, "a member's or a parameter's mode this path doesn't model"); }
     }
 
     if (sp->is_const) { res = ftype_with_const(res); }
@@ -3122,6 +3176,18 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
 
     fast_cc_parse_asm_label(cc, &attr);
     fast_cc_parse_attributes(cc, &attr);
+    // #3577: a mode attribute on the declarator gives its type (fast_cc_mode_type), as one among the specifiers does; main's
+    // direct path ignored it (glibc's `typedef int register_t __attribute__ ((__mode__ (__word__)))` was an int). One on a
+    // pointer's, an array's or a function's declarator is the full pipeline's error. An unmodeled one stays in the
+    // attributes: a typedef's uses are refused (BUSTER_FSYM_ALIGNED), and any other declaration with it leaves.
+    if (attr.mode_size != 0)
+    {
+        uint32_t derived = 0;
+        for (uint32_t gi = 0; gi < gdepth; gi += 1) { derived |= groups[gi].ptr_count | groups[gi].suffix_count; }
+        bool unmodeled = false;
+        if (derived != 0) { fast_cc_bail(cc, "a mode on a derived declarator"); }
+        else { base_type = fast_cc_mode_type(cc, base_type, &attr, &unmodeled); }
+    }
 
     // Step 3: Build final FastType from outermost group down to innermost group (right-to-left C declarator rule!)
     FastType cur = base_type;
@@ -3502,6 +3568,8 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
                     {
                         FastDeclaratorResult dr = { 0 };
                         if (!fast_cc_parse_declarator(cc, sub_t, false, &dr, false)) { break; }
+                        // #3577: a mode this path can't give its member (fast_cc_mode_type).
+                        if (dr.attr.mode_size == BUSTER_FMODE_UNMODELED) { fast_cc_bail(cc, "a member's mode this path doesn't model"); break; }
                         if (!pf->is_union && pf->cur_bit > 0)
                         {
                             pf->cur_byte += (pf->cur_bit + 7u) >> 3;
@@ -3639,6 +3707,8 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
             const uint32_t f_start = cc->pos;
             FastDeclaratorResult dr = { 0 };
             if (!fast_cc_parse_declarator(cc, fbase, true, &dr, false)) { break; }
+            // #3577: a mode this path can't give its member (fast_cc_mode_type).
+            if (dr.attr.mode_size == BUSTER_FMODE_UNMODELED) { fast_cc_bail(cc, "a member's mode this path doesn't model"); break; }
             if (fast_cc_peek(cc) == FTOK_COLON)
             {
                 // Bitfield! SysV AMD64 ABI bitfield layout
@@ -3955,15 +4025,13 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     if (saw_complex != 0) { res = FTYPE_UNSUP16; }
 
     // Apply __attribute__((__mode__(...))) overrides (used by glibc stdint/math headers!)
+    // #3577: a mode's type (fast_cc_mode_type); an unmodeled one is refused where it is used (a typedef's uses,
+    // BUSTER_FSYM_ALIGNED; an object's, unsupported).
     if (sp->attr.mode_size != 0)
     {
-        const bool u = saw_unsigned != 0;
-        if (sp->attr.mode_float) { res = sp->attr.mode_size == 4u ? FTYPE_F32 : FTYPE_F64; }
-        else if (sp->attr.mode_size == 1u) { res = u ? FTYPE_U8 : FTYPE_I8; }
-        else if (sp->attr.mode_size == 2u) { res = u ? FTYPE_U16 : FTYPE_I16; }
-        else if (sp->attr.mode_size == 4u) { res = u ? FTYPE_U32 : FTYPE_I32; }
-        else if (sp->attr.mode_size == 8u) { res = u ? FTYPE_U64 : FTYPE_I64; }
-        else { sp->is_unsupported_type = 1u; res &= ~BUSTER_FTYPE_SCALAR_LONG; }
+        bool unmodeled = false;
+        res = fast_cc_mode_type(cc, res, &sp->attr, &unmodeled);
+        sp->is_unsupported_type |= (uint8_t)unmodeled;
     }
 
     if (sp->is_const) { res = ftype_with_const(res); }
