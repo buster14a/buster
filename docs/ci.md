@@ -1464,6 +1464,21 @@ state; the remaining states; and evidence links. It warns when the week's
 arrivals exceed the completions observed per cycle, or when the oldest pending
 state is over three days old.
 
+**Full snapshot measurement** separately reports the latest admitted `snapshot`
+attempt for the report's cycle: its exact target SHA, whether it is the pin or
+a substitute, its run and attempt link, and its recorded coverage. Completion
+requires a harvested `complete` record with `full` coverage and admitted
+hardware. A targeted or plain completion, a successful coordinator, or a
+workflow success awaiting its record cannot supply that verdict. A newer
+unrecorded attempt remains in progress or awaiting its record; an unseen
+dispatch remains pending during its visibility grace. `Not observed` means
+the current inputs contain no admitted snapshot attempt. The report retains
+counts of failed, blocked and interrupted snapshot records across earlier
+attempts, even when a later attempt completes. This is the native correctness
+and full measurement verdict; it does not certify the snapshot's separate
+deferred full hosted/sanitizer/fuzz run. It uses the existing ledger and does
+not detect missing past cycles or change admission, retry or recovery policy.
+
 **Capacity.** In late October main gained 31 to 82 first-parent commits a day.
 Nightly runs are bounded at 25 minutes, but PR jobs took 4 to 5 minutes. A
 three-hour window holds about 25 to 30 such runs, so the backlog drains only

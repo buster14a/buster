@@ -2530,6 +2530,120 @@ static void nightly_run_url(char* output, size_t capacity, uint64_t run)
     snprintf(output, capacity, "https://github.com/buster14a/buster/actions/runs/%llu", (unsigned long long)run);
 }
 
+// The admitted snapshot's latest attempt, independently of targeted completions or the coordinator's result.
+// A newer run or rerun without a harvested record cannot keep an older attempt's completion as its verdict.
+// Like nightly_report, this is called only after the cycle's pin resolves to a state.
+static void nightly_report_snapshot(const NightlyPlanInput* input, const NightlyCycleState* cycle, FILE* report)
+{
+    const NightlyRow* rows = input->ledger->rows;
+    const uint32_t row_count = input->ledger->row_count;
+    const NightlyRun* runs = input->facts->runs;
+    const uint32_t run_count = input->facts->run_count;
+    const NightlyPending* pending = input->pending;
+    const uint32_t pending_count = input->pending_count;
+    const NightlyRow* record = NULL;
+    uint64_t run_id = 0;
+    uint32_t attempt = 0;
+    int64_t created = 0;
+    const char* sha = NULL;
+    const char* status = "not observed";
+    uint32_t failed = 0;
+    uint32_t interrupted = 0;
+    for (uint32_t i = 0; i < row_count; i += 1)
+    {
+        const NightlyRow* row = &rows[i];
+        bool admit = false;
+        if (row->purpose == NIGHTLY_PURPOSE_SNAPSHOT && nightly_request_this_cycle(row->request, cycle->date, &admit) && admit)
+        {
+            const NightlyOutcome outcome = row->outcome;
+            failed += outcome == NIGHTLY_OUTCOME_FAILED || outcome == NIGHTLY_OUTCOME_BLOCKED_NATIVE || outcome == NIGHTLY_OUTCOME_BLOCKED_HOSTED;
+            interrupted += outcome == NIGHTLY_OUTCOME_INTERRUPTED;
+            if (nightly_later(row->run, row->attempt, run_id, attempt))
+            {
+                record = row;
+                run_id = row->run;
+                attempt = row->attempt;
+                created = row->created;
+                sha = row->commit;
+                status = nightly_outcome_names[outcome];
+                if (outcome == NIGHTLY_OUTCOME_COMPLETE)
+                {
+                    status = row->coverage == NIGHTLY_COVERAGE_FULL && row->hardware == NIGHTLY_HARDWARE_ADMIT ? "complete" : "incomplete";
+                }
+            }
+        }
+    }
+    for (uint32_t i = 0; i < run_count; i += 1)
+    {
+        const NightlyRun* run = &runs[i];
+        bool admit = false;
+        if (run->workflow && run->nightly && run->purpose == NIGHTLY_PURPOSE_SNAPSHOT && run->admit && nightly_request_this_cycle(run->request, cycle->date, &admit) && admit && nightly_later(run->id, run->attempt, run_id, attempt))
+        {
+            record = NULL;
+            run_id = run->id;
+            attempt = run->attempt;
+            created = run->created;
+            sha = run->target;
+            const NightlyConclusion conclusion = run->conclusion;
+            status = "awaiting record";
+            if (!run->completed)
+            {
+                status = "in progress";
+            }
+            else if (conclusion == NIGHTLY_CONCLUSION_CANCELLED)
+            {
+                status = "interrupted (awaiting record)";
+            }
+            else if (conclusion == NIGHTLY_CONCLUSION_FAILURE || conclusion == NIGHTLY_CONCLUSION_TIMED_OUT)
+            {
+                status = "failed (awaiting record)";
+            }
+        }
+    }
+    for (uint32_t i = 0; i < pending_count; i += 1)
+    {
+        const NightlyPending* request = &pending[i];
+        bool admit = false;
+        if (request->purpose == NIGHTLY_PURPOSE_SNAPSHOT && request->admit && nightly_request_this_cycle(request->request, cycle->date, &admit) && admit && request->dispatched >= created && nightly_pending_active(request, input->facts, input->now))
+        {
+            bool recorded = false;
+            for (uint32_t j = 0; j < row_count && !recorded; j += 1)
+            {
+                recorded = strcmp(rows[j].request, request->request) == 0;
+            }
+            if (!recorded)
+            {
+                record = NULL;
+                run_id = 0;
+                attempt = 0;
+                created = request->dispatched;
+                sha = request->sha;
+                status = "dispatch pending visibility";
+            }
+        }
+    }
+    fprintf(report, "\n**Full snapshot measurement**: **%s**.", status);
+    if (sha != NULL)
+    {
+        fprintf(report, " Target: `%s` (%s).", sha, strcmp(sha, input->states->items[cycle->snapshot].sha) == 0 ? "pinned snapshot" : "substitute for the pinned snapshot");
+    }
+    if (run_id != 0)
+    {
+        char url[128];
+        nightly_run_url(url, sizeof(url), run_id);
+        fprintf(report, " Latest observed attempt: [run %llu, attempt %u](%s/attempts/%u).", (unsigned long long)run_id, attempt, url, attempt);
+    }
+    if (record != NULL)
+    {
+        fprintf(report, " Recorded coverage: `%s`; hardware: `%s`.", nightly_coverage_names[record->coverage], nightly_hardware_names[record->hardware]);
+    }
+    else
+    {
+        fprintf(report, " No completed full coverage record is confirmed for this admission.");
+    }
+    fprintf(report, "\nSnapshot admission records this cycle, including earlier attempts: %u failed or blocked, %u interrupted.\n", failed, interrupted);
+}
+
 // The report (Markdown, for the job summary and the ledger's publication) and the capacity alert.
 static void nightly_report(const NightlyPlanInput* input, const NightlyCycleState* cycle, FILE* output, FILE* report)
 {
@@ -2613,6 +2727,7 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
     {
         fprintf(report, "No comprehensive run this cycle: %s.\n", cycle->substitute_reason);
     }
+    nightly_report_snapshot(input, cycle, report);
     fprintf(report, "\n| Status | States |\n| --- | ---: |\n");
     for (uint32_t i = 0; i < NIGHTLY_STATUS_COUNT; i += 1)
     {
@@ -4323,6 +4438,147 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_scenario_free(scenario);
 }
 
+static void nightly_test_snapshot_report(NightlyTest* test)
+{
+    const int64_t committed = nightly_test_madrid(2026, 11, 1, 9, 0);
+    const int64_t opening = nightly_test_madrid(2026, 11, 4, 4, 10);
+    char expected[256];
+    char actions[1 << 15];
+
+    NightlyScenario* scenario = nightly_scenario(2, committed);
+    nightly_scenario_cycle(scenario, "2026-11-04", 1);
+    nightly_scenario_row(scenario, 200, 1, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_COMPLETE);
+    scenario->prepare_only = true;
+    nightly_scenario_plan(scenario, opening);
+    snprintf(expected, sizeof(expected), "**Full snapshot measurement**: **complete**. Target: `%s` (pinned snapshot).", scenario->states.items[1].sha);
+    nightly_expect(test, strstr(scenario->report, expected) != NULL, "the full snapshot verdict names the exact pinned SHA");
+    nightly_expect(test, strstr(scenario->report, "[run 200, attempt 1](https://github.com/buster14a/buster/actions/runs/200/attempts/1). Recorded coverage: `full`; hardware: `admit`.") != NULL, "the full snapshot verdict links its exact recorded attempt");
+    nightly_copy(actions, sizeof(actions), scenario->output);
+    scenario->ledger.rows[0].coverage = NIGHTLY_COVERAGE_TARGETED;
+    nightly_scenario_plan(scenario, opening);
+    nightly_expect(test, strstr(scenario->report, "**Full snapshot measurement**: **incomplete**.") != NULL && strstr(scenario->report, "Recorded coverage: `targeted`") != NULL, "a snapshot's targeted completion is not a full completion");
+    nightly_expect(test, strcmp(actions, scenario->output) == 0, "the separate snapshot verdict leaves planner actions unchanged");
+    scenario->ledger.rows[0].coverage = NIGHTLY_COVERAGE_FULL;
+    scenario->ledger.rows[0].hardware = NIGHTLY_HARDWARE_SKIP;
+    nightly_scenario_plan(scenario, opening);
+    nightly_expect(test, strstr(scenario->report, "**Full snapshot measurement**: **incomplete**.") != NULL, "full coverage without admitted hardware is not a full measurement");
+    scenario->ledger.rows[0].hardware = NIGHTLY_HARDWARE_ADMIT;
+    nightly_copy(scenario->ledger.rows[0].commit, sizeof(scenario->ledger.rows[0].commit), scenario->states.items[0].sha);
+    nightly_scenario_plan(scenario, opening);
+    snprintf(expected, sizeof(expected), "**Full snapshot measurement**: **complete**. Target: `%s` (substitute for the pinned snapshot).", scenario->states.items[0].sha);
+    nightly_expect(test, strstr(scenario->report, expected) != NULL, "a full substitute completion names its own exact SHA");
+    snprintf(expected, sizeof(expected), "Snapshot: `%s`", scenario->states.items[1].sha);
+    nightly_expect(test, strstr(scenario->report, expected) != NULL, "a substitute completion preserves the original pin");
+    nightly_scenario_free(scenario);
+
+    static const NightlyOutcome outcomes[] = {
+        NIGHTLY_OUTCOME_FAILED,
+        NIGHTLY_OUTCOME_BLOCKED_NATIVE,
+        NIGHTLY_OUTCOME_INTERRUPTED,
+        NIGHTLY_OUTCOME_DEFERRED,
+    };
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(outcomes); i += 1)
+    {
+        scenario = nightly_scenario(2, committed);
+        nightly_scenario_cycle(scenario, "2026-11-04", 1);
+        nightly_scenario_row(scenario, 200, 1, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.admit", NIGHTLY_PLAIN_OK, i == 3 ? NIGHTLY_HARDWARE_SKIP : NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, outcomes[i]);
+        nightly_scenario_row(scenario, 201, 1, NIGHTLY_PURPOSE_BACKLOG, "20261104.900.2.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_TARGETED, NIGHTLY_OUTCOME_COMPLETE);
+        scenario->prepare_only = true;
+        nightly_scenario_plan(scenario, opening);
+        snprintf(expected, sizeof(expected), "**Full snapshot measurement**: **%s**.", nightly_outcome_names[outcomes[i]]);
+        nightly_expect(test, strstr(scenario->report, expected) != NULL, "a later targeted completion cannot hide the snapshot's unsuccessful attempt");
+        snprintf(expected, sizeof(expected), "including earlier attempts: %u failed or blocked, %u interrupted.", i < 2 ? 1 : 0, i == 2 ? 1 : 0);
+        nightly_expect(test, strstr(scenario->report, expected) != NULL, "snapshot failure and interruption counts exclude targeted completions");
+        nightly_scenario_free(scenario);
+    }
+
+    scenario = nightly_scenario(2, committed);
+    nightly_scenario_cycle(scenario, "2026-11-04", 1);
+    nightly_scenario_pushes(scenario);
+    nightly_scenario_row(scenario, 200, 1, NIGHTLY_PURPOSE_SNAPSHOT, "20261103.900.1.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_COMPLETE);
+    nightly_scenario_row(scenario, 201, 1, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.defer", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_COMPLETE);
+    nightly_scenario_row(scenario, 202, 1, NIGHTLY_PURPOSE_FULL, "20261104.900.2.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_COMPLETE);
+    nightly_scenario_row(scenario, 203, 1, NIGHTLY_PURPOSE_BACKLOG, "20261104.900.3.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_COMPLETE);
+    nightly_scenario_flying(scenario, 204, "snapshot", "admit", 1, "20261103.900.4.admit", opening - 60);
+    scenario->prepare_only = true;
+    nightly_scenario_plan(scenario, opening);
+    nightly_expect(test, strstr(scenario->report, "**Full snapshot measurement**: **not observed**.") != NULL, "only this cycle's admitted snapshot counts, not plain, preparation, manual, backlog or prior-cycle evidence");
+    nightly_scenario_free(scenario);
+
+    static const char* const conclusions[] = {
+        "-",
+        "success",
+        "failure",
+        "cancelled",
+    };
+    static const char* const statuses[] = {
+        "in progress",
+        "awaiting record",
+        "failed (awaiting record)",
+        "interrupted (awaiting record)",
+    };
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(conclusions); i += 1)
+    {
+        scenario = nightly_scenario(2, committed);
+        nightly_scenario_cycle(scenario, "2026-11-04", 1);
+        nightly_scenario_row(scenario, 200, 1, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_COMPLETE);
+        const char* sha = scenario->states.items[1].sha;
+        nightly_append(&scenario->runs, "run\t200\t2\tworkflow_dispatch\t%s\t%s\t%s\t%s\tmain\t%lld\t%lld\t%u\tNightly snapshot (admit) of %s [20261104.900.1.admit]\n", i == 0 ? "in_progress" : "completed", conclusions[i], sha, BUSTER_NIGHTLY_WORKFLOW, (long long)opening - 600, (long long)opening - 60, BUSTER_NIGHTLY_REPOSITORY, sha);
+        scenario->prepare_only = true;
+        nightly_scenario_plan(scenario, opening);
+        snprintf(expected, sizeof(expected), "**Full snapshot measurement**: **%s**.", statuses[i]);
+        nightly_expect(test, strstr(scenario->report, expected) != NULL, "a newer unrecorded attempt supersedes an older full completion without inventing coverage");
+        nightly_expect(test, strstr(scenario->report, "[run 200, attempt 2](https://github.com/buster14a/buster/actions/runs/200/attempts/2)") != NULL, "the unrecorded rerun links the newer attempt");
+        nightly_scenario_free(scenario);
+    }
+
+    scenario = nightly_scenario(2, committed);
+    nightly_scenario_cycle(scenario, "2026-11-04", 1);
+    scenario->pending[0] = (NightlyPending){
+        .request = "20261104.900.1.admit",
+        .purpose = NIGHTLY_PURPOSE_SNAPSHOT,
+        .admit = true,
+        .dispatched = opening - 60,
+    };
+    nightly_copy(scenario->pending[0].sha, sizeof(scenario->pending[0].sha), scenario->states.items[1].sha);
+    scenario->pending_count = 1;
+    scenario->prepare_only = true;
+    nightly_scenario_plan(scenario, opening);
+    nightly_expect(test, strstr(scenario->report, "**Full snapshot measurement**: **dispatch pending visibility**.") != NULL, "an unseen admission remains pending during its visibility grace");
+    nightly_scenario_plan(scenario, opening + BUSTER_NIGHTLY_PENDING_AGE);
+    nightly_expect(test, strstr(scenario->report, "**Full snapshot measurement**: **not observed**.") != NULL, "an expired unseen request supplies no snapshot completion evidence");
+    nightly_scenario_row(scenario, 200, 1, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_COMPLETE);
+    nightly_scenario_plan(scenario, opening);
+    nightly_expect(test, strstr(scenario->report, "**Full snapshot measurement**: **complete**.") != NULL, "a recorded request is not made pending by stale visibility bookkeeping");
+    nightly_copy(scenario->pending[0].request, sizeof(scenario->pending[0].request), "20261104.900.2.admit");
+    nightly_scenario_plan(scenario, opening);
+    nightly_expect(test, strstr(scenario->report, "**Full snapshot measurement**: **dispatch pending visibility**.") != NULL, "a newer unseen admission cannot inherit an earlier completion");
+    nightly_scenario_free(scenario);
+
+    for (uint32_t order = 0; order < 2; order += 1)
+    {
+        for (uint32_t later_fails = 0; later_fails < 2; later_fails += 1)
+        {
+            scenario = nightly_scenario(2, committed);
+            nightly_scenario_cycle(scenario, "2026-11-04", 1);
+            nightly_scenario_row(scenario, 199, 1, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_INTERRUPTED);
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                const uint32_t attempt = order == 0 ? k + 1 : 2 - k;
+                const bool failed = attempt == 2 ? later_fails != 0 : later_fails == 0;
+                nightly_scenario_row(scenario, 200, 1, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.2.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, failed ? NIGHTLY_OUTCOME_FAILED : NIGHTLY_OUTCOME_COMPLETE);
+                scenario->ledger.rows[scenario->ledger.row_count - 1].attempt = attempt;
+            }
+            scenario->prepare_only = true;
+            nightly_scenario_plan(scenario, opening);
+            snprintf(expected, sizeof(expected), "**Full snapshot measurement**: **%s**.", later_fails ? "failed" : "complete");
+            nightly_expect(test, strstr(scenario->report, expected) != NULL && strstr(scenario->report, "actions/runs/200/attempts/2") != NULL, "the latest recorded snapshot attempt decides in either ledger order");
+            nightly_expect(test, strstr(scenario->report, "including earlier attempts: 1 failed or blocked, 1 interrupted.") != NULL, "a later snapshot attempt retains earlier failure and interruption counts");
+            nightly_scenario_free(scenario);
+        }
+    }
+}
+
 static void nightly_test_worker_plan(NightlyTest* test)
 {
     const int64_t committed = nightly_test_madrid(2026, 11, 1, 9, 0);
@@ -4834,6 +5090,7 @@ static int nightly_self_test(const char* root)
     nightly_test_queue(&test);
     nightly_test_states(&test);
     nightly_test_plan(&test);
+    nightly_test_snapshot_report(&test);
     nightly_test_worker_plan(&test);
     nightly_test_metadata(&test, root);
     nightly_test_workflow(&test, root);

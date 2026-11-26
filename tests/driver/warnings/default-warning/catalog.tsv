@@ -584,6 +584,10 @@ initializer-list-diagnostics-in-walk-order	initializer-list-diagnostics-in-walk-
 # A builtin's call is made after its argument's failed conversion that clang only warns of by default as an error
 # (#2914): its result's own conversion is checked, as an ordinary call's is.
 builtin-results-after-a-failed-argument	builtin-results-after-a-failed-argument.c	0	4	1	-	-	builtin results after a failed argument
+# A builtin call folded to zero locates its null-pointer conversion at the callee (#2914), including a later argument's
+# default error. Parenthesized calls and callees retain the written opener, and a call inside a sum retains the binary operator.
+# Calls used as conditional conditions locate at the callee; a parenthesized conditional retains the written opener.
+builtin-null-pointer-conversion-locations	builtin-null-pointer-conversion-locations.c	15	8	0	c23	-	builtin null-pointer conversion locations
 # A discarded comparison's -Wunused-comparison follows the comparison's own warnings (#2914): clang's
 # DiagnoseUnusedExprResult runs at the full expression's end.
 unused-comparisons-after-the-comparison-s-warnings	unused-comparisons-after-the-comparison-s-warnings.c	8	0	2	-	-	unused comparisons after the comparison's warnings
