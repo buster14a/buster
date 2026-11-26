@@ -1267,33 +1267,6 @@ static uint32_t tier1_cfg_piece_at(const Tier1CfgPieces* pieces, uint32_t first,
     return low > first && pieces->ends[low - 1] > position ? low - 1 : BUSTER_TIER1_CFG_NONE;
 }
 
-// A latch phi that mostly carries its header's phi unchanged takes that value's convention, rather than a cold
-// operand's merely because its predecessor is nearest in layout (#2553). The candidate is the successor phi, so one
-// bounded vector pass counts its occurrences and finds the nearest earlier matching predecessor. No profile is
-// inferred: a strict majority of all incoming edges must carry the same value, including undefined edges in the total.
-static uint32_t tier1_cfg_phi_carried_predecessor(const uint32_t* operands, const uint32_t* predecessors, uint32_t count, uint32_t value, uint32_t block)
-{
-    const __m512i wanted = _mm512_set1_epi32((int)value);
-    const __m512i limit = _mm512_set1_epi32((int)block);
-    const __m512i one = _mm512_set1_epi32(1);
-    __m512i nearest = _mm512_setzero_si512();
-    uint32_t votes = 0;
-    for (uint32_t j = 0; j < count; j += 16)
-    {
-        const uint32_t left = count - j;
-        const __mmask16 lanes = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
-        const __m512i values = _mm512_maskz_loadu_epi32(lanes, operands + j);
-        const __m512i blocks = _mm512_maskz_loadu_epi32(lanes, predecessors + j);
-        const __mmask16 same = _mm512_mask_cmpeq_epi32_mask(lanes, values, wanted);
-        const __mmask16 earlier = _mm512_mask_cmplt_epu32_mask(same, blocks, limit);
-        votes += (uint32_t)__builtin_popcount((uint32_t)same);
-        // One-based block ids distinguish predecessor zero from an empty lane. Each eligible id is below block.
-        nearest = _mm512_max_epu32(nearest, _mm512_maskz_add_epi32(earlier, blocks, one));
-    }
-    const uint32_t found = _mm512_reduce_max_epu32(nearest);
-    return votes > count / 2 && found != 0 ? found - 1 : BUSTER_TIER1_CFG_NONE;
-}
-
 // A phi's interval that no sibling convention models (#1216) takes its operand's register at the exit of its block's
 // chosen predecessor (#2553, tier1_cfg_anchors). Every value's intervals must be filled: an operand's may follow its
 // phi's.
@@ -1322,7 +1295,6 @@ static void tier1_cfg_phi_exits(const Tier1CfgInput* input, const uint32_t* chos
         const uint32_t exit = predecessor != BUSTER_TIER1_CFG_NONE ? input->block_starts[predecessor + 1] - 1 : 0;
         const bool single = input->successor_offsets[b + 1] - input->successor_offsets[b] == 1;
         const uint32_t next = single ? input->successors[input->successor_offsets[b]] : BUSTER_TIER1_CFG_NONE;
-        const uint32_t degree = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
         for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
         {
             const uint32_t v = input->phi_values[k];
@@ -1343,16 +1315,6 @@ static void tier1_cfg_phi_exits(const Tier1CfgInput* input, const uint32_t* chos
                 pieces->hint_intervals[own] = convention;
             }
             const uint32_t operand = predecessor != BUSTER_TIER1_CFG_NONE ? input->phi_operands[input->phi_operand_offsets[k] + j] : BUSTER_TIER1_CFG_NONE;
-            // The latch and header carry each other's phis. Preserve the header's convention where most incoming
-            // edges pass it unchanged, without changing the block's anchor or overriding a sibling's convention.
-            const bool carried = along && next > b && degree >= 3 && operand != up && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE;
-            const uint32_t from = carried ? tier1_cfg_phi_carried_predecessor(input->phi_operands + input->phi_operand_offsets[k], input->predecessors + input->predecessor_offsets[b], degree, up, b) : BUSTER_TIER1_CFG_NONE;
-            const uint32_t kept = from != BUSTER_TIER1_CFG_NONE ? tier1_cfg_piece_at(pieces, offsets[up], offsets[up + 1], input->block_starts[from + 1] - 1) : BUSTER_TIER1_CFG_NONE;
-            if (kept != BUSTER_TIER1_CFG_NONE && pieces->classes[kept] == pieces->classes[own] && pieces->ends[kept] <= pieces->starts[own])
-            {
-                pieces->hints[own] = up;
-                pieces->hint_intervals[own] = kept | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
-            }
             const uint32_t taken = operand != BUSTER_TIER1_CFG_NONE ? tier1_cfg_piece_at(pieces, offsets[operand], offsets[operand + 1], exit) : BUSTER_TIER1_CFG_NONE;
             if (own != BUSTER_TIER1_CFG_NONE && taken != BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE && pieces->classes[taken] == pieces->classes[own] &&
                 pieces->ends[taken] <= pieces->starts[own])
@@ -1419,6 +1381,73 @@ static void tier1_cfg_ties(const Tier1CfgInput* input, const uint32_t* offsets, 
                 pieces->hint_intervals[own] = taken | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
             }
         }
+    }
+}
+
+// A non-phi value defined after its loop body in layout follows the convention that body's first range opened
+// with, where no operand, tie, call argument register or other range already hints the definition. An unused recipe may otherwise hold that
+// register when the definition arrives; the allocator's guarded recipe yielding then keeps the body convention.
+// Lua's startfunc loads k into the register its handlers use, rather than swapping it with base at the dispatch edge.
+// Sixteen independent value rows test eligibility and search their defining pieces together. All scatter targets are
+// distinct: a value's intervals belong to its own disjoint slice. No interval order or existing hint changes.
+static void tier1_cfg_definition_hints(const Tier1CfgInput* input, const uint8_t* phis, const uint32_t* offsets, const uint8_t* register_hints, Tier1CfgPieces* pieces)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i none = _mm512_set1_epi32(-1);
+    const __m512i ordinals = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint32_t v = 0; v < input->value_count; v += 16)
+    {
+        const uint32_t left = input->value_count - v;
+        const __mmask16 lanes = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+        const __m512i first = _mm512_maskz_loadu_epi32(lanes, offsets + v);
+        const __m512i end = _mm512_maskz_loadu_epi32(lanes, offsets + v + 1);
+        const __m512i definition = _mm512_maskz_loadu_epi32(lanes, input->definitions + v);
+        const __m512i phi = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, phis + v));
+        const __m512i recipe = input->rematerializable != 0 ? _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, input->rematerializable + v)) : zero;
+        __mmask16 eligible = _mm512_mask_cmpeq_epi32_mask(lanes, _mm512_or_si512(phi, recipe), zero);
+        eligible = _mm512_mask_cmplt_epu32_mask(eligible, first, end);
+        const __m512i starts = _mm512_mask_i32gather_epi32(zero, eligible, first, pieces->starts, 4);
+        const __m512i ends = _mm512_mask_i32gather_epi32(zero, eligible, first, pieces->ends, 4);
+        eligible = _mm512_mask_cmplt_epu32_mask(eligible, starts, definition);
+        eligible = _mm512_mask_cmple_epu32_mask(eligible, ends, definition);
+        __m512i low = first;
+        __m512i high = end;
+        __mmask16 searching = eligible;
+        while (searching != 0)
+        {
+            const __m512i middle = _mm512_add_epi32(low, _mm512_srli_epi32(_mm512_sub_epi32(high, low), 1));
+            const __m512i positions = _mm512_mask_i32gather_epi32(zero, searching, middle, pieces->starts, 4);
+            const __mmask16 before = _mm512_mask_cmple_epu32_mask(searching, positions, definition);
+            low = _mm512_mask_add_epi32(low, before, middle, one);
+            high = _mm512_mask_mov_epi32(high, (__mmask16)(searching & ~before), middle);
+            searching = _mm512_mask_cmplt_epu32_mask(eligible, low, high);
+        }
+        const __m512i own = _mm512_sub_epi32(low, one);
+        __mmask16 found = _mm512_mask_cmpgt_epu32_mask(eligible, low, first);
+        const __m512i own_starts = _mm512_mask_i32gather_epi32(zero, found, own, pieces->starts, 4);
+        const __m512i own_ends = _mm512_mask_i32gather_epi32(zero, found, own, pieces->ends, 4);
+        found = _mm512_mask_cmpeq_epi32_mask(found, own_starts, definition);
+        found = _mm512_mask_cmpgt_epu32_mask(found, own_ends, definition);
+        const __m512i hints = _mm512_mask_i32gather_epi32(zero, found, own, pieces->hints, 4);
+        const __m512i intervals = _mm512_mask_i32gather_epi32(zero, found, own, pieces->hint_intervals, 4);
+        found = _mm512_mask_cmpeq_epi32_mask(found, hints, none);
+        found = _mm512_mask_cmpeq_epi32_mask(found, intervals, none);
+        if (register_hints != 0 && found != 0)
+        {
+            // Gather each byte through four bytes wholly inside the column, or one masked load for a shorter column.
+            // The final call argument hints include those propagated to a two-address result's operands (#2823).
+            const bool wide = pieces->count >= 4;
+            const __m512i base = wide ? _mm512_min_epu32(own, _mm512_set1_epi32((int)(pieces->count - 4))) : zero;
+            const __m512i bytes = wide ? _mm512_mask_i32gather_epi32(zero, found, base, register_hints, 1) :
+                _mm512_set1_epi32(_mm_cvtsi128_si32(_mm_maskz_loadu_epi8((__mmask16)((1u << pieces->count) - 1), register_hints)));
+            const __m512i shift = _mm512_slli_epi32(_mm512_sub_epi32(own, base), 3);
+            const __m512i hint = _mm512_and_si512(_mm512_srlv_epi32(bytes, shift), _mm512_set1_epi32(UINT8_MAX));
+            found = _mm512_mask_cmpeq_epi32_mask(found, hint, _mm512_set1_epi32(UINT8_MAX));
+        }
+        const __m512i values = _mm512_add_epi32(ordinals, _mm512_set1_epi32((int)v));
+        _mm512_mask_i32scatter_epi32(pieces->hints, found, own, values, 4);
+        _mm512_mask_i32scatter_epi32(pieces->hint_intervals, found, own, first, 4);
     }
 }
 
@@ -3252,6 +3281,7 @@ static Tier1CfgError tier1_cfg_prepare_path(const Tier1CfgInput* input, Arena* o
         candidate.intervals.avoided_registers = crossed;
         if (ready)
         {
+            tier1_cfg_definition_hints(input, phis, candidate.value_interval_offsets, argument_hints, &pieces);
             *prepared = (Tier1CfgPrepared){
                 .candidate = candidate,
                 .live = live,

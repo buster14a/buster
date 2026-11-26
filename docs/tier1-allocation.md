@@ -573,24 +573,36 @@ take, by exit hints:
   operand's place at the end of that operand's range, where the range ends at
   the definition ("Two-address results" below).
 
-A latch before its header can have many incoming edges carrying the header's
-phi unchanged, while the nearest predecessor supplies a different value.
-`tier1_cfg_phi_exits` keeps the repeated value's convention when the latch has
-one successor, that later successor's phi takes the latch phi, and a strict
-majority of the latch phi's operands are that successor phi. It takes the
-nearest earlier matching predecessor's interval exit. The block's anchor,
-sibling conventions and the successor alternate's settled-place guard stay as
-before. Undefined operands count in the denominator; a tie, no earlier matching
-predecessor, or an unavailable interval leaves the existing choice in place.
-The known successor phi needs no histogram: one masked AVX-512 pass counts its
-occurrences and finds the nearest predecessor, with no extra scratch storage.
+A non-phi, non-rematerializable value can have its first range in a loop body
+laid out before the value's defining block. When no operand, tie, interval or
+call-argument register hint already chooses the convention, `tier1_cfg_definition_hints`
+gives its defining range the opening hint of that first range (#2553). The
+first range must end before or at the definition, and the defining range must
+start exactly there. The existing allocator can then yield that register from
+an unused recipe, while its allowed masks, required uses and other claims
+still decide whether the hint can be followed. Lua's late `startfunc` load of
+`k` otherwise lost its body register to an unused frame address and exchanged
+registers with `base` at the dispatcher.
 
-`test-tier1-cfg` checks a dispatch loop with three unchanged handler inputs and
-a different cold operand nearest in layout, including reordered predecessor
-rows and a tied case with an undefined operand. The unchanged handler and latch
-edges move nothing in the majority case. Both checkers and the certificate
-check the allocations; protected-page rows around the vector width check the
-selection's tails and empty input.
+The pass runs after call-argument avoidance has propagated register preferences
+through tied results to their operands. Those final physical register hints
+take priority. A regression checks a late definition feeding a tied call
+argument: it keeps the call's register and avoids the other argument's register,
+even when its earlier body range used another one.
+
+Sixteen value rows test eligibility together and search their disjoint interval
+slices with a masked binary search. Masked gathers and scatters preserve empty
+slices and the final partial vector; the pass needs no extra scratch column.
+The regression checks the late definition and body keeping one register, with
+no move on their edge, while the cold path still reads the recipe. Protected
+rows cover empty slices, mixed search depths and vector tails, and explicit
+cases retain existing hints and each register class's hard constraints. The
+physical-hint byte column is checked at exact protected boundaries too,
+including columns shorter than a four-byte gather.
+The [definition-convention record](https://github.com/buster14a/buster-performance/tree/8c5987b19e9a150e3a856e08b2f0752a57585ee2/docs/measurements/tier1-dispatch-latch-2553-2026-11-26/experiments/definition-v2)
+pins the source, actual CFG replays, controlled instruction counts and
+validation. This rule does not choose a new convention for SQLite's main
+dispatch latch.
 
 Slot sharing joins phi-to-phi pairs before the others (`tier1_cfg_share_slots`):
 in `sqlite3VdbeExec`, whose latch's join is laid out before its header, an

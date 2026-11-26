@@ -2236,167 +2236,6 @@ static void tier1_cfg_test_dispatch_entry(Tier1CfgTestTally* tally, Arena* outpu
     arena_pop_to(output, saved);
 }
 
-// The carried-operand scan's independent bounds: each column ends at a protected page, including a zero-length
-// column whose pointer is itself inaccessible. Tail lanes must neither load past the row nor vote for value zero.
-static void tier1_cfg_test_carried_predecessors(Tier1CfgTestTally* tally)
-{
-    const uint32_t sizes[] = {
-        0,
-        1,
-        2,
-        3,
-        15,
-        16,
-        17,
-        31,
-        32,
-        33,
-    };
-    for (uint32_t size = 0; size < BUSTER_ARRAY_LENGTH(sizes); size += 1)
-    {
-        const uint32_t count = sizes[size];
-        uint32_t operands[33] = { 0 };
-        uint32_t predecessors[33] = { 0 };
-        for (uint32_t variant = 0; variant < 4; variant += 1)
-        {
-            const uint32_t votes = variant == 0 ? count / 2 : variant == 1 ? count / 2 + 1 : count;
-            for (uint32_t j = 0; j < count; j += 1)
-            {
-                // Reverse order also checks that the chosen block is the nearest in layout, not the last input.
-                predecessors[j] = count - j - 1;
-                operands[j] = j >= count - votes ? 0 : BUSTER_TIER1_CFG_NONE;
-            }
-            const uint32_t block = variant == 2 ? 0 : variant == 3 ? 1 : count;
-            const uint32_t expected = count == 0 || variant == 0 || variant == 2 ? BUSTER_TIER1_CFG_NONE : variant == 3 ? 0 : votes - 1;
-            DominatorTestGuard guards[] = {
-                dominator_test_guard(operands, (uint64_t)count * sizeof(uint32_t)),
-                dominator_test_guard(predecessors, (uint64_t)count * sizeof(uint32_t)),
-            };
-            const bool mapped = guards[0].mapping != 0 && guards[1].mapping != 0;
-            tier1_cfg_test_expect(tally, mapped, "carried-operand predecessor scan's guarded columns");
-            if (mapped)
-            {
-                const uint32_t chosen = tier1_cfg_phi_carried_predecessor(guards[0].data, guards[1].data, count, 0, block);
-                tier1_cfg_test_expect(tally, chosen == expected, "carried-operand predecessor scan respects its row, majority and earlier-block bounds");
-            }
-            for (uint32_t guard = 0; guard < BUSTER_ARRAY_LENGTH(guards); guard += 1)
-            {
-                if (guards[guard].mapping != 0)
-                {
-                    munmap(guards[guard].mapping, guards[guard].mapping_bytes);
-                }
-            }
-        }
-    }
-}
-
-// #2553: three handlers pass the dispatch's loop-carried value unchanged to its latch; the nearest predecessor in
-// layout passes a different recipe. The cold path moves the loop value out of its convention's register, so the
-// successor alternate's settled-place check cannot rescue the latch. Choosing the cold operand otherwise moves the
-// value on every hot incoming edge and back again before the dispatch. Only the cold edge should repair its value.
-// Reordering the predecessor row keeps its operand association; replacing one hot input with undef removes the
-// strict majority, in which case the ordinary predecessor convention stands.
-static void tier1_cfg_test_dispatch_latch(Tier1CfgTestTally* tally, Arena* output, Arena* scratch, bool cold_first, bool majority)
-{
-    static Tier1CfgTestBuilder builder;
-    memset(&builder, 0, sizeof(builder));
-    builder.block_count = 8;
-    for (uint32_t b = 0; b < builder.block_count; b += 1)
-    {
-        builder.instructions[b] = 4;
-    }
-    builder.registers[BUSTER_TIER1_ALLOCATE_GPR] = 7;
-    builder.scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
-    tier1_cfg_test_edge(&builder, 0, 6);
-    if (cold_first)
-    {
-        tier1_cfg_test_edge(&builder, 4, 5);
-    }
-    tier1_cfg_test_edge(&builder, 1, 5);
-    tier1_cfg_test_edge(&builder, 2, 5);
-    tier1_cfg_test_edge(&builder, 3, 5);
-    tier1_cfg_test_edge(&builder, 3, 4);
-    if (!cold_first)
-    {
-        tier1_cfg_test_edge(&builder, 4, 5);
-    }
-    tier1_cfg_test_edge(&builder, 5, 6);
-    tier1_cfg_test_edge(&builder, 6, 1);
-    tier1_cfg_test_edge(&builder, 6, 2);
-    tier1_cfg_test_edge(&builder, 6, 3);
-    tier1_cfg_test_edge(&builder, 6, 7);
-    const uint32_t all = builder.registers[BUSTER_TIER1_ALLOCATE_GPR];
-    const uint32_t start = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, 1);
-    const uint32_t carried = builder.value_count + 3;
-    // A phi keeps the cold path's range separate: an exit hint names an interval's closing register, which must be
-    // the hot predecessor's here, not the closing after a merged continuation has moved it in the cold block.
-    const uint32_t cold_operands[] = {
-        carried,
-    };
-    const uint32_t held = tier1_cfg_test_phi(&builder, 4, BUSTER_TIER1_ALLOCATE_GPR, cold_operands);
-    builder.allowed[held] = 1;
-    const uint32_t recipe = tier1_cfg_test_value(&builder, 4, 2, BUSTER_TIER1_ALLOCATE_GPR, all);
-    builder.remat[recipe] = 1;
-    uint32_t latch_operands[4] = { 0 };
-    const uint32_t first_hot = cold_first ? 1 : 0;
-    latch_operands[cold_first ? 0 : 3] = recipe;
-    for (uint32_t j = 0; j < 3; j += 1)
-    {
-        latch_operands[first_hot + j] = majority || j != 2 ? carried : BUSTER_TIER1_CFG_NONE;
-    }
-    const uint32_t joined = tier1_cfg_test_phi(&builder, 5, BUSTER_TIER1_ALLOCATE_GPR, latch_operands);
-    const uint32_t header_operands[] = {
-        start,
-        joined,
-    };
-    const bool numbered = tier1_cfg_test_phi(&builder, 6, BUSTER_TIER1_ALLOCATE_GPR, header_operands) == carried;
-    tier1_cfg_test_definition_use(&builder, start);
-    tier1_cfg_test_definition_use(&builder, held);
-    tier1_cfg_test_definition_use(&builder, recipe);
-    for (uint32_t b = 1; b <= 3; b += 1)
-    {
-        tier1_cfg_test_use(&builder, carried, b, 0, true);
-    }
-    tier1_cfg_test_use(&builder, carried, 4, 1, true);
-    tier1_cfg_test_use(&builder, carried, 4, 3, true);
-    tier1_cfg_test_use(&builder, held, 4, 3, true);
-    tier1_cfg_test_use(&builder, carried, 6, 0, true);
-    tier1_cfg_test_use(&builder, carried, 7, 0, true);
-    const uint64_t saved = output->length;
-    Tier1CfgInput input = { 0 };
-    const bool built = numbered && tier1_cfg_test_build(&builder, output, &input);
-    tier1_cfg_test_expect(tally, built, "dispatch-latch fixture builds");
-    if (built)
-    {
-        const uint64_t mark = output->length;
-        Tier1CfgAllocation result = { 0 };
-        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
-        Tier1CfgCheck check;
-        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
-        tier1_cfg_test_expect(tally, allocated, "the independent checker accepts the dispatch-latch fixture");
-        uint32_t locations[4] = { 0 };
-        uint8_t kinds[4] = { 0 };
-        const bool found = allocated && tier1_cfg_location(&result, carried, input.block_starts[1], &locations[0], &kinds[0]) &&
-                           tier1_cfg_location(&result, carried, input.block_starts[4] + 2, &locations[1], &kinds[1]) &&
-                           tier1_cfg_location(&result, joined, input.block_starts[5], &locations[2], &kinds[2]) &&
-                           tier1_cfg_location(&result, recipe, input.block_starts[5] - 1, &locations[3], &kinds[3]);
-        const bool registers = found && kinds[0] == BUSTER_TIER1_ALLOCATE_REGISTER && kinds[1] == BUSTER_TIER1_ALLOCATE_REGISTER && kinds[2] == BUSTER_TIER1_ALLOCATE_REGISTER && kinds[3] == BUSTER_TIER1_ALLOCATE_REGISTER;
-        tier1_cfg_test_expect(tally, registers && locations[0] != locations[1], "the cold path moves the loop value, so the settled-place alternate cannot choose its convention");
-        tier1_cfg_test_expect(tally, registers && locations[0] != locations[3], "the cold recipe and the handlers use different registers");
-        tier1_cfg_test_expect(tally, registers && locations[2] == locations[majority ? 0 : 3], majority ? "a latch keeps the loop value's convention on its repeated unchanged inputs" : "without a strict majority the latch keeps the ordinary predecessor's convention");
-        uint32_t moved = 0;
-        for (uint32_t b = 1; allocated && b <= 3; b += 1)
-        {
-            moved += tier1_cfg_test_edge_moves(&input, &result, b, 5);
-        }
-        moved += allocated ? tier1_cfg_test_edge_moves(&input, &result, 5, 6) : 0;
-        tier1_cfg_test_expect(tally, allocated && (majority ? moved == 0 : moved != 0), majority ? "the dispatch loop's unchanged handler and latch edges move nothing" : "undefined operands do not turn a tied convention into a majority");
-        arena_pop_to(output, mark);
-        tier1_cfg_test_case(tally, &input, output, scratch, "dispatch latch", true, 0, 0, true);
-    }
-    arena_pop_to(output, saved);
-}
-
 static void tier1_cfg_test_phi_storage(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     const uint32_t widths[] = {
@@ -3630,6 +3469,487 @@ static void tier1_cfg_test_latch_chain(Tier1CfgTestTally* tally, Arena* output, 
     arena_pop_to(output, saved);
 }
 
+// A late definition before a loop in control flow, after it in layout. Entry 0 defines a recipe and enters 3;
+// 3 defines a loop value and chooses the hot body 1 or cold block 4, which alone reads the recipe. The body loops
+// or exits at 2. The loop value's first range takes r0 while the recipe is not live there. At its later definition,
+// the recipe's entry convention holds r0, so an unhinted definition takes r1 and the hot edge repairs it every time.
+// Following the earlier body convention lets the existing recipe-yielding rule give the definition r0 instead.
+static void tier1_cfg_test_definition_body(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 5;
+    const uint32_t instructions[] = {
+        1,
+        2,
+        1,
+        2,
+        2,
+    };
+    for (uint32_t b = 0; b < builder.block_count; b += 1)
+    {
+        builder.instructions[b] = instructions[b];
+    }
+    // A restricted value pool selects the allocator's recipe-aware scan, as Lua's callee-register preference does.
+    builder.registers[0] = 7;
+    builder.scratch[0] = 11;
+    const uint32_t edges[][2] = {
+        { 0, 3 },
+        { 3, 1 },
+        { 3, 4 },
+        { 1, 1 },
+        { 1, 2 },
+        { 4, 2 },
+    };
+    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(edges); e += 1)
+    {
+        tier1_cfg_test_edge(&builder, edges[e][0], edges[e][1]);
+    }
+    const uint32_t recipe = tier1_cfg_test_value(&builder, 0, 0, 0, 3);
+    const uint32_t value = tier1_cfg_test_value(&builder, 3, 0, 0, 3);
+    builder.remat[recipe] = 1;
+    tier1_cfg_test_definition_use(&builder, recipe);
+    tier1_cfg_test_definition_use(&builder, value);
+    tier1_cfg_test_use(&builder, value, 1, 0, true);
+    tier1_cfg_test_use(&builder, value, 1, 1, true);
+    tier1_cfg_test_use(&builder, recipe, 4, 1, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input = { 0 };
+    const bool built = tier1_cfg_test_build(&builder, output, &input);
+    tier1_cfg_test_expect(tally, built, "a late definition's body convention: built");
+    if (built)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "a late definition's body convention: allocated");
+        uint32_t at_definition = BUSTER_TIER1_CFG_NONE;
+        uint32_t at_body = BUSTER_TIER1_CFG_NONE;
+        uint8_t definition_kind = UINT8_MAX;
+        uint8_t body_kind = UINT8_MAX;
+        const bool found = allocated && tier1_cfg_location(&result, value, input.definitions[value], &at_definition, &definition_kind) &&
+                           tier1_cfg_location(&result, value, input.block_starts[1], &at_body, &body_kind);
+        tier1_cfg_test_expect(tally, found && definition_kind == BUSTER_TIER1_ALLOCATE_REGISTER && body_kind == BUSTER_TIER1_ALLOCATE_REGISTER && at_definition == at_body,
+                             "a late definition takes its body's register from an unused recipe");
+        tier1_cfg_test_expect(tally, allocated && tier1_cfg_test_edge_moves(&input, &result, 3, 1) == 0,
+                             "a late definition's hot edge needs no repair");
+        arena_pop_to(output, mark);
+        tier1_cfg_test_case(tally, &input, output, scratch, "a late definition's body convention", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
+// The late definition 3 chooses the earlier loop body 1 or call block 4. The body's first range takes r0.
+// Block 4's add-like result is tied to the dying root and is read as the call's r1 argument. Another argument lives
+// in r2 but is read in r0. The call's r1 hint and avoidance of r0 must reach the root through the tie before a new
+// definition/body hint is considered: otherwise the root takes r0, the tie follows it, and the call needs an extra
+// argument move. The defining root range spans 3 and 4, so it is both laid after its body and the tie chain's root.
+static void tier1_cfg_test_definition_argument(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 5;
+    const uint32_t instructions[] = {
+        1,
+        2,
+        1,
+        2,
+        3,
+    };
+    for (uint32_t b = 0; b < builder.block_count; b += 1)
+    {
+        builder.instructions[b] = instructions[b];
+    }
+    builder.registers[BUSTER_TIER1_ALLOCATE_GPR] = 7;
+    builder.scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    builder.use_registers = true;
+    const uint32_t edges[][2] = {
+        { 0, 3 },
+        { 3, 1 },
+        { 3, 4 },
+        { 1, 1 },
+        { 1, 2 },
+        { 4, 2 },
+    };
+    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(edges); e += 1)
+    {
+        tier1_cfg_test_edge(&builder, edges[e][0], edges[e][1]);
+    }
+    const uint32_t other = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, 1u << 2);
+    const uint32_t root = tier1_cfg_test_value(&builder, 3, 0, BUSTER_TIER1_ALLOCATE_GPR, 7);
+    const uint32_t argument = tier1_cfg_test_value(&builder, 4, 1, BUSTER_TIER1_ALLOCATE_GPR, 7);
+    tier1_cfg_test_definition_use(&builder, other);
+    tier1_cfg_test_definition_use(&builder, root);
+    tier1_cfg_test_definition_use(&builder, argument);
+    tier1_cfg_test_use(&builder, root, 1, 0, true);
+    tier1_cfg_test_use(&builder, root, 1, 1, true);
+    tier1_cfg_test_use(&builder, root, 4, 1, true);
+    tier1_cfg_test_use(&builder, other, 4, 2, true);
+    builder.use_register[builder.use_count - 1] = 0;
+    tier1_cfg_test_use(&builder, argument, 4, 2, true);
+    builder.use_register[builder.use_count - 1] = 1;
+    const uint64_t saved = output->length;
+    Tier1CfgInput input = { 0 };
+    bool built = tier1_cfg_test_build(&builder, output, &input);
+    uint32_t* ties = built ? arena_push_array(output, 2 * (uint64_t)input.value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    built = built && ties != 0;
+    for (uint32_t k = 0; ties != 0 && k < 2 * input.value_count; k += 1)
+    {
+        ties[k] = k == 2 * argument ? root : BUSTER_TIER1_CFG_NONE;
+    }
+    input.ties = ties;
+    tier1_cfg_test_expect(tally, built, "a late definition's tied call argument: built");
+    if (built)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "a late definition's tied call argument: allocated");
+        const uint32_t call = input.block_starts[4] + 2 * 2;
+        const uint32_t root_interval = allocated ? tier1_cfg_interval_oracle(&result, root, input.definitions[root]) : BUSTER_TIER1_CFG_NONE;
+        const uint32_t argument_interval = allocated ? tier1_cfg_interval_oracle(&result, argument, call) : BUSTER_TIER1_CFG_NONE;
+        const bool intervals = root_interval != BUSTER_TIER1_CFG_NONE && argument_interval != BUSTER_TIER1_CFG_NONE;
+        tier1_cfg_test_expect(tally, intervals && result.value_interval_offsets[root] < root_interval &&
+                             result.intervals.starts[root_interval] == input.definitions[root] && result.intervals.ends[root_interval] == input.definitions[argument] &&
+                             result.intervals.hint_values[argument_interval] == root && result.intervals.hint_intervals[argument_interval] == (root_interval | BUSTER_TIER1_ALLOCATE_HINT_EXIT),
+                             "a late definition's earlier body and merged dying root reach the tied result");
+        tier1_cfg_test_expect(tally, intervals && result.intervals.register_hints != 0 &&
+                             result.intervals.register_hints[root_interval] == 1 && result.intervals.register_hints[argument_interval] == 1,
+                             "a late definition retains the call-register hint propagated through its tied result");
+        tier1_cfg_test_expect(tally, intervals && result.intervals.avoided_registers != 0 &&
+                             result.intervals.avoided_registers[root_interval] == 1 && result.intervals.avoided_registers[argument_interval] == 1,
+                             "a late definition and its tied result avoid the other argument's register");
+        uint32_t body_register = BUSTER_TIER1_CFG_NONE;
+        uint32_t root_register = BUSTER_TIER1_CFG_NONE;
+        uint32_t argument_register = BUSTER_TIER1_CFG_NONE;
+        uint8_t body_kind = UINT8_MAX;
+        uint8_t root_kind = UINT8_MAX;
+        uint8_t argument_kind = UINT8_MAX;
+        const bool found = allocated && tier1_cfg_location(&result, root, input.block_starts[1], &body_register, &body_kind) &&
+                           tier1_cfg_location(&result, root, input.definitions[root], &root_register, &root_kind) &&
+                           tier1_cfg_location(&result, argument, call, &argument_register, &argument_kind);
+        tier1_cfg_test_expect(tally, found && body_kind == BUSTER_TIER1_ALLOCATE_REGISTER && root_kind == BUSTER_TIER1_ALLOCATE_REGISTER &&
+                             argument_kind == BUSTER_TIER1_ALLOCATE_REGISTER && body_register == 0 && root_register == 1 && argument_register == 1,
+                             "a late definition's call convention takes priority over its earlier body's register");
+        arena_pop_to(output, mark);
+        tier1_cfg_test_case(tally, &input, output, scratch, "a late definition's tied call argument", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
+// Explicit rows exercise eligibility and hint priority, including searches of different depths in one vector.
+// Every input and output column ends at an inaccessible page. Empty rows may name the first inaccessible element;
+// inactive lanes must not read it, and scattering a partial vector must not write beyond the last defining piece.
+static void tier1_cfg_test_definition_hint_rows(Tier1CfgTestTally* tally, uint32_t count, uint32_t shape, bool mixed, bool recipes, bool with_registers)
+{
+    uint32_t definitions[33] = { 0 };
+    uint8_t phis[33] = { 0 };
+    uint8_t remat[33] = { 0 };
+    uint32_t offsets[34] = { 0 };
+    uint32_t starts[33 * 17] = { 0 };
+    uint32_t ends[33 * 17] = { 0 };
+    uint32_t hints[33 * 17];
+    uint32_t intervals[33 * 17];
+    uint32_t expected_hints[33 * 17];
+    uint32_t expected_intervals[33 * 17];
+    uint8_t register_hints[33 * 17];
+    uint32_t pieces_count = 0;
+    for (uint32_t v = 0; v < count; v += 1)
+    {
+        const uint32_t kind = mixed ? (v + shape) % 19 : shape;
+        // The final definition touches the final register-hint byte, or an empty slice points beyond that byte.
+        // Both occur in a partial vector at 17/33, while preceding rows exercise searches of different depths.
+        const uint32_t row = mixed && v + 1 == count ? (shape == 0 ? 18 : 7) : kind;
+        const uint32_t first = pieces_count;
+        uint32_t length = 2;
+        uint32_t changed = BUSTER_TIER1_CFG_NONE;
+        definitions[v] = 10;
+        offsets[v] = first;
+        starts[first] = 2;
+        ends[first] = 4;
+        starts[first + 1] = 10;
+        ends[first + 1] = 12;
+        switch (row)
+        {
+            case 0: // An ordinary late definition follows the earlier body range.
+                changed = first + 1;
+                break;
+            case 1: // An operand hint already chooses the definition's value convention.
+            case 2: // An interval-only hint already chooses a predecessor's exit convention.
+            case 3: // A tie supplies both the operand and its closing interval.
+                break;
+            case 4: // Phi conventions are set by the predecessor/continuation rules.
+                phis[v] = 1;
+                break;
+            case 5: // A recipe keeps its existing treatment; an absent optional column means ordinary values.
+                remat[v] = 1;
+                changed = recipes ? BUSTER_TIER1_CFG_NONE : first + 1;
+                break;
+            case 6: // There is no earlier body range to follow.
+                length = 1;
+                starts[first] = 10;
+                ends[first] = 12;
+                break;
+            case 7: // The value has no ranges, including when first is the end of the guarded allocation.
+                length = 0;
+                break;
+            case 8: // The first range itself contains the definition.
+                ends[first] = 12;
+                starts[first + 1] = 14;
+                ends[first + 1] = 16;
+                break;
+            case 9: // A range containing, but not opening at, the definition has an established entry convention.
+                starts[first + 1] = 8;
+                break;
+            case 10: // A hole at the definition must not name the next range.
+                starts[first + 1] = 12;
+                ends[first + 1] = 14;
+                break;
+            case 11: // Touching half-open ranges still have a completed earlier body convention.
+                ends[first] = 10;
+                changed = first + 1;
+                break;
+            case 12: // The definition is in the middle of its slice, with later ranges left untouched.
+                length = 3;
+                starts[first + 2] = 20;
+                ends[first + 2] = 22;
+                changed = first + 1;
+                break;
+            case 13: // A longer slice requires more search steps than the neighboring two-range rows.
+                length = 17;
+                definitions[v] = 24;
+                for (uint32_t r = 0; r < length; r += 1)
+                {
+                    starts[first + r] = 2 * r;
+                    ends[first + r] = 2 * r + 1;
+                }
+                changed = first + 12;
+                break;
+            case 14: // No range reaches the definition, even though the first one precedes it.
+                starts[first + 1] = 6;
+                ends[first + 1] = 8;
+                break;
+            case 15: // Physical register zero is a real call-argument hint, not an absent hint.
+            case 16: // Other physical call-argument registers retain the same precedence.
+                changed = with_registers ? BUSTER_TIER1_CFG_NONE : first + 1;
+                break;
+            case 17: // A body range's physical hint does not choose the later defining range's register.
+                changed = first + 1;
+                break;
+            case 18: // A definition at the third piece reads exactly the last of three register-hint bytes.
+                length = 3;
+                definitions[v] = 20;
+                starts[first + 2] = 20;
+                ends[first + 2] = 22;
+                changed = first + 2;
+                break;
+        }
+        for (uint32_t r = 0; r < length; r += 1)
+        {
+            hints[first + r] = BUSTER_TIER1_CFG_NONE;
+            intervals[first + r] = BUSTER_TIER1_CFG_NONE;
+            register_hints[first + r] = UINT8_MAX;
+        }
+        if (row == 1 || row == 3)
+        {
+            hints[first + 1] = v;
+        }
+        if (row == 2 || row == 3)
+        {
+            intervals[first + 1] = first | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+        }
+        if (row == 15 || row == 16)
+        {
+            register_hints[first + 1] = row == 15 ? 0 : 3;
+        }
+        if (row == 17)
+        {
+            register_hints[first] = 0;
+        }
+        for (uint32_t r = 0; r < length; r += 1)
+        {
+            expected_hints[first + r] = hints[first + r];
+            expected_intervals[first + r] = intervals[first + r];
+        }
+        if (changed != BUSTER_TIER1_CFG_NONE)
+        {
+            expected_hints[changed] = v;
+            expected_intervals[changed] = first;
+        }
+        pieces_count += length;
+    }
+    offsets[count] = pieces_count;
+    DominatorTestGuard guards[] = {
+        dominator_test_guard(definitions, count * sizeof(*definitions)),
+        dominator_test_guard(phis, count * sizeof(*phis)),
+        dominator_test_guard(remat, count * sizeof(*remat)),
+        dominator_test_guard(offsets, (count + 1) * sizeof(*offsets)),
+        dominator_test_guard(starts, pieces_count * sizeof(*starts)),
+        dominator_test_guard(ends, pieces_count * sizeof(*ends)),
+        dominator_test_guard(hints, pieces_count * sizeof(*hints)),
+        dominator_test_guard(intervals, pieces_count * sizeof(*intervals)),
+        dominator_test_guard(register_hints, pieces_count * sizeof(*register_hints)),
+    };
+    bool guarded = true;
+    for (uint32_t g = 0; g < BUSTER_ARRAY_LENGTH(guards); g += 1)
+    {
+        guarded = guarded && guards[g].mapping != 0;
+    }
+    char label[160];
+    snprintf(label, sizeof(label), "definition hint guard setup: values=%u shape=%u mixed=%u recipes=%u registers=%u", count, shape, mixed, recipes, with_registers);
+    tier1_cfg_test_expect(tally, guarded, label);
+    if (guarded)
+    {
+        const Tier1CfgInput input = {
+            .definitions = guards[0].data,
+            .rematerializable = recipes ? guards[2].data : 0,
+            .value_count = count,
+        };
+        Tier1CfgPieces pieces = {
+            .starts = guards[4].data,
+            .ends = guards[5].data,
+            .hints = guards[6].data,
+            .hint_intervals = guards[7].data,
+            .count = pieces_count,
+        };
+        tier1_cfg_definition_hints(&input, guards[1].data, guards[3].data, with_registers ? guards[8].data : 0, &pieces);
+        snprintf(label, sizeof(label), "definition value hint eligibility and priority: values=%u shape=%u mixed=%u recipes=%u registers=%u", count, shape, mixed, recipes, with_registers);
+        tier1_cfg_test_expect(tally, pieces_count == 0 || memcmp(pieces.hints, expected_hints, pieces_count * sizeof(*expected_hints)) == 0, label);
+        snprintf(label, sizeof(label), "definition interval hint eligibility and priority: values=%u shape=%u mixed=%u recipes=%u registers=%u", count, shape, mixed, recipes, with_registers);
+        tier1_cfg_test_expect(tally, pieces_count == 0 || memcmp(pieces.hint_intervals, expected_intervals, pieces_count * sizeof(*expected_intervals)) == 0, label);
+    }
+    for (uint32_t g = 0; g < BUSTER_ARRAY_LENGTH(guards); g += 1)
+    {
+        if (guards[g].mapping != 0)
+        {
+            munmap(guards[g].mapping, guards[g].mapping_bytes);
+        }
+    }
+}
+
+// The convention is a preference. A different legal register set at the definition remains a hard constraint,
+// regardless of the earlier range's register. Exercise all classes through allocation and its independent verifier.
+static void tier1_cfg_test_definition_hint_constraints(Tier1CfgTestTally* tally, Arena* output)
+{
+    for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+    {
+        const uint8_t first_register = c == BUSTER_TIER1_ALLOCATE_MASK ? 1 : 0;
+        const uint8_t definition_register = first_register + 1;
+        uint32_t starts[] = {
+            2,
+            10,
+        };
+        uint32_t ends[] = {
+            4,
+            12,
+        };
+        const uint32_t definitions[] = { 10 };
+        const uint8_t phis[] = { 0 };
+        const uint32_t offsets[] = {
+            0,
+            2,
+        };
+        const uint32_t values[] = {
+            0,
+            0,
+        };
+        const uint32_t allowed[] = {
+            1u << first_register,
+            1u << definition_register,
+        };
+        const uint8_t classes[] = {
+            c,
+            c,
+        };
+        const uint8_t flags[] = {
+            BUSTER_TIER1_ALLOCATE_REQUIRED,
+            BUSTER_TIER1_ALLOCATE_REQUIRED,
+        };
+        uint32_t hints[] = {
+            BUSTER_TIER1_CFG_NONE,
+            BUSTER_TIER1_CFG_NONE,
+        };
+        uint32_t intervals[] = {
+            BUSTER_TIER1_CFG_NONE,
+            BUSTER_TIER1_CFG_NONE,
+        };
+        const Tier1CfgInput input = {
+            .definitions = definitions,
+            .value_count = 1,
+        };
+        Tier1CfgPieces pieces = {
+            .starts = starts,
+            .ends = ends,
+            .hints = hints,
+            .hint_intervals = intervals,
+            .count = 2,
+        };
+        tier1_cfg_definition_hints(&input, phis, offsets, 0, &pieces);
+        tier1_cfg_test_expect(tally, hints[1] == 0 && intervals[1] == 0, "a late definition keeps an earlier convention as a preference with different masks");
+        Tier1AllocationInput intervals_input = {
+            .starts = starts,
+            .ends = ends,
+            .values = values,
+            .allowed_registers = allowed,
+            .classes = classes,
+            .flags = flags,
+            .hint_values = hints,
+            .hint_intervals = intervals,
+            .count = 2,
+            .value_count = 1,
+            .position_count = 12,
+        };
+        intervals_input.registers[c] = 7u << first_register;
+        const uint64_t saved = output->length;
+        Tier1Allocation result = { 0 };
+        const Tier1AllocationError error = tier1_allocate(&intervals_input, output, &result);
+        const bool allocated = error == TIER1_ALLOCATION_OK && tier1_allocation_verify(&intervals_input, &result);
+        tier1_cfg_test_expect(tally, allocated, "a late definition's incompatible range masks allocate and verify");
+        Tier1AllocationLocation body = { 0 };
+        Tier1AllocationLocation definition = { 0 };
+        const bool found = allocated && tier1_allocation_location(&intervals_input, &result, 0, 2, &body) &&
+                           tier1_allocation_location(&intervals_input, &result, 1, 10, &definition);
+        tier1_cfg_test_expect(tally, found && body.kind == BUSTER_TIER1_ALLOCATE_REGISTER && body.reg == first_register &&
+                             definition.kind == BUSTER_TIER1_ALLOCATE_REGISTER && definition.reg == definition_register,
+                             "a late definition's hard register mask wins over its earlier body hint");
+        arena_pop_to(output, saved);
+    }
+}
+
+static void tier1_cfg_test_definition_hint_guards(Tier1CfgTestTally* tally, Arena* output)
+{
+    for (uint32_t shape = 0; shape < 19; shape += 1)
+    {
+        tier1_cfg_test_definition_hint_rows(tally, 1, shape, false, true, true);
+    }
+    tier1_cfg_test_definition_hint_rows(tally, 1, 5, false, false, true);
+    tier1_cfg_test_definition_hint_rows(tally, 1, 15, false, true, false);
+    tier1_cfg_test_definition_hint_rows(tally, 1, 16, false, true, false);
+    const uint32_t counts[] = {
+        0,
+        1,
+        2,
+        3,
+        15,
+        16,
+        17,
+        31,
+        32,
+        33,
+    };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(counts); k += 1)
+    {
+        tier1_cfg_test_definition_hint_rows(tally, counts[k], 0, true, true, true);
+        tier1_cfg_test_definition_hint_rows(tally, counts[k], 1, true, false, true);
+        tier1_cfg_test_definition_hint_rows(tally, counts[k], 0, true, true, false);
+    }
+    tier1_cfg_test_definition_hint_constraints(tally, output);
+}
+
 // The registers a call reads its arguments in (#2646, Tier1CfgInput.use_registers). Block 0 defines p (a recipe), w and,
 // with `held`, q, then a, b and v; a call at its instruction 3 reads a in r4, b in r0, which p holds until its use at
 // instruction 5, and w in r4, though w lives on into block 1; block 1, whose phi of p keeps it from continuing block 0's
@@ -4339,11 +4659,9 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_latch_chain(&tally, &output, &scratch);
             tier1_cfg_test_local_phis(&tally, &output, &scratch);
             tier1_cfg_test_dispatch_entry(&tally, &output, &scratch);
-            tier1_cfg_test_carried_predecessors(&tally);
-            for (uint32_t variant = 0; variant < 4; variant += 1)
-            {
-                tier1_cfg_test_dispatch_latch(&tally, &output, &scratch, (variant & 1) != 0, (variant & 2) != 0);
-            }
+            tier1_cfg_test_definition_body(&tally, &output, &scratch);
+            tier1_cfg_test_definition_argument(&tally, &output, &scratch);
+            tier1_cfg_test_definition_hint_guards(&tally, &output);
             tier1_cfg_test_use_registers(&tally, &output, &scratch, false);
             tier1_cfg_test_use_registers(&tally, &output, &scratch, true);
             for (uint32_t variant = 0; variant < 4; variant += 1)
