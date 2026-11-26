@@ -3321,7 +3321,14 @@ What the lowering covers past scalars (#145's programs):
   `(*p).y` (`check_vector_arrow`): the source reader decodes a `->` member's
   name as a swizzle only in a unit whose type table has an extended vector
   (`TypeTable.ext_vectors`), growing its list past the `.` members it counted;
-  a struct's `->` member is unaffected. Swizzles aren't lowered: `-c` refuses
+  a struct's `->` member is unaffected. Graph arrows borrow the sorted selector
+  slice in `CheckAction` and search it only after the checked operand identifies
+  a pointer to an extended vector (#2278). Ordinary arrows perform no selector
+  search, even in a unit that also declares extended vectors. The slice and its
+  lane storage stay live and unchanged through the action or batch. A positive
+  `vector_member_count` selects this borrowed slice; zero selects the nullable
+  direct `vector_member` used by dot actions and pre-graph type queries. The
+  count occupies existing action padding. Swizzles aren't lowered: `-c` refuses
   both spellings as a member access. The cold diagnostic renderer gives clang's
   vector member errors (#2096): the first illegal component character at its
   operator-relative byte, an out-of-range component at the operator, duplicate

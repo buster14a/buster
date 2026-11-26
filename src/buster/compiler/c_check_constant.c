@@ -3536,6 +3536,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
         if (decoded)
         {
             CheckAction typed = *action;
+            typed.vector_member_count = 0;
             typed.vector_member = &member;
             check_action_scalar(reader->types, &typed, checked);
         }
