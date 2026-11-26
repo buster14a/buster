@@ -158,6 +158,8 @@ static inline __attribute__((always_inline)) bool check_warning_null_event(const
                 .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                 .completion = completion,
                 .payload = { .first_type = destination, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                .range_begin = original_first,
+                .range_end = original_end,
             };
         }
     }

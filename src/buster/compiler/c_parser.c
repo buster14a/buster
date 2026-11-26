@@ -861,6 +861,9 @@ struct ParseDiagnostic
     // The token where the parser knew it, where that is after `token` (a counted_by family's second error, at its
     // argument's first token, known at the type name the first is at, #1842), or 0 for `token` itself.
     uint32_t publication;
+    // The exclusive end of a complete type after sizeof/alignof without parentheses, retained by error recovery for
+    // its two insertion hints. Zero means that the type did not finish before recovery's boundary.
+    uint32_t fixit_type_end;
     // A delimiter error with a proven diagnostic-only continuation. Ordinarily this inserts a missing declaration
     // semicolon; an attribute's missing ')' or ']' instead retains its already-read arguments (#2332).
     bool resumed;
