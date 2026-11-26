@@ -87,7 +87,7 @@ residual aggregate slots after promotion.
 
 ## In `--tier1`
 
-`--tier1` doesn't run this stage (#1189). An experiment ran it before
+The original `--tier1` pipeline did not run this stage (#1189). An experiment ran it before
 promotion, in `--tier1`'s pipeline, and counted user-space instructions by
 callgrind against the same head without it:
 
@@ -107,7 +107,10 @@ removes those escapes.
 Memcopies, partial/overlapping field splitting, dynamic array indexing,
 pointer phi/select analysis and aggregate call ABI handling remain outside
 this conservative implementation. Target-host compile-time, stack-size and
-generated-code measurements remain pending.
+generated-code measurements remained pending for that original field stage.
+The selective vector and register-class aggregate paths described below and
+in the [IR optimization guide](commands/ir-optimization.md) now use SROA in
+Tier 1; the historical measurements above do not describe those later paths.
 
 The implementation is original. LLVM's [pass documentation](
 https://llvm.org/docs/Passes.html#sroa-scalar-replacement-of-aggregates) was
@@ -139,4 +142,20 @@ it, and isn't a field: a zeroed object's `i64` stores don't overlap the vector
 that overwrites them. Without the options SROA keeps its #139 contract,
 refusing SIMD functions and address-taken slots; `test-ir-sroa`'s escape-mask
 oracle has the two forwarding conversions too.
+
+## Runtime integer vector construction (#3641)
+
+`IrSroaOptions.construct` extends the constant/splat recovery with distinct
+runtime integer lanes and constants. It is off by default: the target-aware
+C driver and inline expander enable it only where the existing lane insertion
+and widening rules are available (AVX512F/BW/DQ/VL). The proof covers a private
+object's fully defined vector load in one block, with every runtime lane
+coming from one intact scalar store. The recipe preserves source SSA values
+and uses independent 16-byte pieces and a balanced width-change tree, with a
+direct widening for a low scalar followed by zeros. It does not add a new IR
+opcode or backend rule.
+
+See [vectors assembled in memory](commands/ir-optimization.md#vectors-assembled-in-memory-1344-3641)
+for the byte-provenance proof, overlap and escape refusals, the default-path
+integration, allocation bounds, and the IR and strict native regressions.
 

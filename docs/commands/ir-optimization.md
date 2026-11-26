@@ -309,7 +309,7 @@ an iteration in a loop that needs its registers.
 every symbol listed, and `benchmark-ir-source --passes --only store-motion`
 times it ([the IR guide](ir.md)).
 
-## Vectors assembled in memory (#1344)
+## Vectors assembled in memory (#1344, #3641)
 
 clang's headers write `_mm512_set1_epi8`, `_mm512_setzero_si512`,
 `_mm512_set_epi64` and their kin as vector compound literals, and the typed
@@ -317,10 +317,9 @@ stream initializes such a literal as an object: each element's store, then one
 load of the whole vector. With the `simd` and `flagged` options, SROA's
 `ir_sroa_assemble` turns that load back into a value before the fields are
 made. It walks each reachable block's loads and stores of the slots that are
-not refused and hold at most 64 bytes, and keeps for each slot the bytes the
-block's stores wrote, which of them are constants', and whether every store
-wrote the same scalar. A vector load whose every byte they wrote becomes, in
-place:
+not refused and hold at most 64 bytes, and keeps the bytes the block's stores
+wrote, which of them are constants', and whether every store wrote the same
+scalar. A vector load whose every byte they wrote becomes:
 
 - an `IR_VCONST` of the bytes, where each is a constant's (read through the
   truncations, extensions and copies the typed stream leaves between a literal
@@ -328,27 +327,75 @@ place:
 - a splat of the scalar, where every store wrote the same one at offsets that
   are multiples of its size. A slot's repeated loads with no store between
   count as one scalar, since the typed stream reads a parameter again for each
-  element.
+  element; or
+- with `IrSroaOptions.construct`, a construction from complete runtime integer
+  lanes and constant lanes. Each byte records its latest defining store, so a
+  lane is accepted only when all its bytes belong to one intact, aligned store
+  of that lane's width. A complete later overwrite is supported; a torn lane
+  or missing byte is refused.
 
 The element stores then reach no load and go with their fields. The walk
 assumes nothing across blocks: a slot that isn't refused has no access but its
 loads and stores, and a dead store's bytes are read by no load, so within a
-block it sees every write of the bytes it decides. A literal whose elements are
-distinct scalars stays in memory. `IrSroaResult.assembled` counts the loads,
-and the C driver's Tier 1 path takes SROA's result when it is nonzero, as when
-a slot was split. `test-ir-inline` runs four fixtures in the typed stream's
-shape through SROA and promotion on both twins and on the interpreter: a splat
-of 64 bytes read from the parameter's object with a second 16-byte load, a
-zeroed object's quadword constants, and two that must stay memory (the
-scalar's object written between its loads, and one lane another scalar's).
+block it sees every write of the bytes it decides. Runtime sources remain SSA
+values in their original order: a volatile read, call or write to a source
+object is not replayed or removed. Volatile construction accesses and an
+escaping construction object remain in memory. The complete-use scan precedes
+rewriting; remaining loads or out-of-bounds accesses prevent removal of a
+construction object's stores. This also permits zero-initializing eightbyte
+stores followed by narrower integer lane stores without treating their dead
+overlap as a live field.
+
+The runtime recipe uses existing IR and selection rules. A low integer scalar
+with a zero tail is bitcast to its scalar SSE carrier and widened directly
+(byte and word values are zero-extended first). Other constructions build
+independent 16-byte pieces with lane inserts, then join them with a balanced
+tree of widening and half insertion. Empty upper halves need only widening.
+Constant lanes in these mixed constructions use scalar constants and lane
+inserts; the optimizer may fold a wholly constant piece to an `IR_VCONST`.
+The existing all-constant and splat paths are unchanged, and Tier 1's literal
+pool handles nonuniform vector constants (#2744).
+
+The C driver and inline expander enable runtime construction only at output
+targets with AVX512F, AVX512BW, AVX512DQ and AVX512VL, which the existing lane
+and width selection rules require. Other targets retain the memory path.
+The default C path also visits a source vector function's local construction
+slots when no inline expansion runs, including `noinline` functions and
+`--tier1-passes=-inline`; ordinary scalar functions do not enter this extra
+path. Byte-source tables are allocated only for eligible vector-load slots,
+and construction recipes only for candidate loads. `IrSroaResult.assembled`
+counts recovered loads; the C driver takes a nonzero result as it does a split
+slot.
+
+`test-ir-inline` checks the original constant/splat fixtures and a matrix of
+1-, 2-, 4- and 8-byte integer lanes at 16, 32 and 64 vector bytes. It compares
+the original, reconstructed and promoted functions against independently
+expected bytes, including zero tails, alternating/distinct inputs, constants,
+store-order changes, full overwrites, source effects, conservative refusals,
+disabled construction, and arena rollback. The source regression in
+`tests/driver/tier1_patterns.c` compiles the vector constructors separately for
+Zen 5 with strict Tier 1 and verifies the selection report. It links them to
+an independent byte/effect oracle, also runs the same source through Clang,
+and checks the pure constructors for one vector output store and no temporary
+memory construction or call. Nine pure constructors have no stack access;
+the eight-distinct-input case may save and reload only its output pointer,
+matched at the same stack address and used by the final store. Its eight
+scalar inputs otherwise occupy all available general registers. An
+always-inline helper checks the expanded path. A second constructor compile
+with `--tier1-passes=-inline` checks the ordinary path, including the same
+bytes/effects and pure shapes; the deliberately uninlined helper caller keeps
+its semantic check. The older scalar pattern fixtures keep their original
+output target.
 
 On the compiler's own lexer by `--tier1`, `c_tokenize` went from 30.20 to
 14.62 instructions per byte on a 9,076-byte file (clang -O2: 3.06), every
 instruction counted; the record is
 [buster-performance's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-vector-lexer-breakdown-1344-2026-11-14).
-What it leaves are true constants that Tier 1's constant rule still builds
-below `rsp` (#2744), but for those whose quadwords are one value, which are a
-`mov` and a `vpbroadcastq` at EVEX targets (13.46 instructions per byte).
+At that revision the remaining true constants still built below `rsp`,
+except those whose quadwords were one value: a `mov` and a `vpbroadcastq` at
+EVEX targets (13.46 instructions per byte). #2744 subsequently added literal
+pool loads for the other vector constants. These historical lexer measurements
+are not measurements of #3641's runtime construction change.
 
 ## Register-class aggregates in registers (#3311)
 

@@ -371,10 +371,10 @@ static void ir_inline_assembled_line(char* text, uint64_t capacity, uint64_t* le
 // - kind 0, a splat: 64 bytes, each a load of the parameter's object (the typed stream reads a local again for each
 //   use), and a second load of 16 of the object's bytes, stored at p + 128;
 // - kind 1, a constant: the object zeroed by quadwords, then eight quadword constants;
-// - kind 2, quadwords with the parameter's object written between the fourth and the fifth load: two scalars, so the
-//   vector stays in memory;
-// - kind 3, quadwords of which the first is another scalar: memory too.
-// Each runs on the interpreter before SROA and after promotion, on both twins, against the bytes computed here.
+// - kind 2, quadwords with the parameter's object written between the fourth and the fifth load: two scalar values;
+// - kind 3, quadwords of which the first is another scalar.
+// #3641 assembles the two nonuniform forms too. Each runs on the interpreter before SROA and after promotion,
+// against the bytes computed here; a mutation of the scalar's object must keep the earlier lanes' original value.
 static void ir_inline_test_assembled(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     for (uint32_t kind = 0; kind < 4; kind += 1)
@@ -475,6 +475,7 @@ static void ir_inline_test_assembled(IrInlineTest* test, Arena* input, Arena* ou
             IrSroaOptions sroa = ir_sroa_options();
             sroa.simd = true;
             sroa.flagged = true;
+            sroa.construct = kind >= 2;
             IrSroaResult split = { 0 };
             const IrCheck checked = ir_optimize_sroa(&function, output, scratch, sroa, &split);
             IrFunction promoted = { 0 };
@@ -482,7 +483,7 @@ static void ir_inline_test_assembled(IrInlineTest* test, Arena* input, Arena* ou
             ir_inline_test_expect(test, checked.error == IR_OK && promotion.error == IR_OK, "SROA and promotion take an assembled vector's function");
             if (checked.error == IR_OK && promotion.error == IR_OK)
             {
-                ir_inline_test_expect(test, split.assembled == (kind == 0 ? 2u : kind == 1 ? 1u : 0u), "the block's stores decide a vector load where they are constants or one scalar, and only there");
+                ir_inline_test_expect(test, split.assembled == (kind == 0 ? 2u : 1u), "the block's stores decide constant, uniform and distinct-scalar vector loads");
                 if (kind == 0)
                 {
                     // The parameter's load, two splats of it and their stores.
@@ -499,7 +500,8 @@ static void ir_inline_test_assembled(IrInlineTest* test, Arena* input, Arena* ou
                 }
                 else
                 {
-                    ir_inline_test_expect(test, ir_inline_simd_count(&promoted, IR_VCONST) == 0 && ir_inline_simd_count(&promoted, IR_INTRINSIC) == 0, "two scalars' lanes stay stores and a load");
+                    ir_inline_test_expect(test, promoted.slot_count == 0 && ir_inline_simd_count(&promoted, IR_LOAD) == 2 && ir_inline_simd_count(&promoted, IR_STORE) == 1,
+                                          "distinct scalars' lanes have no construction stores or vector reload");
                 }
                 ir_inline_test_expect(test, ir_inline_simd_run(&promoted, 1, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0, "the promoted function runs as the fixture");
             }
@@ -510,10 +512,428 @@ static void ir_inline_test_assembled(IrInlineTest* test, Arena* input, Arena* ou
     }
 }
 
+enum
+{
+    IR_INLINE_CONSTRUCT_ZERO_TAIL,
+    IR_INLINE_CONSTRUCT_ALTERNATING,
+    IR_INLINE_CONSTRUCT_MIXED,
+    IR_INLINE_CONSTRUCT_DISTINCT,
+    IR_INLINE_CONSTRUCT_REVERSED,
+    IR_INLINE_CONSTRUCT_OVERWRITE,
+    IR_INLINE_CONSTRUCT_CALL_SOURCE,
+    IR_INLINE_CONSTRUCT_VOLATILE_SOURCE,
+    IR_INLINE_CONSTRUCT_OVERLAP,
+    IR_INLINE_CONSTRUCT_INCOMPLETE,
+    IR_INLINE_CONSTRUCT_VOLATILE_STORE,
+    IR_INLINE_CONSTRUCT_VOLATILE_LOAD,
+    IR_INLINE_CONSTRUCT_ESCAPE,
+    IR_INLINE_CONSTRUCT_PREDECESSOR,
+    IR_INLINE_CONSTRUCT_COUNT,
+};
+
+#define BUSTER_IR_INLINE_CONSTRUCT_REPLACEMENT UINT64_C(0xfedcba9876543210)
+
+// #3641: the typed stream's zeroing and scalar stores for each integer width and native vector size. The parameter
+// supplies the lanes, and p + 64 receives the vector. The callee mutates either p (the construction slot stays
+// private) or the slot (an escape). Source loads on either side of a call must retain their own SSA values.
+static bool ir_inline_constructed_fixture(IrInlineTest* test, uint32_t kind, uint32_t lane_bytes, uint32_t vector_bytes, Arena* input, Arena* scratch, IrFunction* functions)
+{
+    enum { CAPACITY = 24576 };
+    char text[CAPACITY];
+    uint64_t length = 0;
+    uint32_t next = 2;
+    const uint32_t lanes = vector_bytes / lane_bytes;
+    const char* lane_type = lane_bytes == 1 ? "i8" : lane_bytes == 2 ? "i16" : lane_bytes == 4 ? "i32" : "i64";
+    const char* vector_type = vector_bytes == 16 ? "v4i32" : vector_bytes == 32 ? "v8i32" : "v16i32";
+    ir_inline_assembled_line(text, CAPACITY, &length, "function (ptr) -> void {\n  slot $0 size=%u align=64 type=void flags=0x01\nb0:\n  %%0 = param.ptr 0\n  %%1 = stack_addr.ptr $0\n", vector_bytes);
+    if (kind != IR_INLINE_CONSTRUCT_INCOMPLETE)
+    {
+        ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = const.i64 0x00000000000000000000000000000000\n", next);
+        const uint32_t zero = next++;
+        for (uint32_t offset = 0; offset < vector_bytes; offset += 8)
+        {
+            ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = address.ptr %%1 offset=%u\n  %%%u = store.void %%%u, %%%u align=8\n", next, offset, next + 1, next, zero);
+            next += 2;
+        }
+    }
+    const uint32_t stores = kind == IR_INLINE_CONSTRUCT_ZERO_TAIL ? 1 : kind == IR_INLINE_CONSTRUCT_INCOMPLETE ? lanes - 1 : lanes;
+    for (uint32_t at = 0; at < stores; at += 1)
+    {
+        const uint32_t lane = kind == IR_INLINE_CONSTRUCT_REVERSED ? lanes - at - 1 : at;
+        if (kind == IR_INLINE_CONSTRUCT_CALL_SOURCE && at == lanes / 2)
+        {
+            ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = call.void @2(%%0) fixed=(ptr) variadic=0\n", next++);
+        }
+        if (kind == IR_INLINE_CONSTRUCT_VOLATILE_SOURCE && at == lanes / 2)
+        {
+            ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = const.i64 0x0000000000000000%016" PRIx64 "\n  %%%u = store.void %%0, %%%u align=1 volatile\n", next,
+                                     BUSTER_IR_INLINE_CONSTRUCT_REPLACEMENT, next + 1, next);
+            next += 2;
+        }
+        uint32_t value = next;
+        if (kind == IR_INLINE_CONSTRUCT_MIXED && lane % 3 != 0)
+        {
+            const uint64_t mask = lane_bytes == 8 ? UINT64_MAX : (UINT64_C(1) << (lane_bytes * 8)) - 1;
+            const uint64_t bits = lane % 3 == 1 ? UINT64_C(0xe5a43c9627180bf0) ^ (lane * UINT64_C(0x0101010101010101)) : 0;
+            ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = const.%s 0x0000000000000000%016" PRIx64 "\n", next++, lane_type, bits & mask);
+        }
+        else
+        {
+            const uint32_t offset = kind == IR_INLINE_CONSTRUCT_ALTERNATING ? (lane & 1) * 8 : kind == IR_INLINE_CONSTRUCT_CALL_SOURCE || kind == IR_INLINE_CONSTRUCT_VOLATILE_SOURCE ? 0 : lane * lane_bytes;
+            ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = address.ptr %%0 offset=%u\n  %%%u = load.%s %%%u align=1%s\n", next, offset, next + 1, lane_type, next,
+                                     kind == IR_INLINE_CONSTRUCT_VOLATILE_SOURCE ? " volatile" : "");
+            value = next + 1;
+            next += 2;
+        }
+        ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = address.ptr %%1 offset=%u\n  %%%u = store.void %%%u, %%%u align=1%s\n", next, lane * lane_bytes, next + 1, next, value,
+                                 kind == IR_INLINE_CONSTRUCT_VOLATILE_STORE && at == 0 ? " volatile" : "");
+        next += 2;
+    }
+    if (kind == IR_INLINE_CONSTRUCT_OVERWRITE || kind == IR_INLINE_CONSTRUCT_OVERLAP)
+    {
+        const bool overlap = kind == IR_INLINE_CONSTRUCT_OVERLAP;
+        ir_inline_assembled_line(text, CAPACITY, &length,
+                                 "  %%%u = address.ptr %%0 offset=%u\n  %%%u = load.%s %%%u align=1\n  %%%u = address.ptr %%1 offset=%u\n  %%%u = store.void %%%u, %%%u align=1\n",
+                                 next, overlap ? 24 : 0, next + 1, overlap ? "i64" : lane_type, next, next + 2, overlap ? 1 : (lanes / 2) * lane_bytes, next + 3, next + 2, next + 1);
+        next += 4;
+    }
+    if (kind == IR_INLINE_CONSTRUCT_ESCAPE)
+    {
+        ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = call.void @2(%%1) fixed=(ptr) variadic=0\n", next++);
+    }
+    if (kind == IR_INLINE_CONSTRUCT_PREDECESSOR)
+    {
+        ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = br.void b1\nb1:\n", next++);
+    }
+    ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = load.%s %%1 align=64%s\n  %%%u = address.ptr %%0 offset=64\n  %%%u = store.void %%%u, %%%u align=1\n  %%%u = ret.void\n}\n",
+                             next, vector_type, kind == IR_INLINE_CONSTRUCT_VOLATILE_LOAD ? " volatile" : "", next + 1, next + 2, next + 1, next, next + 3);
+    ir_inline_test_expect(test, length < CAPACITY, "a runtime construction fixture fits its bounded text");
+    bool good = length < CAPACITY && ir_inline_simd_parse(test, text, input, scratch, &functions[0]);
+    if (good && (kind == IR_INLINE_CONSTRUCT_CALL_SOURCE || kind == IR_INLINE_CONSTRUCT_ESCAPE))
+    {
+        static const char callee[] =
+            "function (ptr) -> void {\n"
+            "b0:\n"
+            "  %0 = param.ptr 0\n"
+            "  %1 = const.i64 0x0000000000000000fedcba9876543210\n"
+            "  %2 = store.void %0, %1 align=1\n"
+            "  %3 = ret.void\n"
+            "}\n";
+        good = ir_inline_simd_parse(test, callee, input, scratch, &functions[1]);
+    }
+    return good;
+}
+
+// The fixture's bytes, independent of SROA's lane recipes. No execution invents values for the incomplete fixture.
+static void ir_inline_constructed_expected(uint32_t kind, uint32_t lane_bytes, uint32_t vector_bytes, const uint8_t* seed, uint8_t* expected)
+{
+    memcpy(expected, seed, 128);
+    memset(expected + 128, 0x5a, 64);
+    const uint32_t lanes = vector_bytes / lane_bytes;
+    const uint64_t replacement = BUSTER_IR_INLINE_CONSTRUCT_REPLACEMENT;
+    for (uint32_t lane = 0; lane < lanes; lane += 1)
+    {
+        uint64_t constant = 0;
+        const uint8_t* source = seed + lane * lane_bytes;
+        if (kind == IR_INLINE_CONSTRUCT_ZERO_TAIL && lane != 0)
+        {
+            source = (const uint8_t*)&constant;
+        }
+        else if (kind == IR_INLINE_CONSTRUCT_ALTERNATING)
+        {
+            source = seed + (lane & 1) * 8;
+        }
+        else if (kind == IR_INLINE_CONSTRUCT_MIXED && lane % 3 != 0)
+        {
+            constant = lane % 3 == 1 ? UINT64_C(0xe5a43c9627180bf0) ^ (lane * UINT64_C(0x0101010101010101)) : 0;
+            source = (const uint8_t*)&constant;
+        }
+        else if (kind == IR_INLINE_CONSTRUCT_CALL_SOURCE || kind == IR_INLINE_CONSTRUCT_VOLATILE_SOURCE)
+        {
+            source = lane < lanes / 2 ? seed : (const uint8_t*)&replacement;
+        }
+        memcpy(expected + 64 + lane * lane_bytes, source, lane_bytes);
+    }
+    if (kind == IR_INLINE_CONSTRUCT_OVERWRITE)
+    {
+        memcpy(expected + 64 + (lanes / 2) * lane_bytes, seed, lane_bytes);
+    }
+    if (kind == IR_INLINE_CONSTRUCT_OVERLAP)
+    {
+        memcpy(expected + 65, seed + 24, 8);
+    }
+    if (kind == IR_INLINE_CONSTRUCT_ESCAPE)
+    {
+        memcpy(expected + 64, &replacement, 8);
+    }
+    if (kind == IR_INLINE_CONSTRUCT_CALL_SOURCE || kind == IR_INLINE_CONSTRUCT_VOLATILE_SOURCE)
+    {
+        memcpy(expected, &replacement, 8);
+    }
+}
+
+static void ir_inline_constructed_short_arenas(IrInlineTest* test, const IrFunction* function, Arena* output, Arena* scratch, uint64_t required)
+{
+    IrSroaOptions options = ir_sroa_options();
+    options.simd = true;
+    options.flagged = true;
+    options.construct = true;
+    const uint64_t scratch_mark = scratch->length;
+    const uint64_t output_limits[] = {
+        0,
+        1,
+        required / 2,
+        required - 1,
+        required,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(output_limits); i += 1)
+    {
+        Arena limited = *output;
+        limited.capacity = output_limits[i];
+        IrSroaResult result = { .assembled = 3641 };
+        uint8_t saved[sizeof(result)];
+        memcpy(saved, &result, sizeof(result));
+        const IrCheck check = ir_optimize_sroa(function, &limited, scratch, options, &result);
+        // Verification borrows the output arena beyond the resident result, so even `required` can be too short.
+        const bool good = check.error == IR_OK ? output_limits[i] >= required && result.assembled == 1 :
+                                                check.error == IR_ERROR_MEMORY && limited.length == 0 && memcmp(&result, saved, sizeof(result)) == 0;
+        ir_inline_test_expect(test, good && scratch->length == scratch_mark, "runtime assembly's short output rolls back or succeeds completely");
+    }
+    for (uint64_t available = 0; available < (UINT64_C(1) << 17); available = available == 0 ? 1 : available * 2)
+    {
+        Arena limited = *scratch;
+        limited.capacity = scratch_mark + available;
+        IrSroaResult result = { .assembled = 3641 };
+        uint8_t saved[sizeof(result)];
+        memcpy(saved, &result, sizeof(result));
+        const IrCheck check = ir_optimize_sroa(function, output, &limited, options, &result);
+        const bool good = check.error == IR_OK ? result.assembled == 1 : check.error == IR_ERROR_MEMORY && output->length == 0 && memcmp(&result, saved, sizeof(result)) == 0;
+        ir_inline_test_expect(test, good && limited.length == scratch_mark, "runtime assembly's short scratch rolls back arenas and result");
+        arena_pop_to(output, 0);
+    }
+}
+
+static void ir_inline_test_constructed(IrInlineTest* test, Arena* input, Arena* output, Arena* promoted_arena, Arena* scratch)
+{
+    // Keep the pre-existing inliner's frozen random stream unchanged.
+    IrInlineTest values = { .random = 3641 };
+    for (uint32_t lane_bytes = 1; lane_bytes <= 8; lane_bytes *= 2)
+    {
+        for (uint32_t vector_bytes = 16; vector_bytes <= 64; vector_bytes *= 2)
+        {
+            for (uint32_t kind = 0; kind < IR_INLINE_CONSTRUCT_COUNT; kind += 1)
+            {
+                IrFunction functions[2] = { 0 };
+                if (ir_inline_constructed_fixture(test, kind, lane_bytes, vector_bytes, input, scratch, functions))
+                {
+                    const uint32_t count = kind == IR_INLINE_CONSTRUCT_CALL_SOURCE || kind == IR_INLINE_CONSTRUCT_ESCAPE ? 2 : 1;
+                    const bool assemble = kind < IR_INLINE_CONSTRUCT_OVERLAP;
+                    IrSroaOptions options = ir_sroa_options();
+                    options.simd = true;
+                    options.flagged = true;
+                    options.construct = true;
+                    IrSroaResult split = { 0 };
+                    const IrCheck check = ir_optimize_sroa(&functions[0], output, scratch, options, &split);
+                    IrFunction promoted = { 0 };
+                    const IrCheck promotion = check.error == IR_OK ? ssa_ir_promote(&split.function, promoted_arena, scratch, &promoted) : check;
+                    const bool transformed = check.error == IR_OK && promotion.error == IR_OK;
+                    ir_inline_test_expect(test, transformed, "runtime construction passes SROA and promotion with verified SSA");
+                    if (transformed)
+                    {
+                        uint32_t vector_loads = 0;
+                        uint32_t observable_before = 0;
+                        uint32_t observable_after = 0;
+                        for (uint32_t i = 0; i < functions[0].instruction_count; i += 1)
+                        {
+                            observable_before += (functions[0].op[i] == IR_LOAD || functions[0].op[i] == IR_STORE) && (functions[0].flags[i] & BUSTER_IR_OBSERVABLE) != 0;
+                        }
+                        for (uint32_t i = 0; i < promoted.instruction_count; i += 1)
+                        {
+                            vector_loads += promoted.op[i] == IR_LOAD && ir_vector_type(promoted.type[i]);
+                            observable_after += (promoted.op[i] == IR_LOAD || promoted.op[i] == IR_STORE) && (promoted.flags[i] & BUSTER_IR_OBSERVABLE) != 0;
+                        }
+                        const bool shape = split.assembled == (assemble ? 1u : 0u) && vector_loads == (assemble ? 0u : 1u) &&
+                                           (!assemble || (promoted.slot_count == 0 && ir_inline_simd_count(&promoted, IR_STORE) == (kind == IR_INLINE_CONSTRUCT_VOLATILE_SOURCE ? 2u : 1u)));
+                        ir_inline_test_expect(test, shape, "complete runtime lanes construct in registers; escapes, torn lanes, incomplete and cross-block definitions stay conservative");
+                        if (!shape && test->failures <= 12)
+                        {
+                            fprintf(stderr, "ir-inline: construction kind=%u lane=%u bytes=%u assembled=%u slots=%u vector-loads=%u\n", kind, lane_bytes, vector_bytes, split.assembled, promoted.slot_count, vector_loads);
+                        }
+                        ir_inline_test_expect(test, observable_before == observable_after && ir_inline_simd_count(&functions[0], IR_CALL) == ir_inline_simd_count(&promoted, IR_CALL),
+                                              "runtime construction retains every observable access and call");
+                        for (uint32_t trial = 0; trial < 6 && kind != IR_INLINE_CONSTRUCT_INCOMPLETE; trial += 1)
+                        {
+                            uint8_t seed[128];
+                            for (uint32_t i = 0; i < sizeof(seed); i += 1)
+                            {
+                                seed[i] = trial == 0 ? 0 : trial == 1 ? 0xff : trial == 2 ? (uint8_t)(0x80 + i * 13) : (uint8_t)ir_inline_test_random(&values);
+                            }
+                            uint8_t expected[192];
+                            uint8_t bytes[192];
+                            ir_inline_constructed_expected(kind, lane_bytes, vector_bytes, seed, expected);
+                            ir_inline_test_expect(test, ir_inline_simd_run(functions, count, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
+                                                  "runtime construction's input has the independently expected lane bytes and effects");
+                            const IrFunction split_functions[2] = {
+                                split.function,
+                                functions[1],
+                            };
+                            ir_inline_test_expect(test, ir_inline_simd_run(split_functions, count, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
+                                                  "SROA preserves runtime lane bytes and intervening effects");
+                            const IrFunction promoted_functions[2] = {
+                                promoted,
+                                functions[1],
+                            };
+                            ir_inline_test_expect(test, ir_inline_simd_run(promoted_functions, count, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
+                                                  "promoted runtime construction preserves lane order, zero tails and effects");
+                        }
+                    }
+                    const uint64_t required = output->length;
+                    arena_pop_to(promoted_arena, 0);
+                    arena_pop_to(output, 0);
+                    if (transformed && required != 0 && lane_bytes == 8 && vector_bytes == 64 && kind == IR_INLINE_CONSTRUCT_DISTINCT)
+                    {
+                        ir_inline_constructed_short_arenas(test, &functions[0], output, scratch, required);
+                    }
+                    if (transformed && lane_bytes == 8 && vector_bytes == 64 && (kind == IR_INLINE_CONSTRUCT_MIXED || kind == IR_INLINE_CONSTRUCT_DISTINCT))
+                    {
+                        options.construct = false;
+                        IrSroaResult refused = { 0 };
+                        const IrCheck gated = ir_optimize_sroa(&functions[0], output, scratch, options, &refused);
+                        ir_inline_test_expect(test, !ir_sroa_options().construct && gated.error == IR_OK && refused.assembled == 0 && refused.function.slot_count == 1,
+                                              "runtime construction requires the target's explicit construction option");
+                        arena_pop_to(output, 0);
+                    }
+                }
+                arena_pop_to(input, 0);
+            }
+        }
+    }
+}
+
+// Call descriptors may be shared: three instructions can name the same one-entry table. Expansion emits a descriptor
+// per instruction, so it must count instructions rather than reuse that table's size. Three descriptors cross the
+// old allocation's 64-byte alignment into its following constants; the scalar stored at p + 48 keeps that observable.
+static void ir_inline_test_constructed_shared_calls(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    static const char caller_text[] =
+        "function (ptr) -> void {\n"
+        "  slot $0 size=16 align=16 type=void flags=0x01\n"
+        "b0:\n"
+        "  %0 = param.ptr 0\n"
+        "  %1 = const.i64 0x00000000000000000123456789abcdef\n"
+        "  %2 = stack_addr.ptr $0\n"
+        "  %3 = load.i64 %0 align=1\n"
+        "  %4 = store.void %2, %3 align=1\n"
+        "  %5 = const.i64 0x0000000000000000fedcba9876543210\n"
+        "  %6 = address.ptr %2 offset=8\n"
+        "  %7 = store.void %6, %5 align=1\n"
+        "  %8 = load.v4i32 %2 align=16\n"
+        "  %9 = call.void @2(%0) fixed=(ptr) variadic=0\n"
+        "  %10 = call.void @2(%0) fixed=(ptr) variadic=0\n"
+        "  %11 = call.void @2(%0) fixed=(ptr) variadic=0\n"
+        "  %12 = address.ptr %0 offset=48\n"
+        "  %13 = store.void %12, %1 align=1 volatile\n"
+        "  %14 = address.ptr %0 offset=64\n"
+        "  %15 = store.void %14, %8 align=1\n"
+        "  %16 = ret.void\n"
+        "}\n";
+    static const char callee_text[] =
+        "function (ptr) -> void {\n"
+        "b0:\n"
+        "  %0 = param.ptr 0\n"
+        "  %1 = load.i64 %0 align=1 volatile\n"
+        "  %2 = const.i64 0x00000000000000000000000000000001\n"
+        "  %3 = add.i64 %1, %2\n"
+        "  %4 = store.void %0, %3 align=1 volatile\n"
+        "  %5 = address.ptr %0 offset=8\n"
+        "  %6 = load.i64 %5 align=1 volatile\n"
+        "  %7 = const.i64 0x00000000000000000000000000000008\n"
+        "  %8 = shl.i64 %6, %7\n"
+        "  %9 = const.i64 0x000000000000000000000000000000ff\n"
+        "  %10 = and.i64 %3, %9\n"
+        "  %11 = or.i64 %8, %10\n"
+        "  %12 = store.void %5, %11 align=1 volatile\n"
+        "  %13 = ret.void\n"
+        "}\n";
+    IrFunction functions[2] = { 0 };
+    if (ir_inline_simd_parse(test, caller_text, input, scratch, &functions[0]) && ir_inline_simd_parse(test, callee_text, input, scratch, &functions[1]))
+    {
+        functions[0].b[10] = functions[0].b[9];
+        functions[0].b[11] = functions[0].b[9];
+        functions[0].call_count = 1;
+        ir_inline_test_expect(test, ir_verify(&functions[0], scratch, NULL).error == IR_OK, "three calls sharing one descriptor are valid input IR");
+        IrSroaOptions options = ir_sroa_options();
+        options.simd = true;
+        options.flagged = true;
+        options.construct = true;
+        IrSroaResult split = { 0 };
+        const IrCheck check = ir_optimize_sroa(&functions[0], output, scratch, options, &split);
+        IrFunction promoted = { 0 };
+        const IrCheck promotion = check.error == IR_OK ? ssa_ir_promote(&split.function, twin, scratch, &promoted) : check;
+        const bool transformed = check.error == IR_OK && promotion.error == IR_OK;
+        ir_inline_test_expect(test, transformed, "runtime construction allocates complete metadata for shared-descriptor calls");
+        if (transformed)
+        {
+            ir_inline_test_expect(test, split.assembled == 1 && promoted.slot_count == 0 && split.function.call_count == 3 && promoted.call_count == 3 &&
+                                      ir_inline_simd_count(&split.function, IR_CALL) == 3 && ir_inline_simd_count(&promoted, IR_CALL) == 3 &&
+                                      ir_verify(&split.function, scratch, NULL).error == IR_OK && ir_verify(&promoted, scratch, NULL).error == IR_OK,
+                                  "construction keeps all three calls with valid expanded descriptors");
+            IrInlineTest values = { .random = 3642 };
+            for (uint32_t trial = 0; trial < 6; trial += 1)
+            {
+                uint8_t seed[128];
+                for (uint32_t i = 0; i < sizeof(seed); i += 1)
+                {
+                    seed[i] = trial == 0 ? 0 : trial == 1 ? 0xff : trial == 2 ? (uint8_t)(0x80 + i * 13) : (uint8_t)ir_inline_test_random(&values);
+                }
+                uint8_t expected[192];
+                memcpy(expected, seed, 128);
+                memset(expected + 128, 0x5a, 64);
+                uint64_t counter = 0;
+                uint64_t trace = 0;
+                memcpy(&counter, seed, 8);
+                memcpy(&trace, seed + 8, 8);
+                for (uint32_t call = 0; call < 3; call += 1)
+                {
+                    counter += 1;
+                    trace = (trace << 8) | (counter & 0xff);
+                }
+                const uint64_t guard = UINT64_C(0x0123456789abcdef);
+                const uint64_t lane = BUSTER_IR_INLINE_CONSTRUCT_REPLACEMENT;
+                memcpy(expected, &counter, 8);
+                memcpy(expected + 8, &trace, 8);
+                memcpy(expected + 48, &guard, 8);
+                memcpy(expected + 64, seed, 8);
+                memcpy(expected + 72, &lane, 8);
+                uint8_t bytes[192];
+                ir_inline_test_expect(test, ir_inline_simd_run(functions, 2, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
+                                      "shared calls' input has the independently expected bytes and effect trace");
+                const IrFunction split_functions[2] = {
+                    split.function,
+                    functions[1],
+                };
+                ir_inline_test_expect(test, ir_inline_simd_run(split_functions, 2, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
+                                      "construction preserves shared calls, vector bytes, scalar constants and effect trace");
+                const IrFunction promoted_functions[2] = {
+                    promoted,
+                    functions[1],
+                };
+                ir_inline_test_expect(test, ir_inline_simd_run(promoted_functions, 2, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
+                                      "promotion preserves shared calls' bytes and effect trace");
+            }
+        }
+        arena_pop_to(twin, 0);
+        arena_pop_to(output, 0);
+    }
+    arena_pop_to(input, 0);
+}
+
 static void ir_inline_test_simd(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     ir_inline_test_by_value(test, input, output, twin, scratch);
     ir_inline_test_rows(test, input, output, twin, scratch);
     ir_inline_test_permute2(test, input, output, twin, scratch);
     ir_inline_test_assembled(test, input, output, twin, scratch);
+    ir_inline_test_constructed(test, input, output, twin, scratch);
+    ir_inline_test_constructed_shared_calls(test, input, output, twin, scratch);
 }
