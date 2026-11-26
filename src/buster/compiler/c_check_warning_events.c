@@ -699,6 +699,9 @@ typedef enum CheckWarningEventKind
     // T from smaller integer type S", payload.second_type the cast's type (its value type, unqualified) and payload.data its
     // typedef's spelling, payload.first_type the operand's type after its lvalue conversion and payload.name its spelling.
     CHECK_WARNING_EVENT_INT_TO_POINTER_CAST,
+    // A braced initializer's pointer conversion (#3563). first_type is the destination, second_type the source
+    // before decay, data its graph node, token the initializer's first token, detail the selected member (or 0).
+    CHECK_WARNING_EVENT_INITIALIZER_POINTER,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

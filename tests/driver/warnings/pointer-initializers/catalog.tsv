@@ -1,0 +1,15 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+report	report.c	8	1	2	-	-	discarded qualifiers remain visible around a nonconstant static initializer
+report-c23	report.c	8	1	2	c23	-	C23 discarded qualifiers remain visible around a nonconstant static initializer
+aggregates	aggregates.c	7	0	0	-	-	braced scalar array and member pointer conversions retain their warnings
+aggregates-c23	aggregates.c	7	0	0	c23	-	C23 braced scalar array and member pointer conversions retain their warnings
+calls	calls.c	4	0	4	-	-	array argument replay preserves inherited qualifiers
+calls-c23	calls.c	4	0	4	c23	-	C23 array argument replay preserves inherited qualifiers
+spelling	spelling.c	7	0	0	-	-	initializer warnings preserve source and destination typedef spelling
+spelling-c23	spelling.c	7	0	0	c23	-	C23 initializer warnings preserve source and destination typedef spelling
+positions	positions.c	5	0	2	-	-	parenthesized arithmetic and macro elements keep their original locations
+policy	policy.c	2	0	0	-	-	source policy suppresses only the selected qualifier warning
+ranges	ranges.c	2	0	0	-	-	GNU ranges and compound literal revisits retain one warning per source
+pointer-sign	pointer-sign.c	3	0	0	-	-	pointer sign and nested qualifier diagnostics share initializer retention
+controls	controls.c	0	0	0	-	-	qualification additions matching pointers explicit casts and null stay quiet

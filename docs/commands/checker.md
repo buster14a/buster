@@ -269,8 +269,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   The shared harness checks suppression/promotion, scalar/default readers, one/three
   requested lanes, syntax/object modes, rejected-output preservation and accepted object twins.
   `--initializer-diagnostics-only` runs the runtime `tests/checker/initializer-comma/`
-  catalogue alone in GNU17 and C23 (#2441). It compares complete Clang diagnostics
-  and exit status for multiple incompatible elements, independent nested excess
+  and `tests/driver/warnings/pointer-initializers/` catalogues in GNU17 and C23 (#2441, #3563).
+  The pointer catalogue covers qualifier loss in braced scalar, array and member initializers,
+  array arguments, typedef spelling, GNU ranges, compound literals, pointer sign and nested
+  qualifiers, with explicit casts, qualification additions and null pointers as quiet controls.
+  Both compare complete Clang diagnostics and exit status. The comma catalogue covers
+  multiple incompatible elements, independent nested excess
   warnings, invalid compound-literal dependencies and atomic conditional deduction.
   The cases retain comma-warning order, matching conditional-arm typedefs,
   later independent errors and accepted sibling values. Command-line and scoped

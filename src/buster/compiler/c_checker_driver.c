@@ -2011,7 +2011,10 @@ static void check_driver_initializer_order(const Parser* parser, Preprocessor* p
 // preserves initializer semantic order alongside new facts; the generic sparse renderer still ignores MESSAGE.
 // The initializers' walk's warnings, and its unavailable members' errors (CHECK_WARNING_EVENT_UNAVAILABLE_USE, #147), which
 // `quiet` (-w) keeps alone: the walk stages them all, whatever the warning options.
-static bool check_driver_initializer_warning_events(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+static bool check_driver_initializer_pointer_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                       const TypeTable* types, const CheckWarningEvent* event, const CheckRepair* repair, Arena* scratch);
+
+static bool check_driver_initializer_warning_events(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                       const CheckWarningEvents* view, const CheckRepair* repair, bool quiet, Arena* scratch)
 {
     bool valid = true;
@@ -2048,6 +2051,10 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                     valid = !pp->diagnostic_collection_failed;
                 }
             }
+        }
+        else if (shown && event->kind == CHECK_WARNING_EVENT_INITIALIZER_POINTER)
+        {
+            valid = check_driver_initializer_pointer_warning(parser, pp, input, stream, types, event, repair, scratch);
         }
         else if (shown && event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE)
         {
@@ -2672,10 +2679,11 @@ static CheckActionResult check_driver_pointer_warning(const TypeTable* types, co
     CheckActionResult result = { 0 };
     const CheckAction action = { .node = node, .context = check_graph_context(graph, node, false) };
     const TypeId target = type_unqualified(type_strip_aligned(types, destination));
-    TypeId source = type_unqualified(type_strip_aligned(types, value->type));
+    // An array's outer qualifiers belong to its element after decay. Keep them until type_element reads them.
+    TypeId source = type_strip_aligned(types, value->type);
     if (type_kind(types, source) == BUSTER_TYPE_KIND_ATOMIC)
     {
-        source = type_unqualified(type_strip_aligned(types, type_element(types, source)));
+        source = type_strip_aligned(types, type_element(types, source));
     }
     const uint8_t kind = type_kind(types, source);
     *nested = false;
@@ -2700,6 +2708,58 @@ static const char* check_driver_pointer_wording(const TypeTable* types, uint32_t
            (nested ? "discards qualifiers in nested pointer types" : "discards qualifiers") : plain_char ?
            "converts between pointers to integer types where one is of the unique plain 'char' type and the other is not" :
            "converts between pointers to integer types with different sign";
+}
+
+// The list walker retained this accepted conversion before checking whether its static value is constant. Render
+// it in the list's semantic order with its original source type, including an array before its implicit decay.
+static bool check_driver_initializer_pointer_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                       const TypeTable* types, const CheckWarningEvent* event, const CheckRepair* repair, Arena* scratch)
+{
+    const uint32_t node = event->payload.data;
+    bool valid = stream != NULL && node < stream->count && event->token < parser->tokens.count && event->completion <= parser->tokens.count;
+    const bool retained = valid && (repair == NULL || check_repair_warning_token(repair, event->token));
+    const CheckWarningSeverity severity = retained ? check_driver_warning_severity(pp, input, event) : CHECK_WARNING_IGNORE;
+    if (severity != CHECK_WARNING_IGNORE)
+    {
+        const uint64_t mark = scratch->length;
+        const uint32_t warning = event->id == CHECK_WARNING_ID_POINTER_SIGN ? CHECK_WARNING_POINTER_SIGN : CHECK_WARNING_DISCARDED_QUALIFIERS;
+        CheckWarningSpelling spell = { .stream = stream };
+        uint32_t declaration = BUSTER_CHECK_NONE;
+        for (uint32_t at = event->payload.token; declaration == BUSTER_CHECK_NONE && at != 0;)
+        {
+            at -= 1;
+            declaration = check_sparse_get(input->initializer_begins, at) == event->payload.token ? at : declaration;
+            if (check_input_declaration_boundary(parser->tree.roles[at]))
+            {
+                break;
+            }
+        }
+        const uint32_t member = event->detail;
+        const uint32_t subject = member != 0 ? check_semantic_member_token(parser, input, types, member) : declaration;
+        const uint32_t target_spelling = subject < input->token_count ? check_input_specifier_spelling(input, parser, subject) : 0;
+        const uint32_t source_spelling = check_driver_pointer_spelling(parser, input, stream, types, node);
+        const String8 target = check_driver_warning_type(parser, pp, input, types, &spell, scratch, event->payload.first_type, target_spelling);
+        const String8 source = check_driver_warning_type(parser, pp, input, types, &spell, scratch, event->payload.second_type, source_spelling);
+        bool nested = false;
+        const CheckValue value = check_stream_value(stream, node);
+        check_driver_pointer_warning(types, stream->graph, node, event->payload.first_type, &value, &nested);
+        valid = source.length != 0 && target.length != 0;
+        if (valid)
+        {
+            const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                           severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+            const uint32_t publication = check_driver_publication_position(parser, pp, event->completion, pp->output.count);
+            const PPDiagnosticRecord* previous = pp->diagnostic_last;
+            pp_diagnose_output_at(pp, disposition, parse_source_index(&parser->tokens, event->token), publication,
+                "initializing %.*s with an expression of type %.*s %s [%s%s]", (int)target.length, target.pointer, (int)source.length, source.pointer,
+                check_driver_pointer_wording(types, warning, nested, event->payload.first_type, event->payload.second_type),
+                check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR), check_warning_descriptions[event->id].option);
+            check_driver_initializer_order(parser, pp, previous, event->token);
+            valid = !pp->diagnostic_collection_failed;
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return valid;
 }
 
 // A conditional's -Wpointer-type-mismatch or -Wconditional-type-mismatch (#2292): clang's words name its arms' types as
@@ -14524,7 +14584,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_driver_rejected_warnings(checking, &input.warning_events, unit_errors, error_counts, scratch, &input_warnings) &&
                         check_driver_unit_end_split(checking, pp, &input_warnings, output_arena, &input_warnings, unit_end_warnings);
                     if (!unit_end_ready ||
-                        !check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
+                        !check_driver_initializer_warning_events(checking, pp, &input, &stream, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
                         !check_driver_reports(checking, recovered, pp, publication_end, &input, reported, &types, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                               NULL, 0, quiet, &shift_warnings, scratch) ||

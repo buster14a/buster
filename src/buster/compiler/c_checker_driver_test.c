@@ -10472,6 +10472,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary && initializer_diagnostics_only)
     {
+        check_test_driver_pointer_initializers(&test, clang, executable, directory);
         check_test_driver_warning_catalog(&test, clang, executable != NULL ? executable : "./build/compiler", directory, "checker/initializer-comma");
         check_test_driver_warning_catalog_run(&test, clang, executable != NULL ? executable : "./build/compiler", directory,
                                                    "checker/initializer-comma", false, true);
@@ -10799,6 +10800,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 .check = check_test_driver_builtin_pointer_sign,
                 .weight = 140,
+            },
+            {
+                .check = check_test_driver_pointer_initializers,
+                .weight = BUSTER_CHECK_DRIVER_UNIT_WEIGHT,
             },
             {
                 .check = check_test_driver_shift_op_parentheses,
