@@ -756,8 +756,10 @@ static void ir_if_convert_test_scans(IrOptimizeTest* test)
                 {
                     const uint32_t row = first + lane;
                     bool match = f->op[row] == key.op;
+                    const uint32_t difference = f->flags[row] ^ key.flags;
+                    const bool copy_hint = (key.op == IR_LOAD || key.op == IR_STORE) && difference == BUSTER_IR_COPY_PIECE;
                     match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_TYPE) == 0 || f->type[row] == key.type);
-                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) == 0 || f->flags[row] == key.flags);
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) == 0 || difference == 0 || copy_hint);
                     match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_A) == 0 || f->a[row] == key.a);
                     match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_B) == 0 || f->b[row] == key.b);
                     match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_C) == 0 || f->c[row] == key.c);
@@ -770,6 +772,29 @@ static void ir_if_convert_test_scans(IrOptimizeTest* test)
     ir_optimize_test_expect(test, candidates, "if-conversion's conditional branches' and narrowing casts' scans, against their definitions");
     ir_optimize_test_expect(test, barriers, "if-conversion's barriers' scan, against its definition");
     ir_optimize_test_expect(test, filters, "if-conversion's keys' filter, against its definition");
+    // Every flag byte, followed by each single-bit difference: accesses match themselves and bit 7 alone; other
+    // operations match only themselves. No other access flag, including an order or segment bit, is metadata.
+    static const uint8_t operations[] = { IR_LOAD, IR_STORE, IR_INTRINSIC };
+    uint8_t op[9];
+    uint8_t flags[9];
+    const IrFunction function = { .op = op, .flags = flags };
+    bool metadata = true;
+    for (uint32_t operation = 0; operation < BUSTER_ARRAY_LENGTH(operations); operation += 1)
+    {
+        memset(op, operations[operation], sizeof(op));
+        for (uint32_t value = 0; value <= UINT8_MAX; value += 1)
+        {
+            flags[0] = (uint8_t)value;
+            for (uint32_t bit = 0; bit < 8; bit += 1)
+            {
+                flags[1 + bit] = (uint8_t)(value ^ (1u << bit));
+            }
+            const IrIfConvertKey key = { .fields = BUSTER_IR_IF_CONVERT_KEY_FLAGS, .op = operations[operation], .flags = (uint8_t)value };
+            const uint32_t expected = operation < 2 ? 0x101u : 1u;
+            metadata &= ir_if_convert_filter(&function, 0, BUSTER_ARRAY_LENGTH(op), key) == expected;
+        }
+    }
+    ir_optimize_test_expect(test, metadata, "if-conversion ignores only access copy provenance and preserves every other flag bit");
 }
 
 // Both triangle orientations, both operand orders, and a second phi that also needs the arm's original value.

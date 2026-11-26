@@ -125,7 +125,7 @@ static void tier1_pipeline_copy_source(Tier1PipelineTest* test, const char* clan
                                           s == 0 ? "the 64-byte local copy has four paired high-half loads at every target" :
                                           s == 1 ? "the cached candidate's own code pairs on an owned copy of its scalar summary" :
                                           s == 2 ? "the caller expands the unchanged scalar summary and SROA removes unread fields before pairing" :
-                                                   "paired loads with unused results still emit through the reserved vector scratch");
+                                                   "paired copies to an unobserved aggregate destination still emit");
                 if (!ok)
                 {
                     fprintf(stderr, "copy-halves: %s has %u high-half loads in %s (expected %u), %u cached calls\n",

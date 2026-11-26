@@ -64,8 +64,8 @@
 
 COPY_SIZES(DEFINE_COPY)
 
-// Final dead-store elimination can leave a paired load whose value is unused. Its accesses still need emission,
-// using the reserved vector scratch register. An opaque call keeps the source's bytes in its frame object.
+// An unobserved aggregate destination still exercises paired-copy emission. An opaque call keeps the source's
+// bytes in its frame object rather than replacing them with their initial values.
 __attribute__((noinline)) void copy_unused_64(unsigned long seed)
 {
     struct Copy64 local;
