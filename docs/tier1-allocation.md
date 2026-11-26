@@ -831,7 +831,7 @@ to 20 and the default, every mutant fails the checker.
 
 Tier 1's CFG consumer gives `F32` and `F64` values the second class, the vector
 registers: xmm0 to xmm14, with xmm15 the class's scratch for cycles and
-slot-to-slot moves (`BUSTER_TIER1_EMIT_VECTOR_REGISTERS`, or the
+slot-to-slot moves (`BUSTER_TIER1_EMIT_LOW_VECTOR_REGISTERS`, or the
 `Tier1EmitOptions.vector_register_mask` of them, which the tests narrow to force
 spills). A value's slot is its width, which `movss` or `movsd` spills and reloads,
 and a move between two registers is a `movaps`, which copies the whole register
@@ -847,12 +847,23 @@ recipes don't make.
 The IR's vectors (#141), `v4i32`, `v8i32` and `v16i32`, are the class's values
 too, at their widths, 16, 32 and 64 bytes: a vector's slot is its bytes, aligned
 to 16 at most, which `vmovdqu32` of its width spills and reloads, and a move
-between two registers is a `vmovdqa64` of its ymm or zmm register (a 16-byte
-one's a `movaps`). In a function with vectors, the class's call-save rows and
+between two registers is a `vmovdqa64` at its width (a 16-byte one's a `movaps`
+when both registers are low). In a function with vectors, the class's call-save rows and
 its temporary slot take the widest vector's bytes: the saves around a call move
 a register's whole widest vector (`Tier1EmitPrepared.vector_bytes`), and the
 temporary slot fits any value a cycle stages there; without one they stay 8 bytes
 and `movsd`'s. No vector is rematerializable either.
+
+True vectors may also take registers 16 to 31 (#3625). Before allocation the
+consumer excludes the high registers used by machine-row fallback roles and
+64-byte ABI argument staging, then intersects each value's producer and all
+selected uses with the output target's legal forms. Its spill, reload and copy
+must support the upper register at the value's whole width. Legacy and VEX
+consumers keep their values low; AVX512F without VL admits only 64-byte upper
+transport. Scalar floats and functions with asm bodies remain low. The default
+candidate mask is `0xffff7fff`, while an explicit `vector_register_mask` may
+restrict it further. Frame columns, caller-save masks and transport retain
+all five register bits; xmm15 remains the sole vector move scratch.
 
 A floating parameter arrives in xmm0 to xmm7 by its place among the function's
 floating parameters (`tier1_select_parameter_place`), its definition bound to

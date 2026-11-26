@@ -137,11 +137,12 @@ static bool tier1_emit_cfg_register(uint8_t reg)
     return tier1_select_register_allowed(reg) || (reg < 16 && ((BUSTER_TIER1_EMIT_CFG_CALLEE >> reg) & 1) != 0);
 }
 
-// Whether a location is an xmm register a floating value may be in (#141): xmm0 to xmm14.
+// Whether a location is an allocatable vector register. Each value's actual allowed mask also excludes target-illegal
+// registers and the function's row/call reservations; xmm15 remains the class's scratch.
 static bool tier1_emit_cfg_vector_location(uint32_t location)
 {
     const uint32_t x = location - BUSTER_TIER1_EMIT_VECTOR_LOCATION;
-    return x < 16 && ((BUSTER_TIER1_EMIT_VECTOR_REGISTERS >> x) & 1) != 0;
+    return x < 32 && ((BUSTER_TIER1_EMIT_VECTOR_REGISTERS >> x) & 1) != 0;
 }
 
 // Whether node's value is in a register of its class at `location` (the emitter's view, by location): a mask in k1 to
@@ -156,7 +157,7 @@ static bool tier1_emit_cfg_holds(const Tier1EmitResult* emitted, uint32_t node, 
 // Whether a location is a register the emitter's view keeps an owner for: a general register, an xmm one or an opmask one.
 static bool tier1_emit_cfg_register_location(uint32_t location)
 {
-    return location < 16 || (location >= BUSTER_TIER1_EMIT_VECTOR_LOCATION && location < BUSTER_TIER1_EMIT_VECTOR_LOCATION + 16) || (location >= BUSTER_TIER1_EMIT_MASK_LOCATION && location < BUSTER_TIER1_EMIT_MASK_LOCATION + 8);
+    return location < 16 || (location >= BUSTER_TIER1_EMIT_VECTOR_LOCATION && location < BUSTER_TIER1_EMIT_VECTOR_LOCATION + 32) || (location >= BUSTER_TIER1_EMIT_MASK_LOCATION && location < BUSTER_TIER1_EMIT_MASK_LOCATION + 8);
 }
 
 // The frame's rows past the spilled values' slots (see the header): the opmask registers' call-save row of k, the xmm
@@ -504,6 +505,45 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
 // The plan's allocation problem, in `output`, which the result keeps (see the header), with the maps between nodes and
 // values and the prepared columns the shared helpers read: recipes and sizes by node, the calls' save rows, and the
 // frame's columns (a node's slot, each caller-save row, then the temporary slot).
+// The upper registers owned by a row's existing placement. A role may stay in an allocated operand's register, but
+// every temporary fallback has a reserved home too. Floating roles follow the vector roles and share their span.
+static uint32_t tier1_emit_cfg_row_reserved(const Tier1EmitPrepared* prepared, const Tier0Operation* row)
+{
+    const Tier0Reach reach = tier0_operation_reach(row);
+    const bool upper_vectors = tier1_select_row_upper_vectors(row, tier1_emit_encoding(prepared), prepared->zmm);
+    const bool upper_floats = !prepared->vex && !tier1_select_row_low_floating(row);
+    uint32_t floating = tier0_class_floating(row->result_class);
+    for (uint32_t j = 0; j < row->operand_count; j += 1)
+    {
+        floating += tier0_class_floating(row->operand_classes[j]);
+    }
+    const uint32_t vector_count = reach.vectors < 16 ? reach.vectors : 16;
+    const uint32_t floating_end = reach.vectors + floating < 16 ? reach.vectors + floating : 16;
+    const uint32_t vectors = upper_vectors ? (uint32_t)(((UINT64_C(1) << vector_count) - 1) << 16) : 0;
+    const uint32_t floats = upper_floats ? (uint32_t)(((UINT64_C(1) << floating_end) - (UINT64_C(1) << vector_count)) << 16) : 0;
+    return vectors | floats;
+}
+
+// Registered 64-byte aggregate parts wait in zmm16 and following registers before the call's parallel moves. Reserve
+// the largest such span before allocating anything, including values used by a later argument of the same call.
+static uint32_t tier1_emit_cfg_call_reserved(const IrFunction* function, const IrCall* call)
+{
+    uint32_t count = 0;
+    for (uint32_t argument = 0; call->abi != 0 && argument < call->argument_count; argument += 1)
+    {
+        const IrPassed* record = tier1_select_argument_record(function, call, argument);
+        Tier1SelectPart parts[2];
+        const uint32_t part_count = tier1_select_aggregate_record(record) && !tier1_select_location_whole(record->location) ?
+                                    tier1_select_location_parts(record->location, record->size, parts) : 0;
+        for (uint32_t k = 0; k < part_count; k += 1)
+        {
+            count += parts[k].reg != BUSTER_ABI_REGISTER_NONE && tier1_select_part_in_zmm(parts[k].bytes);
+        }
+    }
+    const uint32_t bounded = count < 16 ? count : 16;
+    return (uint32_t)(((UINT64_C(1) << bounded) - 1) << BUSTER_TIER1_SELECT_PART_ZMM);
+}
+
 static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
 {
     const IrFunction* function = plan->function;
@@ -559,6 +599,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     prepared->x87_ranks = ok ? ir_allocate(output, (uint64_t)count + 1, 4, &ok) : 0;
     prepared->x87_count = 0;
     prepared->vector_bytes = 0;
+    prepared->vector_reserved = 0;
     prepared->function = function;
     // Whether the function has vectors (#141): one scan of it, by the requested path, so that a function without one pays no
     // node's vector checks.
@@ -613,12 +654,21 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         emitted->fixed_count += fixed != 0;
         prepared->asm_count += body;
         prepared->asm_callee |= body ? fixed & BUSTER_ABI_CALLEE_SAVED : 0;
+        // The asm operand contract names only the low vector registers. Keep its unmodelled upper clobbers outside
+        // allocation until that separate contract describes all 32 registers.
+        prepared->vector_reserved |= body ? 0xffff0000u : 0;
+        if (!plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_ROW)
+        {
+            const uint32_t row = (uint32_t)plan->patterns[node].immediate;
+            prepared->vector_reserved |= row < function->row_count ? tier1_emit_cfg_row_reserved(prepared, &function->rows[row]) : 0xffff0000u;
+        }
         if (tier1_select_function_call(function, node))
         {
             prepared->call_count += 1;
             // The argument registers of each class the calls take, and the outgoing area: the most stack slots a call's
             // arguments past their classes' registers take (#141).
             const IrCall* call = &function->calls[function->b[node]];
+            prepared->vector_reserved |= tier1_emit_cfg_call_reserved(function, call);
             Tier1SelectPlaces places = { 0 };
             for (uint32_t argument = 0; call->abi == 0 && argument < call->argument_count; argument += 1)
             {
@@ -668,7 +718,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     const uint32_t objects = error == TIER1_EMIT_OK ? tier1_emit_cfg_object_count(function, prepared) : 0;
     prepared->classes = node_classes;
     prepared->mask_columns = masks != 0 ? 8 : 0;
-    prepared->vector_columns = floats != 0 ? 16 : 0;
+    const bool upper_transport = prepared->vector_bytes != 0 && prepared->zmm && (!prepared->vex || prepared->vector_bytes == 64);
+    prepared->vector_columns = floats != 0 ? (upper_transport && (prepared->vector_reserved & 0xffff0000u) != 0xffff0000u ? 32 : 16) : 0;
     const uint32_t mask_columns = prepared->mask_columns;
     const uint32_t fixed_columns = call_slots + mask_columns + prepared->vector_columns + BUSTER_TIER1_ALLOCATE_CLASSES;
     prepared->slot_columns = count + fixed_columns + objects;
@@ -783,7 +834,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     }
     const uint32_t registers = options->register_mask & ~prepared->reserved_registers;
     // The xmm registers the floating values take (#141): every one but the class's scratch, or the options' of them.
-    const uint32_t vector_registers = options->vector_register_mask != 0 ? options->vector_register_mask & BUSTER_TIER1_EMIT_VECTOR_REGISTERS : BUSTER_TIER1_EMIT_VECTOR_REGISTERS;
+    const uint32_t vector_candidates = options->vector_register_mask != 0 ? options->vector_register_mask & BUSTER_TIER1_EMIT_VECTOR_REGISTERS : BUSTER_TIER1_EMIT_VECTOR_REGISTERS;
+    const uint32_t vector_registers = vector_candidates & ~prepared->vector_reserved & (upper_transport ? UINT32_MAX : BUSTER_TIER1_EMIT_LOW_VECTOR_REGISTERS);
     // The callee-saved registers values live across a call may take, but those the frame reserves (tier1_emit_cfg_preference):
     // rbp where it is the frame pointer, r15 where it is a realigned dynamic frame's base.
     // And values live across an asm body (#2144), which may take them to keep out of the registers it touches.
@@ -866,7 +918,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             // A slot's bytes, the frame row's (tier1_emit_cfg_row_bytes): a phi web shares a slot only at one width.
             slot_widths[v] = (uint8_t)prepared->sizes[node];
             const bool vector_value = classes[v] == BUSTER_TIER1_ALLOCATE_VECTOR;
-            allowed[v] = classes[v] == BUSTER_TIER1_ALLOCATE_MASK ? BUSTER_TIER1_EMIT_MASK_REGISTERS : vector_value ? vector_registers : registers;
+            const uint32_t value_vectors = tier1_select_vector_width(function->type[node]) != 0 ? vector_registers : vector_registers & BUSTER_TIER1_EMIT_LOW_VECTOR_REGISTERS;
+            allowed[v] = classes[v] == BUSTER_TIER1_ALLOCATE_MASK ? BUSTER_TIER1_EMIT_MASK_REGISTERS : vector_value ? value_vectors : registers;
             // A parameter's incoming register, its place's (#141): a general one, or an xmm one for a floating value.
             // A by-value aggregate parameter (#789) is its copy's address, defined at its node as a frame object's is.
             const bool parameter = tier1_select_entry_parameter(function, node);
@@ -1224,7 +1277,7 @@ static Tier1EmitError tier1_emit_cfg_saves(const Tier1SelectPlan* plan, Arena* s
                 const uint32_t low = tier1_emit_first_at(positions, position_count, allocation->starts[f]);
                 const bool covers = low < position_count && positions[low] < allocation->ends[f] && in_register;
                 saved |= list != 2 && class == BUSTER_TIER1_ALLOCATE_MASK && covers && reg < 8 ? 1u << reg : 0;
-                vectors_saved |= (list == 0 || list == 2) && class == BUSTER_TIER1_ALLOCATE_VECTOR && covers && reg < 16 ? 1u << reg : 0;
+                vectors_saved |= (list == 0 || list == 2) && class == BUSTER_TIER1_ALLOCATE_VECTOR && covers && reg < 32 ? 1u << reg : 0;
             }
         }
     }
@@ -1529,7 +1582,7 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
             indices[row++] = count + call_columns + k;
         }
     }
-    for (uint32_t x = 0; error == TIER1_EMIT_OK && x < 16; x += 1)
+    for (uint32_t x = 0; error == TIER1_EMIT_OK && x < 32; x += 1)
     {
         if (((prepared->vector_save_mask >> x) & 1) != 0)
         {
@@ -1948,21 +2001,21 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
         // movss or movsd of its width, and a vector (#141) by vmovdqa64 and vmovdqu32 of its: tier1_cfg moves one slot to
         // another through xmm15, in two moves, and recomputes none.
         const bool vector = tier1_emit_class(&emitted->prepared, node) == BUSTER_TIER1_ALLOCATE_VECTOR;
-        const bool from_vector = from - BUSTER_TIER1_EMIT_VECTOR_LOCATION < 16;
-        const bool to_vector = to - BUSTER_TIER1_EMIT_VECTOR_LOCATION < 16;
+        const bool from_vector = from - BUSTER_TIER1_EMIT_VECTOR_LOCATION < 32;
+        const bool to_vector = to - BUSTER_TIER1_EMIT_VECTOR_LOCATION < 32;
         const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, tier1_emit_encoding(&emitted->prepared));
         if (vector && from_vector && to_vector)
         {
-            records[record_count++] = tier1_select_class_move((uint8_t)(to & 15), (uint8_t)(from & 15), width, tier1_emit_encoding(&emitted->prepared));
+            records[record_count++] = tier1_select_class_move((uint8_t)(to & 31), (uint8_t)(from & 31), width, tier1_emit_encoding(&emitted->prepared));
         }
         else if (vector && from_vector && tier1_emit_cfg_slot(emitted, to, &offset))
         {
-            records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(from & 15), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = floats->store };
+            records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(from & 31), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = floats->store };
             emitted->spill_stores += 1;
         }
         else if (vector && to_vector && tier1_emit_cfg_slot(emitted, from, &offset))
         {
-            records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(to & 15), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = floats->load };
+            records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(to & 31), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = floats->load };
             emitted->spill_loads += 1;
         }
         else if (vector)
@@ -2503,14 +2556,14 @@ static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function,
             .displacement = zero_extended || sign_extended ? 0 : (int32_t)(value >> 32),
         };
         const uint32_t broadcast = width == 16 ? X86_FORM_VPBROADCASTQ_X_R64 : width == 32 ? X86_FORM_VPBROADCASTQ_Y_R64 : X86_FORM_VPBROADCASTQ_Z_R64;
-        error = tier1_emit_append(buffer, move) && tier1_emit_append(buffer, tier1_select_register_record(broadcast, (uint8_t)(holes->destination & 15), BUSTER_TIER1_SELECT_SCRATCH)) ? error : TIER1_EMIT_MEMORY;
+        error = tier1_emit_append(buffer, move) && tier1_emit_append(buffer, tier1_select_register_record(broadcast, (uint8_t)(holes->destination & 31), BUSTER_TIER1_SELECT_SCRATCH)) ? error : TIER1_EMIT_MEMORY;
     }
     else if (error == TIER1_EMIT_OK)
     {
         error = literal != UINT32_MAX ? error : TIER1_EMIT_UNSUPPORTED;
         const X86Instruction load = {
             .form = (uint16_t)(tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load | BUSTER_X86_FORM_FIXUP),
-            .reg = (uint8_t)(holes->destination & 15),
+            .reg = (uint8_t)(holes->destination & 31),
             .mode = BUSTER_X86_MEMORY_RIP,
         };
         *reference = (LinkReference){
@@ -2796,7 +2849,7 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
     {
         const bool general = location < BUSTER_TIER1_EMIT_GENERAL_REGISTERS;
         const bool mask = location >= BUSTER_TIER1_EMIT_MASK_LOCATION;
-        const bool vector = location >= BUSTER_TIER1_EMIT_VECTOR_LOCATION && location < BUSTER_TIER1_EMIT_VECTOR_LOCATION + 16;
+        const bool vector = location >= BUSTER_TIER1_EMIT_VECTOR_LOCATION && location < BUSTER_TIER1_EMIT_VECTOR_LOCATION + 32;
         const uint32_t owner = general || mask || vector ? transitions->owners[location] : BUSTER_IR_NONE;
         const bool live = owner != BUSTER_IR_NONE && owner != node && transitions->registers[owner] == location && tier1_cfg_interval_at(cfg, emitted->node_values[owner], use + 1) != BUSTER_TIER1_CFG_NONE;
         busy_general |= live && general ? 1u << location : 0;
@@ -2813,7 +2866,7 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         const uint8_t location = sources[j];
         error = tier1_emit_cfg_holds(emitted, value, location) ? error : TIER1_EMIT_ALLOCATION;
         busy_general |= location < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << location : 0;
-        busy_vectors |= location >= BUSTER_TIER1_EMIT_VECTOR_LOCATION && location < BUSTER_TIER1_EMIT_VECTOR_LOCATION + 16 ? 1u << (location - BUSTER_TIER1_EMIT_VECTOR_LOCATION) : 0;
+        busy_vectors |= location >= BUSTER_TIER1_EMIT_VECTOR_LOCATION && location < BUSTER_TIER1_EMIT_VECTOR_LOCATION + 32 ? 1u << (location - BUSTER_TIER1_EMIT_VECTOR_LOCATION) : 0;
         busy_masks |= location >= BUSTER_TIER1_EMIT_MASK_LOCATION && location < BUSTER_TIER1_EMIT_MASK_LOCATION + 8 ? 1u << (location - BUSTER_TIER1_EMIT_MASK_LOCATION) : 0;
     }
     const uint32_t result_type = function->type[node];
@@ -2834,13 +2887,6 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
     const bool vex = emitted->prepared.vex;
     // Its moves' encoding: a legacy SSE target's 16-byte vectors move by movaps (#141's SSE targets).
     const uint32_t encoding = tier1_emit_encoding(&emitted->prepared);
-    bool narrow = false;
-    for (uint32_t j = 0; error == TIER1_EMIT_OK && j <= row->operand_count; j += 1)
-    {
-        const uint32_t class = j < row->operand_count ? row->operand_classes[j] : row->result_class;
-        const uint32_t bytes = j < row->operand_count ? row->operand_bytes[j] : row->result_bytes;
-        narrow |= tier0_class_vector(class) && bytes < 64;
-    }
     // A row's vector roles are below 16 where it has a VEX or legacy form's vector register, and at a target without
     // AVX512VL where it has a vector narrower than 64 bytes (whose moves into zmm16 and on would be VL's) or the target has
     // no zmm16 (#1281's review: a 64-byte EVEX row at an AVX512F target keeps zmm16 and on). A row that names a floating
@@ -2848,8 +2894,9 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
     // copies past 15 would be VL's), has its floating roles below 16 too. Either kind takes free xmm registers below 16
     // one at a time, from one pool, where it doesn't stay in place (#1283): not a contiguous run, which register pressure
     // could leave none of (#1281's review).
-    const bool low_vectors = error == TIER1_EMIT_OK && reach.vectors != 0 && (reach.vex_vectors != 0 || (vex && (narrow || !emitted->prepared.zmm)));
+    const bool low_vectors = error == TIER1_EMIT_OK && reach.vectors != 0 && !tier1_select_row_upper_vectors(row, encoding, emitted->prepared.zmm);
     const bool low_floats = error == TIER1_EMIT_OK && (vex || tier1_select_row_low_floating(row));
+    error = error == TIER1_EMIT_OK && (busy_vectors & tier1_emit_cfg_row_reserved(&emitted->prepared, row)) != 0 ? TIER1_EMIT_ALLOCATION : error;
     uint32_t free_low = low_vectors || low_floats ? 0xffffu & ~busy_vectors : 0;
     // Each VECTOR(j) role's register (#1283), placed one at a time: where no role below takes another, zmm16 + j, which
     // no value is in, or for a role below 16 a free register taken when it is placed (UINT8_MAX until then).
@@ -4417,7 +4464,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 // in its register's row before the call and reloaded after, its 8 bytes by movsd, or in a function with
                 // vectors (#141) the widest one's bytes by vmovdqu32. The call's own result can't share a register with one.
                 uint32_t vectors_saved = 0;
-                for (uint32_t x = 0; x < 15; x += 1)
+                for (uint32_t x = 0; x < 32; x += 1)
                 {
                     const uint32_t location = BUSTER_TIER1_EMIT_VECTOR_LOCATION + x;
                     const uint32_t owner = transitions.owners[location];
@@ -4428,7 +4475,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 error = tier1_select_float_width(function->type[node]) == 0 || ((vectors_saved >> (transitions.registers[node] & 15)) & 1) == 0 ? error : TIER1_EMIT_ALLOCATION;
                 for (uint32_t pass = 0; pass < 2; pass += 1)
                 {
-                    for (uint32_t x = 0; error == TIER1_EMIT_OK && x < 15; x += 1)
+                    for (uint32_t x = 0; error == TIER1_EMIT_OK && x < 32; x += 1)
                     {
                         const uint32_t row = tier1_emit_cfg_vector_save_row(emitted, x);
                         const bool listed = ((vectors_saved >> x) & 1) != 0;
@@ -5337,6 +5384,63 @@ static Tier1EmitError tier1_emit_cfg_order_check(const Tier1SelectPlan* plan, co
     return differs != 0 ? TIER1_EMIT_CERTIFICATE : TIER1_EMIT_OK;
 }
 
+// Refine each vector value's mask by its producer and every selected use before allocation. The arrays belong to this
+// just-built problem and no allocation has borrowed them yet. One selected-kernel probe per node qualifies all its
+// operands together; rows' longer operand lists use the same placement contract as emission. Phis need only their
+// full-width transport, since their copies are independent of the producers' and consumers' selected forms.
+static void tier1_emit_cfg_vector_constraints(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, Tier1EmitResult* emitted)
+{
+    const IrFunction* function = plan->function;
+    const uint32_t count = function->instruction_count;
+    const uint32_t encoding = tier1_emit_encoding(&emitted->prepared);
+    const uint32_t low = BUSTER_TIER1_EMIT_LOW_VECTOR_REGISTERS;
+    uint32_t* const allowed = (uint32_t*)emitted->cfg_input.allowed_registers;
+    uint32_t* const defined = (uint32_t*)emitted->cfg_input.definition_registers;
+    const uint32_t* const node_values = emitted->node_values;
+    const uint8_t* const classes = emitted->cfg_input.classes;
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        if (!plan->covered[node])
+        {
+            const Tier1SelectPattern* pattern = &plan->patterns[node];
+            const uint32_t roles = tier1_select_upper_vector_roles(plan, node, allowed_forms, encoding, emitted->prepared.avx2);
+            const uint32_t value = node_values[node];
+            if (value != BUSTER_TIER1_CFG_NONE && classes[value] == BUSTER_TIER1_ALLOCATE_VECTOR)
+            {
+                allowed[value] &= (roles & 1) != 0 ? UINT32_MAX : low;
+            }
+            const uint32_t row_index = pattern->rule == TIER1_RULE_ROW ? (uint32_t)pattern->immediate : UINT32_MAX;
+            const bool row_upper = row_index < function->row_count && tier1_select_row_upper_vectors(&function->rows[row_index], encoding, emitted->prepared.zmm);
+            for (uint32_t use = plan->effective_use_offsets[node]; use < plan->effective_use_offsets[node + 1]; use += 1)
+            {
+                const uint32_t source = plan->effective_use_values[use];
+                const uint32_t used = node_values[source];
+                if (used != BUSTER_TIER1_CFG_NONE && classes[used] == BUSTER_TIER1_ALLOCATE_VECTOR)
+                {
+                    bool upper = pattern->rule == TIER1_RULE_ROW ? row_upper && tier1_select_upper_vector_type(function->type[source], allowed_forms, encoding) : function->op[node] == IR_PHI;
+                    if (pattern->rule != TIER1_RULE_ROW && function->op[node] != IR_PHI)
+                    {
+                        bool named = false;
+                        upper = true;
+                        for (uint32_t role = 0; role < BUSTER_TIER1_SELECT_VALUES; role += 1)
+                        {
+                            const bool same = pattern->values[role] == source;
+                            named |= same;
+                            upper &= !same || ((roles >> (role + 1)) & 1) != 0;
+                        }
+                        upper &= named;
+                    }
+                    allowed[used] &= upper ? UINT32_MAX : low;
+                }
+            }
+        }
+    }
+    for (uint32_t value = 0; defined != 0 && value < emitted->cfg_input.value_count; value += 1)
+    {
+        defined[value] &= allowed[value];
+    }
+}
+
 // The CFG consumer's whole function: problem, allocation, frame and records, out of line, so that tier1_emit_function's
 // straight-line path compiles as it did without it.
 static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
@@ -5352,6 +5456,10 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     emitted->prepared.sse = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQU_X_XM128);
     emitted->prepared.zmm = x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_Z_ZM512);
     Tier1EmitError error = tier1_emit_cfg_problem(plan, verified_cfg, options, output, scratch, emitted);
+    if (error == TIER1_EMIT_OK && (emitted->cfg_input.registers[BUSTER_TIER1_ALLOCATE_VECTOR] & 0xffff0000u) != 0)
+    {
+        tier1_emit_cfg_vector_constraints(plan, allowed_forms, emitted);
+    }
     const Tier1CfgInput problem = emitted->cfg_input;
     if (error == TIER1_EMIT_OK)
     {
