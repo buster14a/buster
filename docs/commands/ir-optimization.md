@@ -85,13 +85,24 @@ with its unreachable stub, an `int` induction's clamp, byte arithmetic through
 32-bit lanes, population counts, a stencil whose exit test is `i + 1 < n`, an
 in-place `y[i] += k * x[i]`, an `fma`, an `sitofp` of `i32` to `f32`, an invariant start and index offset, a uniform load,
 a sum of a uniform (no vector load or store), two loops and a nested one; and one fixture per refusal (a prefix sum, a
-histogram, a strided store, the induction as data, a call, a volatile load, a
+histogram, the induction as data, a call, a volatile load, a
 division, FNV-1a's recurrence, a float sum, bytes summed into a 64-bit total (a width no vector holds), more guards
 than the limit, a reduction's partial value read, an early exit, a step of two). #2808's fixtures, past the frozen
 digest's: counts of comparisons (`count-u8`, `count-i32`), strided loads (`aos-sum`, `rgb-gray` through 32-bit
 indices, `strided-pairs-i16`, `stride8-u8`, and `stride8-i64`, whose last element ends the interpreter's buffer, so a
 load past it faults) and a 32-bit index that wraps within a vector (`narrow-wrap`, whose input and result must fault
-alike).
+alike). The former `refuse-strided` fixture now expects its strided store to
+vectorize. Further #2808 fixtures cover positive and negative strides, strides
+beyond eight, dword/qword gathers and scatters, sparse masked byte/word stores,
+opposite source/destination directions, and overlap fallback. Large dword
+strides that need qword indices use fewer data lanes so the index vector fits.
+Exact first/last-byte bindings check that no access crosses the scalar range;
+overlapping elements still refuse. Shared structure loads have explicit load
+counts (`aos-sum`: two instead of four; `rgb-gray`: one instead of three),
+members visited out of address order, partial structures, different element
+widths, and reads separated by a store. A signed/unsigned index-extension
+fixture makes the proposed field relation false without an index wrapping,
+so it independently checks the starting-pointer equality guard.
 Each runs by the parser and the pass at six targets of every operation
 the IR has: at most 64, 32 and 16 bytes wide with masked moves, 64 bytes without
 them or masks from a general register, 64 bytes with them but no select of 32-
@@ -100,22 +111,37 @@ general register (an AVX512F target without DQ's `kmovb`) (#2807). Its
 result and counts are folded into a frozen digest (#2924), and the kinds and the
 refusing kinds' scan are checked against their definitions. A fixture expects how
 many loops each width vectorizes, or its refusal's reason, and how many of them
-have a masked tail: every integer loop's where the target has masked moves (a
+have a masked tail: an integer loop's where its accesses are consecutive and the target has masked moves (a
 reduction's only where it has the selects too, and a loop of 8-byte lanes only
-where it has the byte mask), and none of a floating loop's. Each changed result, and its form after
+where it has the byte mask), and none of a floating or strided loop's. Each changed result, and its form after
 the ordinary optimizer (whose final verification checks dominance), runs in the
 shared interpreter against the input on one buffer, its pointers placed apart,
 at one address, a byte, an element and a vector apart either way, at lengths
 around the vectors' boundaries (signed bounds negative too): the same bytes,
-value and status. Seven mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
-test, an unrounded tail, a wrong reduction identity, lanes of the wrong width, a
-masked tail's mask of one lane more, no 32-bit index wrap test, a strided load's
-wrong lane) must each be rejected on some fixture. `--print NAME` prints a fixture's
+value and status. The twelve `BUSTER_IR_VECTORIZE_MUTATE_*` modes are the
+unchanged transform and eleven injected faults: no overlap test, an unrounded
+tail, a wrong reduction identity, lanes of the wrong width, a masked tail's
+mask of one lane more, no 32-bit index wrap test, a strided load's wrong lane,
+the wrong reverse direction, a sparse store writing a gap, a shared load
+selecting the wrong member, and no shared-member relation guard. Every fault
+must be rejected on some fixture. `--print NAME` prints a fixture's
 64-byte result. `test-checker-driver`'s inlining unit compiles a C fixture of
 loops by `--tier1 --tier1-passes=+vectorize --verify` at x86-64 to x86-64-v4 and znver5 by
 both paths, checks the loops each target vectorizes and that both paths give one
 object, and runs it as clang -O0's build does. [The design and its
 status](../tier1-loop-vectorization.md) has the rules and the measurements.
+
+`tests/driver/tier1_strided.c` is the native C differential for the remaining
+#2808 memory rules; its header has the standalone compile/link/run commands.
+The correctness suite builds the same kernels with Clang -O0 as the oracle
+and with Buster's strict, verified Tier 1 path at x86-64, x86-64-v3,
+x86-64-v4 and znver5. Both subject builds use `-fno-strict-aliasing`, and
+packed access types permit the deliberately misaligned addresses. It compares
+results and every writable byte for overlapping and disjoint pointers, vector
+boundaries, exact page ends, and float/double copies including IEEE payloads.
+Sparse byte streams cross inaccessible pages between selected elements;
+large virtual gaps force qword gather/scatter indices. CI also checks the
+qword-index instructions in the emitted objects at the AVX-512 targets.
 
 The optional `BUSTER_IR_OPTIMIZE_LAYOUT` pass (#1218) changes the rewrite's
 block visitation order, using `ir_optimize_layout.c`'s fall-through chains.
