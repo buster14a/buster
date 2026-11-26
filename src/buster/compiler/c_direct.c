@@ -4798,6 +4798,14 @@ static int c_direct_unit_tests(void)
         "#define E(v)\nint f(int x, int y) { while (E(1) (x == y)) { x += 1; } return x; }\n" BUSTER_DIRECT_TEST_TAIL,
         "#define EMPTY\nstruct S { int a; };\nint f(struct S s) { return s EMPTY .a == s.a; }\n" BUSTER_DIRECT_TEST_TAIL,
         "#define EMPTY\nint f(int* p) { return p EMPTY [0] == p[0]; }\n" BUSTER_DIRECT_TEST_TAIL,
+        // -Wsizeof-pointer-memaccess compares the destination and sizeof's operand without their parentheses: one a
+        // macro's (data 1), or inside the operand only.
+        "void *memset(void *, int, unsigned long);\nstruct S { char *buf; };\n#define FIELD(p) ((p)->buf)\n"
+        "void f(struct S *s) { memset((s)->buf, 0, sizeof(FIELD(s))); }\n" BUSTER_DIRECT_TEST_TAIL,
+        "void *memset(void *, int, unsigned long);\nstruct S { char *buf; };\n#define ALWAYS(X) (X)\n"
+        "void f(struct S *s) { memset(ALWAYS(s)->buf, 0, sizeof((s)->buf)); }\n" BUSTER_DIRECT_TEST_TAIL,
+        "void *memset(void *, int, unsigned long);\nstruct S { char *buf; };\n"
+        "void f(struct S *s) { memset(s->buf, 0, sizeof((s)->buf)); }\n" BUSTER_DIRECT_TEST_TAIL,
         // -Wformat and its family: printf's int conversion of a long, a string of an int (in a dead branch and in
         // sizeof too, as the full pipeline checks every call's), one conversion short and one over, an invalid
         // specifier, a non-literal format without arguments (-Wformat-security); fprintf's and snprintf's formats,

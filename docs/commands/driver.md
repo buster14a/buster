@@ -352,7 +352,10 @@ macro name whose expansion was empty kept the name's id: `if (EMPTY (x == y))`
 read as a macro's grouping and `s EMPTY .a == s.a` as two paths, both quiet
 where the full pipeline warns. The slot is cleared before the expansion, and
 an identity wrapper's `(` (`ALWAYS(X)`, whose name goes and whose `(` is the
-file's) is marked as its body's.
+file's) is marked as its body's. `-Wsizeof-pointer-memaccess` compares the
+destination with `sizeof`'s operand without any of their parentheses, as the
+full pipeline does: `memset(s->buf, 0, sizeof((s)->buf))`, and a macro's
+grouping (`sizeof(FIELD(s))` of `((p)->buf)`), are one expression.
 `returns_twice` (a function's), `format_arg(N)` (a prototyped function's whose
 parameter N and value point to a character type) and `may_alias` (anything's)
 are taken as the full pipeline takes them, where musl's `<setjmp.h>`,

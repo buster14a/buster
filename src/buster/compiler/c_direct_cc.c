@@ -5559,17 +5559,25 @@ static __attribute__((cold, noinline)) bool fast_cc_nonnull_arguments_clean(cons
     return nulls == 0;
 }
 
-// #3577: whether tokens [A, A_END) and [B, B_END) are one expression's, but for parentheses around either.
+// #3577: whether tokens [A, A_END) and [B, B_END) are one expression's, but for their parentheses, which the full
+// pipeline's -Wsizeof-pointer-memaccess doesn't compare (`(s)->buf` and `s->buf` are one; a macro's `(`, data 1 from
+// the #define, is one too). Skipping them all joins `(a + b) * c` and `a + b * c` as well, which fails closed.
 static bool fast_cc_same_tokens(const FastCCState* cc, uint32_t a, uint32_t a_end, uint32_t b, uint32_t b_end)
 {
-    while (a < a_end && cc->tk[a] == FTOK_LPAREN && fast_cc_group_end(cc, a) == a_end) { a += 1u; a_end -= 1u; }
-    while (b < b_end && cc->tk[b] == FTOK_LPAREN && fast_cc_group_end(cc, b) == b_end) { b += 1u; b_end -= 1u; }
-    bool same = a < a_end && a_end - a == b_end - b;
-    for (uint32_t i = 0; same && a + i < a_end; i += 1u)
+    bool same = true;
+    bool any = false;
+    while (same && (a < a_end || b < b_end))
     {
-        same = cc->tk[a + i] == cc->tk[b + i] && cc->td[a + i] == cc->td[b + i];
+        while (a < a_end && (cc->tk[a] == FTOK_LPAREN || cc->tk[a] == FTOK_RPAREN)) { a += 1u; }
+        while (b < b_end && (cc->tk[b] == FTOK_LPAREN || cc->tk[b] == FTOK_RPAREN)) { b += 1u; }
+        const bool a_more = a < a_end;
+        const bool b_more = b < b_end;
+        same = a_more == b_more && (!a_more || (cc->tk[a] == cc->tk[b] && cc->td[a] == cc->td[b]));
+        any = any || a_more;
+        a += (uint32_t)a_more;
+        b += (uint32_t)b_more;
     }
-    return same;
+    return same && any;
 }
 
 static uint32_t fast_cc_loosest_operator(const FastCCState* cc, uint32_t s, uint32_t e, uint32_t* out_precedence);
