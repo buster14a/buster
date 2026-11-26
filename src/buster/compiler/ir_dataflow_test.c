@@ -17,8 +17,8 @@
 // IR_FENCE (#1059) uses no value: the default case's. IR_INTRINSIC uses a, and b where it has one: splat's (#1450) and
 // the unary kinds' is none. IR_ATOMIC_RMW (#1059) uses its address and its operand, as a store does, and a
 // compare-exchange's desired value too. IR_MASKED_LOAD and IR_MASKED_STORE (#1840) use a, b and c, as a select does,
-// and so do IR_COMPRESS_STORE and IR_GATHER (#1840), the last added.
-_Static_assert(IR_OP_COUNT == 70, "audit the independent dataflow operand oracle for a new IR operation");
+// and so do IR_COMPRESS_STORE and IR_GATHER (#1840). IR_ASM_RESULT (#2144) names its producing call in a alone.
+_Static_assert(IR_OP_COUNT == 71, "audit the independent dataflow operand oracle for a new IR operation");
 
 typedef struct IrDataflowTests IrDataflowTests;
 struct IrDataflowTests
@@ -50,7 +50,7 @@ static uint32_t ir_dataflow_test_direct(const IrFunction* f, uint32_t node, uint
         case IR_TRUNC: case IR_ZEXT: case IR_SEXT: case IR_FTRUNC: case IR_FEXT:
         case IR_SITOFP: case IR_UITOFP: case IR_FPTOSI: case IR_FPTOUI:
         case IR_INTTOPTR: case IR_PTRTOINT: case IR_BITCAST: case IR_LOAD:
-        case IR_CBR: case IR_SWITCH: case IR_ALLOCA: case IR_STACK_RESTORE: case IR_BR_INDIRECT:
+        case IR_CBR: case IR_SWITCH: case IR_ALLOCA: case IR_STACK_RESTORE: case IR_BR_INDIRECT: case IR_ASM_RESULT:
         {
             values[count++] = f->a[node];
         } break;

@@ -446,7 +446,9 @@ static void ir_vectorize_test_scans(IrVectorizeTest* test)
             {
                 const uint32_t kind = ir_vectorize_kind_table[f.op[i]];
                 const uint32_t base = kind & 7;
-                const bool flagged = (base == BUSTER_IR_VECTORIZE_KIND_LOAD || base == BUSTER_IR_VECTORIZE_KIND_STORE) && (f.flags[i] & BUSTER_IR_ACCESS_FLAGS) != 0;
+                // The access definition's semantic bits, independently of the production mask: COPY_PIECE is a hint.
+                const uint32_t semantic = BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_ORDER | BUSTER_IR_SEGMENT;
+                const bool flagged = (base == BUSTER_IR_VECTORIZE_KIND_LOAD || base == BUSTER_IR_VECTORIZE_KIND_STORE) && (f.flags[i] & semantic) != 0;
                 const uint32_t expected = i >= length ? 0xa5 : flagged ? BUSTER_IR_VECTORIZE_KIND_FORBID : kind;
                 same = same && kinds[i] == expected;
             }
@@ -470,6 +472,42 @@ static void ir_vectorize_test_scans(IrVectorizeTest* test)
     }
     ir_vectorize_test_expect(test, classified, "scans", "the rows' admission kinds, against their definition");
     ir_vectorize_test_expect(test, forbidden && refusals != 0, "scans", "the refusing kinds' scan, against its definition");
+
+    // #2818: every flags byte, without deriving expected admission from the classifier's mask or kind table. Only
+    // an unmarked access or COPY_PIECE alone is plain memory. Nonmemory rows keep their opcode's kind and flag byte.
+    static const struct
+    {
+        uint8_t op;
+        uint8_t kind;
+        const char* name;
+    } cases[] = {
+        { IR_LOAD, BUSTER_IR_VECTORIZE_KIND_LOAD, "load flags" },
+        { IR_STORE, BUSTER_IR_VECTORIZE_KIND_STORE, "store flags" },
+        { IR_INTRINSIC, BUSTER_IR_VECTORIZE_KIND_INTRINSIC, "intrinsic flags" },
+        { IR_CBR, BUSTER_IR_VECTORIZE_KIND_BRANCH, "branch flags" },
+    };
+    uint8_t op[256];
+    uint8_t flags[256];
+    uint8_t admission[256];
+    const IrFunction all_flags = { .instruction_count = 256, .op = op, .flags = flags };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        for (uint32_t value = 0; value < 256; value += 1)
+        {
+            op[value] = cases[c].op;
+            flags[value] = (uint8_t)value;
+        }
+        ir_vectorize_kinds(&all_flags, admission);
+        bool exact = true;
+        for (uint32_t value = 0; value < 256; value += 1)
+        {
+            const bool memory = cases[c].op == IR_LOAD || cases[c].op == IR_STORE;
+            const bool plain = value == 0 || value == BUSTER_IR_COPY_PIECE;
+            const uint8_t expected = memory && !plain ? BUSTER_IR_VECTORIZE_KIND_FORBID : cases[c].kind;
+            exact = exact && admission[value] == expected && op[value] == cases[c].op && flags[value] == value;
+        }
+        ir_vectorize_test_expect(test, exact, cases[c].name, "all flag combinations preserve semantic admission and input bytes");
+    }
 }
 
 static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)

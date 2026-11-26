@@ -56,6 +56,47 @@ requirements. [Command index](README.md).
   [The optimization guide](../../docs/ir-optimization.md) records supported inputs,
   the pass order and #139's measurements.
 
+## Local-copy halves (#2818)
+
+`ir_copy_pair.c` runs at the end of `check_tier1_passes`, after SROA and
+promotion and before operand sinking, DCE and final verification. Its 16-instruction
+screens find four marked memory events in one block: an i64 load/store,
+then a second load/store at source and destination offsets eight bytes later.
+Only pure address/value definitions can intervene; each load has exactly its
+store as a use, including scalar debugger bindings in that count.
+
+The flag is a hint, so the pass independently checks the current ranges. The
+source is a bounded ordinary stack object. The destination is the same range,
+a disjoint range in that object, another bounded stack object, a symbol or
+an incoming parameter. A pointer loaded from memory can capture an escaped
+source and is left alone. Inlined parameters have already become their actual
+arguments. Volatile, atomic and segment accesses and incoming-frame anchor
+slots never pair. Address normalization is bounded to 32 links, with checked
+constant-offset arithmetic. The second load/store become unused `undef`s;
+the ordinary optimizer removes them and verifies the changed first load's
+`v4i32` type before any analysis is published.
+
+Cached inline summaries retain their scalar pieces for callers' SROA. Their
+own emitted bodies take the same pairing in `check_tier1_finish_own`, copying
+mutable columns only when the candidate screen finds two marked i64 loads.
+Only a changed body reruns the sink and final optimizer; the shared summary
+and its verified analysis remain immutable.
+
+Functions without two marked loads allocate nothing; unmarked chunks read
+only the flags column. Candidates use four scratch
+bytes per instruction for use counts and restore that scratch on every exit;
+failure precedes all rewrites. The exact-length columns have no padding, and
+masked tails flush at each block boundary. `test-ir` covers 19 window shapes
+at 32 placements with guarded columns, before/after interpretation, aliasing,
+extra uses, barriers, short slots, scalar debug bindings and allocation failure.
+`test-ir-lowering` checks the hint on all sizes 1–256, ordinary and volatile;
+`test-ir-parse` round-trips `copy-pieces.ir`, including paired vector accesses.
+The `sroa-widen` text fixture marks its narrow loads and stores and checks
+that widening removes their hint when it replaces the access with a conversion.
+`test-tier1-pipeline --cross-check` also checks a cached candidate's own
+paired body and a later caller's scalar use of its untouched summary, using
+one emission lane so the candidate's own finishing step runs before the caller.
+
 ## Switches of constants (#3298)
 
 `ir_switch_table.c` turns a jump-table switch whose arms only give a constant to
@@ -216,6 +257,15 @@ short output arena are covered. `test-ir-optimize` runs its text pair
 (`tests/ir/optimize/unroll-loops-*.ir`), and `test-ir-source --passes` the pass
 on c-testsuite's subset, the frozen `sqlite3.c` and musl, where each unrolled
 function must verify with dominance.
+
+The same command feeds the loop vectorizer's real output through unrolling and
+the optimizer, at 16-, 32- and 64-byte vector widths, with masked and scalar
+tails and factors 2, 4 and 8. Interpreter comparisons cover vector/chunk
+boundaries, zero-length null-pointer inputs and overlapping arrays. Conditional
+entry edges retain the producer's guard and bypass phi values. Integer vector
+reductions use lane-width identities and combining operations; floating,
+saturating and vector-select recurrences stay ordered. The pass remains opt-in;
+the historical scalar performance record does not qualify the extension.
 
 ## Loop store motion (#3309, #3346)
 

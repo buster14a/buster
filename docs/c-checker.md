@@ -3011,30 +3011,40 @@ What the lowering covers past scalars (#145's programs):
   the member's alignment, and a member of 8 bytes or less whose copy takes
   more (`GROWN`) is the integer of its C size where clang has no general
   register left, as clang's `getIndirectResult` makes it. A first member
-  that passes as a vector wider than 16 bytes or as an `_Atomic` value in
-  memory (which clang passes uncounted) is still refused by name,
-  and so is a printer's such union of `__builtin_dump_struct`. And a union made transparent, by a
-  later declaration's attribute, after a function definition or a static
-  object's initializer that names a function, whose first member passes
-  otherwise than the union does (its registers, its stack or its extension):
-  clang's code classifies a function's type where it first meets it, which an
-  object's initializer does where clang's code emits the object, and keeps
-  that for the type's every use (`check_lower_transparent_late`; clang 23.1.4
-  passes `void f(union U)` as the union in a call after the attribute when a
-  definition before it met the type, or an initializer such as
-  `void (*p)(union U) = f;`). The lowering takes the earliest such place in the
-  unit (`check_lower_first_classification`, the first body or an earlier
-  initializer that names any function), the first time a lane asks, which
-  only such a union makes it do. So a union only made transparent inside a
-  body, or after a static object's initializer, which clang's code emits only
-  once a function uses the object, or after one that names a function of
-  another type, is refused so too, though clang's code would pass it as its
-  member. `test-checker`'s programs
+  that passes as a wider vector uses the target's vector registers and the
+  union's own byval slot when Clang exhausts them; a named variadic vector
+  uses its member's value-sized stack slot instead. Atomic members keep
+  Clang's uncounted memory convention. A tagged location records the exact
+  member prefix (including 24, 40, 48 and 56 bytes), so a union's extra
+  padding is never mistaken for payload.
+
+  A union made transparent by a later declaration preserves Clang's first
+  arrangement of each complete function signature
+  (`c_check_program_transparent.c`). Calls, function addresses, definitions,
+  aliases and ifunc declarations can arrange a signature; a prototype alone
+  does not. The source emission walk supplies eager bodies' closing points
+  and retained initializer function leaves. Deferred static definitions and
+  objects, dead constant branches and unevaluated operands do not freeze an
+  earlier ABI. An unrelated signature does not freeze the union either.
+  Variadic calls include their promoted actual tail and required argument
+  count in the key; static-chain calls have a separate key. Every lowering lane shares this immutable directory;
+  arguments of a signature arranged before the attribute use ordinary-union
+  rows appended only to the ABI table, leaving language types unchanged.
+  `__builtin_dump_struct`'s generated printer calls retain a named refusal
+  for an own-slot or late transparent context: their synthetic variadic
+  signatures are outside this source-call directory.
+  Late unions whose ABI changes also retain a named refusal when the unit
+  carries `regparm`, `noescape`, object-size or retained-result function
+  attributes whose extra ABI-cache metadata is not represented in the type
+  table. Ignored attributes and unions whose ABI is unchanged remain accepted.
+  `test-checker`'s programs
   (`c_check_program_transparent_test.c`) run each kind of member value, union
   values, unnamed arguments and `va_arg`, in registers and on the stack, and
   unions of a slot of their own of each such member
   (`BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS`, and
-  `BUSTER_CHECK_TEST_TRANSPARENT_GROWN_UNIONS` for `LARGER` members),
+  `BUSTER_CHECK_TEST_TRANSPARENT_GROWN_UNIONS` for `LARGER` members), the
+  `transparent-union-members` fixtures at baseline, v3 and v4 targets, and
+  `transparent-union-late` fixtures for signature-specific arrangements,
   against clang -O0's build of the same source, calling the harness's clang
   functions and called by them through pointers, with the registers a
   `short`, an `unsigned short` and a `_Bool` arrive in read as 32 bits; and
@@ -3321,7 +3331,14 @@ What the lowering covers past scalars (#145's programs):
   `(*p).y` (`check_vector_arrow`): the source reader decodes a `->` member's
   name as a swizzle only in a unit whose type table has an extended vector
   (`TypeTable.ext_vectors`), growing its list past the `.` members it counted;
-  a struct's `->` member is unaffected. Swizzles aren't lowered: `-c` refuses
+  a struct's `->` member is unaffected. Graph arrows borrow the sorted selector
+  slice in `CheckAction` and search it only after the checked operand identifies
+  a pointer to an extended vector (#2278). Ordinary arrows perform no selector
+  search, even in a unit that also declares extended vectors. The slice and its
+  lane storage stay live and unchanged through the action or batch. A positive
+  `vector_member_count` selects this borrowed slice; zero selects the nullable
+  direct `vector_member` used by dot actions and pre-graph type queries. The
+  count occupies existing action padding. Swizzles aren't lowered: `-c` refuses
   both spellings as a member access. The cold diagnostic renderer gives clang's
   vector member errors (#2096): the first illegal component character at its
   operator-relative byte, an out-of-range component at the operator, duplicate
@@ -4635,12 +4652,15 @@ What the lowering covers past scalars (#145's programs):
   first, from its `CheckArgAlignment` ("passing 4-byte aligned argument to
   8-byte aligned parameter 1 of 'f' may result in an unaligned pointer
   access", `check_input_cleanup_alignment`), and on its own where the types
-  are compatible; after the unit's first error, the driver's later rounds give
-  the errors without it. A pointer of another signedness or
+  are compatible. The driver's recovery rounds retain a fresh cleanup's
+  alignment warning before its type error, with the source warning policy
+  and diagnostic limit applied in that order; previously published events
+  are not repeated (`cleanup-recovery` warning fixtures). A pointer of another signedness or
   to a pointer of other qualifiers, which an assignment only warns about, is
   an error here. An `__auto_type` variable's parameter type is checked once
   its initializer gives the type (`check_input_cleanup_deduced`, from the
-  initializer's finish), as clang checks it against the deduced type; the
+  initializer's finish), as clang checks it against the deduced type without
+  introducing a new alignment warning at deduction; the
   rest, and the variable's record, at its declaration. Another count of
   arguments is "'cleanup' attribute takes one argument" on a variable it
   applies to (clang checks the subject first). The last of a declaration's
@@ -6887,6 +6907,18 @@ judges every output token from runs its main loop keeps (`pp_system_levels`),
 or with `--scalar` and for a unit whose runs can't say, by the expansion
 history (`pp_system_levels_history`); `docs/c-preprocessor.md`'s "System
 levels" has both.
+
+The initializer walker retains a braced scalar's, array element's or member's
+accepted pointer conversion warning before static-constant validation (#3563).
+Its sparse event records the original source type, selected destination and
+member spelling, including a member array's elements. Revisited compound literals
+and GNU ranges publish each source conversion once. The driver renders these
+events in initializer order under the source warning policy; unbraced scalar
+conversions stay with the expression graph. Argument warning replay preserves
+an array's qualifiers until `type_element` transfers them to the decayed pointee.
+The pointer-initializer driver catalogue compares complete Clang diagnostics,
+including typedefs, parenthesized and macro locations, parameter notes, promotion,
+suppression, rejected outputs and accepted scalar/vector object twins.
 
 An option or a pragma can demote or ignore those groups, as clang's (#1963).
 `-Wno-error=` makes one a warning, `-Wno-` drops it, and a pragma's `warning`,

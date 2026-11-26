@@ -76,6 +76,7 @@ fixture_main()
         printf 'fixtures: %s: %s\n' "$suite" "$fixture_reason"
         if [ "$suite" = caches ]; then fixture_run 'download retry policy' bash tests/ci/cached-download-retry.sh; fi
         fixture_run "$suite" bash "tests/ci/$suite-fixtures.sh"
+        if [ "$suite" = nightly ]; then fixture_run 'nightly observer' bash tests/ci/nightly-observe.sh --glue-only; fi
     else
         printf 'fixtures: %s: skipped: %s\n' "$suite" "$fixture_reason"
     fi

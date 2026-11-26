@@ -15,3 +15,8 @@ static void check_test_driver_builtin_pointer_sign(CheckTest* test, const char* 
 {
     check_test_driver_warning_suite(test, clang, executable, directory, "driver/warnings/builtin-pointer-sign", false);
 }
+
+static void check_test_driver_pointer_initializers(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_warning_suite(test, clang, executable, directory, "driver/warnings/pointer-initializers", false);
+}

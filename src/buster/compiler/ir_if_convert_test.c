@@ -524,6 +524,54 @@ static bool ir_if_convert_test_reload(Arena* arena, IrFunction* f, uint32_t vari
     return created;
 }
 
+// Copy provenance (#2818) is absent from a load's identity and from the head's proof that an address is readable.
+// Exercise both directions of mixed marked/plain numbering, a marked store's proof behind a write barrier, and a
+// marked volatile arm that must still stay conditional. These trials keep the existing fixture digest unchanged.
+static void ir_if_convert_test_copy_piece(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    const uint64_t im = input->length;
+    const uint64_t om = output->length;
+    const uint64_t sm = scratch->length;
+    for (uint32_t variant = 0; variant < 4; variant += 1)
+    {
+        IrFunction function = { 0 };
+        const bool created = ir_if_convert_test_reload(input, &function, variant == 2 ? 1 : variant == 3 ? 3 : 0);
+        ir_optimize_test_expect(test, created, "copy-provenance if-conversion fixture allocation");
+        if (created)
+        {
+            function.flags[5] = variant == 0 || variant == 2 ? BUSTER_IR_COPY_PIECE : 0;
+            function.flags[10] |= variant != 0 ? BUSTER_IR_COPY_PIECE : 0;
+            function.flags[6] = variant == 2 ? BUSTER_IR_COPY_PIECE : 0;
+            const bool valid = ir_verify_complete(&function, scratch).error == IR_OK;
+            ir_optimize_test_expect(test, valid, "copy-provenance if-conversion fixture is complete SSA");
+            IrIfConvertResult converted = { 0 };
+            const bool checked = valid && ir_if_convert(&function, output, scratch, &converted).error == IR_OK;
+            const uint32_t regions = variant == 3 ? 0 : 1;
+            const uint32_t reused = variant < 2 ? 3 : variant == 2 ? 1 : 0;
+            ir_optimize_test_expect(test, checked && converted.regions == regions && converted.selects == regions &&
+                                    converted.loads == regions && converted.reused == reused,
+                                    "copy provenance preserves reload numbering and address proofs without admitting volatile loads");
+            if (checked)
+            {
+                ir_optimize_test_expect(test, ir_verify_complete(&converted.function, scratch).error == IR_OK,
+                                        "copy-provenance if-conversion preserves complete SSA");
+                for (uint32_t trial = 0; trial < 8; trial += 1)
+                {
+                    const uint64_t value = trial < 6 ? trial : trial == 6 ? UINT64_MAX : UINT64_C(1) << 63;
+                    const IrOptimizeExecution before = ir_optimize_test_execute(&function, scratch, value, trial & 1);
+                    const IrOptimizeExecution after = ir_optimize_test_execute(&converted.function, scratch, value, trial & 1);
+                    ir_optimize_test_expect(test, before.status != 4 && before.status == after.status && before.effects == after.effects &&
+                                            (before.status != 1 || before.value == after.value),
+                                            "copy-provenance if-conversion preserves independently executed values, traps and effects");
+                }
+            }
+        }
+        ir_optimize_test_expect(test, scratch->length == sm, "copy-provenance if-conversion restores scratch");
+        arena_pop_to(output, om);
+        arena_pop_to(input, im);
+    }
+}
+
 // The C lowering's `&&` (variant 0) and `||` (1) value: the arm holds a comparison twice with its zero extensions and
 // a dead shift, of which the phi needs two rows. The join tests the phi against zero, which becomes an i1 and (or or) of
 // the two comparisons (#2677). Variant 2's dead division by a parameter could fault, so its arm stays.
@@ -708,8 +756,10 @@ static void ir_if_convert_test_scans(IrOptimizeTest* test)
                 {
                     const uint32_t row = first + lane;
                     bool match = f->op[row] == key.op;
+                    const uint32_t difference = f->flags[row] ^ key.flags;
+                    const bool copy_hint = (key.op == IR_LOAD || key.op == IR_STORE) && difference == BUSTER_IR_COPY_PIECE;
                     match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_TYPE) == 0 || f->type[row] == key.type);
-                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) == 0 || f->flags[row] == key.flags);
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) == 0 || difference == 0 || copy_hint);
                     match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_A) == 0 || f->a[row] == key.a);
                     match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_B) == 0 || f->b[row] == key.b);
                     match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_C) == 0 || f->c[row] == key.c);
@@ -722,6 +772,29 @@ static void ir_if_convert_test_scans(IrOptimizeTest* test)
     ir_optimize_test_expect(test, candidates, "if-conversion's conditional branches' and narrowing casts' scans, against their definitions");
     ir_optimize_test_expect(test, barriers, "if-conversion's barriers' scan, against its definition");
     ir_optimize_test_expect(test, filters, "if-conversion's keys' filter, against its definition");
+    // Every flag byte, followed by each single-bit difference: accesses match themselves and bit 7 alone; other
+    // operations match only themselves. No other access flag, including an order or segment bit, is metadata.
+    static const uint8_t operations[] = { IR_LOAD, IR_STORE, IR_INTRINSIC };
+    uint8_t op[9];
+    uint8_t flags[9];
+    const IrFunction function = { .op = op, .flags = flags };
+    bool metadata = true;
+    for (uint32_t operation = 0; operation < BUSTER_ARRAY_LENGTH(operations); operation += 1)
+    {
+        memset(op, operations[operation], sizeof(op));
+        for (uint32_t value = 0; value <= UINT8_MAX; value += 1)
+        {
+            flags[0] = (uint8_t)value;
+            for (uint32_t bit = 0; bit < 8; bit += 1)
+            {
+                flags[1 + bit] = (uint8_t)(value ^ (1u << bit));
+            }
+            const IrIfConvertKey key = { .fields = BUSTER_IR_IF_CONVERT_KEY_FLAGS, .op = operations[operation], .flags = (uint8_t)value };
+            const uint32_t expected = operation < 2 ? 0x101u : 1u;
+            metadata &= ir_if_convert_filter(&function, 0, BUSTER_ARRAY_LENGTH(op), key) == expected;
+        }
+    }
+    ir_optimize_test_expect(test, metadata, "if-conversion ignores only access copy provenance and preserves every other flag bit");
 }
 
 // Both triangle orientations, both operand orders, and a second phi that also needs the arm's original value.
@@ -1120,6 +1193,7 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
             }
             arena_pop_to(&input, 0);
         }
+        ir_if_convert_test_copy_piece(test, &input, &vector, &scratch);
         for (uint32_t variant = 0; variant < 2; variant += 1)
         {
             IrFunction f = { 0 };

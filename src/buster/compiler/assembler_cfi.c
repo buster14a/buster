@@ -258,6 +258,8 @@ struct AsmCfiWriter
     uint8_t* bytes;
     uint32_t size;
     uint32_t capacity;
+    // The fragment's position in its section: explicit unwind bytes can precede generated CFI.
+    uint32_t origin;
     bool failed;
 };
 
@@ -342,7 +344,7 @@ static void asm_cfi_event(AsmCfiWriter* writer, const AsmCfiEvent* event)
 
 static void asm_cfi_pad(AsmCfiWriter* writer, uint32_t alignment)
 {
-    while (!writer->failed && writer->size % alignment != 0)
+    while (!writer->failed && (writer->origin + writer->size) % alignment != 0)
     {
         asm_cfi_integer(writer, 0, 1);
     }
@@ -389,6 +391,7 @@ static void asm_cfi_finish(AsmParser* parser)
 static uint32_t asm_cfi_intern_cie(AsmCfiWriter* writer, AsmCfiWriter candidate, const AsmCfiProcedure* procedure, const AsmCfiEvent* events, bool debug, uint32_t* cies, uint32_t mask)
 {
     uint8_t* bytes = writer->bytes;
+    candidate.origin = writer->origin + writer->size;
     asm_cfi_integer(&candidate, 0, 4);
     asm_cfi_integer(&candidate, debug ? UINT32_MAX : 0, 4); // CIE id
     asm_cfi_integer(&candidate, 1, 1); // version
@@ -459,7 +462,8 @@ static uint32_t asm_cfi_intern_cie(AsmCfiWriter* writer, AsmCfiWriter candidate,
 // bytes with DW_CFA_nop. Identical CIEs are shared.
 static void asm_cfi_frame(AsmParser* parser, bool debug, uint64_t bound, uint64_t candidate_bound)
 {
-    uint8_t* bytes = bound <= BUSTER_ASM_MAX_SECTION ? arena_push(parser->arena, bound, 8) : 0;
+    const uint32_t origin = debug ? 0 : parser->sections[BUSTER_LINK_CLASS_EH_FRAME].size;
+    uint8_t* bytes = origin <= BUSTER_ASM_MAX_SECTION && bound <= BUSTER_ASM_MAX_SECTION - origin ? arena_push(parser->arena, bound, 8) : 0;
     Scratch scratch = scratch_begin(parser->arena);
     uint8_t* candidate_bytes = candidate_bound <= BUSTER_ASM_MAX_SECTION ? arena_push(scratch.arena, candidate_bound, 8) : 0;
     uint32_t slots = 16;
@@ -469,14 +473,14 @@ static void asm_cfi_frame(AsmParser* parser, bool debug, uint64_t bound, uint64_
     }
     uint32_t* cies = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, slots);
     const AsmCfiWriter candidate = {.bytes = candidate_bytes, .capacity = candidate_bound <= BUSTER_ASM_MAX_SECTION ? candidate_bound : 0};
-    AsmCfiWriter writer = {.bytes = bytes, .capacity = bound <= BUSTER_ASM_MAX_SECTION ? bound : 0};
+    AsmCfiWriter writer = {.bytes = bytes, .capacity = bound <= BUSTER_ASM_MAX_SECTION ? bound : 0, .origin = origin};
     // Each section has its own offsets and encoding. With no initial events the two flags and the version-1 return
     // column determine every byte. Only the presence bits need clearing when a section uses few of the possible keys.
     uint32_t defaults[4 * (UINT8_MAX + 1)];
     uint64_t present[BUSTER_ARRAY_LENGTH(defaults) / 64] = {0};
-    if (bytes == 0 || candidate_bytes == 0 || cies == 0 || (!debug && parser->sections[BUSTER_LINK_CLASS_EH_FRAME].declared))
+    if (bytes == 0 || candidate_bytes == 0 || cies == 0)
     {
-        asm_fail(parser, 0, "CFI output capacity exhausted or explicit .eh_frame conflicts with CFI");
+        asm_fail(parser, 0, "CFI output capacity exhausted");
     }
     if (cies != 0)
     {
@@ -520,7 +524,7 @@ static void asm_cfi_frame(AsmParser* parser, bool debug, uint64_t bound, uint64_
         else
         {
             asm_cfi_integer(&writer, fde + 4 - cie, 4);
-            procedure->relocation = writer.size;
+            procedure->relocation = origin + writer.size;
             asm_cfi_integer(&writer, 0, 4);
             asm_cfi_integer(&writer, finish->offset - start->offset, 4);
             asm_cfi_integer(&writer, 0, 1); // FDE augmentation length
@@ -569,8 +573,9 @@ static void asm_cfi_frame(AsmParser* parser, bool debug, uint64_t bound, uint64_
         AsmFragment* fragment = &parser->fragments[id];
         fragment->bytes = bytes;
         fragment->size = writer.size;
-        parser->sections[parser->section].size = writer.size;
-        parser->sections[parser->section].alignment = 3;
+        fragment->offset = origin;
+        parser->sections[parser->section].size = origin + writer.size;
+        parser->sections[parser->section].alignment = parser->sections[parser->section].alignment < 3 ? 3 : parser->sections[parser->section].alignment;
         asm_partition_append(parser, id);
         parser->section = previous;
     }

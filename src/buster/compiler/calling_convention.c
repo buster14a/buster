@@ -317,7 +317,10 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 // type's bytes past it lost as they are in the register, #2113), and FIRST (the parts, or a STACK location's slots, are
 // those of the value's first 16 bytes alone, as a value of 16 bytes would have them: a transparent union of a slot of its
 // own past 16 bytes, its member's eightbytes, pair or 16-byte vector, AbiTable.transparent, #1844; the union's bytes
-// past them are padding).
+// past them are padding). PREFIX tags an exact prefix instead: bit 7 is set and bits 0--6 hold its byte count, with
+// no other flags. A transparent union's single scalar or vector value may carry fewer bytes than its object, including
+// a vector payload of 24, 40, 48 or 56 bytes. Its stack slot is that value's, rounded to the vector register's width
+// above 8 bytes. The tagged form keeps every location eight bytes; abi_location_flags and abi_location_size decode it.
 #define BUSTER_ABI_LOCATION_IGNORE 0
 #define BUSTER_ABI_LOCATION_REGISTERS 1
 #define BUSTER_ABI_LOCATION_STACK 2
@@ -329,6 +332,8 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 #define BUSTER_ABI_FLAG_LOW 0x10
 #define BUSTER_ABI_FLAG_PAYLOAD 0x20
 #define BUSTER_ABI_FLAG_FIRST 0x40
+#define BUSTER_ABI_FLAG_PREFIX 0x80
+#define BUSTER_ABI_PREFIX_BYTES 0x7f
 
 typedef struct AbiLocation AbiLocation;
 struct AbiLocation
@@ -462,7 +467,9 @@ static __attribute__((unused)) uint64_t abi_capacity_bytes(uint32_t types);
 static __attribute__((unused)) bool abi_initialize(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes);
 // The same for the table's first `types` types alone, from its count to its capacity: a table no type will be made in
 // after it (a code generator's whose front end has finished) needs no columns for the room past its types, which
-// abi_initialize would clear (#442: the checker's room is four times a unit's tokens). abi_classify_all leaves a type
+// abi_initialize would clear (#442: the checker's room is four times a unit's tokens). A caller may also reserve extra
+// rows for ABI-only aliases, which it initializes and uses only in signatures; classification visits TypeTable's
+// logical types alone. abi_classify_all leaves a type
 // made after it unclassified; abi_classify, abi_classes and the rest must be given types below `types` alone.
 static __attribute__((unused)) bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes, uint32_t types);
 // Classifies every complete type the table has that isn't yet, a level at a time (each level's types depend only on
@@ -499,6 +506,30 @@ static __attribute__((unused)) uint32_t abi_vector_payload_bytes(uint64_t size)
 static __attribute__((unused)) uint32_t abi_vector_register_bytes(uint32_t payload)
 {
     return payload <= BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : payload <= 2 * BUSTER_ABI_REGISTER_BYTES ? 2 * BUSTER_ABI_REGISTER_BYTES : 4 * BUSTER_ABI_REGISTER_BYTES;
+}
+
+// A PREFIX location's low bits are its byte count, not independent flags. Its value occupies one register or one
+// stack slot; eightbyte pairs and split values keep FIRST and the ordinary flags.
+static __attribute__((unused)) uint8_t abi_location_flags(AbiLocation location)
+{
+    return (location.flags & BUSTER_ABI_FLAG_PREFIX) != 0 ? 0 : location.flags;
+}
+
+static __attribute__((unused)) uint32_t abi_location_size(AbiLocation location, uint32_t size)
+{
+    const uint32_t prefix = (location.flags & BUSTER_ABI_FLAG_PREFIX) != 0 ? location.flags & BUSTER_ABI_PREFIX_BYTES :
+                            (location.flags & BUSTER_ABI_FLAG_FIRST) != 0 ? BUSTER_ABI_REGISTER_BYTES : size;
+    return prefix < size ? prefix : size;
+}
+
+static __attribute__((unused)) bool abi_location_prefix_valid(AbiLocation location, uint32_t size)
+{
+    const uint32_t bytes = location.flags & BUSTER_ABI_PREFIX_BYTES;
+    return (location.flags & BUSTER_ABI_FLAG_PREFIX) == 0 ||
+           (bytes != 0 && bytes <= 64 && bytes <= size && (bytes <= 8 || bytes % 8 == 0) && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
+            (location.kind == BUSTER_ABI_LOCATION_STACK ? location.registers[0] == BUSTER_ABI_REGISTER_NONE :
+             location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] != BUSTER_ABI_REGISTER_NONE &&
+             (bytes <= 8 || (location.registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR)));
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2179,8 +2210,8 @@ __attribute__((cold, noinline)) static AbiRare abi_finish_rare(AbiTable* abi, co
 
 // A transparent union's first member's index where the union's stack slot differs from the member's (#1844,
 // AbiTable.transparent), or 0: a union whose own attribute aligns or packs it otherwise, of a member that passes in its
-// registers (a scalar or an aggregate of eightbytes, a pair's two general registers or a vector's xmm one, not a vector
-// wider than 16 bytes or an _Atomic value in memory), which clang's classification of the member puts in registers, or
+// registers (a scalar or an aggregate of eightbytes, a pair's two general registers or a vector's), which clang's
+// classification of the member puts in registers, or
 // else gives the union's bytes their own byval slot; or of an
 // aggregate member in memory, which clang passes as the member (getIndirectResult of it: byval at its alignment, the
 // union's bytes, or as an integer of its size where it has 8 bytes or less, aligned to 8 or less, and clang no general
@@ -2189,7 +2220,9 @@ __attribute__((cold, noinline)) static AbiRare abi_finish_rare(AbiTable* abi, co
 // is the union's, which is never LARGER (clang lays a union out in its own bytes), so a GROWN member is an integer of its
 // size where clang has no general register left, as it is alone, and its copy's bytes are none of the union's. Every
 // union of a GROWN member differs: its stack bytes are 8 where its member's are 16 or more, unless its own alignment of
-// 16 or more sets them, which differs from the member's. Another member keeps its refusal (check_lower_transparent_passed).
+// 16 or more sets them, which differs from the member's. An atomic scalar passes as its value without clang counting
+// registers, and spills into that value's slot, never a byval copy of the union. Unsupported member representations
+// keep their refusal (check_lower_transparent_passed).
 static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     uint32_t result = 0;
@@ -2197,12 +2230,13 @@ static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* tab
     {
         const uint32_t tag = table->types.index[index];
         const uint32_t member = table->tags.member_count[tag] != 0 ? table->members.type[table->tags.member_begin[tag]] >> BUSTER_TYPE_INDEX_SHIFT : 0;
-        const uint32_t refused = BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY |
+        const uint32_t refused = BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY |
                                  BUSTER_ABI_PASS_END_MEMORY;
         const uint32_t larger = BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_GROWN;
         const uint32_t pass = member != 0 && member < abi->capacity ? abi->pass[member] : 0;
         const bool in_memory = (pass & BUSTER_ABI_PASS_MEMORY) != 0;
-        const bool placed = in_memory ? (pass & BUSTER_ABI_PASS_AGGREGATE) != 0 : (pass & larger) == 0;
+        const bool value = (pass & BUSTER_ABI_PASS_VALUE) != 0 && (pass & larger) == 0;
+        const bool placed = in_memory ? (pass & BUSTER_ABI_PASS_AGGREGATE) != 0 || value : (pass & larger) == 0;
         const bool simple = (pass & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (pass & refused) == 0 && placed;
         const bool differs = simple && (abi->stack_bytes[index] != abi->stack_bytes[member] || abi->alignment_log2[index] != abi->alignment_log2[member]);
         result = differs ? member : 0;
@@ -2898,7 +2932,7 @@ static bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* t
     abi->larger = 0;
     abi->rare = 0;
     const bool result = abi->transparent != 0 && (vector_bytes == 16 || vector_bytes == 32 || vector_bytes == 64) && types >= table->types.count &&
-                        types <= table->types.capacity;
+                        types <= BUSTER_TYPE_MAX_INDEX + 1u;
     if (result)
     {
         // TypeTable's builtin prefix is immutable, apart from plain-char mode. Reuse its complete ABI facts;
@@ -2994,7 +3028,8 @@ __attribute__((cold, noinline)) static bool abi_members_classified(const AbiTabl
 // only when `all`, for a LARGER member, which makes its copy LARGER (abi_copy_bytes): only a table with an _Atomic of a
 // type of no size, the root of every LARGER type, has one (abi_classify_levels), and waiting would add a level for
 // every nesting of records; but a flexible one of no size always waits, as an _Atomic of it takes its alignment as its
-// size. Each is complete when the type is, so no type waits forever. The rare cases are out of line, which keeps this
+// size. A transparent union always waits for its first member's passing facts, even when its own row is already
+// known to be MEMORY. Each is complete when the type is, so no type waits forever. The rare cases are out of line, which keeps this
 // small enough for clang to inline into abi_classify_scan.
 static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* table, uint32_t index, bool all)
 {
@@ -3019,6 +3054,11 @@ static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* ta
     else if (record && (all || ((table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 && table->types.size[index] == 0)))
     {
         result = abi_members_classified(abi, table, index);
+    }
+    else if (kind == BUSTER_TYPE_KIND_UNION && (table->types.flags[index] & BUSTER_TYPE_FLAG_TRANSPARENT_UNION) != 0)
+    {
+        const uint32_t tag = table->types.index[index];
+        result = table->tags.member_count[tag] == 0 || abi_is_classified(abi, table->members.type[table->tags.member_begin[tag]]);
     }
     return result;
 }
@@ -3672,6 +3712,7 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, uint
         const __mmask16 uncounted = passed & in_memory & BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_UNCOUNTED);
         const __mmask16 counted = passed & (__mmask16)~uncounted;
         const __m512i value = _mm512_srli_epi32(_mm512_and_si512(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_VALUE)), BUSTER_ABI_PASS_VALUE_SHIFT);
+        const __mmask16 value_member = transparent & in_memory & (__mmask16)~aggregate & _mm512_cmpneq_epi32_mask(value, zero);
         const __mmask16 small = _mm512_cmple_epu32_mask(bytes, _mm512_set1_epi32(BUSTER_ABI_REGISTER_BYTES));
         const __m512i need_integers = _mm512_add_epi32(_mm512_and_si512(pass, one), _mm512_and_si512(_mm512_srli_epi32(pass, 2), one));
         const __m512i need_vectors = _mm512_add_epi32(_mm512_and_si512(_mm512_srli_epi32(pass, 1), one), _mm512_and_si512(_mm512_srli_epi32(pass, 3), one));
@@ -3771,11 +3812,13 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, uint
         // payload alone (a record's <size / 8 x double>, its result's part_bytes), PAYLOAD where the C type's bytes run
         // past it.
         __m512i payload = bytes;
-        if (vector_stack != 0)
+        // A transparent union's register value also needs the member's exact payload: its own object may be larger.
+        const __mmask16 read_payload = vector_stack | (transparent & (vector | uncounted));
+        if (read_payload != 0)
         {
             const __m512i entries = _mm512_slli_epi32(index, 1);
-            const __m512i returned = _mm512_mask_i32gather_epi32(zero, vector_stack, entries, (const void*)abi->results, 4);
-            const __m512i returned_high = _mm512_mask_i32gather_epi32(zero, vector_stack, entries, (const void*)((const uint8_t*)abi->results + 4), 4);
+            const __m512i returned = _mm512_mask_i32gather_epi32(zero, read_payload, entries, (const void*)abi->results, 4);
+            const __m512i returned_high = _mm512_mask_i32gather_epi32(zero, read_payload, entries, (const void*)((const uint8_t*)abi->results + 4), 4);
             const __m512i part_bytes = _mm512_and_si512(_mm512_srli_epi32(returned, 16), _mm512_set1_epi32(0xff));
             const __mmask16 held = _mm512_cmpeq_epi32_mask(_mm512_and_si512(returned, _mm512_set1_epi32((int)0xff0000ffu)), _mm512_set1_epi32((int)(BUSTER_ABI_RESULT_REGISTERS | (uint32_t)BUSTER_ABI_REGISTER_VECTOR << 24))) &
                                    _mm512_cmpeq_epi32_mask(_mm512_and_si512(returned_high, _mm512_set1_epi32(0xff)), _mm512_set1_epi32(BUSTER_ABI_REGISTER_NONE)) &
@@ -3787,7 +3830,7 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, uint
         const __m512i width_log2 = _mm512_mask_mov_epi32(_mm512_mask_mov_epi32(_mm512_set1_epi32(6), within_32, _mm512_set1_epi32(5)), within_16, _mm512_set1_epi32(4));
         const __m512i width = _mm512_sllv_epi32(one, width_log2);
         // Each slot's bytes and alignment, by the rule that placed it.
-        const __m512i memory_bytes = _mm512_mask_mov_epi32(_mm512_mask_mov_epi32(bytes, transparent, own_bytes), decision.integer, slot_bytes);
+        const __m512i memory_bytes = _mm512_mask_mov_epi32(_mm512_mask_mov_epi32(bytes, transparent & (__mmask16)~value_member, own_bytes), decision.integer, slot_bytes);
         __m512i slot = _mm512_mask_mov_epi32(bytes, value_out, _mm512_mask_mov_epi32(slot_bytes, (__mmask16)~decision.value_low, _mm512_set1_epi32(2 * BUSTER_ABI_SLOT_BYTES)));
         slot = _mm512_mask_mov_epi32(slot, memory_stacked, memory_bytes);
         slot = _mm512_mask_mov_epi32(slot, vector_stack, width);
@@ -3818,13 +3861,23 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, uint
         const __m512i value_bytes = _mm512_mask_mov_epi32(bytes, transparent, own_bytes);
         const __mmask16 integer_low = decision.integer & (__mmask16)~decision.in_register & _mm512_cmpgt_epu32_mask(own_bytes, slot_bytes);
         const __mmask16 halves_low = halves & (__mmask16)~high & stacked & _mm512_cmpgt_epu32_mask(value_bytes, slot_bytes);
-        const __mmask16 own_slot = decision.memory & (__mmask16)~decision.integer;
-        const __mmask16 first_bytes = (in_registers | placed) & (__mmask16)~own_slot & _mm512_cmpgt_epu32_mask(own_bytes, _mm512_set1_epi32(BUSTER_ABI_REGISTER_BYTES));
+        const __mmask16 own_slot = decision.memory & (__mmask16)~(decision.integer | value_member);
+        const __mmask16 single_value = vector | (value_member & (_mm512_cmpeq_epi32_mask(value, _mm512_set1_epi32(BUSTER_ABI_VALUE_GENERAL)) |
+                                                               _mm512_cmpeq_epi32_mask(value, _mm512_set1_epi32(BUSTER_ABI_VALUE_VECTOR)) |
+                                                               _mm512_cmpeq_epi32_mask(value, _mm512_set1_epi32(BUSTER_ABI_VALUE_X87))));
+        const __mmask16 first_bytes = (in_registers | placed) & (__mmask16)~own_slot &
+                                      ((__mmask16)~single_value | _mm512_cmple_epu32_mask(payload, _mm512_set1_epi32(BUSTER_ABI_REGISTER_BYTES))) &
+                                      _mm512_cmpgt_epu32_mask(own_bytes, _mm512_set1_epi32(BUSTER_ABI_REGISTER_BYTES));
         __m512i flags = _mm512_and_si512(_mm512_srli_epi32(pass, 10), _mm512_set1_epi32(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO));
         flags = _mm512_mask_or_epi32(flags, integer_low | halves_low, flags, _mm512_set1_epi32(BUSTER_ABI_FLAG_LOW));
         flags = _mm512_mask_or_epi32(flags, vector_stack & _mm512_cmplt_epu32_mask(payload, bytes), flags, _mm512_set1_epi32(BUSTER_ABI_FLAG_PAYLOAD));
         flags = _mm512_mask_or_epi32(flags, halves & (__mmask16)~low, flags, _mm512_set1_epi32(BUSTER_ABI_FLAG_HIGH));
         flags = _mm512_mask_or_epi32(flags, first_bytes, flags, _mm512_set1_epi32(BUSTER_ABI_FLAG_FIRST));
+        // One scalar or vector value, in a register or LLVM's own slot, carries its exact prefix. This includes atomic
+        // scalars whose MEMORY class clang leaves to LLVM, and wide vectors in named variadic calls. Ordinary byval
+        // slots still copy the union whole. Pairs and split halves keep FIRST and their eightbyte flags.
+        const __mmask16 prefix = transparent & single_value & (in_registers | placed) & (__mmask16)~own_slot & _mm512_cmpgt_epu32_mask(own_bytes, payload);
+        flags = _mm512_mask_mov_epi32(flags, prefix, _mm512_or_si512(payload, _mm512_set1_epi32(BUSTER_ABI_FLAG_PREFIX)));
         // The locations: the offset, then the registers, kind and flags, a byte each.
         const __m512i fields = _mm512_or_si512(_mm512_or_si512(first_register, _mm512_slli_epi32(second_register, 8)), _mm512_or_si512(_mm512_slli_epi32(kind, 16), _mm512_slli_epi32(flags, 24)));
         const __m512i offsets = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi64_epi32(low_offsets)), _mm512_cvtepi64_epi32(high_offsets), 1);

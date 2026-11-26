@@ -17,7 +17,9 @@
 # data (.data.rel.ro.buster: their .data.rel.ro, which a static link at a fixed address relocates in the file, where the
 # C library's own, in .data.rel.ro, is written by its start). The two make a writable segment of their own, between the
 # read-only data and the code, which the bake makes read-only (baked.c's bake_seal), so that the exit helper can ask
-# for its ranges in huge pages as for the code's.
+# for its ranges in huge pages as for the code's. The direct path, frontend and checker lead the relocated data, so
+# their small tables share ranges instead of the other units' tests and benchmarks separating them. Each starts on
+# a 64 KB fault-around boundary, so preceding units do not shift its tables across the windows.
 #
 #   buster_start_order_files(LIST SCRIPT SYMBOLS SHIFT_SOURCE CHECKER_SHIFT)
 #
@@ -37,6 +39,10 @@
 # (BusterCodegen.cmake), in every static build, whatever its linker, buster_start_order_unit below writes the names the
 # split (tools/codegen/presplit.c or split.c, --first) puts first in that section. Each file is written only when its text changes, so
 # that an unchanged list relinks nothing.
+#
+# The small writable state of a compile (lane.c's BUSTER_START_DATA) shares one page after .bss, separate from the
+# large arrays of the driver, tests and benchmarks. It stays NOBITS and between __bss_start and _end, so the compile's
+# existing advice keeps it in base pages too. A new object that overfills that page fails the link.
 
 function(buster_start_order_write path text)
     set(current "")
@@ -103,11 +109,22 @@ function(buster_start_order_files list script symbols shift_source checker_shift
         "/* The start's code order (cmake/BusterStartOrder.cmake), from ${list}. */\n"
         "SECTIONS\n{\n"
         "    buster_baked : ALIGN(0x200000)\n    {\n        *(buster_baked)\n    }\n"
-        "    .data.rel.ro.buster :\n    {\n        *.c.o(.data.rel.ro .data.rel.ro.*)\n        */native.o(.data.rel.ro .data.rel.ro.*)\n    }\n"
+        "    .data.rel.ro.buster :\n    {\n"
+        "        . = ALIGN(0x10000);\n"
+        "        */c_direct.c.o(.data.rel.ro .data.rel.ro.*)\n        */c_direct/native.o(.data.rel.ro .data.rel.ro.*)\n"
+        "        . = ALIGN(0x10000);\n"
+        "        */main_unit_frontend.c.o(.data.rel.ro .data.rel.ro.*)\n        */main_unit_frontend/native.o(.data.rel.ro .data.rel.ro.*)\n"
+        "        . = ALIGN(0x10000);\n"
+        "        */main_unit_checker.c.o(.data.rel.ro .data.rel.ro.*)\n        */main_unit_checker/native.o(.data.rel.ro .data.rel.ro.*)\n"
+        "        *.c.o(.data.rel.ro .data.rel.ro.*)\n        */native.o(.data.rel.ro .data.rel.ro.*)\n    }\n"
         "    .text.buster_start : ALIGN(0x200000)\n    {\n        buster_start_probe = .;\n        . += 0x20000;\n${sections}    }\n"
         "    ASSERT(SIZEOF(.text.buster_start) > 0x20000, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
         "    .text.buster_checker :${checker_alignment}\n    {\n${checker_sections}        buster_start_end = .;\n    }\n"
-        "}\nINSERT BEFORE .text;\n")
+        "}\nINSERT BEFORE .text;\n"
+        "SECTIONS\n{\n"
+        "    .bss.buster_start (NOLOAD) : ALIGN(4096)\n    {\n        buster_start_data_begin = .;\n        *(.bss.buster_start)\n        buster_start_data_end = .;\n    }\n"
+        "    ASSERT(SIZEOF(.bss.buster_start) <= 4096, \"the compile's small writable state no longer fits in one page\")\n"
+        "}\nINSERT AFTER .bss;\n")
     buster_start_order_write("${script}" "${text}")
     # A shifted link's padding before .text's code: the first section lld places there (absent elsewhere, which
     # --no-warn-symbol-ordering lets pass).

@@ -25,6 +25,34 @@ struct CheckVectorMember
     uint8_t kind;
 };
 
+struct CheckVectorCall
+{
+    uint32_t node;
+    CheckVectorMember member;
+};
+
+// The retained graph's decoded selectors are sorted by node, with at most one record per node. The slice and its
+// lane storage remain unchanged while an action/batch borrows them; an absent selector stays null.
+static const CheckVectorMember* check_vector_member_find(const CheckVectorCall* members, uint32_t count, uint32_t node)
+{
+    uint32_t first = 0;
+    uint32_t last = count;
+    while (first < last)
+    {
+        const uint32_t middle = first + (last - first) / 2;
+        if (members[middle].node < node)
+        {
+            first = middle + 1;
+        }
+        else
+        {
+            last = middle;
+        }
+    }
+    const CheckVectorMember* member = first < count && members[first].node == node ? &members[first].member : NULL;
+    return member;
+}
+
 static bool check_vector_type(const TypeTable* table, TypeId type)
 {
     const uint8_t kind = check_action_kind(table, type);
@@ -540,10 +568,12 @@ static void check_vector_member(TypeTable* table, const CheckAction* action, Che
 
 // `p->y` (CHECK_OP_ARROW): check_vector_member of the lvalue `*p`, which takes the pointer's own effects but none of its
 // object's flags (a register pointer's lane isn't a register's).
-static void check_vector_arrow(TypeTable* table, const CheckAction* action, CheckActionResult* result)
+static void check_vector_arrow(TypeTable* table, const CheckAction* action, const CheckVectorMember* selector, CheckActionResult* result)
 {
     const CheckValue pointer = check_action_operand(table, action, result, 0);
     CheckAction member = *action;
+    member.vector_member_count = 0;
+    member.vector_member = selector;
     member.operands[0] = pointer;
     member.operands[0].type = type_element(table, type_strip_aligned(table, pointer.type));
     member.operands[0].category = CHECK_LVALUE;
@@ -688,13 +718,22 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
         case CHECK_OP_ARROW:
         {
             // `p->y`: a lane of the extended vector a pointer points to, as clang's LookupMemberExpr takes it, the
-            // lvalue `(*p).y` (a vector_size vector's pointer stays a struct's or union's error).
-            const TypeId pointer = type_strip_aligned(table, action->operands[0].type);
-            handled = action->vector_member != NULL && type_kind(table, pointer) == BUSTER_TYPE_KIND_POINTER &&
-                      check_action_kind(table, type_element(table, pointer)) == BUSTER_TYPE_KIND_EXT_VECTOR;
-            if (handled)
+            // lvalue `(*p).y` (a vector_size vector's pointer stays a struct's or union's error). Ordinary record
+            // arrows never search the swizzle records, including in a unit that declares extended vectors (#2278).
+            if (__builtin_expect(table->ext_vectors, 0))
             {
-                check_vector_arrow(table, action, result);
+                const TypeId pointer = type_strip_aligned(table, action->operands[0].type);
+                if (type_kind(table, pointer) == BUSTER_TYPE_KIND_POINTER &&
+                    check_action_kind(table, type_element(table, pointer)) == BUSTER_TYPE_KIND_EXT_VECTOR)
+                {
+                    const CheckVectorMember* member = action->vector_member_count != 0 ?
+                        check_vector_member_find(action->vector_members, action->vector_member_count, action->node) : action->vector_member;
+                    handled = member != NULL;
+                    if (handled)
+                    {
+                        check_vector_arrow(table, action, member, result);
+                    }
+                }
             }
         } break;
         case CHECK_OP_CONDITIONAL:
