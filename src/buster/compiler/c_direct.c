@@ -4848,6 +4848,10 @@ static int c_direct_unit_tests(void)
         "struct P { int x, y; };\nint f(void) { struct P a[] = { 1, 2, 3, 4 }; return sizeof(a); }\n",
         "int f(void) { int a[][2] = { 1, 2, 3, 4, 5 }; return sizeof(a); }\n",
         "int f(void) { return sizeof((int[]){ [3] = 1 }); }\n",
+        // An attribute after a bit-field's width (main's direct path took it for another member's start).
+        "struct S { int a : 3 __attribute__((packed)); int b; };\nint f(void) { return sizeof(struct S); }\n",
+        "struct S { unsigned a : 3 __attribute__((mode(DI))); int b; };\nint f(void) { return sizeof(struct S); }\n",
+        "struct S { int a : 3, b : 4 __attribute__((aligned(8))); };\nint f(void) { return sizeof(struct S); }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

@@ -3715,6 +3715,10 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
                 cc->pos += 1u;
                 const int64_t bw = fast_cc_const_int_expr(cc, true);
                 if (bw < 0 || bw > 64) { fast_cc_bail(cc, "invalid bitfield width"); break; }
+                // #3577: an attribute after the width is the bit-field's (packed, aligned, a mode), which this layout
+                // doesn't take: left unread, main's direct path took it for another member's start, an int (`unsigned
+                // a : 3 __attribute__((packed)); int b;` was 12 bytes, the full pipeline's 8).
+                if (fast_cc_peek(cc) == FTOK_KW_ATTRIBUTE) { fast_cc_bail(cc, "an attribute after a bit-field's width"); break; }
                 // #3577: a zero width is an unnamed bit-field's alone.
                 if (bw == 0 && dr.name_id != 0) { fast_cc_bail(cc, "named zero-width bit-field"); break; }
                 const uint32_t usize = ftype_size(cc, dr.type);

@@ -378,7 +378,9 @@ do, which CI's count compiles sqlite3.c with), and never use it. Any other (a
 class that isn't the type's, an unknown or vector mode, a `_Bool`'s, an
 enum's, a record's, one on a pointer's, an array's or a function's declarator)
 is the full pipeline's error or warning, or a type it doesn't model, and leaves
-where it is declared. One
+where it is declared. An attribute after a bit-field's width (`int a : 3
+__attribute__((packed))`) was taken for another member's start, an int; it
+leaves. One
 gap is left: a loop's empty body (`for (...);`) is `-Wempty-body` only where the
 next statement is a block or is indented past the loop, as clang decides, and
 the direct path's tokens keep no columns, so it compiles such loops quietly as
