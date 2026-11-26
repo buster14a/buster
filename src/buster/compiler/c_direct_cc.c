@@ -1778,6 +1778,9 @@ _Static_assert(sizeof(FastVal) == 32u, "expression stack entry size");
 #define BUSTER_FVAL_LASTING_UNALIGNED  0x04u
 // sizeof's value of a pointer expression, which the memcpy family's size checks (-Wsizeof-pointer-memaccess).
 #define BUSTER_FVAL_LASTING_SIZEOF_POINTER 0x08u
+// A register's (or its spill's) sum of a known object's address and a constant (-Wfortify-source's destination): where it
+// points in addr_disp, which neither kind uses, a frame offset with sym_idx 0 or SYM_IDX's addend.
+#define BUSTER_FVAL_LASTING_ADDRESS 0x10u
 
 // A value's marks (#3577), lost where an operator makes a new value: a register variable, whose address is an error; a
 // function whose call's null constant arguments are -Wnonnull; the result of a call whose discarding is -Wunused-result;
@@ -2008,6 +2011,7 @@ struct FastExprCtx
     uint32_t seq_mod_ids[4];
     uint32_t seq_start_pos;
     uint32_t cmp_pos;      // #3577: the token of the binary operator fval_emit_binary emits (fast_cc_comparison_reported)
+    uint32_t call_open;    // #3577: the `(` of the call fval_emit_call emits (its arguments' tokens for -Wfortify-source)
     // #3577: for -Wunsequenced, a log of the variables the expression names where evaluated and the lvalues its ++, --
     // and assignments modify, in order, by identity (BUSTER_FSEQ_*; 0 for an lvalue that isn't a variable by name): bit i
     // of seq_mods marks entry i a modification, seq_own its own operands' first entry + 1 (0 unknown). A variable modified
@@ -4385,6 +4389,23 @@ static __attribute__((noinline)) bool fast_cc_binary_operands_quiet(FastCCState*
     return quiet;
 }
 
+// #3577: a register's sum of a known object's address (BASE: a local's or a global's array or address, or such a sum) and
+// DELTA, kept for -Wfortify-source (BUSTER_FVAL_LASTING_ADDRESS); a place past 32 bits isn't kept.
+static __attribute__((cold, noinline)) void fast_cc_address_sum(FastVal* v, const FastVal* base, int64_t delta)
+{
+    const bool summed = (base->lasting & BUSTER_FVAL_LASTING_ADDRESS) != 0;
+    const bool local = summed ? base->sym_idx == 0 : (base->kind == FVAL_LOCAL_ADDR || base->kind == FVAL_LOCAL);
+    const int64_t place = summed ? (int64_t)base->addr_disp : local ? (int64_t)base->off : base->imm;
+    int64_t at = 0;
+    const bool overflowed = __builtin_add_overflow(place, delta, &at);
+    if (!overflowed && at >= INT32_MIN && at <= INT32_MAX)
+    {
+        v->lasting |= BUSTER_FVAL_LASTING_ADDRESS;
+        v->sym_idx = local ? 0u : base->sym_idx;
+        v->addr_disp = (int32_t)at;
+    }
+}
+
 static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, FastVal* lhs, FastVal* rhs, FastVal* out)
 {
     FastCCState* cc = ex->cc;
@@ -4478,6 +4499,14 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
         fval_flush_flags(ex);
         if (iv->kind == FVAL_IMM)
         {
+            // #3577: a known object's address (a local's or a global's, an array decaying, or such a sum) plus a constant
+            // keeps where it points (BUSTER_FVAL_LASTING_ADDRESS), which -Wfortify-source's check of a library call reads.
+            const FastVal base = *pv;
+            const uint32_t addressed = (uint32_t)(((UINT32_C(1) << base.kind) & ((UINT32_C(1) << FVAL_LOCAL_ADDR) | (UINT32_C(1) << FVAL_GLOBAL_ADDR))) != 0) |
+                                       ((uint32_t)(((UINT32_C(1) << base.kind) & ((UINT32_C(1) << FVAL_LOCAL) | (UINT32_C(1) << FVAL_GLOBAL))) != 0) &
+                                        (uint32_t)(base.type != pt)) |
+                                       ((uint32_t)(((UINT32_C(1) << base.kind) & ((UINT32_C(1) << FVAL_REG) | (UINT32_C(1) << FVAL_SPILL))) != 0) &
+                                        (uint32_t)((base.lasting & BUSTER_FVAL_LASTING_ADDRESS) != 0));
             const uint32_t pr = fval_to_gp(ex, pv, true);
             const int64_t delta = (op == FTOK_PLUS ? iv->imm : -iv->imm) * (int64_t)esz;
             if (delta != 0)
@@ -4492,6 +4521,10 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
                 }
             }
             *out = (FastVal){ .type = ftype_unqual(pt), .kind = FVAL_REG, .reg = (uint8_t)pr };
+            if (addressed != 0)
+            {
+                fast_cc_address_sum(out, &base, delta);
+            }
             return;
         }
         fval_convert(ex, iv, FTYPE_I64);
@@ -5420,47 +5453,372 @@ static bool fast_cc_same_tokens(const FastCCState* cc, uint32_t a, uint32_t a_en
     return same;
 }
 
-// #3577: whether a call of a library function checked by its name (KIND, its identifier's FPP_KW_*_FUNCTION) is quiet in
-// the full pipeline: the memcpy family's size argument `sizeof(E)` with E another argument's expression, a pointer to an
-// object (-Wsizeof-pointer-memaccess; any argument against any other, a superset of its positions and names), read from
-// the call's tokens only where an argument is sizeof's of a pointer (BUSTER_FVAL_LASTING_SIZEOF_POINTER); an absolute value
-// function's argument unsigned (_Bool and an unsigned enum too), floating for an integer one or integral for a floating
-// one, or wider than its parameter (-Wabsolute-value). cc->pos is past the call's `)`. Arguments ARGS, their types before
-// conversion.
-static __attribute__((cold, noinline)) bool fast_cc_library_call_clean(const FastCCState* cc, uint32_t kind, const FastComplexType* fn, const FastVal* args,
-                                                                       uint32_t argc)
+static uint32_t fast_cc_loosest_operator(const FastCCState* cc, uint32_t s, uint32_t e, uint32_t* out_precedence);
+
+// #3577: -Wfortify-source's calls (the full pipeline's check_common_call_fortify), by what the amount is: a string literal
+// (strcpy, stpcpy, strcat), a size whose excess is "size argument is too large" (strncpy, stpncpy, strncat), a size
+// (memcpy, memmove, mempcpy, memset; bzero's second argument; bcopy's third, into its second).
+#define BUSTER_FFORTIFY_NONE    0u
+#define BUSTER_FFORTIFY_STRING  1u
+#define BUSTER_FFORTIFY_LIMITED 2u
+#define BUSTER_FFORTIFY_MEMORY  3u
+#define BUSTER_FFORTIFY_BZERO   4u
+#define BUSTER_FFORTIFY_BCOPY   5u
+
+// What the full pipeline's walk of a call's argument down to an object (check_common_call_object) finds of tokens: no
+// object, an object (a name or a string literal), or a shape the direct path's walk doesn't read.
+#define BUSTER_FWALK_UNKNOWN   0u
+#define BUSTER_FWALK_KNOWN     1u
+#define BUSTER_FWALK_UNDECIDED 2u
+
+// #3577: whether tokens [S, E) may be one of the full pipeline's integer constants (check_common_call_integer): none of
+// them a variable or a function named outside an operand that is no evaluation (sizeof's, _Alignof's, _Generic's, a
+// builtin's), an assignment, `++` or `--`. A superset: where it can't tell, true. A member's name, a tag and a typedef's
+// name are no variables.
+static bool fast_cc_tokens_constant(const FastCCState* cc, uint32_t s, uint32_t e)
 {
-    bool clean = true;
-    uint32_t sized = 0;
-    for (uint32_t i = 0; i < argc; i += 1u)
+    bool constant = s < e;
+    uint32_t p = s;
+    while (constant && p < e)
     {
-        sized |= args[i].lasting & BUSTER_FVAL_LASTING_SIZEOF_POINTER;
-    }
-    uint32_t open = 0;
-    if (kind == FPP_KW_MEMACCESS_FUNCTION && sized != 0 && cc->pos >= 2u && cc->tk[cc->pos - 1u] == FTOK_RPAREN)
-    {
-        uint32_t depth = 0;
-        uint32_t q = cc->pos;
-        while (q > 0)
+        const uint8_t t = cc->tk[p];
+        const uint8_t before = p > s ? cc->tk[p - 1u] : FTOK_EOF;
+        const uint32_t id = cc->td[p];
+        const uint32_t si = t == FTOK_IDENT && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+        const uint8_t sym_kind = cc->syms[si].kind;
+        const bool opaque = (t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF || t == FTOK_KW_GENERIC) ||
+                            (t == FTOK_IDENT && si == 0 && p + 1u < e && cc->tk[p + 1u] == FTOK_LPAREN);
+        if (opaque && p + 1u < e && cc->tk[p + 1u] == FTOK_LPAREN)
         {
-            q -= 1u;
-            const uint8_t u = cc->tk[q];
-            depth += (uint32_t)(u == FTOK_RPAREN) | (uint32_t)(u == FTOK_RBRACKET) | (uint32_t)(u == FTOK_RBRACE);
-            depth -= (uint32_t)(u == FTOK_LPAREN) | (uint32_t)(u == FTOK_LBRACKET) | (uint32_t)(u == FTOK_LBRACE);
-            if (depth == 0) { break; }
+            p = fast_cc_group_end(cc, p + 1u);
         }
-        open = q;
+        else if (opaque)
+        {
+            // sizeof's or _Alignof's operand without parentheses: `*`s, a name, then its postfix operators.
+            p += 1u;
+            while (p < e && (cc->tk[p] == FTOK_STAR || cc->tk[p] == FTOK_AMP))
+            {
+                p += 1u;
+            }
+            p += (uint32_t)(p < e);
+            while (p < e && (cc->tk[p] == FTOK_LBRACKET || cc->tk[p] == FTOK_DOT || cc->tk[p] == FTOK_ARROW))
+            {
+                p = cc->tk[p] == FTOK_LBRACKET ? fast_cc_group_end(cc, p) : p + 2u;
+            }
+        }
+        else
+        {
+            const bool named = t == FTOK_IDENT && before != FTOK_DOT && before != FTOK_ARROW && before != FTOK_KW_STRUCT &&
+                               before != FTOK_KW_UNION && before != FTOK_KW_ENUM;
+            const bool variable = named && si != 0 && (sym_kind == FSYM_LOCAL || sym_kind == FSYM_GLOBAL || sym_kind == FSYM_FUNC);
+            const bool effect = t == FTOK_INC || t == FTOK_DEC || ((uint32_t)t - (uint32_t)FTOK_ASSIGN) <= (uint32_t)(FTOK_SHR_ASSIGN - FTOK_ASSIGN);
+            constant = !variable && !effect;
+            p += 1u;
+        }
     }
-    if (open != 0 && argc <= 8u)
+    return constant;
+}
+
+// #3577: the full pipeline's walk of a call's argument down to the object it points into (check_common_call_object), over
+// its tokens [S, E): through grouping parentheses, `__extension__`, a cast to a pointer, `&`, a `+` or `-` of a constant, a
+// subscript by a constant and `.`, to a name (an array, or any object whose address the walk took) or a string literal,
+// whose token goes in *ROOT (BUSTER_FWALK_KNOWN; *STEPPED where a step moved off its start). A pointer's value, `->`, `*`,
+// a call, a variable's index, a cast to an integer, a conditional, a comma, an assignment and a compound literal stop it
+// (BUSTER_FWALK_UNKNOWN), as they stop the full pipeline's; another shape is BUSTER_FWALK_UNDECIDED. A cast to a typedef's
+// name is followed (it may name a pointer).
+static uint32_t fast_cc_fortify_walk(const FastCCState* cc, uint32_t s, uint32_t e, uint32_t* root, bool* stepped)
+{
+    uint32_t result = BUSTER_FWALK_UNDECIDED;
+    bool address = false;
+    bool done = false;
+    *stepped = false;
+    for (uint32_t steps = 0; !done && steps < 256u; steps += 1u)
     {
-        // The arguments' token ranges, split at the commas outside brackets.
-        uint32_t starts[8];
-        uint32_t ends[8];
-        uint32_t count = 0;
+        while (s < e && cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e && !fast_cc_is_type_start(cc, s + 1u))
+        {
+            s += 1u;
+            e -= 1u;
+        }
+        uint32_t precedence = 99u;
+        const uint32_t at = s + 1u < e ? fast_cc_loosest_operator(cc, s, e, &precedence) : UINT32_MAX;
+        const uint8_t first = s < e ? cc->tk[s] : FTOK_EOF;
+        const uint8_t last = s < e ? cc->tk[e - 1u] : FTOK_EOF;
+        if (s >= e)
+        {
+            done = true;
+        }
+        else if (at != UINT32_MAX && cc->tk[at] != FTOK_PLUS && cc->tk[at] != FTOK_MINUS)
+        {
+            // A comma, an assignment, a conditional, or an operator whose value is no pointer.
+            result = BUSTER_FWALK_UNKNOWN;
+            done = true;
+        }
+        else if (at != UINT32_MAX)
+        {
+            // The pointer operand of `+` (either) or `-` (the left), and the other a constant.
+            const bool swap = cc->tk[at] == FTOK_PLUS && fast_cc_tokens_constant(cc, s, at) && !fast_cc_tokens_constant(cc, at + 1u, e);
+            const uint32_t index_start = swap ? s : at + 1u;
+            const uint32_t index_end = swap ? at : e;
+            if (!fast_cc_tokens_constant(cc, index_start, index_end))
+            {
+                result = BUSTER_FWALK_UNKNOWN;
+                done = true;
+            }
+            else
+            {
+                s = swap ? at + 1u : s;
+                e = swap ? e : at;
+                address = false;
+                *stepped = true;
+            }
+        }
+        else if (first == FTOK_LPAREN && fast_cc_is_type_start(cc, s + 1u))
+        {
+            // A cast (the group isn't the whole), or a compound literal.
+            const uint32_t close = fast_cc_group_end(cc, s);
+            bool pointer = false;
+            bool arithmetic = true;
+            for (uint32_t q = s + 1u; q + 1u < close; q += 1u)
+            {
+                pointer = pointer || cc->tk[q] == FTOK_STAR || cc->tk[q] == FTOK_LBRACKET;
+                arithmetic = arithmetic && cc->tk[q] != FTOK_IDENT && cc->tk[q] != FTOK_KW_TYPEOF;
+            }
+            if (close < e && cc->tk[close] == FTOK_LBRACE)
+            {
+                result = fast_cc_group_end(cc, close) == e ? BUSTER_FWALK_UNKNOWN : BUSTER_FWALK_UNDECIDED;
+                done = true;
+            }
+            else if (!pointer && arithmetic)
+            {
+                result = BUSTER_FWALK_UNKNOWN;
+                done = true;
+            }
+            else
+            {
+                s = close;
+            }
+        }
+        else if (first == FTOK_AMP)
+        {
+            address = true;
+            s += 1u;
+        }
+        else if (first == FTOK_KW_EXTENSION)
+        {
+            s += 1u;
+        }
+        else if (first == FTOK_STAR || first == FTOK_PLUS || first == FTOK_MINUS || first == FTOK_BANG || first == FTOK_TILDE ||
+                 first == FTOK_INC || first == FTOK_DEC || first == FTOK_KW_SIZEOF || first == FTOK_KW_ALIGNOF)
+        {
+            result = BUSTER_FWALK_UNKNOWN;
+            done = true;
+        }
+        else if (last == FTOK_RBRACKET)
+        {
+            // A subscript: back to its `[`, the base before it, the index inside (either way round).
+            uint32_t open = e - 1u;
+            uint32_t depth = 0;
+            while (open > s)
+            {
+                const uint8_t u = cc->tk[open];
+                depth += (uint32_t)(u == FTOK_RPAREN) | (uint32_t)(u == FTOK_RBRACKET) | (uint32_t)(u == FTOK_RBRACE);
+                depth -= (uint32_t)(u == FTOK_LPAREN) | (uint32_t)(u == FTOK_LBRACKET) | (uint32_t)(u == FTOK_LBRACE);
+                if (depth == 0)
+                {
+                    break;
+                }
+                open -= 1u;
+            }
+            const bool swap = fast_cc_tokens_constant(cc, s, open) && !fast_cc_tokens_constant(cc, open + 1u, e - 1u);
+            const uint32_t index_start = swap ? s : open + 1u;
+            const uint32_t index_end = swap ? open : e - 1u;
+            if (open <= s || cc->tk[open] != FTOK_LBRACKET)
+            {
+                done = true;
+            }
+            else if (!fast_cc_tokens_constant(cc, index_start, index_end))
+            {
+                result = BUSTER_FWALK_UNKNOWN;
+                done = true;
+            }
+            else
+            {
+                const uint32_t base_start = swap ? open + 1u : s;
+                const uint32_t base_end = swap ? e - 1u : open;
+                s = base_start;
+                e = base_end;
+                address = false;
+                *stepped = true;
+            }
+        }
+        else if (last == FTOK_IDENT && e >= s + 3u && (cc->tk[e - 2u] == FTOK_DOT || cc->tk[e - 2u] == FTOK_ARROW))
+        {
+            if (cc->tk[e - 2u] == FTOK_ARROW)
+            {
+                result = BUSTER_FWALK_UNKNOWN;
+                done = true;
+            }
+            else
+            {
+                e -= 2u;
+                address = true;
+                *stepped = true;
+            }
+        }
+        else if (last == FTOK_RPAREN || last == FTOK_INC || last == FTOK_DEC)
+        {
+            // A call (the group that is the whole is gone), `++` or `--`.
+            result = BUSTER_FWALK_UNKNOWN;
+            done = true;
+        }
+        else
+        {
+            bool literals = true;
+            for (uint32_t q = s; q < e; q += 1u)
+            {
+                literals = literals && cc->tk[q] == FTOK_STR_LIT;
+            }
+            const uint32_t id = cc->td[s];
+            const uint32_t si = first == FTOK_IDENT && e == s + 1u && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+            const uint8_t sym_kind = cc->syms[si].kind;
+            if (literals)
+            {
+                *root = s;
+                result = BUSTER_FWALK_KNOWN;
+            }
+            else if (si != 0 && (sym_kind == FSYM_LOCAL || sym_kind == FSYM_GLOBAL))
+            {
+                *root = s;
+                result = (address || ftype_is_array(cc->syms[si].type)) ? BUSTER_FWALK_KNOWN : BUSTER_FWALK_UNKNOWN;
+            }
+            else if ((si != 0 && sym_kind == FSYM_ENUM_CONST) || (e == s + 1u && (first == FTOK_INT_LIT || first == FTOK_INT_U32 ||
+                     first == FTOK_INT_I64 || first == FTOK_INT_U64 || first == FTOK_CHAR_LIT)))
+            {
+                result = BUSTER_FWALK_UNKNOWN;
+            }
+            done = true;
+        }
+    }
+    return result;
+}
+
+// #3577: where the argument V, whose walk found the object named at ROOT (a local's or a global's name), points into it:
+// the bytes left from there to its end into *REMAINING (none from before its start or past its end, as the full
+// pipeline's unsigned offset), from V's place: an array or address of a local or a global, or a register's sum of one
+// (BUSTER_FVAL_LASTING_ADDRESS). 0 where V doesn't say where it points, 1 sized, 2 where the object's type is incomplete,
+// no object to the full pipeline either.
+static uint32_t fast_cc_fortify_remaining(const FastCCState* cc, uint32_t root, const FastVal* v, uint64_t* remaining)
+{
+    uint32_t result = 0;
+    const uint32_t id = cc->td[root];
+    const uint32_t si = cc->tk[root] == FTOK_IDENT && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+    const FastSym* sym = cc->syms + si;
+    if (si != 0 && (sym->kind == FSYM_LOCAL || sym->kind == FSYM_GLOBAL) && BUSTER_FAST_TYPE_INCOMPLETE(cc, sym->type) != 0)
+    {
+        result = 2u;
+    }
+    else if (si != 0 && (sym->kind == FSYM_LOCAL || sym->kind == FSYM_GLOBAL))
+    {
+        const bool array = ftype_is_array(v->type);
+        const bool summed = (v->kind == FVAL_REG || v->kind == FVAL_SPILL) && (v->lasting & BUSTER_FVAL_LASTING_ADDRESS) != 0;
+        const bool at_local = (v->kind == FVAL_LOCAL && array) || v->kind == FVAL_LOCAL_ADDR || (summed && v->sym_idx == 0);
+        const bool at_global = (v->kind == FVAL_GLOBAL && array) || v->kind == FVAL_GLOBAL_ADDR || (summed && v->sym_idx != 0);
+        const uint64_t size = ftype_size(cc, sym->type);
+        int64_t offset = 0;
+        if (at_local && sym->kind == FSYM_LOCAL)
+        {
+            offset = (summed ? (int64_t)v->addr_disp : (int64_t)v->off) - (int64_t)sym->stack_off;
+            result = 1u;
+        }
+        else if (at_global && sym->kind == FSYM_GLOBAL && sym->obj_sym != 0 && v->sym_idx == sym->obj_sym)
+        {
+            offset = summed ? (int64_t)v->addr_disp : v->imm;
+            result = 1u;
+        }
+        const uint64_t start = (uint64_t)offset < size ? (uint64_t)offset : size;
+        *remaining = size - start;
+    }
+    return result;
+}
+
+// #3577: a string literal's bytes up to its first NUL and that NUL, its adjacent literals' joined (strcpy's amount).
+static uint64_t fast_cc_literal_amount(const FastCCState* cc, uint32_t literal)
+{
+    uint64_t amount = 0;
+    bool ended = false;
+    for (uint32_t p = literal; !ended && p < cc->tcount && cc->tk[p] == FTOK_STR_LIT; p += 1u)
+    {
+        const FastLitSlice slice = cc->pp->lit_slices[cc->td[p]];
+        const void* nul = memchr(cc->pp->lit_bytes + slice.offset, 0, slice.length);
+        ended = nul != NULL;
+        amount += ended ? (uint64_t)((const char*)nul - (cc->pp->lit_bytes + slice.offset)) : slice.length;
+    }
+    return amount + 1u;
+}
+
+// #3577: whether the full pipeline's -Wfortify-source is quiet on a call of FORTIFY's kind (BUSTER_FFORTIFY_*), ARGS its
+// arguments before conversion, at tokens [STARTS[i], ENDS[i]): no amount it knows (a constant, or a string literal's
+// length), no object it knows the destination points into, or an amount within what is left of it. Where the walk can't
+// tell (an amount that may be a constant to the full pipeline but isn't one here, a shape the walk doesn't read, a
+// destination whose place the value lost), it isn't quiet.
+static bool fast_cc_fortify_quiet(const FastCCState* cc, uint32_t fortify, const FastVal* args, uint32_t argc, const uint32_t* starts,
+                                  const uint32_t* ends)
+{
+    const bool two = fortify == BUSTER_FFORTIFY_STRING || fortify == BUSTER_FFORTIFY_BZERO;
+    const uint32_t destination = fortify == BUSTER_FFORTIFY_BCOPY ? 1u : 0u;
+    const uint32_t sized = two ? 1u : 2u;
+    bool quiet = true;
+    if (argc >= sized + 1u)
+    {
+        uint64_t amount = 0;
+        uint32_t amount_state = BUSTER_FWALK_UNKNOWN;
+        if (fortify == BUSTER_FFORTIFY_STRING)
+        {
+            uint32_t root = 0;
+            bool stepped = false;
+            const uint32_t source = fast_cc_fortify_walk(cc, starts[1], ends[1], &root, &stepped);
+            const bool literal = source == BUSTER_FWALK_KNOWN && cc->tk[root] == FTOK_STR_LIT;
+            amount = literal && !stepped ? fast_cc_literal_amount(cc, root) : 0u;
+            amount_state = literal ? (stepped ? BUSTER_FWALK_UNDECIDED : BUSTER_FWALK_KNOWN) :
+                           source == BUSTER_FWALK_UNDECIDED ? BUSTER_FWALK_UNDECIDED : BUSTER_FWALK_UNKNOWN;
+        }
+        else if (args[sized].kind == FVAL_IMM && ftype_is_int(args[sized].type))
+        {
+            amount = (uint64_t)args[sized].imm;
+            amount_state = BUSTER_FWALK_KNOWN;
+        }
+        else if (fast_cc_tokens_constant(cc, starts[sized], ends[sized]))
+        {
+            amount_state = BUSTER_FWALK_UNDECIDED;
+        }
+        if (amount_state != BUSTER_FWALK_UNKNOWN)
+        {
+            uint32_t root = 0;
+            bool stepped = false;
+            const uint32_t object = fast_cc_fortify_walk(cc, starts[destination], ends[destination], &root, &stepped);
+            uint64_t remaining = 0;
+            const uint32_t sizing = object == BUSTER_FWALK_KNOWN ? fast_cc_fortify_remaining(cc, root, args + destination, &remaining) : 0u;
+            quiet = object == BUSTER_FWALK_UNKNOWN || sizing == 2u ||
+                    (sizing == 1u && amount_state == BUSTER_FWALK_KNOWN && amount <= remaining);
+        }
+    }
+    return quiet;
+}
+
+// #3577: the token ranges of the first WANT (at most 8) arguments of the call whose `(` is at OPEN (the expression
+// compiler's call frame keeps it) and whose `)` is just before cc->pos, split at the commas outside brackets, into STARTS
+// and ENDS; their count (all of them where there are fewer), or UINT32_MAX where those aren't a `(` and a `)`.
+static uint32_t fast_cc_call_arguments(const FastCCState* cc, uint32_t open, uint32_t want, uint32_t* starts, uint32_t* ends)
+{
+    uint32_t count = UINT32_MAX;
+    const uint32_t close = cc->pos - 1u;
+    if (open < close && close < cc->tcount && cc->tk[open] == FTOK_LPAREN && cc->tk[close] == FTOK_RPAREN)
+    {
+        const uint32_t limit = want < 8u ? want : 8u;
         uint32_t p = open + 1u;
         uint32_t from = p;
-        const uint32_t close = cc->pos - 1u;
-        while (p < close && count < 8u)
+        count = 0;
+        while (p < close && count < limit)
         {
             const uint8_t t = cc->tk[p];
             if (t == FTOK_LPAREN || t == FTOK_LBRACKET || t == FTOK_LBRACE)
@@ -5479,13 +5837,71 @@ static __attribute__((cold, noinline)) bool fast_cc_library_call_clean(const Fas
                 p += 1u;
             }
         }
-        if (count < 8u)
+        if (count < limit && from < close)
         {
             starts[count] = from;
             ends[count] = close;
             count += 1u;
         }
-        for (uint32_t i = 0; clean && i < count && count == argc; i += 1u)
+    }
+    return count;
+}
+
+// #3577: whether a call of a library function checked by its name (KIND, its identifier's FPP_KW_*_FUNCTION) is quiet in
+// the full pipeline: the memcpy family's size argument `sizeof(E)` with E another argument's expression, a pointer to an
+// object (-Wsizeof-pointer-memaccess; any argument against any other, a superset of its positions and names), read from
+// the call's tokens only where an argument is sizeof's of a pointer (BUSTER_FVAL_LASTING_SIZEOF_POINTER); an absolute value
+// function's argument unsigned (_Bool and an unsigned enum too), floating for an integer one or integral for a floating
+// one, or wider than its parameter (-Wabsolute-value); and a memcpy family's or strcpy family's call that EVALUATED,
+// -Wfortify-source's (fast_cc_fortify_quiet). cc->pos is past the call's `)`, OPEN its `(`. Arguments ARGS, their types
+// before conversion.
+static __attribute__((cold, noinline)) bool fast_cc_library_call_clean(const FastCCState* cc, uint32_t kind, const FastComplexType* fn,
+                                                                       const FastVal* args, uint32_t argc, bool evaluated, uint32_t open)
+{
+    static const uint8_t fortify_kinds[5] = {
+        BUSTER_FFORTIFY_MEMORY,
+        BUSTER_FFORTIFY_LIMITED,
+        BUSTER_FFORTIFY_BZERO,
+        BUSTER_FFORTIFY_BCOPY,
+        BUSTER_FFORTIFY_STRING,
+    };
+    bool clean = true;
+    uint32_t sized = 0;
+    for (uint32_t i = 0; i < argc; i += 1u)
+    {
+        sized |= args[i].lasting & BUSTER_FVAL_LASTING_SIZEOF_POINTER;
+    }
+    // -Wfortify-source asks an evaluated call only, as the full pipeline's (a dead branch's or sizeof's is quiet there), and
+    // one whose amount may be a constant: a variable's value, or one through a pointer, is none (a const object's isn't
+    // either, to the full pipeline), so such a call is quiet without its tokens. A string's copy asks its source.
+    const uint32_t fortify_at = kind - (uint32_t)FPP_KW_FORTIFY_MEMORY_FUNCTION;
+    uint32_t fortify = evaluated && fortify_at < 5u ? fortify_kinds[fortify_at] : BUSTER_FFORTIFY_NONE;
+    const uint32_t amount_at = (fortify == BUSTER_FFORTIFY_BZERO || fortify == BUSTER_FFORTIFY_STRING) ? 1u : 2u;
+    // So is one whose destination's value is read (a pointer variable's, a member's or an element's that isn't an array):
+    // it points into no object the full pipeline knows, whose walk stops at the read.
+    const uint32_t destination = fortify == BUSTER_FFORTIFY_BCOPY ? 1u : 0u;
+    const uint32_t loaded_kinds = (UINT32_C(1) << FVAL_LOCAL) | (UINT32_C(1) << FVAL_GLOBAL) | (UINT32_C(1) << FVAL_INDIRECT) |
+                                  (UINT32_C(1) << FVAL_SPILL_ADDR) | (UINT32_C(1) << FVAL_BITFIELD);
+    const bool amount_loaded = fortify != BUSTER_FFORTIFY_STRING && argc > amount_at && ((UINT32_C(1) << args[amount_at].kind) & loaded_kinds) != 0;
+    const bool destination_read = argc > destination && ((UINT32_C(1) << args[destination].kind) & loaded_kinds) != 0 &&
+                                  !ftype_is_array(args[destination].type);
+    if (fortify != BUSTER_FFORTIFY_NONE && (argc <= amount_at || amount_loaded || destination_read))
+    {
+        fortify = BUSTER_FFORTIFY_NONE;
+    }
+    const bool memaccess = kind >= FPP_KW_MEMACCESS_FUNCTION && kind <= FPP_KW_FORTIFY_BCOPY_FUNCTION && sized != 0;
+    if ((memaccess || fortify != BUSTER_FFORTIFY_NONE) && argc <= 8u)
+    {
+        // The arguments' token ranges.
+        uint32_t starts[8];
+        uint32_t ends[8];
+        // All of them for the sizes' check; for -Wfortify-source's, through the destination, and through the amount where
+        // it isn't a constant here or is a string's source.
+        const uint32_t want = memaccess ? argc :
+                              (fortify != BUSTER_FFORTIFY_STRING && args[amount_at].kind == FVAL_IMM) ? destination + 1u : amount_at + 1u;
+        const uint32_t expected = argc < want ? argc : want;
+        const uint32_t count = fast_cc_call_arguments(cc, open, want, starts, ends);
+        for (uint32_t i = 0; memaccess && clean && i < count && count == expected; i += 1u)
         {
             // `sizeof(E)` or `sizeof E`, in parentheses or not.
             uint32_t s0 = starts[i];
@@ -5501,7 +5917,8 @@ static __attribute__((cold, noinline)) bool fast_cc_library_call_clean(const Fas
                 }
             }
         }
-        clean = clean && count == argc;
+        clean = clean && count == expected;
+        clean = clean && (fortify == BUSTER_FFORTIFY_NONE || fast_cc_fortify_quiet(cc, fortify, args, argc, starts, ends));
     }
     else if ((kind == FPP_KW_ABS_FUNCTION || kind == FPP_KW_FABS_FUNCTION) && argc == 1u && fn->count >= 1u)
     {
@@ -5595,7 +6012,8 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     if ((callee_marks & BUSTER_FVAL_MARK_NONNULL) != 0)
     {
         const uint32_t library = callee->seq_ident != 0 ? cc->pp->idents.entries[callee->seq_ident].pp_kw : 0u;
-        if (library >= FPP_KW_MEMACCESS_FUNCTION && library <= FPP_KW_FABS_FUNCTION && !fast_cc_library_call_clean(cc, library, fn, args, argc))
+        if (library >= FPP_KW_MEMACCESS_FUNCTION && library <= FPP_KW_FABS_FUNCTION &&
+            !fast_cc_library_call_clean(cc, library, fn, args, argc, ex->eval_only == 0, ex->call_open))
         {
             fast_cc_bail(cc, "a library call the full pipeline questions by its name");
             return;
@@ -7605,6 +8023,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 cc->pos += 1u;
                 FastVal callee = ex.vstack[--ex.vsp];
                 FastVal res = { 0 };
+                ex.call_open = cop.lbl2;
                 fval_emit_call(&ex, &callee, ex.call_args + cop.lbl0, 0u, cop.lbl0, &res);
                 ex.arg_sp = cop.lbl0;
                 ex.vstack[ex.vsp++] = res;
@@ -7723,7 +8142,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
         if (k == FTOK_LPAREN)
         {
             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-            ops[osp++] = (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.arg_sp, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
+            ops[osp++] = (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.arg_sp, .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -7888,6 +8307,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 const uint32_t argc = ex.arg_sp - cop.lbl0;
                 FastVal callee = ex.vstack[--ex.vsp];
                 FastVal res = { 0 };
+                ex.call_open = cop.lbl2;
                 fval_emit_call(&ex, &callee, ex.call_args + cop.lbl0, argc, cop.lbl0, &res);
                 ex.arg_sp = cop.lbl0;
                 ex.vstack[ex.vsp++] = res;

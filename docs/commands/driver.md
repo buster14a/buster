@@ -311,12 +311,18 @@ pipeline's.
 in files that leave the direct path for another reason first (the flags each
 file prints with `--no-direct`, against its bail log's reason, show which).
 Each family of the full pipeline's default warnings was probed with variants
-against `--no-direct`, which found main's direct path quiet on fourteen more
+against `--no-direct`, which found main's direct path quiet on fifteen more
 (among them `-Wreturn-stack-address`, `-Warray-bounds`,
-`-Waddress-of-packed-member`, `-Wsizeof-pointer-memaccess` and the
-pointer-to-int casts); the variants that touch types ran or asserted their
-sizes as well, and found three of its layouts and values wrong (an enumerator
-past `INT64_MAX`, a `(*p)[N]` parameter, packed records with alignments). One
+`-Waddress-of-packed-member`, `-Wsizeof-pointer-memaccess`, `-Wfortify-source`
+and the pointer-to-int casts); the variants that touch types ran or asserted
+their sizes as well, and found three of its layouts and values wrong (an
+enumerator past `INT64_MAX`, a `(*p)[N]` parameter, packed records with
+alignments). `-Wfortify-source` (a memcpy, memset, strcpy or strncpy family
+call's constant amount past the object its destination points into) walks the
+destination's tokens as the full pipeline's `check_common_call_object` walks
+its expression, and reads where it points from the value: a local's or a
+global's array or address, or a register's sum of one with a constant, which
+keeps that place (`BUSTER_FVAL_LASTING_ADDRESS`) through a spill. One
 gap is left: a loop's empty body (`for (...);`) is `-Wempty-body` only where the
 next statement is a block or is indented past the loop, as clang decides, and
 the direct path's tokens keep no columns, so it compiles such loops quietly as

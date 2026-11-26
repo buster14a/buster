@@ -4515,6 +4515,17 @@ static int c_direct_unit_tests(void)
         // 18. Casts the full pipeline's -Wpointer-to-int-cast family leaves alone: a pointer to a long and a _Bool, a long
         // and a constant to a pointer.
         "long casted(void* p, long l) { return (long)p + (_Bool)p + (long)(int*)l + (long)(int*)12; }\n",
+        // 19. Copies the full pipeline's -Wfortify-source leaves alone: into what is left of an array past a constant (its
+        // address in a register, spilled for the call), an object's own size, a pointer's, a variable size, a const
+        // object's (no constant to it), a string that fits, a member array within its record, and a dead branch's.
+        "void* memcpy(void*, const void*, unsigned long);\nvoid* memset(void*, int, unsigned long);\n"
+        "char* strcpy(char*, const char*);\nstruct R { char c[4]; int x; };\nchar g[8];\n"
+        "int copied(char* p, const char* s, unsigned long n) {\n"
+        "    char b[4]; int x; struct R r; const unsigned long k = 8;\n"
+        "    memcpy(b + 2, s, 2); memcpy(&x, s, sizeof x); memset(&r, 0, sizeof r); memcpy(p, s, 8); memcpy(b, s, n);\n"
+        "    memcpy(b, s, k); strcpy(b, \"abc\"); memcpy(r.c, s, 8); memcpy(g + 6, s, 2); if (0) { memcpy(b, s, 8); }\n"
+        "    return b[0] + x + r.x;\n"
+        "}\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4676,6 +4687,20 @@ static int c_direct_unit_tests(void)
         // -Wgnu-designator: an array designator without its `=`.
         "int a[3] = { [1] 2 };\nint f(void) { return a[1]; }\n",
         "int f(void) { int a[3] = { [1] 2 }; return a[1]; }\n",
+        // -Wfortify-source: memcpy past a local array, a global's sum with a constant, a member array past its record, a
+        // scalar's address, a sum spilled for the call; strcpy of a literal, strncpy's size, bcopy's destination, an
+        // unused inline body's.
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(const char* s) { char b[4]; memcpy(b, s, 8); (void)b; }\n",
+        "void* memset(void*, int, unsigned long);\nchar g[8];\nvoid f(void) { memset(g + 6, 0, 3); }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nstruct P { int x; char buf[4]; };\n"
+        "void f(const char* s) { struct P p; memcpy(p.buf, s, 5); (void)p; }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(const char* s) { int x; memcpy(&x, s, 8); (void)x; }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(const char* s) { char b[4]; memcpy(b + 1 + 1, s, 3); (void)b; }\n",
+        "char* strcpy(char*, const char*);\nvoid f(void) { char b[4]; strcpy(b, \"hello\"); (void)b; }\n",
+        "char* strncpy(char*, const char*, unsigned long);\nvoid f(const char* s) { char b[4]; strncpy(b, s, 8); (void)b; }\n",
+        "void bcopy(const void*, void*, unsigned long);\nvoid f(const char* s) { char b[4]; bcopy(s, b, 8); (void)b; }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nstatic inline void f(const char* s) { char b[4]; memcpy(b, s, 8); (void)b; }\n"
+        "int main(void) { return 0; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
