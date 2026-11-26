@@ -7592,10 +7592,11 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem),
                                                                BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_system),
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");
-    // C on the window: its own fixture's counts, each rule on both sides.
+    // C on the window: its own fixture's counts, each rule on both sides. Floating targets list four more joins
+    // (#2842): three whose exact integer/logical conversion sinks, and the conservative float-to-double case.
     static const NodeContextsExpected contexts_expected = {
         .expressions = 2536,
-        .decided = 2276,
+        .decided = 2272,
         .refused = 61,
         .strides = 241,
         .asked = 7,
@@ -7606,11 +7607,11 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .branched = 1722,
         .branched_roots = 523,
         .valued = 470,
-        .sunk = 18,
+        .sunk = 22,
         .commas = 224,
         .listed = {
             [BUSTER_NODE_CONTEXTS_REASON_CALL] = 44,
-            [BUSTER_NODE_CONTEXTS_REASON_LOGICAL] = 183,
+            [BUSTER_NODE_CONTEXTS_REASON_LOGICAL] = 187,
             [BUSTER_NODE_CONTEXTS_REASON_UPDATE] = 15,
             [BUSTER_NODE_CONTEXTS_REASON_COMMA] = 5,
             [BUSTER_NODE_CONTEXTS_REASON_DIVISION] = 2,
@@ -7698,13 +7699,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows.c", node_rows_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_expected),
                       "node-rows: X's rows on the window make each shape's entries' kinds and classes as X does on T's columns, and list what they don't make");
     static const NodeRowsExpected rows_contexts_expected = {
-        .expressions = 2215,
-        .taken = 2194,
-        .entries = 20965,
+        .expressions = 2211,
+        .taken = 2191,
+        .entries = 20932,
         .listed_update = 0,
         .listed_branches = 5,
         .listed_conversion = 10,
-        .listed_floating = 6,
+        .listed_floating = 5,
         .written = 23354,
         .words = 537,
         .lines = 501,
@@ -7721,7 +7722,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         },
         .numbered = 223,
         .steps = 1895,
-        .control_valued = 548,
+        .control_valued = 547,
         .chunks = 23,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_contexts_expected),
