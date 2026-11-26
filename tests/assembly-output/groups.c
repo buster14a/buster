@@ -11,11 +11,23 @@ __attribute__((selectany)) __thread int selected_tls = 3;
 extern __attribute__((alias("selected_first"), selectany)) int selected_alias;
 __attribute__((used, retain, section(".retained"))) static int retained = 11;
 __attribute__((used, retain, section(".data"))) static int retained_default = 13;
+int ordinary_default = 7;
+
+__attribute__((section(".data"), noinline)) int placed(void)
+{
+    return ordinary_default;
+}
+
+__attribute__((section(".text"), noinline)) int explicit_text(void)
+{
+    return 5;
+}
 
 int main(void)
 {
     return selected_first != 17 || selected_second != 25 || ordinary != 9 ||
            selected_pointer != &selected_first || *selected_pointer != 17 ||
            selected_zero != 0 || selected_constant != 7 || selected_tls != 3 ||
-           selected_alias != 17 || retained != 11 || retained_default != 13;
+           selected_alias != 17 || retained != 11 || retained_default != 13 ||
+           placed() != 7 || explicit_text() != 5;
 }

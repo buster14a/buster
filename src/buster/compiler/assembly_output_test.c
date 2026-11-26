@@ -779,6 +779,78 @@ static void assembly_test_escaped_fixups(AssemblyTest* test)
     arena_pop_to(&test->arena, mark);
 }
 
+// A section attribute can reuse a built-in or another custom section's name with different attributes. Equal
+// descriptors must still rejoin after an intervening section, and an explicit default descriptor must stay default.
+static void assembly_test_sections(AssemblyTest* test)
+{
+    const uint64_t mark = test->arena.length;
+    AssemblyFixture fixture;
+    assembly_fixture_begin(&fixture, &test->arena);
+    ObjectAtomSection sections[BUSTER_ASSEMBLY_TEST_ATOMS] = { 0 };
+    const uint8_t function_flags = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION;
+    const ObjectAtomSection executable_data = {
+        .name = BUSTER_S8(".data"),
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC | SHF_EXECINSTR,
+    };
+    const AtomId placed = assembly_fixture_function(test, &fixture, "placed", function_flags, 0, "mov eax, dword ptr [rip + ordinary]\nret\n");
+    sections[placed] = executable_data;
+    static const char* const builtin_pieces[] = { "\t.section .data,\"ax\",@progbits,unique," };
+    assembly_test_section_fixture(test, &fixture, sections, "section-builtin", builtin_pieces, BUSTER_ARRAY_LENGTH(builtin_pieces));
+
+    assembly_fixture_function(test, &fixture, "plain_text", function_flags, 0, "ret\n");
+    const AtomId placed_again = assembly_fixture_function(test, &fixture, "placed_again", function_flags, 0, "ret\n");
+    sections[placed_again] = executable_data;
+    const AtomId explicit_text = assembly_fixture_function(test, &fixture, "explicit_text", function_flags, 0, "ret\n");
+    sections[explicit_text] = (ObjectAtomSection){
+        .name = BUSTER_S8(".text"),
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC | SHF_EXECINSTR,
+    };
+    const AtomId custom_code = assembly_fixture_function(test, &fixture, "custom_code", function_flags, 0, "ret\n");
+    sections[custom_code] = (ObjectAtomSection){
+        .name = BUSTER_S8(".collision"),
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC | SHF_EXECINSTR,
+    };
+    const uint32_t value = 7;
+    const AtomId ordinary = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, 2, &value, sizeof(value));
+    assembly_fixture_define(&fixture, "ordinary", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, ordinary, 0, sizeof(value));
+    const AtomId custom_data = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, 2, &value, sizeof(value));
+    sections[custom_data] = (ObjectAtomSection){
+        .name = BUSTER_S8(".collision"),
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC | SHF_WRITE,
+    };
+    assembly_fixture_define(&fixture, "custom_data", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, custom_data, 0, sizeof(value));
+    const AtomId unnamed = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA, 2, &value, sizeof(value));
+    sections[unnamed] = sections[custom_data];
+    sections[unnamed].name = BUSTER_S8(".unanchored");
+    // The object writer also separates equal descriptors of different classes, as C's DATA_RELRO and an earlier
+    // source assembly DATA contribution may share a spelling and flags without sharing an output section. Their
+    // section order differs: the object writer follows class order, and the sink follows atom order.
+    const uint64_t address = 0;
+    const AtomId custom_relro = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA_RELRO, 3, &address, sizeof(address));
+    sections[custom_relro] = sections[custom_data];
+    assembly_fixture_define(&fixture, "custom_relro", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, custom_relro, 0, sizeof(address));
+    assembly_fixture_fixup(&fixture, custom_relro, 0, BUSTER_LINK_FIXUP_ABS64, "external", 0);
+    const AtomId anchored = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_DATA_RELRO, 3, &address, sizeof(address));
+    sections[anchored] = sections[unnamed];
+    assembly_fixture_define(&fixture, "anchored_relro", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, anchored, 0, sizeof(address));
+    assembly_fixture_fixup(&fixture, anchored, 0, BUSTER_LINK_FIXUP_ABS64, "external", 0);
+    static const char* const pieces[] = {
+        "\t.section .data,\"ax\",@progbits,unique,",
+        "\t.section .data,\"aw\",@progbits\n",
+        "\t.section .text,\"ax\",@progbits\n",
+        "\t.section .collision,\"ax\",@progbits,unique,",
+        "\t.section .collision,\"aw\",@progbits,unique,",
+        "\t.section .unanchored,\"aw\",@progbits,unique,",
+    };
+    assembly_test_section_fixture(test, &fixture, sections, "section-collisions", pieces, BUSTER_ARRAY_LENGTH(pieces));
+    assembly_fixture_end(&fixture);
+    arena_pop_to(&test->arena, mark);
+}
+
 static void assembly_test_groups(AssemblyTest* test)
 {
     const uint64_t mark = test->arena.length;
@@ -882,9 +954,9 @@ static void assembly_test_groups(AssemblyTest* test)
         .atom_count = fixture.link.atoms.count,
     };
     static const char* const pieces[] = {
-        "\t.section .shared,\"awG\",@progbits,pick,comdat\n",
-        "\t.section .shared,\"awG\",@progbits,\"quoted group\",comdat\n",
-        "\t.section .shared,\"aw\",@progbits\n",
+        "\t.section .shared,\"awG\",@progbits,pick,comdat,unique,",
+        "\t.section .shared,\"awG\",@progbits,\"quoted group\",comdat,unique,",
+        "\t.section .shared,\"aw\",@progbits,unique,",
         "\t.section .identity,\"awRG\",@progbits,pick,comdat,unique,",
         "\t.section .entries,\"awoG\",@progbits,pick,pick,comdat,unique,",
         "\t.section .rodata.str1.1,\"aMSG\",@progbits,1,\"quoted group\",comdat\n",
@@ -1819,6 +1891,7 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_cfi_boundaries(&test);
         assembly_test_small(&test);
         assembly_test_program(&test);
+        assembly_test_sections(&test);
         assembly_test_groups(&test);
         assembly_test_unique(&test);
         assembly_test_mixed(&test);

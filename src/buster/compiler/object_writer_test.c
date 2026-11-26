@@ -3181,12 +3181,12 @@ static bool object_test_same_section_identity(const ObjectView* a, uint64_t i, c
     const uint64_t b_data = b_section->sh_type == SHT_RELA ? b_section->sh_info : j;
     const bool a_ordered = a_data < a->section_count && (a->sections[a_data].sh_flags & SHF_LINK_ORDER) != 0;
     const bool b_ordered = b_data < b->section_count && (b->sections[b_data].sh_flags & SHF_LINK_ORDER) != 0;
-    const bool a_retained = a_data < a->section_count && (a->sections[a_data].sh_flags & SHF_GNU_RETAIN) != 0;
-    const bool b_retained = b_data < b->section_count && (b->sections[b_data].sh_flags & SHF_GNU_RETAIN) != 0;
-    bool same = a_section->sh_type == b_section->sh_type &&
+    bool same = a_section->sh_type == b_section->sh_type && a_section->sh_flags == b_section->sh_flags && a_section->sh_entsize == b_section->sh_entsize &&
+                a_data < a->section_count && b_data < b->section_count && a->sections[a_data].sh_type == b->sections[b_data].sh_type &&
+                a->sections[a_data].sh_flags == b->sections[b_data].sh_flags && a->sections[a_data].sh_entsize == b->sections[b_data].sh_entsize &&
                 object_test_same_string(object_view_section_name(a, i), object_view_section_name(b, j)) &&
                 object_test_same_string(object_test_section_group(a, i), object_test_section_group(b, j)) &&
-                a_retained == b_retained && a_ordered == b_ordered;
+                a_ordered == b_ordered;
     if (same && a_ordered)
     {
         const uint32_t a_link = a->sections[a_data].sh_link;
@@ -3200,22 +3200,45 @@ static bool object_test_same_section_identity(const ObjectView* a, uint64_t i, c
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
+// A named symbol defined in the section (the data section for relocations): the first when `name` is null, otherwise
+// that exact name. Such a definition identifies equal descriptors even when two writers order their sections apart.
+static const char* object_test_section_anchor(const ObjectView* view, uint64_t index, const char* name)
+{
+    const uint64_t data = view->sections[index].sh_type == SHT_RELA ? view->sections[index].sh_info : index;
+    const char* result = NULL;
+    for (uint64_t s = 1; result == NULL && s < view->symbol_count; s += 1)
+    {
+        const Elf64_Sym* symbol = &view->symbols[s];
+        const uint32_t type = ELF64_ST_TYPE(symbol->st_info);
+        const bool defined = symbol->st_shndx != SHN_UNDEF && symbol->st_shndx != SHN_ABS && symbol->st_shndx != SHN_COMMON;
+        if (defined && type != STT_SECTION && type != STT_FILE && !object_test_unnamed(view, s) && object_view_symbol_section(view, s) == data)
+        {
+            const char* candidate = object_view_string(view->symbol_names, view->symbol_names_size, view->symbols[s].st_name);
+            result = candidate != NULL && candidate[0] != 0 && (name == NULL || strcmp(name, candidate) == 0) ? candidate : NULL;
+        }
+    }
+    return result;
+}
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static uint64_t object_test_matching_section(const ObjectView* view, const ObjectView* source, uint64_t index)
 {
     // Repeated names with explicit unique IDs can have identical ELF attributes, as linked-order sections can even
-    // refer to the same code section. Pair their occurrences in object order.
+    // refer to the same code section. A named definition pairs them independently of section order; without one,
+    // pair only unanchored occurrences. A missing named definition must not fall back to another section.
+    const char* anchor = object_test_section_anchor(source, index, NULL);
     uint64_t occurrence = 0;
-    for (uint64_t i = 1; i < index; i += 1)
+    for (uint64_t i = 1; anchor == NULL && i < index; i += 1)
     {
-        occurrence += object_test_same_section_identity(source, i, source, index);
+        occurrence += object_test_same_section_identity(source, i, source, index) && object_test_section_anchor(source, i, NULL) == NULL;
     }
     uint64_t result = 0;
     for (uint64_t i = 1; result == 0 && i < view->section_count; i += 1)
     {
-        if (object_test_same_section_identity(view, i, source, index))
+        if (object_test_same_section_identity(view, i, source, index) && (anchor != NULL || object_test_section_anchor(view, i, NULL) == NULL))
         {
-            result = occurrence == 0 ? i : 0;
-            occurrence -= occurrence != 0;
+            result = anchor != NULL ? (object_test_section_anchor(view, i, anchor) != NULL ? i : 0) : occurrence == 0 ? i : 0;
+            occurrence -= anchor == NULL && occurrence != 0;
         }
     }
     return result;

@@ -675,7 +675,7 @@ The form contract, which its tests hold GNU as to:
   table whose name matches an ordinary symbol, a spelling GNU as 2.44 refuses.
   COMDAT and other section groups retain their signatures and member identities;
   `G`, `R` and `T` preserve group, retain and TLS flags. A `unique` identity
-  separates same-name sections when their descriptors or groups differ.
+  separates same-name sections when their descriptors, object classes or groups differ.
   GNU unique objects use `.type name, @gnu_unique_object`, with the GNU OSABI
   in the resulting object, and IFUNCs use `@gnu_indirect_function`.
 - **Unwind.** The final emission's frame rows become CFI directives at the

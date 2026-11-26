@@ -1106,6 +1106,7 @@ struct AssemblySection
     AtomId link;
     uint32_t identity;
     uint32_t group;
+    uint8_t class;
 };
 
 static AssemblySection assembly_section(const AssemblyView* view, AtomId atom)
@@ -1131,6 +1132,7 @@ static AssemblySection assembly_section(const AssemblyView* view, AtomId atom)
             .identity = descriptor->identity,
         };
     }
+    result.class = class;
     const LinkGroups groups = view->link->groups;
     result.group = groups.count != 0 && atom < groups.atom_count ? groups.atom_groups[atom] : 0;
     result.flags |= result.group != 0 ? SHF_GROUP : 0;
@@ -1140,7 +1142,7 @@ static AssemblySection assembly_section(const AssemblyView* view, AtomId atom)
 static bool assembly_same_section(AssemblySection a, AssemblySection b)
 {
     return a.name_length == b.name_length && memcmp(a.name, b.name, a.name_length) == 0 && a.flags == b.flags && a.entry_size == b.entry_size &&
-           a.type == b.type && a.link == b.link && a.identity == b.identity && a.group == b.group;
+           a.type == b.type && a.link == b.link && a.identity == b.identity && a.group == b.group && a.class == b.class;
 }
 
 // A stable GNU unique ID for a descriptor the assembler must not merge with another of the same name. The first
@@ -1149,7 +1151,8 @@ static uint32_t assembly_section_identity(const AssemblyView* view, AssemblySect
 {
     const uint64_t hash = link_hash((const uint8_t*)section.name, section.name_length) ^ section.flags ^ section.entry_size ^
                           ((uint64_t)section.type << 32) ^ ((uint64_t)section.link * UINT64_C(0xc2b2ae3d27d4eb4f)) ^
-                          ((uint64_t)section.identity * UINT64_C(0x165667b19e3779f9)) ^ ((uint64_t)section.group * UINT64_C(0x9e3779b97f4a7c15));
+                          ((uint64_t)section.identity * UINT64_C(0x165667b19e3779f9)) ^ ((uint64_t)section.group * UINT64_C(0x9e3779b97f4a7c15)) ^
+                          ((uint64_t)section.class * UINT64_C(0x27d4eb2f165667c5));
     uint64_t slot = hash & mask;
     while (slots[slot] != 0 && !assembly_same_section(section, assembly_section(view, slots[slot])))
     {
@@ -2471,12 +2474,11 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
             const uint8_t class = link->atoms.class[a];
             const AtomId associated = section.link;
             const bool ordered = (section.flags & SHF_LINK_ORDER) != 0;
-            // The CFI preamble owns the default .eh_frame as UNWIND. A source assembly unit may retain a distinct
-            // PROGBITS section of that name; preserve both identities instead of redeclaring the default's type.
-            const bool separate_frame_section = frames && section.type != SHT_X86_64_UNWIND &&
-                                                section.name_length == sizeof(".eh_frame") - 1 &&
-                                                memcmp(section.name, ".eh_frame", sizeof(".eh_frame") - 1) == 0;
-            const bool unique_section = ordered || section.identity != 0 || separate_frame_section;
+            // A nondefault descriptor may reuse another section's name with different flags or type, including an
+            // assembler's built-in .data or .text even without ordinary atoms. Give it a stable identity; explicit
+            // descriptors equal to their class's default still join that section, as the object writer does.
+            const ObjectAtomSection* descriptor = view->sections != NULL && a < view->section_count ? &view->sections[a] : NULL;
+            const bool unique_section = ordered || section.identity != 0 || (descriptor != NULL && !object_section_is_default(descriptor, class));
             if (unique_section && section_slots == NULL)
             {
                 uint64_t capacity = 16;
