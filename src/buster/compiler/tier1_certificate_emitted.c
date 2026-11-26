@@ -180,9 +180,10 @@ struct Tier1CertEmittedStats
 #define BUSTER_CERT_EMITTED_KERNEL (BUSTER_TIER1_SELECT_FIXED_RECORDS + BUSTER_TIER1_SELECT_RECORDS_PER_NODE + 8)
 // The records whose effects one call resolves where a check walks a record run of any length (#2924).
 #define BUSTER_CERT_EMITTED_EFFECTS 64u
-// Source records per node at most: its uses' (up to 15 of a call's, in eights), its clobbers' (16 general, 16 xmm, 8
-// opmask registers and a frame range, in eights) and its definition's.
-#define BUSTER_CERT_EMITTED_NODE_SOURCES 10u
+// Source records per node at most: its uses' (up to 15 of a call's, in eights), its clobbers' (16 general, 32 vector, 8
+// opmask registers and a frame range, in eights) and its definition's. The upper vector registers are caller-saved
+// too (#3625), so their clobbers need two more records than the former xmm0 to xmm15 bound.
+#define BUSTER_CERT_EMITTED_NODE_SOURCES 12u
 // A node's clobbers at most: its registers' (16 general, 32 vector and 8 opmask ones) and its frame bytes' locations of
 // 64 bytes each (tier1_cert_emitted_kills).
 #define BUSTER_CERT_EMITTED_REGISTER_CLOBBERS 56u
@@ -2576,7 +2577,10 @@ static bool tier1_cert_emitted_row_place(X86Instruction record, uint32_t r, cons
         const uint8_t reg = early ? placement->early : tier1_cert_emitted_row_register(role, classes[k], placement, &name);
         name = early ? 0 : name;
         const bool mask = classes[k] == BUSTER_X86_CLASS_OPMASK;
-        valid = reg != UINT8_MAX && name < BUSTER_CERT_EMITTED_ROLE_NAMES;
+        // Reject an unencodable role before its register can be reduced to a resource bit. Legacy/VEX forms and
+        // /is4 operands cannot name an upper vector register even when the output target also has AVX-512 (#3625).
+        const uint32_t registers = vector && description->family == BUSTER_X86_FAMILY_EVEX ? 32 : mask ? 8 : 16;
+        valid = reg < registers && name < BUSTER_CERT_EMITTED_ROLE_NAMES;
         *fields[k] = reg;
         *named |= valid ? UINT64_C(1) << name : 0;
         *explicit_registers |= valid && !mask ? (vector ? BUSTER_X86_RESOURCE_VECTOR(reg & 31) : BUSTER_X86_RESOURCE_GPR(reg & 15)) : 0;
@@ -4392,9 +4396,13 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
 {
     const uint64_t scratch_saved = scratch->length;
     const Tier1SelectCode* code = &emitted->code;
+    // Check the actual fields before canonicalization can discard an unused VEX operand, or a resource mask can
+    // reduce an illegal upper register to a low one. The certificate is independent of the emitter's check (#3625).
+    const uint32_t valid_records = (uint32_t)x86_validate(code->records, code->count);
+    const bool encodable = valid_records == code->count;
     X86Instruction* canonical = 0;
     bool room = true;
-    for (uint32_t first = 0; room && first < code->count; first += 16)
+    for (uint32_t first = 0; encodable && room && first < code->count; first += 16)
     {
         uint32_t found = x86_vex_lookup(code->records + first, code->count - first, x86_vex_legacy);
         while (room && found != 0)
@@ -4419,7 +4427,11 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
     }
     Tier1EmitResult view = *emitted;
     view.code.records = canonical != 0 ? canonical : code->records;
-    const Tier1CertEmittedReason reason = room ? tier1_certificate_emitted_records(plan, &view, output, scratch, definitions, phis, program, stats) : TIER1_CERT_EMITTED_CAPACITY;
+    const Tier1CertEmittedReason reason = !encodable ? TIER1_CERT_EMITTED_DECODE : room ? tier1_certificate_emitted_records(plan, &view, output, scratch, definitions, phis, program, stats) : TIER1_CERT_EMITTED_CAPACITY;
+    if (!encodable && stats != 0)
+    {
+        *stats = (Tier1CertEmittedStats){ .reason = reason, .record = valid_records, .records = code->count };
+    }
     arena_pop_to(scratch, scratch_saved);
     return reason;
 }

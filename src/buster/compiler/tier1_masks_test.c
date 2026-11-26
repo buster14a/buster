@@ -1965,6 +1965,9 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     const Tier1EmitOptions options = {
         .certify = true,
         .register_mask = tier1_liveness_register_mask(),
+        // These fixtures specify pressure past fifteen vectors or an exact row-move shape under that allocation.
+        // Keep that input explicit; tier1_upper_vectors_test.c separately qualifies upper-register pressure and rows.
+        .vector_register_mask = fixture->spills || fixture->rows != 0 ? 0x7fffu : 0,
         .rematerialize = rematerialize,
     };
     Tier1EmitResult emitted = { 0 };
