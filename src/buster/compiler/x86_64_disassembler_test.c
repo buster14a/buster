@@ -1136,17 +1136,21 @@ static uint64_t x86_decode_test_cramped_decoding(uint64_t* state)
     uint64_t checked = 0;
     const X86EncoderMode saved = x86_test_mode;
     x86_test_mode = X86_ENCODER_MODE_64;
-    for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
+    // The cramped instances may exist only with a segment override. Visit the same encoded form
+    // numbers as the decoder's address32 table before the tests initialize the address32 templates.
+    for (uint32_t number = 1; number < BUSTER_X86_FORM_TEMPLATES; number += 1)
     {
-        const bool cramped = ((x86_decode_address32_cramped[row / 64] >> (row % 64)) & 1) != 0;
+        const uint32_t row = number % X86_FORM_COUNT;
+        const bool cramped = ((x86_decode_address32_cramped[number / 64] >> (number % 64)) & 1) != 0;
         for (uint32_t sample = 0; cramped && x86_decode_form_supported(row) && sample < 16; sample += 1)
         {
-            const X86Instruction instruction = x86_random_instruction(state, (uint16_t)row, false);
+            X86Instruction instruction = x86_random_instruction(state, (uint16_t)row, false);
+            instruction.form = (uint16_t)number;
             uint8_t bytes[32] = { 0x67 };
             const uint32_t size = (instruction.mode & BUSTER_X86_MODE_MEMORY) != 0 ? encode_one(&instruction, bytes + 1, X86_ENCODER_MODE_64) : 0;
             X86Decoded decoded[2];
             const X86DecodeResult result = size != 0 && size < 15 ? x86_disassemble(bytes, size + 1, decoded, 2) : (X86DecodeResult){ 0 };
-            const bool accepted = result.count != 0 && decoded[0].address32 && (decoded[0].instruction.form & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT == row;
+            const bool accepted = result.count != 0 && decoded[0].address32 && (decoded[0].instruction.form & BUSTER_X86_FORM_NUMBER) == number;
             if (accepted && failures < 8)
             {
                 fprintf(stderr, "disassembler cramped: %s took a 32-bit address\n", x86_form_descriptions[row].mnemonic);
