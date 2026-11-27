@@ -19,7 +19,7 @@
 // 32, and all but one at most eight classes; #2699), so preparation classes items against a register of up to eight
 // distinct class keys (tier1_frame_classes) and sorts up to BUSTER_TIER1_FRAME_RANK_EVENTS events by rank, every key
 // compared with eight others at a time (tier1_frame_rank). Larger inputs (a ninth class, more events) sort by stable
-// radix passes over the key bytes that differ (tier1_frame_sort); both sorts give one order. One ordered, branch-free
+// radix passes over the key bits that differ (tier1_frame_sort). Both sorts give one order. One ordered, branch-free
 // pass then colors (tier1_frame_color): a class's free colors are a stack, so each class uses exactly its maximum live
 // pressure. The scalar twin went in #2924, after the vector path read 0.31 to 0.96 of its time at every frame size of
 // sqlite3.c's, Lua's and musl's real frames on the 9700X. The tests check each plan independently, preparation's order
@@ -340,7 +340,8 @@ static void tier1_frame_bucket_offsets(uint32_t* offsets, uint32_t count)
 
 // Stable LSD radix over the key bits that vary. Memory is independent of the numeric key range.
 // Return whether the sorted IDs (and keys when requested) are in the temporary columns.
-static bool tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_key, uint32_t* temporary_id, uint32_t count, bool need_keys)
+// Keep the large-frame code away from the instruction pages of the ordinary frame planner.
+static __attribute__((noinline, section(".text.unlikely.tier1_frame_sort"))) bool tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_key, uint32_t* temporary_id, uint32_t count, bool need_keys)
 {
     const __m512i first = _mm512_set1_epi64(count == 0 ? 0 : (long long)key[0]);
     __m512i changed = _mm512_setzero_si512();
@@ -393,61 +394,47 @@ static bool tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_ke
     return (passes & 1) != 0;
 }
 
-// Preparation's sort of up to BUSTER_TIER1_FRAME_RANK_EVENTS events (#2699): an event's rank is the count of keys
-// below its own, and every key is compared with eight others at a time. The keys are distinct, each event's class,
-// position and input place (tier1_frame_prepare), so the ranks are the stable radix sort's order. `vectors` is a
-// constant at each call, which keeps the keys and the ranks in registers; the lanes past `events` hold key 0, below
-// nothing, and their ranks aren't read.
-static inline __attribute__((always_inline)) void tier1_frame_rank_vectors(const uint64_t* key, uint32_t events, uint32_t vectors, uint32_t* rank)
+// Event keys include the original input position, so their ranks are distinct. An inactive
+// lane holds UINT64_MAX and cannot contribute to a count of strictly smaller keys.
+static inline __attribute__((always_inline)) void tier1_frame_rank_vectors(const uint64_t* key, uint32_t count, uint32_t vectors, uint32_t* event)
 {
+    const uint32_t events = count * 2;
     __m512i keys[BUSTER_TIER1_FRAME_RANK_EVENTS / 8];
-    __m512i ranks[BUSTER_TIER1_FRAME_RANK_EVENTS / 8];
     for (uint32_t vector = 0; vector < vectors; vector += 1)
     {
         const uint32_t first = vector * 8;
         const uint32_t live = events <= first ? 0 : (events - first < 8 ? events - first : 8);
-        keys[vector] = _mm512_maskz_loadu_epi64((__mmask8)((1u << live) - 1), key + (live != 0 ? first : 0));
-        ranks[vector] = _mm512_setzero_si512();
+        keys[vector] = _mm512_mask_loadu_epi64(_mm512_set1_epi64(-1), (__mmask8)((1u << live) - 1), key + (live != 0 ? first : 0));
     }
-    for (uint32_t other = 0; other < events; other += 1)
+    for (uint32_t i = 0; i < events; i += 1)
     {
-        const __m512i value = _mm512_set1_epi64((long long)key[other]);
+        const __m512i value = _mm512_set1_epi64((long long)key[i]);
+        uint32_t rank = 0;
         for (uint32_t vector = 0; vector < vectors; vector += 1)
         {
-            ranks[vector] = _mm512_mask_add_epi64(ranks[vector], _mm512_cmpgt_epu64_mask(keys[vector], value), ranks[vector], _mm512_set1_epi64(1));
+            rank += (uint32_t)__builtin_popcount(_mm512_cmplt_epu64_mask(keys[vector], value));
         }
-    }
-    for (uint32_t vector = 0; vector < vectors; vector += 1)
-    {
-        _mm256_storeu_si256((__m256i*)(rank + vector * 8), _mm512_cvtepi64_epi32(ranks[vector]));
+        event[rank] = i < count ? i * 2 : (i - count) * 2 + 1;
     }
 }
 
-// `key` holds count ends' keys, then count starts'; `event` takes the sorted event IDs.
 static void tier1_frame_rank(const uint64_t* key, uint32_t count, uint32_t* event)
 {
-    const uint32_t events = count * 2;
-    uint32_t rank[BUSTER_TIER1_FRAME_RANK_EVENTS];
-    if (events <= 8)
+    if (count <= 4)
     {
-        tier1_frame_rank_vectors(key, events, 1, rank);
+        tier1_frame_rank_vectors(key, count, 1, event);
     }
-    else if (events <= 16)
+    else if (count <= 8)
     {
-        tier1_frame_rank_vectors(key, events, 2, rank);
+        tier1_frame_rank_vectors(key, count, 2, event);
     }
-    else if (events <= 32)
+    else if (count <= 16)
     {
-        tier1_frame_rank_vectors(key, events, 4, rank);
+        tier1_frame_rank_vectors(key, count, 4, event);
     }
     else
     {
-        tier1_frame_rank_vectors(key, events, 8, rank);
-    }
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        event[rank[i]] = i * 2;
-        event[rank[count + i]] = i * 2 + 1;
+        tier1_frame_rank_vectors(key, count, 8, event);
     }
 }
 
@@ -687,7 +674,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
             candidate.class_slot = candidate.class_colors + count;
         }
     }
-    if (error == TIER1_FRAME_OK && request->slots.indices != 0 && count != 0)
+    if (error == TIER1_FRAME_OK && request->slots.indices != 0 && count > 1)
     {
         // Distinct indices: each row is stamped with its item, and an item whose row holds another's stamp shares it.
         // Only stamped rows are read, so the column isn't cleared. Without room for a stamp a row, the indices are sorted.

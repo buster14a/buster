@@ -115,8 +115,8 @@ that:
    distinct key falls back to the sort.
 3. It sorts up to 64 events by rank. Each event's key is distinct
    (class, position, place in the input), every key is compared with eight
-   others at a time, and an event's rank is the count of keys below its own:
-   the stable sort's order.
+   others at a time. The population count of each comparison mask contributes
+   to the rank, and the event ID goes directly to that position in the output.
 4. Larger inputs (a ninth class, more than 64 events) use stable radix passes.
    Eight keys at a time supply their varying bits to a byte shuffle. When a ninth bit
    avoids a pass, it supplies the high digit bit. Ordered bucket writes keep equal
