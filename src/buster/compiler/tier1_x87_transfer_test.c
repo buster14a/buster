@@ -36,7 +36,7 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
     memcpy(twin, original, sizeof(original));
     const X87TransferStats transfer = x87_transfer_records(chosen, 6, tokens, annotations, boundaries);
     tier1_wide_test_expect(test, transfer.pairs == 1 && transfer.regions == 1, "one private round trip in one region");
-    tier1_wide_test_expect(test, chosen[3].form == X86_FORM_FST_ST && chosen[4].form == X86_FORM_FXCH_ST && x87_transfer_verify(original, chosen, tokens, annotations, 0, 6), "the register store and exchange preserve both waiting points and pass independent replay");
+    tier1_wide_test_expect(test, chosen[3].form == X86_FORM_FST_ST && chosen[4].form == X86_FORM_FXCH_ST && x87_transfer_verify(original, chosen, tokens, annotations, 0, 6, UINT64_MAX), "the register store and exchange preserve both waiting points and pass independent replay");
     for (uint32_t mutant = 0; mutant < 9; mutant += 1)
     {
         memcpy(twin, chosen, sizeof(twin));
@@ -76,7 +76,7 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
         {
             twin[3] = (X86Instruction){ 0 };
         }
-        tier1_wide_test_expect(test, !x87_transfer_verify(original, twin, tokens, annotations, 0, 6), "the transport proof rejects a changed value, operation, access, stack action or eligibility certificate");
+        tier1_wide_test_expect(test, !x87_transfer_verify(original, twin, tokens, annotations, 0, 6, UINT64_MAX), "the transport proof rejects a changed value, operation, access, stack action or eligibility certificate");
         annotations[3] = 1;
         tokens[4] = 3;
         annotations[4] = BUSTER_X87_TRANSFER_RELOAD;
@@ -103,7 +103,12 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
             shifted_annotations[first + 5] = BUSTER_X87_TRANSFER_RELOAD;
         }
         memcpy(twin + first, chosen + first, 6 * sizeof(*chosen));
-        const uint32_t pairs = x87_transfer_region(chosen, shifted_tokens, shifted_annotations, first, first + 6);
+        uint8_t kinds[BUSTER_X87_TRANSFER_RECORDS];
+        for (uint32_t r = first; r < first + 6; r += 1)
+        {
+            kinds[r] = (uint8_t)x87_transfer_kind(&chosen[r]);
+        }
+        const uint32_t pairs = x87_transfer_region(chosen, shifted_tokens, shifted_annotations, first, first + 6, kinds);
         const bool expected = variant == 0;
         tier1_wide_test_expect(test, pairs == (uint32_t)expected && (expected
                               ? chosen[first + 3].form == X86_FORM_FST_ST && chosen[first + 4].form == X86_FORM_FXCH_ST
@@ -116,12 +121,17 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
     chosen[7] = original[5];
     memcpy(twin, chosen, 8 * sizeof(*chosen));
     tokens[6] = 3;
-    const uint32_t missing_tag = x87_transfer_region(chosen, tokens, annotations, 0, 8);
+    uint8_t kinds[BUSTER_X87_TRANSFER_RECORDS];
+    for (uint32_t r = 0; r < 8; r += 1)
+    {
+        kinds[r] = (uint8_t)x87_transfer_kind(&chosen[r]);
+    }
+    const uint32_t missing_tag = x87_transfer_region(chosen, tokens, annotations, 0, 8, kinds);
     tier1_wide_test_expect(test, missing_tag == 0 && memcmp(chosen, twin, 8 * sizeof(*chosen)) == 0,
                            "a second read of an already transported definition still rejects the plan");
     chosen[3] = (X86Instruction){ .form = X86_FORM_FST_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
     chosen[4] = (X86Instruction){ .form = X86_FORM_FXCH_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
-    tier1_wide_test_expect(test, !x87_transfer_verify(twin, chosen, tokens, annotations, 0, 8),
+    tier1_wide_test_expect(test, !x87_transfer_verify(twin, chosen, tokens, annotations, 0, 8, UINT64_MAX),
                            "independent replay rejects a stale home read after its first register reload");
     tokens[6] = BUSTER_X87_TRANSFER_NONE;
     // Vary the actual region's position across a cache line of boundary bytes, including the last boundary.

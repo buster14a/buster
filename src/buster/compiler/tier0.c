@@ -11511,21 +11511,20 @@ static __attribute__((noinline)) void tier0_x87_transfers(const Tier0Function* f
     const uint32_t depths = frame->memory_depths > BUSTER_TIER0_INTEGER_DEPTHS ? frame->memory_depths : BUSTER_TIER0_INTEGER_DEPTHS;
     X86Instruction* const records = code->records;
     const uint32_t* const positions = entries->positions;
-    uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);
-    uint32_t* slots = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, depths);
-    uint8_t* annotations = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count);
-    uint8_t* boundaries = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
-    const bool ready = tokens != 0 && slots != 0 && annotations != 0 && boundaries != 0;
-    if (ready)
+    // Tokens and slots share the all-ones sentinel. Annotations and the count+1 boundaries start clear.
+    const uint64_t words = (uint64_t)count + depths;
+    uint32_t* tokens = arena_push(scratch, words * sizeof(*tokens) + (uint64_t)count * 2 + 1, _Alignof(uint32_t));
+    if (tokens != NULL)
     {
+        uint32_t* const slots = tokens + count;
+        uint8_t* const annotations = (uint8_t*)(tokens + words);
+        uint8_t* const boundaries = annotations + count;
         bool has_store = false;
-        memset(tokens, 0xff, (uint64_t)count * sizeof(uint32_t));
-        memset(slots, 0xff, (uint64_t)depths * sizeof(uint32_t));
+        memset(tokens, 0xff, words * sizeof(*tokens));
         // The upper bits of a store annotation count reloads, saturating at two. Its low bits are
         // the published store/reload tags, so no separate per-record use column is needed.
         enum { read_once = 4, read_twice = 8 };
-        memset(annotations, 0, count);
-        memset(boundaries, 0, (uint64_t)count + 1);
+        memset(annotations, 0, (uint64_t)count * 2 + 1);
         boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
         boundaries[count] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
         for (uint32_t i = 0; i < entry_count; i += 1)

@@ -158,13 +158,14 @@ static bool x87_transfer_overlap(const X86Instruction* home, const X86Instructio
 }
 
 // A span begins and ends at an adapter's known-empty boundary. Its internal peak is checked independently below.
-static bool x87_transfer_span(const X86Instruction* records, uint32_t first, uint32_t end)
+static bool x87_transfer_span(const X86Instruction* records, uint32_t first, uint32_t end, uint8_t* kinds)
 {
     uint32_t depth = 0;
     bool valid = end - first <= BUSTER_X87_TRANSFER_RECORDS;
     for (uint32_t r = first; valid && r < end; r += 1)
     {
         const X87TransferKind kind = x87_transfer_kind(&records[r]);
+        kinds[r % BUSTER_X87_TRANSFER_RECORDS] = (uint8_t)kind;
         valid = kind != X87_TRANSFER_STOP && (kind != X87_TRANSFER_STORE || depth >= 1) && (kind != X87_TRANSFER_BINARY || depth >= 2) && (kind != X87_TRANSFER_UNARY || depth >= 1);
         if (valid)
         {
@@ -186,7 +187,7 @@ static __m512i x87_transfer_annotations(const uint8_t* annotations, uint32_t fir
 
 // Independently replay both stacks. Values name original loads and arithmetic results. A resident
 // full-width store has its own identity: its destination can reflect the architecture's SNaN handling.
-static bool x87_transfer_verify(const X86Instruction* original, const X86Instruction* proposed, const uint32_t* tokens, const uint8_t* annotations, uint32_t first, uint32_t count)
+static bool x87_transfer_verify(const X86Instruction* original, const X86Instruction* proposed, const uint32_t* tokens, const uint8_t* annotations, uint32_t first, uint32_t count, uint64_t edits)
 {
     uint64_t before[8], after[8], homes[BUSTER_X87_TRANSFER_RECORDS] = { 0 };
     uint32_t old_depth = 0, new_depth = 0;
@@ -197,7 +198,7 @@ static bool x87_transfer_verify(const X86Instruction* original, const X86Instruc
         const uint32_t token = tokens[first + r];
         const uint32_t home = token - first;
         const X87TransferKind kind = x87_transfer_kind(&original[r]);
-        const bool same = memcmp(&original[r], &proposed[r], sizeof(X86Instruction)) == 0;
+        const bool same = ((edits >> r) & 1) == 0 || memcmp(&original[r], &proposed[r], sizeof(X86Instruction)) == 0;
         const uint64_t identity = (uint64_t)first + r + 1;
         for (uint64_t held = live; valid && held != 0; held &= held - 1)
         {
@@ -288,21 +289,22 @@ static bool x87_transfer_verify(const X86Instruction* original, const X86Instruc
 // The small physical stack contains a store's local record number while its value is parked there,
 // and NONE for an ordinary operand. A reload exchanges its saved value with st0 at its original wait.
 // The independent replay checks the complete operand order, including other values that exchange moved.
-static bool x87_transfer_plan(const X86Instruction* records, X86Instruction* proposed, const uint32_t* tokens, const uint8_t* annotations, uint32_t first, uint32_t count, uint64_t candidates)
+static bool x87_transfer_plan(const X86Instruction* records, X86Instruction* proposed, const uint32_t* tokens, const uint8_t* annotations, uint32_t first, uint32_t count, uint64_t candidates, uint64_t* edits, const uint8_t* kinds)
 {
     uint32_t stack[8];
     uint32_t depth = 0;
     bool valid = true;
-    memcpy(proposed, records, (uint64_t)count * sizeof(*proposed));
+    uint64_t changed = 0;
     for (uint32_t r = 0; valid && r < count; r += 1)
     {
-        const X87TransferKind kind = x87_transfer_kind(&records[r]);
+        const X87TransferKind kind = (X87TransferKind)kinds[(first + r) % BUSTER_X87_TRANSFER_RECORDS];
         const uint32_t home = tokens[first + r] - first;
         if (kind == X87_TRANSFER_STORE && ((candidates >> r) & 1) != 0)
         {
             valid = depth != 0 && stack[depth - 1] == BUSTER_X87_TRANSFER_NONE;
             if (valid)
             {
+                changed |= UINT64_C(1) << r;
                 proposed[r] = (X86Instruction){ .form = X86_FORM_FST_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
                 stack[depth - 1] = r;
             }
@@ -317,6 +319,7 @@ static bool x87_transfer_plan(const X86Instruction* records, X86Instruction* pro
             valid = index < depth;
             if (valid)
             {
+                changed |= UINT64_C(1) << r;
                 proposed[r] = (X86Instruction){ .form = X86_FORM_FXCH_ST, .rm = (uint8_t)index, .mode = BUSTER_X86_REGISTER_DIRECT };
                 stack[depth - 1 - index] = stack[depth - 1];
                 stack[depth - 1] = BUSTER_X87_TRANSFER_NONE;
@@ -337,13 +340,16 @@ static bool x87_transfer_plan(const X86Instruction* records, X86Instruction* pro
             depth -= valid;
         }
     }
-    return valid && depth == 0 && x87_transfer_verify(records, proposed, tokens, annotations, first, count);
+    // A row outside the edit mask still denotes the original instruction, both in replay and publication.
+    *edits = changed;
+    return valid && depth == 0 && x87_transfer_verify(records, proposed, tokens, annotations, first, count, changed);
 }
 
-static uint32_t x87_transfer_region(X86Instruction* records, const uint32_t* tokens, const uint8_t* annotations, uint32_t first, uint32_t end)
+static uint32_t x87_transfer_region(X86Instruction* records, const uint32_t* tokens, const uint8_t* annotations, uint32_t first, uint32_t end, const uint8_t* kinds)
 {
     const uint32_t count = end - first;
     X86Instruction proposed[BUSTER_X87_TRANSFER_RECORDS];
+    uint64_t edits = 0;
     const __m512i tags = x87_transfer_annotations(annotations, first, count);
     uint64_t candidates = _mm512_test_epi8_mask(tags, _mm512_set1_epi8(BUSTER_X87_TRANSFER_STORE));
     uint64_t loads = _mm512_test_epi8_mask(tags, _mm512_set1_epi8(BUSTER_X87_TRANSFER_RELOAD));
@@ -367,26 +373,31 @@ static uint32_t x87_transfer_region(X86Instruction* records, const uint32_t* tok
     if (candidates != 0)
     {
         uint64_t selected = candidates;
-        if (!x87_transfer_plan(records + first, proposed, tokens, annotations, first, count, selected))
+        if (!x87_transfer_plan(records + first, proposed, tokens, annotations, first, count, selected, &edits, kinds))
         {
             // Under pressure or an unrepresentable permutation, retain only independently proven pairs.
             selected = 0;
             for (uint64_t remaining = candidates; remaining != 0; remaining &= remaining - 1)
             {
                 const uint64_t trial = selected | (remaining & -remaining);
-                if (x87_transfer_plan(records + first, proposed, tokens, annotations, first, count, trial))
+                if (x87_transfer_plan(records + first, proposed, tokens, annotations, first, count, trial, &edits, kinds))
                 {
                     selected = trial;
                 }
             }
-            if (selected != 0 && !x87_transfer_plan(records + first, proposed, tokens, annotations, first, count, selected))
+            if (selected != 0 && !x87_transfer_plan(records + first, proposed, tokens, annotations, first, count, selected, &edits, kinds))
             {
                 selected = 0;
             }
         }
         if (selected != 0)
         {
-            memcpy(records + first, proposed, (uint64_t)count * sizeof(*proposed));
+            while (edits != 0)
+            {
+                const uint32_t row = (uint32_t)__builtin_ctzll(edits);
+                records[first + row] = proposed[row];
+                edits &= edits - 1;
+            }
             pairs = (uint32_t)__builtin_popcountll(selected);
         }
     }
@@ -399,6 +410,10 @@ static uint32_t x87_transfer_region(X86Instruction* records, const uint32_t* tok
 static X87TransferStats x87_transfer_records(X86Instruction* records, uint32_t count, const uint32_t* tokens, const uint8_t* annotations, const uint8_t* boundaries)
 {
     X87TransferStats stats = { 0 };
+    // Cache the original operation kind while checking each span. A live region and the next
+    // span fit in one circular window after the known cuts. The verifier decodes the original
+    // records independently when it replays a proposal.
+    uint8_t kinds[BUSTER_X87_TRANSFER_RECORDS];
     uint32_t region_first = 0;
     uint32_t region_end = 0;
     uint32_t first = 0;
@@ -416,15 +431,21 @@ static X87TransferStats x87_transfer_records(X86Instruction* records, uint32_t c
         {
             const uint32_t end = (uint32_t)start + (uint32_t)__builtin_ctzll(ends);
             ends &= ends - 1;
-            const bool safe = (boundaries[first] & BUSTER_X87_TRANSFER_BOUNDARY) != 0 && (boundaries[end] & BUSTER_X87_TRANSFER_BOUNDARY) != 0 &&
-                              x87_transfer_span(records, first, end);
-            const bool cut = !safe || (boundaries[first] & BUSTER_X87_TRANSFER_CUT) != 0 || end - region_first > BUSTER_X87_TRANSFER_RECORDS;
+            const bool cut = (boundaries[first] & BUSTER_X87_TRANSFER_CUT) != 0 || end - region_first > BUSTER_X87_TRANSFER_RECORDS;
             if (cut && region_end > region_first)
             {
-                const uint32_t pairs = x87_transfer_region(records, tokens, annotations, region_first, region_end);
+                const uint32_t pairs = x87_transfer_region(records, tokens, annotations, region_first, region_end, kinds);
                 stats.pairs += pairs;
                 stats.regions += pairs != 0;
                 region_first = region_end;
+            }
+            const bool safe = (boundaries[first] & BUSTER_X87_TRANSFER_BOUNDARY) != 0 && (boundaries[end] & BUSTER_X87_TRANSFER_BOUNDARY) != 0 &&
+                              x87_transfer_span(records, first, end, kinds);
+            if (!safe && region_end > region_first)
+            {
+                const uint32_t pairs = x87_transfer_region(records, tokens, annotations, region_first, region_end, kinds);
+                stats.pairs += pairs;
+                stats.regions += pairs != 0;
             }
             if (safe)
             {
@@ -441,7 +462,7 @@ static X87TransferStats x87_transfer_records(X86Instruction* records, uint32_t c
     }
     if (region_end > region_first)
     {
-        const uint32_t pairs = x87_transfer_region(records, tokens, annotations, region_first, region_end);
+        const uint32_t pairs = x87_transfer_region(records, tokens, annotations, region_first, region_end, kinds);
         stats.pairs += pairs;
         stats.regions += pairs != 0;
     }
