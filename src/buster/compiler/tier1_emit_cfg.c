@@ -3898,26 +3898,45 @@ static uint32_t tier1_emit_cfg_x87_consumer(const Tier1EmitResult* emitted, cons
     return consumer;
 }
 
-// Optional transport of an F80 result to its sole consumer (#1387). Use the complete IR use list, including
+// Optional transport of an F80 result to its sole consumer (#1387). Count every IR use, including
 // repeated operands, calls and phi edges. Only the selected producer's own private store and the selected consumer's
 // matching load are annotated. The shared record proof preserves both waiting points and every metadata index,
 // and declines barriers, unresolved operand order and excess pressure.
-static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t records, const uint32_t* block_first, uint32_t blocks, Arena* output, Arena* scratch)
+static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t records, const uint32_t* block_first, uint32_t blocks, Arena* scratch)
 {
     const IrFunction* function = plan->function;
     const uint32_t nodes = function->instruction_count;
     const uint64_t mark = scratch->length;
-    IrUses uses = { 0 };
-    bool ok = emitted->prepared.x87_count != 0 && ir_uses_validated(function, scratch, output, &uses) == IR_OK;
-    uint32_t* tokens = ok ? ir_allocate(scratch, (uint64_t)records + 1, 4, &ok) : 0;
-    uint8_t* eligible = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
-    uint8_t* boundaries = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
-
-    if (ok)
+    bool ok = emitted->prepared.x87_count != 0;
+    const uint64_t rows = (uint64_t)records + 1;
+    IrUse* consumers = ok ? arena_push_array(scratch, nodes, sizeof(IrUse), _Alignof(IrUse)) : NULL;
+    uint32_t* tokens = consumers != NULL ? arena_push_array(scratch, rows, sizeof(uint32_t) + 2, _Alignof(uint32_t)) : NULL;
+    if (tokens != NULL)
     {
-        memset(tokens, 0xff, ((uint64_t)records + 1) * 4);
-        memset(eligible, 0, (uint64_t)records + 1);
-        memset(boundaries, 0, (uint64_t)records + 1);
+        uint8_t* annotations = (uint8_t*)(tokens + rows);
+        uint8_t* boundaries = annotations + rows;
+        bool has_store = false;
+        memset(tokens, 0xff, rows * sizeof(uint32_t));
+        memset(annotations, 0, rows * 2);
+        memset(consumers, 0xff, (uint64_t)nodes * sizeof(IrUse));
+        // A store needs only its sole consumer. Preserve all operand positions, including side tables
+        // and phi edges. A second use invalidates the operand while leaving the first user marked.
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < nodes; i += 1)
+        {
+            const uint32_t count = ir_operand_count(function, i);
+            total += count;
+            for (uint32_t k = 0; k < count; k += 1)
+            {
+                const IrOperand operand = ir_operand(function, i, k, 0);
+                if (function->type[operand.value] == IR_F80)
+                {
+                    IrUse* use = &consumers[operand.value];
+                    use->operand = use->instruction == BUSTER_IR_NONE ? operand.position : BUSTER_IR_NONE;
+                    use->instruction = i;
+                }
+            }
+        }
         boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
         boundaries[records] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
         for (uint32_t b = 0; b < blocks; b += 1)
@@ -3941,9 +3960,9 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
         }
         for (uint32_t node = 0; node < nodes; node += 1)
         {
-            const bool single = uses.offsets[node + 1] - uses.offsets[node] == 1;
+            const bool single = consumers[node].operand != BUSTER_IR_NONE;
             const bool producer = function->type[node] == IR_F80 && single && !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_X87;
-            const uint32_t user = producer ? tier1_emit_cfg_x87_consumer(emitted, plan, node, uses.uses[uses.offsets[node]]) : BUSTER_IR_NONE;
+            const uint32_t user = producer ? tier1_emit_cfg_x87_consumer(emitted, plan, node, consumers[node]) : BUSTER_IR_NONE;
             const bool candidate = user < nodes && !plan->covered[user];
             int32_t offset = 0;
             if (candidate && tier1_emit_cfg_x87_offset(function, emitted, node, &offset))
@@ -3982,11 +4001,16 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
                 {
                     tokens[store] = store;
                     tokens[load] = store;
-                    eligible[store] = 1;
+                    annotations[store] = BUSTER_X87_TRANSFER_STORE;
+                    annotations[load] = BUSTER_X87_TRANSFER_RELOAD;
+                    has_store = true;
                 }
             }
         }
-        (void)x87_transfer_records(emitted->code.records, records, tokens, eligible, boundaries, true);
+        if (has_store && total <= UINT32_MAX)
+        {
+            (void)x87_transfer_records(emitted->code.records, records, tokens, annotations, boundaries);
+        }
     }
     arena_pop_to(scratch, mark);
 }
@@ -4774,7 +4798,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     if (error == TIER1_EMIT_OK)
     {
         tier1_select_requests_flush(&requests, buffer.records);
-        tier1_emit_cfg_x87_transfers(plan, emitted, buffer.count, block_first, blocks, output, scratch);
+        tier1_emit_cfg_x87_transfers(plan, emitted, buffer.count, block_first, blocks, scratch);
     }
     if (error == TIER1_EMIT_OK && x86_validate(buffer.records, buffer.count) != buffer.count)
     {
