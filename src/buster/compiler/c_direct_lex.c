@@ -1649,6 +1649,40 @@ static __attribute__((cold, noinline)) bool fast_float_mantissa_nonzero(const ch
     return nonzero;
 }
 
+// A floating literal whose value isn't read yet (#3592): its data until fast_float_read reads it from the literal's text,
+// which its extra names. The predefines' floating literals are made so: their macros (DBL_MAX's __DBL_MAX__ and its
+// kin) are seldom used, and glibc's strtod read their 20 values in about 1,500 instructions each, 4% of a one-function
+// unit's instructions and 7% of its user cycles on the 9700X. A num_pool index never reaches it.
+#define BUSTER_FFLOAT_UNREAD UINT32_MAX
+
+// A floating literal's value from its text (the literal pool's copy, which ends in a NUL): its double in num_pool, and
+// its kind, FTOK_BAD_LITERAL where the full pipeline diagnoses it.
+static __attribute__((noinline)) FastTok fast_float_read(FastPP* pp, FastTok tok)
+{
+    const FastLitSlice sl = pp->lit_slices[tok.extra];
+    const char* const text = pp->lit_bytes + sl.offset;
+    char* ep = NULL;
+    double d = strtod(text, &ep);
+    // #3577: the literal is read whole but for an f or F suffix (another, a long double's l or L included, is
+    // refused: the full pipeline reads them as it does), and its magnitude is in its type's range and doesn't
+    // round to 0 (-Wliteral-range); a float's value is read as a float, as the full pipeline rounds it once.
+    const uint32_t rest = (uint32_t)(text + sl.length - ep);
+    const bool single = rest == 1u && (ep[0] == 'f' || ep[0] == 'F');
+    const bool extended = rest == 1u && (ep[0] == 'l' || ep[0] == 'L');
+    if (single)
+    {
+        d = (double)strtof(text, NULL);
+    }
+    if ((rest != 0 && !single && !extended) || (!extended && (isinf(d) || (d == 0.0 && fast_float_mantissa_nonzero(text, sl.length)))))
+    {
+        tok.kind = FTOK_BAD_LITERAL;
+    }
+    uint64_t bits = 0;
+    memcpy(&bits, &d, 8);
+    tok.data = fast_pp_add_num(pp, bits);
+    return tok;
+}
+
 static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* end, uint32_t flags_in)
 {
     const uint8_t* const start = p;
@@ -1723,9 +1757,6 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
     if (is_float)
     {
         uint32_t float_flags = flags_in;
-        uint32_t float_data = 0;
-        uint32_t float_extra = 0;
-        uint32_t float_kind = FTOK_FLOAT_LIT;
         // Check suffix f/F/l/L
         const uint8_t last = p[-1];
         if (last == 'f' || last == 'F')
@@ -1736,38 +1767,22 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
         {
             float_flags |= BUSTER_FTOK_LONGLONG; // f80 (long double)
         }
-        // Parse double immediately via strtod on small stack copy
-        char buf[128];
-        if (len < sizeof(buf))
+        // The text in the literal pool, and the value read from it there: where the token is emitted for a predefined
+        // macro's (#3592), now for any other.
+        FastTok tok = fast_tok_make(FTOK_FLOAT_LIT, float_flags, 0, BUSTER_FFLOAT_UNREAD);
+        if (len < 128u)
         {
-            memcpy(buf, start, len);
-            buf[len] = '\0';
-            char* ep = NULL;
-            double d = strtod(buf, &ep);
-            // #3577: the literal is read whole but for an f or F suffix (another, a long double's l or L included, is
-            // refused: the full pipeline reads them as it does), and its magnitude is in its type's range and doesn't
-            // round to 0 (-Wliteral-range); a float's value is read as a float, as the full pipeline rounds it once.
-            const uint32_t rest = (uint32_t)(buf + len - ep);
-            const bool single = rest == 1u && (ep[0] == 'f' || ep[0] == 'F');
-            const bool extended = rest == 1u && (ep[0] == 'l' || ep[0] == 'L');
-            if (single)
+            tok.extra = (uint16_t)fast_pp_add_lit(pp, (const char*)start, len);
+            if (!pp->in_predefines && !pp->bailout)
             {
-                d = (double)strtof(buf, NULL);
+                tok = fast_float_read(pp, tok);
             }
-            if ((rest != 0 && !single && !extended) || (!extended && (isinf(d) || (d == 0.0 && fast_float_mantissa_nonzero(buf, len)))))
-            {
-                float_kind = FTOK_BAD_LITERAL;
-            }
-            uint64_t bits = 0;
-            memcpy(&bits, &d, 8);
-            float_data = fast_pp_add_num(pp, bits);
-            float_extra = (uint16_t)fast_pp_add_lit(pp, buf, len);
         }
         else
         {
             fast_pp_bail(pp, "long float literal");
         }
-        return (FastLexed){ .p = p, .tok = fast_tok_make(float_kind, float_flags, float_extra, float_data) };
+        return (FastLexed){ .p = p, .tok = tok };
     }
 
     // Integer literal
@@ -5385,6 +5400,48 @@ static inline void fast_pp_skip_to_eol(FastPP* pp, FastIncludeFile* f)
     }
 }
 
+// An object-like macro's one-token body (no '#' or '##'), pre-encoded as the output's (kind, data), so that fast_pp_drain
+// replaces the macro's name in place: its fast_mode, 1, or 0 where the token needs the general path (a floating
+// literal, a prefixed string). fast_pp_handle_define's and fast_pp_simple_defines's.
+static inline uint8_t fast_pp_one_token_mode(FastPP* pp, FastTok bt, uint8_t* out_kind, uint32_t* out_data)
+{
+    uint8_t fmode = 0;
+    uint8_t fkind = 0;
+    uint32_t fdata = 0;
+    if (bt.kind == FTOK_INT_LIT)
+    {
+        const uint8_t fl = bt.flags;
+        if ((fl & (BUSTER_FTOK_UNSIGNED | BUSTER_FTOK_LONG | BUSTER_FTOK_LONGLONG | BUSTER_FTOK_IN_POOL)) == 0 && bt.data <= (uint32_t)INT32_MAX)
+        {
+            fmode = 1u; fkind = FTOK_INT_LIT; fdata = bt.data;
+        }
+        else
+        {
+            const uint64_t v = fast_tok_int_val(pp, bt);
+            const bool u = (fl & BUSTER_FTOK_UNSIGNED) != 0;
+            const bool is_l = (fl & (BUSTER_FTOK_LONG | BUSTER_FTOK_LONGLONG)) != 0;
+            const bool is_hex = (fl & BUSTER_FTOK_HEX) != 0;
+            if (!is_l && !u && v <= (uint64_t)INT32_MAX) { fmode = 1u; fkind = FTOK_INT_LIT; fdata = (uint32_t)v; }
+            else if (!is_l && (u || is_hex) && v <= UINT32_MAX) { fmode = 1u; fkind = FTOK_INT_U32; fdata = (uint32_t)v; }
+            else if (!u && v <= (uint64_t)INT64_MAX) { fmode = 1u; fkind = FTOK_INT_I64; fdata = (fl & BUSTER_FTOK_IN_POOL) != 0 ? bt.data : fast_pp_add_num(pp, v); }
+            else { fmode = 1u; fkind = FTOK_INT_U64; fdata = (fl & BUSTER_FTOK_IN_POOL) != 0 ? bt.data : fast_pp_add_num(pp, v); }
+        }
+    }
+    else if ((bt.kind >= 64u && bt.kind <= 121u) || (bt.kind >= 6u && bt.kind <= 51u) || bt.kind == FTOK_CHAR_LIT ||
+             (bt.kind == FTOK_STR_LIT && bt.extra == 0))
+    {
+        fmode = 1u; fkind = bt.kind; fdata = bt.data;
+    }
+    else if (bt.kind == FTOK_IDENT)
+    {
+        // Safe if we verify !macro_bits[fdata] at expansion time!
+        fmode = 1u; fkind = FTOK_IDENT; fdata = bt.data;
+    }
+    *out_kind = fkind;
+    *out_data = fdata;
+    return fmode;
+}
+
 static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncludeFile* f)
 {
     FastTok name_tok = { 0 };
@@ -5676,37 +5733,7 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
     uint32_t fdata = 0;
     if (!is_func && bcnt == 1u && !has_ops)
     {
-        const FastTok bt = pp->macro_toks[body_start];
-        // Pre-encode into SoA (kind, data) so fast_pp_drain replaces 1-tok object macros IN PLACE with ZERO breakout!
-        if (bt.kind == FTOK_INT_LIT)
-        {
-            const uint8_t fl = bt.flags;
-            if ((fl & (BUSTER_FTOK_UNSIGNED | BUSTER_FTOK_LONG | BUSTER_FTOK_LONGLONG | BUSTER_FTOK_IN_POOL)) == 0 && bt.data <= (uint32_t)INT32_MAX)
-            {
-                fmode = 1u; fkind = FTOK_INT_LIT; fdata = bt.data;
-            }
-            else
-            {
-                const uint64_t v = fast_tok_int_val(pp, bt);
-                const bool u = (fl & BUSTER_FTOK_UNSIGNED) != 0;
-                const bool is_l = (fl & (BUSTER_FTOK_LONG | BUSTER_FTOK_LONGLONG)) != 0;
-                const bool is_hex = (fl & BUSTER_FTOK_HEX) != 0;
-                if (!is_l && !u && v <= (uint64_t)INT32_MAX) { fmode = 1u; fkind = FTOK_INT_LIT; fdata = (uint32_t)v; }
-                else if (!is_l && (u || is_hex) && v <= UINT32_MAX) { fmode = 1u; fkind = FTOK_INT_U32; fdata = (uint32_t)v; }
-                else if (!u && v <= (uint64_t)INT64_MAX) { fmode = 1u; fkind = FTOK_INT_I64; fdata = (fl & BUSTER_FTOK_IN_POOL) != 0 ? bt.data : fast_pp_add_num(pp, v); }
-                else { fmode = 1u; fkind = FTOK_INT_U64; fdata = (fl & BUSTER_FTOK_IN_POOL) != 0 ? bt.data : fast_pp_add_num(pp, v); }
-            }
-        }
-        else if ((bt.kind >= 64u && bt.kind <= 121u) || (bt.kind >= 6u && bt.kind <= 51u) || bt.kind == FTOK_CHAR_LIT ||
-                 (bt.kind == FTOK_STR_LIT && bt.extra == 0))
-        {
-            fmode = 1u; fkind = bt.kind; fdata = bt.data;
-        }
-        else if (bt.kind == FTOK_IDENT)
-        {
-            // Safe if we verify !macro_bits[fdata] at expansion time!
-            fmode = 1u; fkind = FTOK_IDENT; fdata = bt.data;
-        }
+        fmode = fast_pp_one_token_mode(pp, pp->macro_toks[body_start], &fkind, &fdata);
     }
     else if (!is_func && !has_ops && bcnt == 0)
     {
@@ -5930,9 +5957,15 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
     }
 }
 
-// Predefines and generated headers often contain consecutive "#define name decimal" lines.
-// Accept only complete physical lines. All other replacements go through the directive reader.
-static bool fast_pp_decimal_defines(FastPP* pp, FastIncludeFile* f)
+// Consecutive "#define NAME BODY" lines whose body is one token, defined here as fast_pp_handle_define defines them
+// but without the window and the directive reader a line: a decimal (generated headers' and the predefines'
+// commonest), a number of another form, an identifier or keyword, or a string literal without a prefix or an escape,
+// its token made as fast_pp_window_convert makes it, without the blank before it. Of the corpus's 473 predefined lines,
+// 164 more come here than the decimals' 258, and each took about 1,100 instructions more through the reader (#3592): a
+// quarter of a one-function unit's instructions on the 9700X.
+// Only complete physical lines whose token ends at the newline; anything else, and a name the reader must judge (a
+// macro defined again, a builtin's, a predefined __STDC macro), goes to the reader, before anything is interned.
+static bool fast_pp_simple_defines(FastPP* pp, FastIncludeFile* f)
 {
     const uint8_t* p = f->ptr; // just after '#'
     const uint8_t* const end = f->end;
@@ -5941,17 +5974,53 @@ static bool fast_pp_decimal_defines(FastPP* pp, FastIncludeFile* f)
     {
         const uint8_t* const name = p + 7;
         const uint32_t length = fast_scan_ident_len(name, end);
-        const uint8_t* q = name + length;
-        if (end - q < 3 || *q != ' ' || q[1] < '0' || q[1] > '9') { break; }
-        q += 1;
-        const uint8_t* const digits = q;
-        uint32_t value = 0;
-        do
+        const uint8_t* const space = name + length;
+        if (end - space < 3 || *space != ' ' || pp->macro_count + 1u >= BUSTER_FPP_MAX_MACROS || pp->macro_tok_count >= pp->macro_tok_cap)
         {
-            value = value * 10u + (*q++ - '0');
-        } while (q < end && q - digits < 8 && *q >= '0' && *q <= '9');
-        if (q == end || *q != '\n' || (*digits == '0' && q - digits > 1) ||
-            pp->macro_count + 1u >= BUSTER_FPP_MAX_MACROS || pp->macro_tok_count >= pp->macro_tok_cap)
+            break;
+        }
+        const uint8_t* const body = space + 1;
+        const uint8_t c = *body;
+        // The body's one token, found without lexing it: a decimal's value, or where the token ends (the newline).
+        uint32_t form = 0; // 1 a decimal (value), 2 another number, 3 a name, 4 a plain string
+        uint32_t value = 0;
+        const uint8_t* q = body;
+        if (c >= '0' && c <= '9')
+        {
+            do
+            {
+                value = value * 10u + (*q++ - '0');
+            } while (q < end && q - body < 8 && *q >= '0' && *q <= '9');
+            form = q < end && *q == '\n' && !(*body == '0' && q - body > 1) ? 1u : 0u;
+            // Another preprocessing number (a suffix, a base, a fraction, an exponent's sign): its characters to the
+            // newline, which fast_lex_number reads as one token.
+            if (form == 0)
+            {
+                q = body;
+                while (q < end && ((fast_char_class[*q] & 1u) != 0 || *q == '.' ||
+                                   ((*q == '+' || *q == '-') && (q[-1] == 'e' || q[-1] == 'E' || q[-1] == 'p' || q[-1] == 'P'))))
+                {
+                    q += 1;
+                }
+                form = q < end && *q == '\n' ? 2u : 0u;
+            }
+        }
+        else if ((fast_char_class[c] & 2u) != 0)
+        {
+            q = body + fast_scan_ident_len(body, end);
+            form = q < end && *q == '\n' ? 3u : 0u;
+        }
+        else if (c == '"')
+        {
+            q = body + 1;
+            while (q < end && *q != '"' && *q != '\\' && *q != '\n')
+            {
+                q += 1;
+            }
+            q += q < end && *q == '"' ? 1 : 0;
+            form = q[-1] == '"' && q - body >= 2 && q < end && *q == '\n' ? 4u : 0u;
+        }
+        if (form == 0)
         {
             break;
         }
@@ -5965,14 +6034,55 @@ static bool fast_pp_decimal_defines(FastPP* pp, FastIncludeFile* f)
         {
             break;
         }
-        const uint32_t body = pp->macro_tok_count++;
-        pp->macro_toks[body] = fast_tok_make(FTOK_INT_LIT, 0, 0, value);
+        // The token as fast_pp_window_convert makes it; a lexer that ends it before the newline leaves the line to the
+        // reader.
+        FastTok tok = fast_tok_make(FTOK_INT_LIT, 0, 0, value);
+        const uint8_t* token_end = q;
+        if (form == 2u)
+        {
+            const FastLexed lexed = fast_lex_number(pp, body, end, 0);
+            tok = lexed.tok;
+            token_end = lexed.p;
+        }
+        else if (form == 3u)
+        {
+            const uint32_t body_length = (uint32_t)(q - body);
+            uint8_t kind = FTOK_IDENT;
+            uint32_t body_id = 0;
+            if (end - body >= 8)
+            {
+                body_id = fast_ident_lookup(&pp->idents, body, body_length, &kind);
+            }
+            else
+            {
+                body_id = fast_ident_intern(&pp->idents, body, body_length);
+                kind = pp->idents.entries[body_id].kw_kind != 0 ? pp->idents.entries[body_id].kw_kind : (uint8_t)FTOK_IDENT;
+            }
+            tok = fast_tok_make(kind, 0, 0, body_id);
+            // #3577: __VA_OPT__ outside a variadic macro is the full pipeline's error, which the reader reports.
+            token_end = body_id == 0 || (kind == FTOK_IDENT && body_id == pp->idents.va_opt_id) ? body : q;
+        }
+        else if (form == 4u)
+        {
+            const FastLexed lexed = fast_lex_string(pp, body, end, 0, 0);
+            tok = lexed.tok;
+            token_end = lexed.p;
+        }
+        if (pp->bailout || token_end != q)
+        {
+            break;
+        }
+        const uint32_t body_start = pp->macro_tok_count++;
+        pp->macro_toks[body_start] = tok;
+        uint8_t fkind = 0;
+        uint32_t fdata = 0;
+        const uint8_t fmode = fast_pp_one_token_mode(pp, tok, &fkind, &fdata);
         fast_pp_bind_macro(pp, id, (FastMacro){
-            .body_start = body, .body_count = 1u, .fast_data = value,
-            .active = 1u, .fast_mode = 1u, .fast_kind = FTOK_INT_LIT,
+            .body_start = body_start, .body_count = 1u, .fast_data = fdata,
+            .active = 1u, .fast_mode = fmode, .fast_kind = fkind, .plain_start = pp->macro_param_count,
         });
         // #3577: the text after the name, which a redefinition compares.
-        pp->macro_texts[pp->macro_count] = (FastMacroText){ .text = name + length, .length = (uint32_t)(q - (name + length)) };
+        pp->macro_texts[pp->macro_count] = (FastMacroText){ .text = space, .length = (uint32_t)(q - space) };
         if (f->guard_state == 1u && id == f->guard_ident) { f->guard_state = 2u; }
         f->line += 1u;
         f->ptr = q + 1;
@@ -6023,7 +6133,7 @@ static __attribute__((noinline)) void fast_pp_line_operands(FastPP* pp, FastIncl
 
 static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastIncludeFile* f)
 {
-    if (fast_pp_decimal_defines(pp, f)) { return; }
+    if (fast_pp_simple_defines(pp, f)) { return; }
     FastTok kw_tok = { 0 };
     fast_pp_read_tok(pp, f, true, &kw_tok);
     if (kw_tok.kind == FTOK_EOF)
@@ -6413,6 +6523,17 @@ static inline void fast_pp_emit_soa(FastPP* pp, FastTok tok)
     }
     else if (kind == FTOK_FLOAT_LIT)
     {
+        if (__builtin_expect(data == BUSTER_FFLOAT_UNREAD, 0))
+        {
+            // A predefined macro's floating literal, read where it is first used (#3592).
+            const FastTok read = fast_float_read(pp, tok);
+            kind = read.kind;
+            data = read.data;
+            if (kind == FTOK_BAD_LITERAL)
+            {
+                fast_pp_bail(pp, "literal the full pipeline diagnoses");
+            }
+        }
         if ((tok.flags & BUSTER_FTOK_LONG) != 0)
         {
             kind = FTOK_FLOAT32;
