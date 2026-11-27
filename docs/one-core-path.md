@@ -4661,6 +4661,46 @@ alone don't compile.
 The full pipeline keeps a path's system header level from that path's first lookup, where clang takes each lookup's
 (#3613). There the direct path's `-MMD` rule is clang's, and lists a header the full pipeline's leaves out.
 
+### The predefines (2026-11-27, #3592)
+
+A one-function unit spent 0.050 ms of its 0.229 ms on the predefines, measured as the corpus's 473 lines against an
+empty `--predefines` file
+([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-predefines-3592-2026-11-27)).
+The 258 decimal `#define`s already went through `fast_pp_decimal_defines`. The other 229 took the directive reader, a
+line-mode window each, and glibc's `strtod` read the 20 floating literals at their definitions.
+
+- **One-token bodies in a batch** (`fast_pp_simple_defines`, which replaces the decimal batch): consecutive
+  `#define NAME BODY` lines whose body is one token. That is a decimal, another number (hex, octal, suffixed, past 2^32,
+  floating), an identifier or keyword, or a string without a prefix or an escape. The token is made by the lexer
+  functions `fast_pp_window_convert` uses, and its fast mode by `fast_pp_one_token_mode`, which the reader shares. A
+  line whose token doesn't end at the newline, a name defined before, a builtin's name and a predefined `__STDC` macro
+  go to the reader before anything is interned. Of the corpus's 473 lines, 409 take the batch and 65 the reader.
+- **A predefined macro's floating literal is read where it is first emitted** (`fast_float_read` from
+  `fast_pp_emit_soa`). Its token keeps its text and a data of `BUSTER_FFLOAT_UNREAD` until then, so a range check the
+  full pipeline makes at a use is made at the use. Every other floating literal is still read as it is lexed.
+- **Measured and not kept:** the predefines' directive lines lexed by `fast_lex_one` instead of a window a line, 2.7%
+  of the one-function unit's instructions. And the arena's tables each sized to what the unit writes, which touched 41
+  pages instead of 46 and moved neither faults nor time: a small unit's pages are the predefines' data (#3586).
+
+| 9700X, CPU 2, a process a unit, rotated rounds | main `7e28b4ed` | this | |
+| --- | ---: | ---: | ---: |
+| one function, wall (11 rounds of 100) | 0.2192 ms | **0.2033 ms** | -7.3% |
+| its user instructions | 741 K | **532 K** | -28% |
+| musl's `wcwidth.c` | 0.3333 ms | **0.3146 ms** | -5.6% |
+| `stdio.h` and a `printf` | 0.5254 ms | **0.5035 ms** | -4.2% |
+| seven standard headers and a `main` | 1.4182 ms | **1.3810 ms** | -2.6% |
+| musl's 1,336 units by `-std=c99`, 1,001 of them direct (5 rounds) | 1,183.4 ms | **1,163.0 ms** | -1.7% |
+| Lua's 34 units, 18 of them direct (7 rounds) | 116.3 ms | **115.2 ms** | -0.9% |
+| `sqlite3.c`, user instructions | 212.049 M | 212.055 M | +0.003% |
+
+- **Checked:** every object is the same. That covers the units above and the corpus's 7,767 runs (2,548 of them
+  the direct path's) by status, diagnostics, object and path. `test-direct` defines each one-token form, defines
+  each again the same and differently, and leaves to the reader two blanks, a comment, a blank after the token, an
+  escaped string and a character constant. It reads predefined floats where they are used, and leaves an unused
+  `F16` literal quiet and a used one to the full pipeline.
+- What a small unit still pays for its predefines is interning their names, their macros' records and the pages
+  those take: about 20 faults.
+
 ## Related
 
 - [#2850](https://github.com/buster14a/buster/issues/2850): the design, its
