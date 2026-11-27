@@ -21,6 +21,7 @@
 #: cpu 3 1.00 AMD EPYC 9V74 80-Core Processor
 #: cpu 1 0.98 INTEL(R) XEON(R) PLATINUM 8573C
 #: unmeasured Test runtime fixture roots and catalog contracts [1 CPU]
+#: unmeasured Compare the direct path with the full pipeline on tests/'s C files [4 CPUs]
 #: peak 84 Test the early driver feedback corpus
 #: peak 130 Test deterministic work and growth contracts [1 CPU]
 #: peak 50 Check unity fixture ownership without rebuilding
@@ -208,6 +209,7 @@
 299.6 Test SQLite's Tcl suite's pinned subset through testfixture by both tiers against clang's [4 CPUs]
 47.2 Test the direct path's executables [8 CPUs]
 4.4 Test the fused direct-to-object compiler [1 CPU]
+98.4 Compare the direct path with the full pipeline on tests/'s C files [4 CPUs]
 23.8 Test the lanes [8 CPUs]
 24.3 Test the per-file jobs on the repository's sources, flat [8 CPUs]
 1.9 Test the link representation [8 CPUs]

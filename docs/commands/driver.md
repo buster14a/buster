@@ -246,6 +246,178 @@ requirements. [Command index](README.md).
   A new test of the checker's goes inside them; a test whose own code is its
   time (a fuzzer's loop, an interpreter) doesn't.
 
+## The direct path's diagnostics (#3577)
+
+A plain `-c` of one C file goes first to the fused direct compiler
+(`c_direct.c`, #2850), which leaves the unit to the full pipeline, writing
+nothing, wherever its result could differ: a construct it doesn't compile, and
+anything the full pipeline diagnoses. Each default warning and error has a
+check that refuses the unit (but one, below), so a compile's standard error and
+exit status are the full pipeline's alone, and the direct path only writes the
+object sooner.
+`BUSTER_TEST_DIRECT_BAILS=FILE` appends a line of the refusing rule and the
+input to FILE each time it refuses one (read on that fallback alone). The
+checks are written for [the compile's count](ci.md#the-compiles-count-before-the-merge):
+comparisons combined bitwise with one rarely taken branch, cold functions for
+the rare cases, macros where a helper's entry would count at every use.
+
+`-Wunsequenced` keeps no log as an expression compiles. Only the variables its
+`++`, `--` and assignments modify are counted, by name. At the expression's end,
+none, or one whose modification is its last operator (an assignment's operands
+are evaluated before it stores), is quiet; so is each modified variable's name
+appearing once among the expression's tokens (a warning needs a second use or
+modification of the same variable). Any other expression, about 140 of
+sqlite3.c's 47,000, is compiled again from its first token without code, with
+the log of every use and sequence point, whose check is the full pipeline's
+(`fast_cc_sequenced_again`). The body is compiled twice, without the log and
+with it (`fast_cc_expr_compile`), so the common one carries none of it; that
+one level of recursion is `call_graph.c`'s allowed cycle.
+
+An expression compiles without code (`eval_only`) in three places: an
+unevaluated operand (`sizeof`'s, `_Alignof`'s, `_Generic`'s controlling
+expression), the dead arm of a constant condition (#3592's dead branches) and
+the compile again for `-Wunsequenced`'s log. The checks are the same in all
+three but for what C's unevaluated operands alone change, which
+`FastExprCtx.unevaluated` counts: a side effect there is
+`-Wunevaluated-expression`, its names are not in the `-Wunsequenced` log, a
+discarded comma operand is quiet, a comparison's `-Wtautological-compare` and
+`-Wstring-compare` are quiet, and its names are no use. A value made without
+code keeps the kind, marks and constants the checks read (an object's address,
+a member's bit-field, a call's effect); a use in a dead branch counts for the
+unit's end (`-Wundefined-internal`) but readies no body. Probes of each
+diagnostic live, in `if (0)`, the else of `if (1)`, a constant `?:`'s arm, a
+decided `&&` or `||` and `sizeof`, against `--no-direct`, cover this.
+
+A comparison whose operands are two lvalues at one place reads its tokens
+(`fast_cc_same_paths`, from the operator's position in `FastExprOp.lbl2`):
+one access path on both sides, parentheses aside, is the full pipeline's
+self-comparison. So does a relational pointer sum (`fast_cc_sum_bounds`). A
+string literal keeps `BUSTER_FVAL_LASTING_STRING` through parentheses and casts
+for `-Wstring-compare`. The tokens don't say whether a macro made an operand,
+which takes the full pipeline's warning away: such a unit leaves the direct
+path.
+
+An inline function's body is checked where it is defined, in the scope it has
+there (a later declaration isn't visible to it), its code dropped. One with
+internal linkage is compiled again at the unit's end only where something
+references it, so unused helpers emit nothing; C99's and GNU's inline
+definitions with external linkage are emitted as the unit's end decides from
+all the function's declarations (#3595). Such a definition that names a static
+function or object (`-Wstatic-in-inline`), or that the unit's end decides and
+declares a modifiable static local (`-Wstatic-local-in-inline`), is the full
+pipeline's. A long double, which the direct path doesn't compile, is taken in a
+checked body whose code is dropped (`fast_cc_checked_long_double`, its type the
+16-byte scalar with `BUSTER_FTYPE_SCALAR_LONG`, unlike `_Float128`'s and
+`_Complex`'s): as a parameter, a local, the return type, a copy to its own type,
+a void cast, a comparison of two (checked as two doubles') and a long double
+parameter's argument, whose rules are a double's. Anything else leaves, and so
+does such a body where it is emitted. musl's `<math.h>` defines `__islessl` and
+its kin this way, and its `libm.h` `fp_barrierl` and `fp_force_evall`: 53 of
+musl's units, which main's direct path compiled, take it again.
+
+`tests/` alone doesn't show that: many families of warnings appear there only
+in files that leave the direct path for another reason first (the flags each
+file prints with `--no-direct`, against its bail log's reason, show which).
+Each family of the full pipeline's default warnings was probed with variants
+against `--no-direct`, which found main's direct path quiet on fifteen more
+(among them `-Wreturn-stack-address`, `-Warray-bounds`,
+`-Waddress-of-packed-member`, `-Wsizeof-pointer-memaccess`, `-Wfortify-source`
+and the pointer-to-int casts); the variants that touch types ran or asserted
+their sizes as well, and found three of its layouts and values wrong (an
+enumerator past `INT64_MAX`, a `(*p)[N]` parameter, packed records with
+alignments). Running each case against the full pipeline's object found more:
+an array of unknown size took its count from its initializer's commas in a
+block (`int a[] = { [5] = 1 }` was one int, `struct P a[] = { 1, 2, 3, 4 }` four
+records), and every completion wrote the count into the array's type, so a
+typedef's `int[]` or `char[]` took its first object's size. A block's count is
+now exact or leaves (`fast_cc_incomplete_array_count`: a designator, or an
+aggregate element's elided braces, need the initializer's walk), and each
+completion is a copy (`fast_cc_completed_array`); a compound literal of unknown
+size takes its elements' count the same way (musl's `(long[]){s, ns}`, which
+the direct path had refused). `-Wfortify-source` (a memcpy, memset, strcpy or strncpy family
+call's constant amount past the object its destination points into) walks the
+destination's tokens as the full pipeline's `check_common_call_object` walks
+its expression, and reads where it points from the value: a local's or a
+global's array or address, or a register's sum of one with a constant, which
+keeps that place (`BUSTER_FVAL_LASTING_ADDRESS`) through a spill. A sweep of
+the flags no probe had reached found four more, main's too: a bit-field wider
+than its type and an `inline` main (errors), a string longer than its array
+(`-Wexcess-initializers`), and a condition that is a parenthesized `==` with a
+modifiable left operand (`-Wparentheses-equality`), which a macro's grouping
+quiets: a `(` from a macro's body has data 1 (the `#define`'s loop marks it), so
+`if (IS1(x))` and sqlite's `ALWAYS(X)` stay direct, while one from a macro's
+argument (`ID((x == 1))`) leaves although the full pipeline is quiet. The
+window's emitter writes no punctuator's data, so a punctuator in the slot of a
+macro name whose expansion was empty kept the name's id: `if (EMPTY (x == y))`
+read as a macro's grouping and `s EMPTY .a == s.a` as two paths, both quiet
+where the full pipeline warns. The slot is cleared before the expansion, and
+an identity wrapper's `(` (`ALWAYS(X)`, whose name goes and whose `(` is the
+file's) is marked as its body's. `-Wsizeof-pointer-memaccess` compares the
+destination with `sizeof`'s operand without any of their parentheses, as the
+full pipeline does: `memset(s->buf, 0, sizeof((s)->buf))`, and a macro's
+grouping (`sizeof(FIELD(s))` of `((p)->buf)`), are one expression.
+#3596's reader of `#define NAME digits` lines (`fast_pp_decimal_defines`)
+binds a macro without the directive reader, so it leaves to that reader a name
+defined before (whose redefinition is compared), a builtin's, and in the
+predefines a `__STDC` macro or `__FLT_EVAL_METHOD__` (the full pipeline's own,
+which no `#undef` removes quietly), and keeps the text after the name that a
+later redefinition compares. A predefines file (`--predefines`) doesn't define
+`__FLT_EVAL_METHOD__` (clang's `-dM` leaves the builtin out), so the direct path
+defines it after either predefines, from the value the full pipeline takes
+(`pp_predefines_eval_method`); without it `#ifdef __FLT_EVAL_METHOD__` took the
+other branch and its `#undef` was quiet.
+`returns_twice` (a function's), `format_arg(N)` (a prototyped function's whose
+parameter N and value point to a character type) and `may_alias` (anything's)
+are taken as the full pipeline takes them, where musl's `<setjmp.h>`,
+`<libintl.h>` and its word types put them.
+printf, fprintf, sprintf and snprintf, whose formats the full pipeline checks
+by their names, no longer leave at every call: `fast_cc_format_quiet` reads a
+literal format as `check_common_format` does (flags, a width and a precision
+that may take an int's argument, a length, the conversion, the next argument
+of the class they name, none left over or missing), in a dead branch's or
+sizeof's call too, and leaves at anything past that (positions, `%n`, the wide
+and binary forms, `%Lf`); a non-literal format is quiet with arguments and
+`-Wformat-security`'s without. A function with a `format` attribute of its own
+still leaves at a call. A pointer to `long` and one to `long long` (or their
+unsigned kinds, at any depth) are incompatible, the full pipeline's
+`-Wincompatible-pointer-types` error, which main's direct path compiled
+quietly in an initializer, an assignment, an argument or a return: the implicit
+conversion's check compares the pointees' `BUSTER_FTYPE_SCALAR_LONG` too. A
+`mode` attribute after a declarator, glibc's `typedef int register_t
+__attribute__ ((__mode__ (__word__)))` among them, was ignored (register_t an
+int, 4 bytes), and one among the specifiers gave DI and word a long long and
+an SF on an int a float: either now gives its type as the full pipeline does
+(`fast_cc_mode_type`), an 8-byte mode long, as clang gives it. A mode whose
+size this path doesn't model (`BUSTER_FMODE_UNMODELED`, kept at the base
+type's before) in a pair the full pipeline takes quietly (TI on an integer;
+TF, XF, KF and HF on a floating type; TC on a `_Complex`) leaves on an object,
+a member or a parameter, and where a typedef with it is used: some glibc
+versions declare `__cfloat128` with `mode(TC)` for clang (the corpus's headers
+do, which CI's count compiles sqlite3.c with), and never use it. Any other (a
+class that isn't the type's, an unknown or vector mode, a `_Bool`'s, an
+enum's, a record's, one on a pointer's, an array's or a function's declarator)
+is the full pipeline's error or warning, or a type it doesn't model, and leaves
+where it is declared. An attribute after a bit-field's width (`int a : 3
+__attribute__((packed))`) was taken for another member's start, an int; it
+leaves. One
+gap is left: a loop's empty body (`for (...);`) is `-Wempty-body` only where the
+next statement is a block or is indented past the loop, as clang decides, and
+the direct path's tokens keep no columns, so it compiles such loops quietly as
+before. `if (x);` and `switch (x);` leave on any line.
+
+`./build/compiler test-direct --differential [--jobs N] [--direct-floor N]
+DIRECTORY...` compiles every C file under the directories with this
+executable twice, each run a child of its own (standard input `/dev/null`,
+without `BUSTER_NO_DIRECT` or `SOURCE_DATE_EPOCH`, which turn the direct path
+off): by default and with `--no-direct`. The two must exit alike and print the
+same bytes, standard output and errors together; the first 20 differences
+print each run's first line that differs. A file is the direct path's where
+its default run exited 0 without a line in its bail log, and fewer such files
+than `--direct-floor` fail the run, as the comparison would leave the direct
+path out. CI runs it on `tests/` with a floor of 260 (286 of 4,578 files on
+2026-11-25, 9.2 s on 4 CPUs in a Release build), in the sanitizer rows too,
+where a sanitizer's report in one run is a difference.
+
 ## Build-system integration (#1113)
 
 Dependency files (`-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP`),

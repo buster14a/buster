@@ -30,6 +30,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <math.h>
+#include <time.h>
 #include <immintrin.h>
 
 #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
@@ -99,6 +101,10 @@ typedef enum FastTokKind
     FTOK_SHR_ASSIGN = 51,   // >>=
     FTOK_HASH = 52,         // #
     FTOK_HASHHASH = 53,     // ##
+    // A number the full pipeline diagnoses where it is used, as clang does (#3577): an invalid suffix, a base without
+    // digits, an integer past 64 bits, a floating value out of its type's range. A macro may hold one; the compiler's
+    // stream, #if and # or ## refuse it.
+    FTOK_BAD_LITERAL = 54,
 
     // C17 / GNU keywords (64..125)
     FTOK_KW_AUTO = 64,
@@ -177,6 +183,9 @@ typedef enum FastTokKind
 #define BUSTER_FTOK_HEX         0x20u   // hex/octal integer literal (unsigned promotion allowed)
 #define BUSTER_FTOK_IN_POOL     0x40u   // INT_LIT payload is index into num_pool (not inline u32)
 #define BUSTER_FTOK_BLUE        0x80u   // macro-expansion blue-painted (cannot expand again)
+// A character constant with an escape or a prefix keeps its spelling in the literal pool, at the token's extra (#3577:
+// # and ## spell it as written); an integer with a base or a suffix always does.
+#define BUSTER_FTOK_SPELLED     BUSTER_FTOK_HEX
 
 // Compact 8-byte token
 typedef struct FastTok FastTok;
@@ -187,6 +196,7 @@ struct FastTok
     uint16_t extra;   // string/literal flags or wide/prefix kind or param index in macro body
     uint32_t data;    // ident_id (IDENT/KW), inline u32 or num_pool index (INT/FLOAT), lit_pool index (STR)
 };
+_Static_assert(sizeof(FastTok) == 8u && offsetof(FastTok, kind) == 0u && offsetof(FastTok, flags) == 1u, "a token's word: its kind's byte, then its flags'");
 
 // A token made in a register and given back whole. A token written a field at a time and then loaded whole waits for
 // its stores to leave the store buffer: Zen 5 forwards a store to a load only when the load lies inside that one store
@@ -213,6 +223,7 @@ struct FastLitSlice
 {
     uint32_t offset;
     uint32_t length;
+    uint32_t escaped;   // a string literal's text had an escape: its value doesn't spell it (#3577)
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -347,6 +358,8 @@ typedef enum FastPPKw
     FPP_KW_BASE_FILE_MACRO,
     FPP_KW_INCLUDE_LEVEL_MACRO,
     FPP_KW_PRAGMA_OP,
+    FPP_KW_TIMESTAMP_MACRO,
+    FPP_KW_FILE_NAME_MACRO,
     FPP_KW_HAS_BUILTIN,
     FPP_KW_HAS_ATTRIBUTE,
     FPP_KW_HAS_FEATURE,
@@ -357,10 +370,37 @@ typedef enum FastPPKw
     FPP_KW_BUILDING_MODULE,
     FPP_KW_HAS_WARNING,
     FPP_KW_IS_IDENTIFIER,
+    FPP_KW_HAS_DECLSPEC_ATTRIBUTE,
+    FPP_KW_HAS_EMBED,
+    FPP_KW_HAS_CONSTEXPR_BUILTIN,
+    FPP_KW_IS_TARGET_ARCH,
+    FPP_KW_IS_TARGET_VENDOR,
+    FPP_KW_IS_TARGET_OS,
+    FPP_KW_IS_TARGET_ENVIRONMENT,
+    FPP_KW_IS_TARGET_VARIANT_OS,
+    FPP_KW_IS_TARGET_VARIANT_ENVIRONMENT,
     FPP_KW_ONCE,
     FPP_KW_ELIFDEF,
-    FPP_KW_ELIFNDEF
+    FPP_KW_ELIFNDEF,
+    FPP_KW_FORMAT_FUNCTION, // printf, fprintf, sprintf, snprintf: the full pipeline checks their formats (#3577)
+    // #3577: library functions whose calls the full pipeline checks by name: the memcpy family's sizes
+    // (-Wsizeof-pointer-memaccess, a superset of its names: MEMACCESS to FORTIFY_BCOPY), the destinations of those that
+    // write and of strcpy, stpcpy and strcat (-Wfortify-source, by how the amount is given: FORTIFY_MEMORY to
+    // STRING_COPY), and the integer and floating absolute values' arguments (-Wabsolute-value).
+    FPP_KW_MEMACCESS_FUNCTION,
+    FPP_KW_FORTIFY_MEMORY_FUNCTION,
+    FPP_KW_FORTIFY_LIMITED_FUNCTION,
+    FPP_KW_FORTIFY_BZERO_FUNCTION,
+    FPP_KW_FORTIFY_BCOPY_FUNCTION,
+    FPP_KW_STRING_COPY_FUNCTION,
+    FPP_KW_ABS_FUNCTION,
+    FPP_KW_FABS_FUNCTION
 } FastPPKw;
+
+// The full pipeline's builtin macros (#3577), __LINE__ to __is_target_variant_environment: each is defined (defined(),
+// #ifdef), and none may be defined or undefined quietly. The direct path expands __LINE__ to _Pragma and answers the
+// queries in #if; __TIMESTAMP__, __FILE_NAME__ and a query outside #if are refused.
+#define BUSTER_FPP_KW_LAST_BUILTIN FPP_KW_IS_TARGET_VARIANT_ENVIRONMENT
 
 typedef struct FastIdentTable FastIdentTable;
 struct FastIdentTable
@@ -385,6 +425,7 @@ struct FastIdentTable
     uint32_t cache_bits;
     uint32_t cache_shift;      // 64 - cache_bits: a key's hash >> cache_shift is its slot
     uint32_t cache_grow_at;    // the count of names at which the cache grows (UINT32_MAX at its full size)
+    uint32_t va_opt_id;        // __VA_OPT__'s IdentId, a seed's (#3577: a macro body's check)
 
     FastArena* arena;
 };
@@ -744,13 +785,10 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
             { "__int128", FTOK_KW_INT128, 0 },
             { "__int128_t", FTOK_KW_INT128, 0 },
             { "__uint128_t", FTOK_KW_INT128, 0 },
-            { "_Float128", FTOK_KW_FLOAT128, 0 },
+            // _Float128, _Float32, _Float64, _Float32x and _Float64x are identifiers, as the full pipeline lexes them:
+            // glibc's floatn headers name them with typedefs (#3577).
             { "__float128", FTOK_KW_FLOAT128, 0 },
             { "_Float16", FTOK_KW_FLOAT16, 0 },
-            { "_Float32", FTOK_KW_FLOAT, 0 },
-            { "_Float64", FTOK_KW_DOUBLE, 0 },
-            { "_Float32x", FTOK_KW_DOUBLE, 0 },
-            { "_Float64x", FTOK_KW_FLOAT128, 0 },
             { "__builtin_va_list", FTOK_KW_BUILTIN_VA_LIST, 0 },
             { "__builtin_va_start", FTOK_KW_BUILTIN_VA_START, 0 },
             { "__builtin_va_arg", FTOK_KW_BUILTIN_VA_ARG, 0 },
@@ -797,7 +835,47 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
             { "__building_module", 0, FPP_KW_BUILDING_MODULE },
             { "__has_warning", 0, FPP_KW_HAS_WARNING },
             { "__is_identifier", 0, FPP_KW_IS_IDENTIFIER },
+            { "__TIMESTAMP__", 0, FPP_KW_TIMESTAMP_MACRO },
+            { "__FILE_NAME__", 0, FPP_KW_FILE_NAME_MACRO },
+            { "__has_declspec_attribute", 0, FPP_KW_HAS_DECLSPEC_ATTRIBUTE },
+            { "__has_embed", 0, FPP_KW_HAS_EMBED },
+            { "__has_constexpr_builtin", 0, FPP_KW_HAS_CONSTEXPR_BUILTIN },
+            { "__is_target_arch", 0, FPP_KW_IS_TARGET_ARCH },
+            { "__is_target_vendor", 0, FPP_KW_IS_TARGET_VENDOR },
+            { "__is_target_os", 0, FPP_KW_IS_TARGET_OS },
+            { "__is_target_environment", 0, FPP_KW_IS_TARGET_ENVIRONMENT },
+            { "__is_target_variant_os", 0, FPP_KW_IS_TARGET_VARIANT_OS },
+            { "__is_target_variant_environment", 0, FPP_KW_IS_TARGET_VARIANT_ENVIRONMENT },
             { "once", 0, FPP_KW_ONCE },
+            { "printf", 0, FPP_KW_FORMAT_FUNCTION },
+            { "fprintf", 0, FPP_KW_FORMAT_FUNCTION },
+            { "sprintf", 0, FPP_KW_FORMAT_FUNCTION },
+            { "snprintf", 0, FPP_KW_FORMAT_FUNCTION },
+            { "memcpy", 0, FPP_KW_FORTIFY_MEMORY_FUNCTION },
+            { "memmove", 0, FPP_KW_FORTIFY_MEMORY_FUNCTION },
+            { "memset", 0, FPP_KW_FORTIFY_MEMORY_FUNCTION },
+            { "memcmp", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "bcmp", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "bcopy", 0, FPP_KW_FORTIFY_BCOPY_FUNCTION },
+            { "bzero", 0, FPP_KW_FORTIFY_BZERO_FUNCTION },
+            { "mempcpy", 0, FPP_KW_FORTIFY_MEMORY_FUNCTION },
+            { "memccpy", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "strncpy", 0, FPP_KW_FORTIFY_LIMITED_FUNCTION },
+            { "strncat", 0, FPP_KW_FORTIFY_LIMITED_FUNCTION },
+            { "strncmp", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "strncasecmp", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "strndup", 0, FPP_KW_MEMACCESS_FUNCTION },
+            { "stpncpy", 0, FPP_KW_FORTIFY_LIMITED_FUNCTION },
+            { "strcpy", 0, FPP_KW_STRING_COPY_FUNCTION },
+            { "stpcpy", 0, FPP_KW_STRING_COPY_FUNCTION },
+            { "strcat", 0, FPP_KW_STRING_COPY_FUNCTION },
+            { "abs", 0, FPP_KW_ABS_FUNCTION },
+            { "labs", 0, FPP_KW_ABS_FUNCTION },
+            { "llabs", 0, FPP_KW_ABS_FUNCTION },
+            { "imaxabs", 0, FPP_KW_ABS_FUNCTION },
+            { "fabs", 0, FPP_KW_FABS_FUNCTION },
+            { "fabsf", 0, FPP_KW_FABS_FUNCTION },
+            { "fabsl", 0, FPP_KW_FABS_FUNCTION },
         };
         for (uint32_t i = 0; i < (uint32_t)(sizeof(seeds) / sizeof(seeds[0])); i += 1)
         {
@@ -809,7 +887,8 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
             }
             t->entries[id].kw_kind = seeds[i].kw;
             t->entries[id].pp_kw = seeds[i].pp;
-            if (seeds[i].pp >= FPP_KW_LINE_MACRO && seeds[i].pp <= FPP_KW_PRAGMA_OP)
+            t->va_opt_id = seeds[i].pp == FPP_KW_VA_OPT ? id : t->va_opt_id;
+            if (seeds[i].pp >= FPP_KW_LINE_MACRO && seeds[i].pp <= BUSTER_FPP_KW_LAST_BUILTIN)
             {
                 t->macro_bits[id >> 6] |= (UINT64_C(1) << (id & 63u));
             }
@@ -1171,6 +1250,16 @@ struct FastMacro
     uint32_t plain_start;    // before '##'), each once in the order of its first such name: macro_params[plain_start..]
     uint16_t use_count;      // a body without '#' and '##': where each parameter's name stands (position << 8 | number),
     uint8_t plain_subst;     // macro_params[plain_start + plain_count..], which the substitution copies around
+    uint8_t language_defined; // a __STDC macro of the predefines, or __FLT_EVAL_METHOD__: the full pipeline's builtin (#3577)
+};
+
+// #3577: a macro's definition as written after its name, to the line's end, for a redefinition's check
+// (fast_pp_same_definition): FastPP's macro_texts, beside the macros every expansion reads.
+typedef struct FastMacroText FastMacroText;
+struct FastMacroText
+{
+    const uint8_t* text;
+    uint32_t length;
 };
 
 typedef struct FastIncludeFile FastIncludeFile;
@@ -1354,6 +1443,7 @@ struct FastPP
 
     // Macro definitions
     FastMacro* macros;
+    FastMacroText* macro_texts; // each macro's text as written (#3577), beside macros
     uint32_t macro_count;
     FastTok* macro_toks;
     uint32_t macro_tok_count;
@@ -1418,7 +1508,8 @@ struct FastPP
     uint32_t dependency_count;
     uint32_t dependency_last;
     uint32_t dependency_main;
-    // The main file's push (#pragma GCC system_header there is ignored, as clang ignores it), or 0 before it.
+    // The main file's push, or 0 before it: #pragma once and GCC system_header there are the full pipeline's warnings
+    // (#3577), which leave the direct path.
     uint32_t main_serial;
 
     // Current source state
@@ -1430,6 +1521,19 @@ struct FastPP
     bool c23;
     bool strict_iso;          // CDirectRequest.strict_iso: no GNU extensions (-std=cNN)
     bool trigraphs;           // CDirectRequest.trigraphs: a file with a trigraph leaves the direct path
+
+    // #3577: what the full pipeline answers and checks.
+    uint32_t (*feature_query)(void* context, uint32_t query, const uint8_t* name, uint32_t length); // __has_* and __is_target_*
+    void* feature_context;
+    bool in_predefines;       // running the predefines: a __STDC macro defined there is a builtin
+    bool time_made;           // __DATE__'s and __TIME__'s text, made at the first use
+    char date_text[16];
+    char time_text[16];
+    // Included files stay mapped until the end, so that a macro's text can be read again by a redefinition.
+    const uint8_t** mapped_bases;
+    uint64_t* mapped_sizes;
+    uint32_t mapped_count;
+    uint32_t mapped_cap;
     uint8_t raw_strings;      // CDirectRequest.raw_strings: a raw string literal leaves the direct path (#3600)
 };
 
@@ -1463,7 +1567,7 @@ static inline uint32_t fast_pp_add_num(FastPP* pp, uint64_t val)
 static inline uint32_t fast_pp_add_lit(FastPP* pp, const char* bytes, uint32_t len)
 {
     uint32_t idx = 0;
-    if (__builtin_expect(pp->lit_count < pp->lit_cap && pp->lit_bytes_used + len + 1u <= pp->lit_bytes_cap, 1))
+    if (__builtin_expect(((uint32_t)(pp->lit_count < pp->lit_cap) & (uint32_t)(pp->lit_bytes_used + len + 1u <= pp->lit_bytes_cap)) != 0, 1))
     {
         idx = pp->lit_count++;
         const uint32_t off = (uint32_t)pp->lit_bytes_used;
@@ -1483,6 +1587,38 @@ static inline uint32_t fast_pp_add_lit(FastPP* pp, const char* bytes, uint32_t l
 // Fast single-token lexer from a byte buffer (handles splices, numbers, strings, punctuators, identifiers)
 
 // Parse integer or floating-point preprocessing number at [p, end). `flags_in` are the token's flags so far.
+// Whether an integer literal's suffix is one C has (#3577): u or U, and l, L, ll or LL (the two of one case), in either
+// order; the full pipeline refuses any other.
+static bool fast_integer_suffix_valid(const uint8_t* s, uint32_t n)
+{
+    uint32_t i = 0;
+    const bool u_first = n != 0 && (s[0] == 'u' || s[0] == 'U');
+    i += u_first ? 1u : 0u;
+    if (i < n && (s[i] == 'l' || s[i] == 'L'))
+    {
+        const uint8_t l = s[i];
+        i += 1u;
+        if (i < n && s[i] == l) { i += 1u; }
+    }
+    if (!u_first && i < n && (s[i] == 'u' || s[i] == 'U')) { i += 1u; }
+    return i == n;
+}
+
+// Whether a floating literal's text before its exponent has a digit other than 0 (#3577): such a literal that reads
+// as 0 underflowed, which the full pipeline warns of (-Wliteral-range).
+static __attribute__((cold, noinline)) bool fast_float_mantissa_nonzero(const char* text, uint32_t length)
+{
+    const bool hex = length > 1u && text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+    bool nonzero = false;
+    for (uint32_t i = hex ? 2u : 0u; i < length; i += 1)
+    {
+        const char c = text[i];
+        if (hex ? (c == 'p' || c == 'P') : (c == 'e' || c == 'E')) { break; }
+        nonzero = nonzero || (c >= '1' && c <= '9') || (hex && ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')));
+    }
+    return nonzero;
+}
+
 static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* end, uint32_t flags_in)
 {
     const uint8_t* const start = p;
@@ -1559,6 +1695,7 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
         uint32_t float_flags = flags_in;
         uint32_t float_data = 0;
         uint32_t float_extra = 0;
+        uint32_t float_kind = FTOK_FLOAT_LIT;
         // Check suffix f/F/l/L
         const uint8_t last = p[-1];
         if (last == 'f' || last == 'F')
@@ -1576,7 +1713,21 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
             memcpy(buf, start, len);
             buf[len] = '\0';
             char* ep = NULL;
-            const double d = strtod(buf, &ep);
+            double d = strtod(buf, &ep);
+            // #3577: the literal is read whole but for an f or F suffix (another, a long double's l or L included, is
+            // refused: the full pipeline reads them as it does), and its magnitude is in its type's range and doesn't
+            // round to 0 (-Wliteral-range); a float's value is read as a float, as the full pipeline rounds it once.
+            const uint32_t rest = (uint32_t)(buf + len - ep);
+            const bool single = rest == 1u && (ep[0] == 'f' || ep[0] == 'F');
+            const bool extended = rest == 1u && (ep[0] == 'l' || ep[0] == 'L');
+            if (single)
+            {
+                d = (double)strtof(buf, NULL);
+            }
+            if ((rest != 0 && !single && !extended) || (!extended && (isinf(d) || (d == 0.0 && fast_float_mantissa_nonzero(buf, len)))))
+            {
+                float_kind = FTOK_BAD_LITERAL;
+            }
             uint64_t bits = 0;
             memcpy(&bits, &d, 8);
             float_data = fast_pp_add_num(pp, bits);
@@ -1586,7 +1737,7 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
         {
             fast_pp_bail(pp, "long float literal");
         }
-        return (FastLexed){ .p = p, .tok = fast_tok_make(FTOK_FLOAT_LIT, float_flags, float_extra, float_data) };
+        return (FastLexed){ .p = p, .tok = fast_tok_make(float_kind, float_flags, float_extra, float_data) };
     }
 
     // Integer literal
@@ -1621,6 +1772,13 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
     {
         flags |= BUSTER_FTOK_LONGLONG;
     }
+    // #3577: a suffix C has, digits after 0x or 0b, and a value in 64 bits, or the full pipeline's error where the
+    // number is used (FTOK_BAD_LITERAL).
+    uint32_t too_large = (uint32_t)((is_hex || is_bin) && dig_end <= dig + 2);
+    if (dig_end != p && !fast_integer_suffix_valid(dig_end, (uint32_t)(p - dig_end)))
+    {
+        too_large = 1u;
+    }
 
     uint64_t val = 0;
     if (is_hex)
@@ -1648,6 +1806,7 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
                 fast_pp_bail(pp, "invalid hex literal");
                 break;
             }
+            too_large |= (uint32_t)((val >> 60) != 0);
             val = (val << 4) | d;
         }
     }
@@ -1663,6 +1822,7 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
                 fast_pp_bail(pp, "invalid bin literal");
                 break;
             }
+            too_large |= (uint32_t)((val >> 63) != 0);
             val = (val << 1) | (uint64_t)(c - '0');
         }
     }
@@ -1678,11 +1838,14 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
                 fast_pp_bail(pp, "invalid oct literal");
                 break;
             }
+            too_large |= (uint32_t)((val >> 61) != 0);
             val = (val << 3) | (uint64_t)(c - '0');
         }
     }
     else
     {
+        // #3577: past 2^64 - 1 the full pipeline's error; only 20 digits or more can get there.
+        const bool long_literal = dig_end - dig >= 20;
         while (dig < dig_end)
         {
             const uint8_t c = *dig++;
@@ -1690,6 +1853,10 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
             {
                 fast_pp_bail(pp, "invalid dec literal");
                 break;
+            }
+            if (long_literal)
+            {
+                too_large |= (uint32_t)(val > (UINT64_MAX - (uint64_t)(c - '0')) / 10u);
             }
             val = val * 10u + (uint64_t)(c - '0');
         }
@@ -1702,7 +1869,14 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
         int_flags |= BUSTER_FTOK_IN_POOL;
         int_data = fast_pp_add_num(pp, val);
     }
-    return (FastLexed){ .p = p, .tok = fast_tok_make(FTOK_INT_LIT, int_flags, 0, int_data) };
+    const uint32_t int_kind = FTOK_INT_LIT ^ ((FTOK_INT_LIT ^ FTOK_BAD_LITERAL) & (UINT32_C(0) - (uint32_t)(too_large != 0)));
+    // #3577: a base or a suffix keeps the spelling, which # and ## give as written.
+    uint32_t int_extra = 0;
+    if ((int_flags & (BUSTER_FTOK_UNSIGNED | BUSTER_FTOK_LONG | BUSTER_FTOK_LONGLONG | BUSTER_FTOK_HEX)) != 0)
+    {
+        int_extra = fast_pp_add_lit(pp, (const char*)start, len);
+    }
+    return (FastLexed){ .p = p, .tok = fast_tok_make(int_kind, int_flags, int_extra, int_data) };
 }
 
 static inline uint64_t fast_tok_int_val(const FastPP* pp, FastTok tok)
@@ -1738,7 +1912,10 @@ static uint32_t fast_decode_escape(const uint8_t** pp_ptr, const uint8_t* end, b
             case 'e': val = 0x1bu; break;
             case 'x':
             {
+                // #3577: past a byte the full pipeline's error ("hex escape sequence out of range"), a wide literal's too
+                // (refused here); the bound is checked at each digit, so that leading zeros stay valid.
                 bool any = false;
+                bool big = false;
                 while (p < end)
                 {
                     const uint8_t h = *p;
@@ -1746,8 +1923,9 @@ static uint32_t fast_decode_escape(const uint8_t** pp_ptr, const uint8_t* end, b
                     else if (h >= 'a' && h <= 'f') { val = (val << 4) | (uint32_t)(h - 'a' + 10); p += 1; any = true; }
                     else if (h >= 'A' && h <= 'F') { val = (val << 4) | (uint32_t)(h - 'A' + 10); p += 1; any = true; }
                     else { break; }
+                    big = big || val > 0xffu;
                 }
-                *ok = *ok && any;
+                *ok = *ok && any && !big;
             } break;
             case '0': case '1': case '2': case '3': case '4': case '5': case '6': case '7':
             {
@@ -1756,6 +1934,8 @@ static uint32_t fast_decode_escape(const uint8_t** pp_ptr, const uint8_t* end, b
                 {
                     val = (val << 3) | (uint32_t)(*p++ - '0');
                 }
+                // #3577: \400 to \777 are out of a byte's range, the full pipeline's error.
+                *ok = *ok && val <= 0xffu;
             } break;
             default:
                 *ok = false;
@@ -1896,7 +2076,7 @@ static FastLexed fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* en
             dst[out_len] = '\0';
             pp->lit_bytes_used += out_len + 1u;
             const uint32_t idx = pp->lit_count++;
-            pp->lit_slices[idx] = (FastLitSlice){ .offset = off, .length = out_len };
+            pp->lit_slices[idx] = (FastLitSlice){ .offset = off, .length = out_len, .escaped = 1u };
             tok_data = idx;
         }
         else
@@ -1914,10 +2094,13 @@ static FastLexed fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* en
 // Lex character literal starting at '\''
 static FastLexed fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t* end, uint32_t flags_in, uint16_t prefix_kind)
 {
+    // The spelling's start: the prefix (L, u or U, or u8) before the quote.
+    const uint8_t* const spelling = p - (prefix_kind == 4u ? 2u : prefix_kind != 0 ? 1u : 0u);
     p += 1; // skip opening '\''
     uint32_t val = 0;
     uint32_t chars = 0;
     bool ok = true;
+    bool escaped = false;
     FastTok tok = fast_tok_make(FTOK_EOF, flags_in, 0, 0);
     while (p < end && *p != '\'' && *p != '\n' && ok)
     {
@@ -1925,6 +2108,7 @@ static FastLexed fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t* end,
         if (*p == '\\')
         {
             p += 1;
+            escaped = true;
             ch = fast_decode_escape(&p, end, &ok);
         }
         else
@@ -1934,7 +2118,8 @@ static FastLexed fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t* end,
         val = (val << 8) | (ch & 0xffu);
         chars += 1u;
     }
-    if (!ok || p >= end || *p != '\'' || chars == 0 || chars > 4u)
+    // #3577: a constant of more than one character is the full pipeline's warning (-Wmultichar), or its error when wide.
+    if (!ok || p >= end || *p != '\'' || chars != 1u)
     {
         fast_pp_bail(pp, "invalid char literal");
     }
@@ -1945,9 +2130,72 @@ static FastLexed fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t* end,
         {
             val = (uint32_t)(int32_t)(int8_t)(val & 0xffu);
         }
-        tok = fast_tok_make(FTOK_CHAR_LIT, flags_in, prefix_kind, val);
+        // #3577: an escape or a prefix keeps the spelling (BUSTER_FTOK_SPELLED), which # and ## give as written and
+        // which tells a u, U or u8 constant, whose type isn't int, apart.
+        uint32_t char_flags = flags_in;
+        uint32_t char_extra = 0;
+        if (escaped || prefix_kind != 0)
+        {
+            char_flags |= BUSTER_FTOK_SPELLED;
+            char_extra = fast_pp_add_lit(pp, (const char*)spelling, (uint32_t)(p - spelling));
+        }
+        tok = fast_tok_make(FTOK_CHAR_LIT, char_flags, char_extra, val);
     }
     return (FastLexed){ .p = p, .tok = tok };
+}
+
+// The first byte at or after `p` that isn't part of a line splice: each backslash followed by blanks and a newline ("\r\n"
+// and "\n\r" one newline) is passed, as the full pipeline's lexer reads them (c_lexer.c's escaped_newline_size).
+static const uint8_t* fast_skip_splices(const uint8_t* p, const uint8_t* end)
+{
+    const uint8_t* at = p;
+    bool spliced = true;
+    while (spliced && at < end && *at == '\\')
+    {
+        const uint8_t* q = at + 1;
+        while (q < end && (*q == ' ' || *q == '\t' || *q == '\f' || *q == '\v'))
+        {
+            q += 1;
+        }
+        spliced = q < end && (*q == '\n' || *q == '\r');
+        if (spliced)
+        {
+            const uint8_t newline = *q;
+            q += 1;
+            q += q < end && (*q == '\n' || *q == '\r') && *q != newline ? 1 : 0;
+            at = q;
+        }
+    }
+    return at;
+}
+
+// Whether the backslash at `p` starts a universal character name: a 'u', 'U' or 'N' after it, past any line splices.
+// The full pipeline's lexer reports a basic, control or surrogate character's in active text, a directive's line, a
+// macro's definition, an unused argument and (#3655) a skipped group; the direct path leaves at every one (#3577).
+static inline bool fast_backslash_starts_ucn(const uint8_t* p, const uint8_t* end)
+{
+    const uint8_t* const letter = fast_skip_splices(p + 1, end);
+    return letter < end && (*letter == 'u' || *letter == 'U' || *letter == 'N');
+}
+
+// A stray backslash at `p` (not a splice's) that starts a UCN leaves the direct path for `reason`. Out of line and cold:
+// such a backslash is rare, and its walk inline made the lexer's hot paths longer.
+static __attribute__((noinline, cold)) void fast_pp_stray_backslash(FastPP* pp, const uint8_t* p, const uint8_t* end, const char* reason)
+{
+    if (fast_backslash_starts_ucn(p, end))
+    {
+        fast_pp_bail(pp, reason);
+    }
+}
+
+// Whether the quote at `s`, past the file's first byte, may be C23's digit separator, which opens no literal: after a
+// name's or a number's character, a '.', or an exponent's sign (`1'000`, `1.'5`, `1e+'5`; a prefix's quote too, `L'x'`).
+// Out of line and cold, as the skip of an inactive group asks it only where a literal hides an event.
+static __attribute__((noinline, cold)) bool fast_quote_may_separate(const uint8_t* base, const uint8_t* s)
+{
+    const uint8_t before = s[-1];
+    const bool sign = (before == '+' || before == '-') && s - 1 > base && ((s[-2] | 0x20) == 'e' || (s[-2] | 0x20) == 'p');
+    return (fast_char_class[before] & 1u) != 0 || before == '.' || sign;
 }
 
 // Lex ONE raw preprocessing token from [p, end), updating *line_count and *at_bol.
@@ -2187,6 +2435,11 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
                 else { tok_kind = FTOK_HASH; p += 1; }
                 break;
             default:
+                // #3577: a stray backslash that starts a UCN, in text, a definition or an argument nothing uses.
+                if (__builtin_expect(c == '\\', 0))
+                {
+                    fast_pp_stray_backslash(pp, p, end, "universal character name");
+                }
                 tok_kind = FTOK_PP_OTHER;
                 tok_data = c;
                 p += 1;
@@ -2228,6 +2481,10 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
 //   end (the rare block with an R before a '"' tests each, so "ERROR" makes none): decided the same way, one literal
 //   of its line at a time, until it is inside one or opens one. A literal that a raw prefix opens leaves the direct
 //   path. Without raw string literals the blocks don't look for them.
+// - a universal character name's start, seen at the byte after a backslash: a 'u', 'U' or 'N', or another backslash,
+//   which a line splice between the backslash and its letter starts. The full pipeline's raw lexer still reports a
+//   basic, control or surrogate character's UCN that starts a token in a skipped group (#3655, `pp_read_skipped_ucns`),
+//   not one in a literal or a comment; a UCN's start outside them leaves the direct path (#3577), whatever it names.
 // Everything else (a '#' inside a line, a lone '/', quotes with nothing after them to hide) is passed in bulk.
 // f->at_bol is false after a directive; where the file ends first the compile fails and nothing reads it.
 static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(FastPP* pp, FastIncludeFile* f, const bool raw_on)
@@ -2237,6 +2494,10 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
     uint32_t line = f->line;
     uint32_t nested = 0;
     uint8_t found_kw = 0;
+    // #3577: a nested group's #else seen (a bit for each depth, 1 to 63; deeper is refused), and what the full pipeline
+    // diagnoses in a skipped group: a nested #else or #elif after its group's #else, an #elifdef or #elifndef before C23.
+    uint64_t nested_else = 0;
+    uint32_t skipped_bad = 0;
     // What crosses a block's end.
     uint64_t bol_in = f->at_bol ? 1u : 0u;   // the text before p ends in a line's leading blanks
     uint64_t taint_in = 0;                   // a quote is before p on its line
@@ -2259,6 +2520,9 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
     const __m512i v_tab = _mm512_set1_epi8('\t');
     const __m512i v_four = _mm512_set1_epi8(4);
     const __m512i v_upper_r = _mm512_set1_epi8('R');
+    const __m512i v_case = _mm512_set1_epi8(0x20);
+    const __m512i v_lower_u = _mm512_set1_epi8('u');
+    const __m512i v_upper_n = _mm512_set1_epi8('N');
 
     while (p < end && !done)
     {
@@ -2289,6 +2553,13 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
         const __mmask64 tainted = passes & ~taint_sum;
 
         const __mmask64 directives = hash & first;
+        // A UCN's letters are looked for only in a block with a byte after a backslash, which most blocks have none of.
+        const __mmask64 escaped = (backslash << 1) | backslash_in;
+        __mmask64 ucns = 0;
+        if (__builtin_expect(escaped != 0, 0))
+        {
+            ucns = (_mm512_cmpeq_epi8_mask(_mm512_or_si512(v, v_case), v_lower_u) | _mm512_cmpeq_epi8_mask(v, v_upper_n) | backslash) & escaped;
+        }
         __mmask64 raws = 0;
         uint64_t r_out = 0;
         if (raw_on)
@@ -2303,7 +2574,7 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                 raws |= fast_raw_string_before(f->base, p + at, pp->raw_strings) ? UINT64_C(1) << at : 0u;
             }
         }
-        const __mmask64 events = (directives | opens | raws) & valid;
+        const __mmask64 events = (directives | opens | raws | ucns) & valid;
         if (__builtin_expect(events == 0, 1))
         {
             line += (uint32_t)__builtin_popcountll(nl);
@@ -2321,7 +2592,8 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
             const uint32_t pos = (uint32_t)__builtin_ctzll(events);
             const bool directive = ((directives >> pos) & 1u) != 0;
             const bool raw = ((raws >> pos) & 1u) != 0;
-            // A comment's event is at its second character.
+            const bool ucn = ((ucns >> pos) & 1u) != 0;
+            // A comment's event is at its second character, and a UCN's at the byte after its backslash.
             const uint32_t slash_pos = pos - 1u;
             const uint8_t* const at = directive || raw ? p + pos : p + pos - 1;
             const bool at_first = directive || (pos != 0 ? ((first >> slash_pos) & 1u) != 0 : slash_first != 0);
@@ -2350,6 +2622,16 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                 if (raw_on && s < stop && *s == '"' && fast_raw_string_before(f->base, s, pp->raw_strings))
                 {
                     fast_pp_bail(pp, "raw string literal in a skipped group");
+                    next = end;
+                    done = true;
+                    decided = true;
+                }
+                else if (pp->c23 && s < stop && *s == '\'' && s > f->base && fast_quote_may_separate(f->base, s))
+                {
+                    // #3577: C23's digit separator (`1'000`, `1.'5`, `1e+'5`) opens no literal, so what this one would hide
+                    // (a comment's start, a UCN the full pipeline reports) isn't hidden; a quote after a name's or a
+                    // number's character, a '.', or an exponent's sign (a prefix's too, `L'x'`) leaves.
+                    fast_pp_bail(pp, "quote after a name or number in a skipped group");
                     next = end;
                     done = true;
                     decided = true;
@@ -2397,9 +2679,12 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                     else if (len == 7u && memcmp(next, "elifdef", 7) == 0) { kw = FPP_KW_ELIFDEF; }
                     else if (len == 8u && memcmp(next, "elifndef", 8) == 0) { kw = FPP_KW_ELIFNDEF; }
                     next += len;
+                    skipped_bad |= ((uint32_t)(kw == FPP_KW_ELIFDEF) | (uint32_t)(kw == FPP_KW_ELIFNDEF)) & (uint32_t)!pp->c23;
                     if (kw == FPP_KW_IF || kw == FPP_KW_IFDEF || kw == FPP_KW_IFNDEF)
                     {
                         nested += 1u;
+                        skipped_bad |= (uint32_t)(nested > 63u);
+                        nested_else &= ~(UINT64_C(1) << (nested & 63u));
                     }
                     else if (kw == FPP_KW_ENDIF)
                     {
@@ -2411,6 +2696,29 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                         found_kw = kw;
                         done = true;
                     }
+                    else if (kw != 0)
+                    {
+                        // A nested #else or #elif: after its group's #else, the full pipeline's error.
+                        const uint64_t level = UINT64_C(1) << (nested & 63u);
+                        skipped_bad |= (uint32_t)((nested_else & level) != 0);
+                        nested_else |= level & (UINT64_C(0) - (uint64_t)(kw == FPP_KW_ELSE));
+                    }
+                }
+            }
+            else if (!decided && ucn)
+            {
+                // The backslash and, past any line splices, its letter: a UCN's start leaves (#3577); a backslash before a
+                // backslash that starts none is passed, and the text goes on from that one.
+                const uint8_t* const letter = fast_skip_splices(at + 1, end);
+                if (letter < end && (*letter == 'u' || *letter == 'U' || *letter == 'N'))
+                {
+                    fast_pp_bail(pp, "universal character name in a skipped group");
+                    next = end;
+                    done = true;
+                }
+                else
+                {
+                    next = at + 1;
                 }
             }
             else if (!decided)
@@ -2449,6 +2757,10 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
     if (found_kw == 0 && !pp->bailout)
     {
         fast_pp_bail(pp, "unterminated #if");
+    }
+    if (skipped_bad != 0)
+    {
+        fast_pp_bail(pp, "skipped group the full pipeline diagnoses");
     }
     f->ptr = p;
     f->line = line;
@@ -2708,7 +3020,18 @@ static void fast_pp_pop_file(FastPP* pp)
         }
         if (f->owned_mmap && f->base != NULL && f->map_size != 0)
         {
-            (void)munmap((void*)(uintptr_t)f->base, f->map_size);
+            // Unmapped at the end (fast_pp_release_files, #3577): the macros the file defined keep their text.
+            if (pp->mapped_count < pp->mapped_cap)
+            {
+                pp->mapped_bases[pp->mapped_count] = f->base;
+                pp->mapped_sizes[pp->mapped_count] = f->map_size;
+                pp->mapped_count += 1u;
+            }
+            else
+            {
+                (void)munmap((void*)(uintptr_t)f->base, f->map_size);
+                fast_pp_bail(pp, "too many included files");
+            }
         }
     }
 }
@@ -2800,6 +3123,13 @@ static bool fast_pp_open_and_push(FastPP* pp, const char* path, uint32_t path_le
 // that exits after its compile leaves them to its exit, which tears the whole address space down at once.
 static void fast_pp_release_files(FastPP* pp)
 {
+    // #3577: the files mapped for their push alone (the guard table had no room), whose unmapping waited for the end: the
+    // macros they defined keep their text.
+    for (uint32_t i = 0; i < pp->mapped_count; i += 1)
+    {
+        (void)munmap((void*)(uintptr_t)pp->mapped_bases[i], pp->mapped_sizes[i]);
+    }
+    pp->mapped_count = 0;
     for (uint32_t i = 0; i < BUSTER_FPP_MAX_GUARDS; i += 1)
     {
         if (pp->guards[i].used != 0)
@@ -3137,6 +3467,17 @@ static uint32_t fast_tok_to_text(const FastPP* pp, FastTok tok, char* buf, uint3
             n = e->length;
         }
     }
+    else if ((tok.kind == FTOK_INT_LIT && (tok.flags & (BUSTER_FTOK_UNSIGNED | BUSTER_FTOK_LONG | BUSTER_FTOK_LONGLONG | BUSTER_FTOK_HEX)) != 0) ||
+             (tok.kind == FTOK_CHAR_LIT && (tok.flags & BUSTER_FTOK_SPELLED) != 0))
+    {
+        // As written (#3577): a base or a suffix, an escape or a prefix.
+        const FastLitSlice sl = pp->lit_slices[tok.extra];
+        if (sl.length < cap)
+        {
+            memcpy(buf, pp->lit_bytes + sl.offset, sl.length);
+            n = sl.length;
+        }
+    }
     else if (tok.kind == FTOK_INT_LIT)
     {
         const uint64_t v = fast_tok_int_val(pp, tok);
@@ -3208,8 +3549,21 @@ static uint32_t fast_tok_to_text(const FastPP* pp, FastTok tok, char* buf, uint3
 }
 
 // Paste two tokens into one by concatenating their text and re-lexing
+// Whether fast_tok_to_text spells a token as it was written (#3577): an integer and a character constant are (their
+// spelling is kept where their value doesn't give it), and a string literal without a prefix or an escape, whose value
+// is its spelling; a prefixed or escaped string isn't, nor a number the full pipeline diagnoses, and a stray backslash
+// stringized makes an invalid string.
+// (A macro, not a function: every pasted and stringized token asks.) 1 when exact, else 0.
+#define BUSTER_FAST_TOK_SPELLING_EXACT(pp, tok) \
+    ((((uint32_t)((tok).kind == FTOK_STR_LIT) & ((uint32_t)((tok).extra != 0) | (uint32_t)((tok).kind == FTOK_STR_LIT && (pp)->lit_slices[(tok).data].escaped != 0))) | \
+      ((uint32_t)((tok).kind == FTOK_PP_OTHER) & (uint32_t)(((tok).data & 0xffu) == '\\')) | (uint32_t)((tok).kind == FTOK_BAD_LITERAL)) == 0)
+
 static __attribute__((noinline)) FastTok fast_pp_paste(FastPP* pp, FastTok lhs, FastTok rhs)
 {
+    if ((BUSTER_FAST_TOK_SPELLING_EXACT(pp, lhs) & BUSTER_FAST_TOK_SPELLING_EXACT(pp, rhs)) == 0)
+    {
+        fast_pp_bail(pp, "paste of a token spelled from its value");
+    }
     char buf[512];
     const uint32_t n1 = fast_tok_to_text(pp, lhs, buf, sizeof(buf) / 2u);
     const uint32_t n2 = fast_tok_to_text(pp, rhs, buf + n1, sizeof(buf) - n1);
@@ -3226,7 +3580,8 @@ static __attribute__((noinline)) FastTok fast_pp_paste(FastPP* pp, FastTok lhs, 
         const uint8_t* p = (const uint8_t*)buf;
         const uint8_t* end = p + total;
         p = fast_lex_one(pp, p, end, &dummy_line, &dummy_bol, false, &res);
-        if (p != end)
+        // #3577: one token, which a comment's start (// or /*) is not: the full pipeline's error.
+        if (p != end || res.kind == FTOK_EOF)
         {
             fast_pp_bail(pp, "invalid token paste");
         }
@@ -3245,6 +3600,11 @@ static __attribute__((noinline)) FastTok fast_pp_stringify(FastPP* pp, const Fas
         if (i > 0 && (toks[i].flags & BUSTER_FTOK_SPACE) != 0)
         {
             buf[n++] = ' ';
+        }
+        if (!BUSTER_FAST_TOK_SPELLING_EXACT(pp, toks[i]))
+        {
+            fast_pp_bail(pp, "stringize of a token spelled from its value");
+            break;
         }
         char tmp[512];
         const uint32_t tn = fast_tok_to_text(pp, toks[i], tmp, sizeof(tmp));
@@ -3265,6 +3625,34 @@ static __attribute__((noinline)) FastTok fast_pp_stringify(FastPP* pp, const Fas
     return res;
 }
 
+// __DATE__'s and __TIME__'s text (#3577), as the full pipeline makes it: the unit's time in local time, "Nov 25 2026" and
+// "09:41:00", at the first use of either; a time that can't be converted, or a year outside 0000 to 9999, is its error.
+static __attribute__((cold, noinline)) bool fast_pp_unit_time(FastPP* pp)
+{
+    if (!pp->time_made)
+    {
+        static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+        const time_t now = time(NULL);
+        struct tm calendar;
+        const bool converted = now != (time_t)-1 && localtime_r(&now, &calendar) != NULL;
+        const bool valid = converted && calendar.tm_year >= -1900 && calendar.tm_year <= 9999 - 1900 && calendar.tm_mon >= 0 &&
+                           calendar.tm_mon < 12 && calendar.tm_mday >= 1 && calendar.tm_mday <= 31 && calendar.tm_hour >= 0 &&
+                           calendar.tm_hour < 24 && calendar.tm_min >= 0 && calendar.tm_min < 60 && calendar.tm_sec >= 0 &&
+                           calendar.tm_sec <= 60;
+        if (valid)
+        {
+            snprintf(pp->date_text, sizeof(pp->date_text), "%s %2d %04d", months[calendar.tm_mon], calendar.tm_mday, calendar.tm_year + 1900);
+            snprintf(pp->time_text, sizeof(pp->time_text), "%02d:%02d:%02d", calendar.tm_hour, calendar.tm_min, calendar.tm_sec);
+            pp->time_made = true;
+        }
+        else
+        {
+            fast_pp_bail(pp, "the unit's time");
+        }
+    }
+    return pp->time_made;
+}
+
 // Expand builtin dynamic or object-like macro. Sets *out_is_func = true if tok is an active unhidden function-like macro.
 static bool fast_pp_try_expand_nonfunc(FastPP* pp, FastTok tok, bool nested, FastTok* out_replacement, bool* out_is_func)
 {
@@ -3277,7 +3665,7 @@ static bool fast_pp_try_expand_nonfunc(FastPP* pp, FastTok tok, bool nested, Fas
     const FastIdentEntry* ie = pp->idents.entries + id;
 
     // Builtin dynamic macros (__LINE__, __FILE__, __COUNTER__, __DATE__, __TIME__, etc.)
-    if (ie->pp_kw >= FPP_KW_LINE_MACRO && ie->pp_kw <= FPP_KW_PRAGMA_OP)
+    if (ie->pp_kw >= FPP_KW_LINE_MACRO && ie->pp_kw <= BUSTER_FPP_KW_LAST_BUILTIN)
     {
         const FastIncludeFile* cur = pp->file_depth > 0 ? pp->files + (pp->file_depth - 1u) : NULL;
         if (ie->pp_kw == FPP_KW_LINE_MACRO)
@@ -3307,21 +3695,21 @@ static bool fast_pp_try_expand_nonfunc(FastPP* pp, FastTok tok, bool nested, Fas
             *out_replacement = (FastTok){ .kind = FTOK_INT_LIT, .flags = tok.flags, .data = pp->file_depth > 0 ? pp->file_depth - 1u : 0u };
             return true;
         }
-        if (ie->pp_kw == FPP_KW_DATE_MACRO)
+        if (ie->pp_kw == FPP_KW_DATE_MACRO || ie->pp_kw == FPP_KW_TIME_MACRO)
         {
-            *out_replacement = (FastTok){ .kind = FTOK_STR_LIT, .flags = tok.flags, .data = fast_pp_add_lit(pp, "Nov 24 2026", 11u) };
+            // #3577: the full pipeline's text, of the unit's time.
+            if (!fast_pp_unit_time(pp))
+            {
+                return false;
+            }
+            const char* text = ie->pp_kw == FPP_KW_DATE_MACRO ? pp->date_text : pp->time_text;
+            *out_replacement = (FastTok){ .kind = FTOK_STR_LIT, .flags = tok.flags, .data = fast_pp_add_lit(pp, text, (uint32_t)strlen(text)) };
             return true;
         }
-        if (ie->pp_kw == FPP_KW_TIME_MACRO)
-        {
-            *out_replacement = (FastTok){ .kind = FTOK_STR_LIT, .flags = tok.flags, .data = fast_pp_add_lit(pp, "00:00:00", 8u) };
-            return true;
-        }
-        if (ie->pp_kw == FPP_KW_PRAGMA_OP)
-        {
-            fast_pp_bail(pp, "_Pragma operator");
-            return false;
-        }
+        // _Pragma, __TIMESTAMP__, __FILE_NAME__, and a query (__has_attribute, ...) outside #if, which the full
+        // pipeline expands or reports.
+        fast_pp_bail(pp, "builtin macro the direct path doesn't expand");
+        return false;
     }
 
     if (ie->macro_idx == 0 || fast_pp_is_hidden(pp, id))
@@ -4020,6 +4408,32 @@ static inline bool fast_pp_try_expand(FastPP* pp, FastTok tok, bool stop_at_eol,
 
 // Expand a token slice `in_toks[0..in_count]` into `out_toks[0..out_cap]`.
 // Used for prescanning macro arguments AND for expanding `#if` / `#elif` expressions!
+// The question a builtin feature query asks the full pipeline's tables (CDirectQuery, #3577), or UINT32_MAX for the ones
+// this path answers itself or refuses.
+static uint32_t fast_pp_feature_query(uint8_t pkw)
+{
+    uint32_t query = UINT32_MAX;
+    switch (pkw)
+    {
+        case FPP_KW_HAS_ATTRIBUTE: query = C_DIRECT_QUERY_HAS_ATTRIBUTE; break;
+        case FPP_KW_HAS_BUILTIN: query = C_DIRECT_QUERY_HAS_BUILTIN; break;
+        case FPP_KW_HAS_FEATURE: query = C_DIRECT_QUERY_HAS_FEATURE; break;
+        case FPP_KW_HAS_EXTENSION: query = C_DIRECT_QUERY_HAS_EXTENSION; break;
+        case FPP_KW_HAS_C_ATTRIBUTE: query = C_DIRECT_QUERY_HAS_C_ATTRIBUTE; break;
+        case FPP_KW_HAS_DECLSPEC_ATTRIBUTE: query = C_DIRECT_QUERY_HAS_DECLSPEC_ATTRIBUTE; break;
+        case FPP_KW_HAS_CONSTEXPR_BUILTIN: query = C_DIRECT_QUERY_HAS_CONSTEXPR_BUILTIN; break;
+        case FPP_KW_IS_TARGET_ARCH: query = C_DIRECT_QUERY_IS_TARGET_ARCH; break;
+        case FPP_KW_IS_TARGET_VENDOR: query = C_DIRECT_QUERY_IS_TARGET_VENDOR; break;
+        case FPP_KW_IS_TARGET_OS: query = C_DIRECT_QUERY_IS_TARGET_OS; break;
+        case FPP_KW_IS_TARGET_ENVIRONMENT: query = C_DIRECT_QUERY_IS_TARGET_ENVIRONMENT; break;
+        case FPP_KW_IS_TARGET_VARIANT_OS: query = C_DIRECT_QUERY_IS_TARGET_VARIANT_OS; break;
+        case FPP_KW_IS_TARGET_VARIANT_ENVIRONMENT: query = C_DIRECT_QUERY_IS_TARGET_VARIANT_ENVIRONMENT; break;
+        case FPP_KW_BUILDING_MODULE: query = C_DIRECT_QUERY_BUILDING_MODULE; break;
+        default: break;
+    }
+    return query;
+}
+
 static bool fast_pp_expand_buffer(FastPP* pp, const FastTok* in_toks, uint32_t in_count,
                                   FastTok* out_toks, uint32_t out_cap, uint32_t* out_count, bool eval_defined)
 {
@@ -4092,106 +4506,92 @@ static bool fast_pp_expand_buffer(FastPP* pp, const FastTok* in_toks, uint32_t i
                 if (oc < out_cap) { out_toks[oc++] = (FastTok){ .kind = FTOK_INT_LIT, .data = is_def }; }
                 continue;
             }
-            if (pkw == FPP_KW_HAS_BUILTIN || pkw == FPP_KW_HAS_ATTRIBUTE || pkw == FPP_KW_HAS_FEATURE ||
-                pkw == FPP_KW_HAS_EXTENSION || pkw == FPP_KW_HAS_C_ATTRIBUTE || pkw == FPP_KW_HAS_INCLUDE ||
-                pkw == FPP_KW_HAS_INCLUDE_NEXT || pkw == FPP_KW_BUILDING_MODULE || pkw == FPP_KW_HAS_WARNING ||
-                pkw == FPP_KW_IS_IDENTIFIER)
+            if (pkw >= FPP_KW_HAS_BUILTIN && pkw <= BUSTER_FPP_KW_LAST_BUILTIN)
             {
-                // Parse (...) argument for __has_*
+                // #3577: the full pipeline's answer, or a refusal. A feature query `( name )` asks the full pipeline's
+                // tables (the request's feature_query; a name that is a macro, which it expands, is refused);
+                // __has_include and __has_include_next search here, as it does, for a plain string or a header name
+                // spelled without blanks; __has_warning, __is_identifier and __has_embed, and any other form, are
+                // refused.
                 uint32_t val = 0;
-                if (ef->pos < ef->count && ef->toks[ef->pos].kind == FTOK_LPAREN)
+                const uint32_t query = fast_pp_feature_query(pkw);
+                if (pkw == FPP_KW_HAS_INCLUDE || pkw == FPP_KW_HAS_INCLUDE_NEXT)
                 {
-                    ef->pos += 1u;
-                    const uint32_t arg_start = ef->pos;
-                    uint32_t pdepth = 1u;
-                    while (pdepth > 0 && ef->pos < ef->count)
+                    uint32_t arg_start = ef->pos;
+                    uint32_t arg_end = ef->pos;
+                    bool closed = false;
+                    if (ef->pos < ef->count && ef->toks[ef->pos].kind == FTOK_LPAREN)
                     {
-                        const uint8_t k = ef->toks[ef->pos++].kind;
-                        if (k == FTOK_LPAREN) { pdepth += 1u; }
-                        else if (k == FTOK_RPAREN) { pdepth -= 1u; }
+                        ef->pos += 1u;
+                        arg_start = ef->pos;
+                        while (ef->pos < ef->count && ef->toks[ef->pos].kind != FTOK_RPAREN)
+                        {
+                            ef->pos += 1u;
+                        }
+                        arg_end = ef->pos;
+                        closed = ef->pos < ef->count;
+                        ef->pos += closed ? 1u : 0u;
                     }
-                    const uint32_t arg_end = ef->pos > arg_start ? ef->pos - 1u : arg_start;
+                    char hname[512];
+                    uint32_t hlen = 0;
+                    bool angled = false;
                     const FastTok arg = arg_start < arg_end ? ef->toks[arg_start] : (FastTok){ 0 };
-                    if (pkw == FPP_KW_HAS_BUILTIN && (arg.kind == FTOK_IDENT || arg.kind >= 64u))
+                    if (closed && arg_end == arg_start + 1u && arg.kind == FTOK_STR_LIT && arg.extra == 0 &&
+                        pp->lit_slices[arg.data].escaped == 0 && pp->lit_slices[arg.data].length < sizeof(hname))
+                    {
+                        const FastLitSlice sl = pp->lit_slices[arg.data];
+                        memcpy(hname, pp->lit_bytes + sl.offset, sl.length);
+                        hlen = sl.length;
+                    }
+                    else if (closed && arg_start + 2u <= arg_end && arg.kind == FTOK_LT && ef->toks[arg_end - 1u].kind == FTOK_GT)
+                    {
+                        angled = true;
+                        for (uint32_t hi = arg_start + 1u; hi + 1u < arg_end && hlen + 8u < sizeof(hname) && !pp->bailout; hi += 1)
+                        {
+                            if ((ef->toks[hi].flags & BUSTER_FTOK_SPACE) != 0 || (ef->toks[hi + 1u].flags & BUSTER_FTOK_SPACE) != 0 ||
+                                !BUSTER_FAST_TOK_SPELLING_EXACT(pp, ef->toks[hi]))
+                            {
+                                fast_pp_bail(pp, "__has_include header name");
+                            }
+                            hlen += fast_tok_to_text(pp, ef->toks[hi], hname + hlen, sizeof(hname) - hlen);
+                        }
+                    }
+                    hname[hlen] = '\0';
+                    if (hlen == 0)
+                    {
+                        fast_pp_bail(pp, "__has_include operand");
+                    }
+                    else
+                    {
+                        char tmp_path[1024];
+                        uint32_t d = 0;
+                        bool sys = false;
+                        val = fast_pp_resolve_include(pp, hname, hlen, angled, pkw == FPP_KW_HAS_INCLUDE_NEXT, tmp_path, sizeof(tmp_path), &d, &sys, NULL) ? 1u : 0u;
+                        if (val != 0 && pp->dependency_records != NULL)
+                        {
+                            fast_pp_dependency_probe(pp, tmp_path, sys);
+                        }
+                    }
+                }
+                else if (query != UINT32_MAX)
+                {
+                    const bool shaped = ef->pos + 3u <= ef->count && ef->toks[ef->pos].kind == FTOK_LPAREN && ef->toks[ef->pos + 2u].kind == FTOK_RPAREN;
+                    const FastTok arg = shaped ? ef->toks[ef->pos + 1u] : (FastTok){ 0 };
+                    const bool named = arg.kind == FTOK_IDENT || (arg.kind >= 64u && arg.kind < 126u);
+                    if (!shaped || !named || fast_ident_is_macro(&pp->idents, arg.data) || pp->feature_query == NULL)
+                    {
+                        fast_pp_bail(pp, "feature query the direct path can't answer");
+                    }
+                    else
                     {
                         const FastIdentEntry* ae = pp->idents.entries + arg.data;
-                        const char* s = pp->idents.strings + ae->str_offset;
-                        if (strcmp(s, "__builtin_clzll") == 0 || strcmp(s, "__builtin_offsetof") == 0 ||
-                            strcmp(s, "__builtin_va_start") == 0 || strcmp(s, "__builtin_va_arg") == 0 ||
-                            strcmp(s, "__builtin_va_end") == 0 || strcmp(s, "__builtin_va_copy") == 0 ||
-                            strcmp(s, "__builtin_inff") == 0 || strcmp(s, "__builtin_expect") == 0 ||
-                            strcmp(s, "__builtin_constant_p") == 0 || strcmp(s, "__builtin_unreachable") == 0)
-                        {
-                            val = 1u;
-                        }
+                        val = pp->feature_query(pp->feature_context, query, (const uint8_t*)(pp->idents.strings + ae->str_offset), ae->length);
+                        ef->pos += 3u;
                     }
-                    else if (pkw == FPP_KW_HAS_ATTRIBUTE && (arg.kind == FTOK_IDENT || arg.kind >= 64u))
-                    {
-                        const FastIdentEntry* ae = pp->idents.entries + arg.data;
-                        const char* s = pp->idents.strings + ae->str_offset;
-                        if (strcmp(s, "noinline") == 0 || strcmp(s, "__noinline__") == 0 ||
-                            strcmp(s, "always_inline") == 0 || strcmp(s, "__always_inline__") == 0 ||
-                            strcmp(s, "unused") == 0 || strcmp(s, "__unused__") == 0 ||
-                            strcmp(s, "packed") == 0 || strcmp(s, "__packed__") == 0 ||
-                            strcmp(s, "aligned") == 0 || strcmp(s, "__aligned__") == 0 ||
-                            strcmp(s, "fallthrough") == 0 || strcmp(s, "__fallthrough__") == 0 ||
-                            strcmp(s, "noreturn") == 0 || strcmp(s, "__noreturn__") == 0 ||
-                            strcmp(s, "format") == 0 || strcmp(s, "__format__") == 0 ||
-                            strcmp(s, "nonnull") == 0 || strcmp(s, "__nonnull__") == 0 ||
-                            strcmp(s, "pure") == 0 || strcmp(s, "__pure__") == 0 ||
-                            strcmp(s, "const") == 0 || strcmp(s, "__const__") == 0 ||
-                            strcmp(s, "malloc") == 0 || strcmp(s, "__malloc__") == 0 ||
-                            strcmp(s, "deprecated") == 0 || strcmp(s, "__deprecated__") == 0 ||
-                            strcmp(s, "visibility") == 0 || strcmp(s, "__visibility__") == 0 ||
-                            strcmp(s, "weak") == 0 || strcmp(s, "__weak__") == 0 ||
-                            strcmp(s, "alias") == 0 || strcmp(s, "__alias__") == 0)
-                        {
-                            val = 1u;
-                        }
-                    }
-                    else if (pkw == FPP_KW_HAS_INCLUDE || pkw == FPP_KW_HAS_INCLUDE_NEXT)
-                    {
-                        char hname[512];
-                        uint32_t hlen = 0;
-                        bool angled = false;
-                        if (arg.kind == FTOK_STR_LIT)
-                        {
-                            const FastLitSlice sl = pp->lit_slices[arg.data];
-                            if (sl.length < sizeof(hname))
-                            {
-                                memcpy(hname, pp->lit_bytes + sl.offset, sl.length);
-                                hlen = sl.length;
-                                hname[hlen] = '\0';
-                            }
-                        }
-                        else if (arg_start + 2u <= arg_end && arg.kind == FTOK_LT && ef->toks[arg_end - 1u].kind == FTOK_GT)
-                        {
-                            angled = true;
-                            for (uint32_t hi = arg_start + 1u; hi + 1u < arg_end && hlen + 8u < sizeof(hname); hi += 1)
-                            {
-                                hlen += fast_tok_to_text(pp, ef->toks[hi], hname + hlen, sizeof(hname) - hlen);
-                            }
-                            hname[hlen] = '\0';
-                        }
-                        if (hlen == 0 && pp->dependency_records != NULL)
-                        {
-                            // An operand a macro names, which this path doesn't expand (#3608): the answer, and the
-                            // files read, may be the full pipeline's others.
-                            fast_pp_bail(pp, "__has_include of a macro with -MD");
-                        }
-                        if (hlen > 0)
-                        {
-                            char tmp_path[1024];
-                            uint32_t d = 0;
-                            bool sys = false;
-                            val = fast_pp_resolve_include(pp, hname, hlen, angled,
-                                                          pkw == FPP_KW_HAS_INCLUDE_NEXT, tmp_path, sizeof(tmp_path), &d, &sys, NULL) ? 1u : 0u;
-                            if (val != 0 && pp->dependency_records != NULL)
-                            {
-                                fast_pp_dependency_probe(pp, tmp_path, sys);
-                            }
-                        }
-                    }
+                }
+                else
+                {
+                    fast_pp_bail(pp, "builtin query the direct path doesn't answer");
                 }
                 if (oc < out_cap) { out_toks[oc++] = (FastTok){ .kind = FTOK_INT_LIT, .data = val }; }
                 continue;
@@ -4271,7 +4671,13 @@ static void fast_pp_apply_op(FastPP* pp, uint16_t op, FastPPVal* vals, uint32_t*
     {
         if (*vsp < 1u) { fast_pp_bail(pp, "pp expr underflow"); return; }
         FastPPVal* a = vals + (*vsp - 1u);
-        if (op == BUSTER_FPP_OP_UNARY_MINUS) { a->val = (uint64_t)(-(int64_t)a->val); }
+        // #3577: negating INT64_MIN overflows (the full pipeline's warning); the negation is then defined.
+        if (((uint32_t)(op == BUSTER_FPP_OP_UNARY_MINUS) & (uint32_t)!a->is_unsigned & (uint32_t)(a->val == (uint64_t)INT64_MIN)) != 0)
+        {
+            fast_pp_bail(pp, "pp overflow");
+            return;
+        }
+        if (op == BUSTER_FPP_OP_UNARY_MINUS) { a->val = UINT64_C(0) - a->val; }
         else if (op == BUSTER_FPP_OP_UNARY_TILDE) { a->val = ~a->val; }
         else if (op == BUSTER_FPP_OP_UNARY_BANG) { a->val = a->val == 0 ? 1u : 0u; a->is_unsigned = false; }
         return;
@@ -4289,23 +4695,62 @@ static void fast_pp_apply_op(FastPP* pp, uint16_t op, FastPPVal* vals, uint32_t*
     if (*vsp < 2u) { fast_pp_bail(pp, "pp binop underflow"); return; }
     const FastPPVal b = vals[--(*vsp)];
     const FastPPVal a = vals[--(*vsp)];
-    const bool u = a.is_unsigned || b.is_unsigned;
+    const bool u = a.is_unsigned | b.is_unsigned;
     FastPPVal r = { .val = 0, .is_unsigned = u };
+    // #3577: what the full pipeline diagnoses in an integer constant expression: a negative signed operand made unsigned
+    // by the other's type (#if's "converted from negative value to unsigned"; not for shifts, whose operands aren't
+    // converted together, nor && and ||), a signed overflow (+ - *, INT64_MIN / -1, which also traps on x86), a shift
+    // count out of range or negative, and a negative value shifted left; the computations below are then defined.
+    // (Branch-free: #if lines and constant expressions apply operators by the thousand.)
+    // (A test of the operator first: #if lines apply operators by the thousand, and each asks its own question.)
+    const uint32_t shift = (uint32_t)(op == FTOK_LSHIFT) | (uint32_t)(op == FTOK_RSHIFT);
+    const uint32_t logical = (uint32_t)(op == FTOK_LAND) | (uint32_t)(op == FTOK_LOR);
+    const uint32_t a_negative = (uint32_t)!a.is_unsigned & (uint32_t)((int64_t)a.val < 0);
+    const uint32_t b_negative = (uint32_t)!b.is_unsigned & (uint32_t)((int64_t)b.val < 0);
+    uint32_t diagnosed = (uint32_t)u & (shift ^ 1u) & (logical ^ 1u) & (a_negative | b_negative);
+    if (!u && (op == FTOK_PLUS || op == FTOK_MINUS || op == FTOK_STAR || op == FTOK_SLASH || op == FTOK_PERCENT))
+    {
+        int64_t ignored = 0;
+        if (op == FTOK_PLUS) { diagnosed |= (uint32_t)__builtin_add_overflow((int64_t)a.val, (int64_t)b.val, &ignored); }
+        else if (op == FTOK_MINUS) { diagnosed |= (uint32_t)__builtin_sub_overflow((int64_t)a.val, (int64_t)b.val, &ignored); }
+        else if (op == FTOK_STAR) { diagnosed |= (uint32_t)__builtin_mul_overflow((int64_t)a.val, (int64_t)b.val, &ignored); }
+        else { diagnosed |= (uint32_t)(a.val == (uint64_t)INT64_MIN) & (uint32_t)((int64_t)b.val == -1); }
+    }
+    else if (shift != 0)
+    {
+        // A left shift of a non-negative signed value by 1 to 63 loses bits when any is at or above bit 63 - count (the
+        // count is masked where it is out of range, which is refused anyway).
+        const uint32_t bits_lost = (uint32_t)(b.val != 0) & (uint32_t)((a.val >> ((63u - b.val) & 63u)) != 0);
+        diagnosed |= b_negative | (uint32_t)(b.val >= 64u) |
+                     ((uint32_t)(op == FTOK_LSHIFT) & (uint32_t)!a.is_unsigned & ((uint32_t)((int64_t)a.val < 0) | bits_lost));
+    }
+    if (diagnosed != 0)
+    {
+        fast_pp_bail(pp, "pp constant expression the full pipeline diagnoses");
+        return;
+    }
     switch (op)
     {
-        case FTOK_LOR:    r.val = (a.val != 0 || b.val != 0) ? 1u : 0u; r.is_unsigned = false; break;
-        case FTOK_LAND:   r.val = (a.val != 0 && b.val != 0) ? 1u : 0u; r.is_unsigned = false; break;
+        // (The comparisons and the right shift select their signed and unsigned results without a branch.)
+        case FTOK_LOR:    r.val = (uint64_t)((a.val | b.val) != 0); r.is_unsigned = false; break;
+        case FTOK_LAND:   r.val = (uint64_t)((uint32_t)(a.val != 0) & (uint32_t)(b.val != 0)); r.is_unsigned = false; break;
         case FTOK_PIPE:   r.val = a.val | b.val; break;
         case FTOK_CARET:  r.val = a.val ^ b.val; break;
         case FTOK_AMP:    r.val = a.val & b.val; break;
-        case FTOK_EQ:     r.val = a.val == b.val ? 1u : 0u; r.is_unsigned = false; break;
-        case FTOK_NE:     r.val = a.val != b.val ? 1u : 0u; r.is_unsigned = false; break;
-        case FTOK_LT:     r.val = (u ? (a.val < b.val) : ((int64_t)a.val < (int64_t)b.val)) ? 1u : 0u; r.is_unsigned = false; break;
-        case FTOK_LE:     r.val = (u ? (a.val <= b.val) : ((int64_t)a.val <= (int64_t)b.val)) ? 1u : 0u; r.is_unsigned = false; break;
-        case FTOK_GT:     r.val = (u ? (a.val > b.val) : ((int64_t)a.val > (int64_t)b.val)) ? 1u : 0u; r.is_unsigned = false; break;
-        case FTOK_GE:     r.val = (u ? (a.val >= b.val) : ((int64_t)a.val >= (int64_t)b.val)) ? 1u : 0u; r.is_unsigned = false; break;
+        case FTOK_EQ:     r.val = (uint64_t)(a.val == b.val); r.is_unsigned = false; break;
+        case FTOK_NE:     r.val = (uint64_t)(a.val != b.val); r.is_unsigned = false; break;
+        case FTOK_LT:     r.val = (uint64_t)(((uint32_t)u & (uint32_t)(a.val < b.val)) | ((uint32_t)!u & (uint32_t)((int64_t)a.val < (int64_t)b.val))); r.is_unsigned = false; break;
+        case FTOK_LE:     r.val = (uint64_t)(((uint32_t)u & (uint32_t)(a.val <= b.val)) | ((uint32_t)!u & (uint32_t)((int64_t)a.val <= (int64_t)b.val))); r.is_unsigned = false; break;
+        case FTOK_GT:     r.val = (uint64_t)(((uint32_t)u & (uint32_t)(a.val > b.val)) | ((uint32_t)!u & (uint32_t)((int64_t)a.val > (int64_t)b.val))); r.is_unsigned = false; break;
+        case FTOK_GE:     r.val = (uint64_t)(((uint32_t)u & (uint32_t)(a.val >= b.val)) | ((uint32_t)!u & (uint32_t)((int64_t)a.val >= (int64_t)b.val))); r.is_unsigned = false; break;
         case FTOK_LSHIFT: r.val = a.val << (b.val & 63u); r.is_unsigned = a.is_unsigned; break;
-        case FTOK_RSHIFT: r.val = a.is_unsigned ? (a.val >> (b.val & 63u)) : (uint64_t)((int64_t)a.val >> (b.val & 63u)); r.is_unsigned = a.is_unsigned; break;
+        case FTOK_RSHIFT:
+        {
+            const uint64_t logical_shift = a.val >> (b.val & 63u);
+            const uint64_t arithmetic_shift = (uint64_t)((int64_t)a.val >> (b.val & 63u));
+            r.val = arithmetic_shift ^ ((arithmetic_shift ^ logical_shift) & (UINT64_C(0) - (uint64_t)a.is_unsigned));
+            r.is_unsigned = a.is_unsigned;
+        } break;
         case FTOK_PLUS:   r.val = a.val + b.val; break;
         case FTOK_MINUS:  r.val = a.val - b.val; break;
         case FTOK_STAR:   r.val = a.val * b.val; break;
@@ -4471,6 +4916,12 @@ static __attribute__((noinline)) void fast_pp_skip_rest_of_line(FastPP* pp, Fast
             line += 1u;
             continue;
         }
+        // #3577: what this passes unread (an #elif's operands after a taken group, a pragma nothing acts on) the full
+        // pipeline's lexer reads: a UCN's start leaves.
+        if (*p == '\\')
+        {
+            fast_pp_stray_backslash(pp, p, end, "universal character name in a directive's line");
+        }
         if (*p == '/' && p + 1 < end && p[1] == '*')
         {
             const uint8_t* next = fast_skip_block_comment(p + 2, end, &line);
@@ -4520,6 +4971,166 @@ static __attribute__((noinline)) void fast_pp_skip_rest_of_line(FastPP* pp, Fast
     f->at_bol = true;
 }
 
+// A macro definition's text after its name, as C compares two definitions (#3577): line splices removed, each run of
+// blanks and comments one space, literals as written, no space at either end, and in a function-like macro's parameter
+// list none at all, nor one between the list and the replacement. UINT32_MAX if it doesn't fit `cap` bytes.
+static __attribute__((cold, noinline)) uint32_t fast_pp_definition_normalize(const uint8_t* p, const uint8_t* end, bool is_func, uint8_t* out, uint32_t cap)
+{
+    uint32_t n = 0;
+    bool space = false;      // a blank is pending
+    uint32_t params = is_func ? 1u : 0u; // 1 inside the parameter list, 2 just after it
+    uint8_t quote = 0;
+    bool ok = true;
+    while (p < end && ok)
+    {
+        const uint8_t c = *p;
+        if (c == '\\' && p + 1 < end && (p[1] == '\n' || (p[1] == '\r' && p + 2 < end && p[2] == '\n')))
+        {
+            p += p[1] == '\r' ? 3 : 2;
+            continue;
+        }
+        if (quote == 0 && c == '/' && p + 1 < end && (p[1] == '*' || p[1] == '/'))
+        {
+            uint32_t ignored = 0;
+            const uint8_t* next = p[1] == '*' ? fast_skip_block_comment(p + 2, end, &ignored) : end;
+            p = next != NULL ? next : end;
+            space = true;
+            continue;
+        }
+        if (quote == 0 && (fast_char_class[c] & 8u) != 0)
+        {
+            p += 1;
+            space = true;
+            continue;
+        }
+        // A pending blank is kept between two tokens of the replacement list, never in or right after the parameters.
+        if (space && n != 0 && params == 0)
+        {
+            ok = n < cap;
+            out[n < cap ? n : 0] = ' ';
+            n += 1u;
+        }
+        space = false;
+        if (quote != 0)
+        {
+            // A literal's bytes as written: an escaped character is copied with its backslash.
+            if (c == '\\' && p + 1 < end)
+            {
+                ok = n + 1u < cap;
+                out[n < cap ? n : 0] = c;
+                out[n + 1u < cap ? n + 1u : 0] = p[1];
+                n += 2u;
+                p += 2;
+                continue;
+            }
+            quote = c == quote ? 0 : quote;
+        }
+        else if (c == '"' || c == '\'')
+        {
+            quote = c;
+        }
+        params = params == 1u && quote == 0 && c == ')' ? 2u : params == 2u ? 0u : params;
+        ok = ok && n < cap;
+        out[n < cap ? n : 0] = c;
+        n += 1u;
+        p += 1;
+    }
+    return ok ? n : UINT32_MAX;
+}
+
+// Whether a redefinition is the macro's definition again (#3577): of the same kind and the same text as C compares it;
+// any other is the full pipeline's warning ("macro redefined"). A text that doesn't fit the buffers counts as another.
+static __attribute__((cold, noinline)) bool fast_pp_same_definition(const FastMacro* old, const FastMacroText* old_text, bool is_func, const uint8_t* text, uint32_t text_length)
+{
+    uint8_t a[2048];
+    uint8_t b[2048];
+    const uint32_t na = fast_pp_definition_normalize(old_text->text, old_text->text + old_text->length, old->is_func != 0, a, sizeof(a));
+    const uint32_t nb = fast_pp_definition_normalize(text, text + text_length, is_func, b, sizeof(b));
+    return (old->is_func != 0) == is_func && na != UINT32_MAX && na == nb && memcmp(a, b, na) == 0;
+}
+
+// Whether a pragma's first name is one the full pipeline knows (#3577; c_check_ignored_pragma.c's rules, the clang and
+// STDC namespaces, omp, align, options and comment): it acts on such a pragma or reports it, where it ignores an
+// unknown one.
+static bool fast_pp_pragma_known(const char* name)
+{
+    static const char* const known[] = {
+        "clang", "STDC", "pack", "unroll", "nounroll", "unroll_and_jam", "nounroll_and_jam", "message", "push_macro", "pop_macro",
+        "redefine_extname", "weak", "ms_struct", "float_control", "acc", "omp", "align", "options", "comment",
+    };
+    bool found = false;
+    for (uint32_t i = 0; !found && i < sizeof(known) / sizeof(known[0]); i += 1)
+    {
+        found = strcmp(name, known[i]) == 0;
+    }
+    return found;
+}
+
+// The rest of a directive's line once its operands are read (#3577): only blanks and comments may be left, or the full
+// pipeline warns (-Wextra-tokens), and a comment left open is its error. It skips the line as fast_pp_skip_to_eol does,
+// with the same branches: what isn't a blank is noted without one.
+static void fast_pp_finish_directive(FastPP* pp, FastIncludeFile* f)
+{
+    const uint8_t* p = f->ptr;
+    const uint8_t* const end = f->end;
+    uint32_t line = f->line;
+    uint32_t extra = 0;
+    uint32_t line_comment = 0;
+    // Most directives end where their operands do, at the newline: fast_pp_skip_to_eol's test, ahead of the walk.
+    const uint32_t ended = (uint32_t)(p < end) && *p == '\n';
+    if (__builtin_expect(ended != 0, 1))
+    {
+        p += 1;
+        line += 1u;
+    }
+    while (ended == 0 && p < end)
+    {
+        if (*p == '\n')
+        {
+            p += 1;
+            line += 1u;
+            break;
+        }
+        if (*p == '\\' && p + 1 < end && (p[1] == '\n' || (p[1] == '\r' && p + 2 < end && p[2] == '\n')))
+        {
+            p += p[1] == '\r' ? 3 : 2;
+            line += 1u;
+            continue;
+        }
+        if (*p == '/')
+        {
+            const uint8_t next_byte = p + 1 < end ? p[1] : 0u;
+            if (next_byte == '*' && line_comment == 0)
+            {
+                const uint8_t* next = fast_skip_block_comment(p + 2, end, &line);
+                if (next == NULL)
+                {
+                    fast_pp_bail(pp, "unterminated comment");
+                }
+                p = next != NULL ? next : end;
+                continue;
+            }
+            line_comment |= (uint32_t)(next_byte == '/');
+        }
+        extra |= (uint32_t)((fast_char_class[*p] & 8u) == 0) & (line_comment ^ 1u);
+        p += 1;
+    }
+    f->ptr = p;
+    f->line = line;
+    f->at_bol = true;
+    if (extra != 0)
+    {
+        fast_pp_bail(pp, "extra tokens at the end of a directive");
+    }
+}
+
+// Whether a name the predefines define is one the full pipeline takes for its own builtin (#3577): a __STDC macro or
+// __FLT_EVAL_METHOD__, which no #define or #undef may change quietly.
+static inline bool fast_pp_language_defined_name(const uint8_t* name, uint32_t length)
+{
+    return (length >= 6u && memcmp(name, "__STDC", 6) == 0) || (length == 19u && memcmp(name, "__FLT_EVAL_METHOD__", 19) == 0);
+}
+
 static inline void fast_pp_bind_macro(FastPP* pp, uint32_t name_id, FastMacro macro)
 {
     const uint32_t index = ++pp->macro_count;
@@ -4554,6 +5165,15 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
         return;
     }
     const uint32_t name_id = name_tok.data;
+    // #3577: `defined`, __VA_ARGS__, __VA_OPT__ and the builtin macros can't be defined quietly: the full pipeline
+    // refuses or warns. The definition's text starts after the name.
+    const uint8_t name_kw = pp->idents.entries[name_id].pp_kw;
+    if (name_kw >= FPP_KW_DEFINED && name_kw <= BUSTER_FPP_KW_LAST_BUILTIN)
+    {
+        fast_pp_bail(pp, "#define of a builtin name");
+        return;
+    }
+    const uint8_t* const text = f->ptr;
     if (f->guard_state == 1u && name_id == f->guard_ident)
     {
         f->guard_state = 2u; // Confirmed #ifndef GUARD / #define GUARD!
@@ -4582,12 +5202,20 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
         fast_pp_bail(pp, "macro_toks overflow");
         return;
     }
+    // #3577: the definition's text ends at the line's end, where the bulk read stops (a redefinition's check).
+    const uint8_t* const text_end = f->ptr;
     uint32_t at = 0;
     if (is_func)
     {
+        // #3577: names separated by commas, the last of them or `...` alone variadic, and no name twice or
+        // __VA_ARGS__ (a 64-bit filter of the names; the list is read again only where two share a bit); anything else
+        // is the full pipeline's error.
         const FastTok none = fast_tok_make(FTOK_EOF, 0, 0, 0);
         FastTok pt = at < line_count ? body[at++] : none;
-        while (pt.kind != FTOK_RPAREN && pt.kind != FTOK_EOF && !pp->bailout)
+        uint64_t param_filter = 0;
+        uint32_t param_collision = 0;
+        bool need_param = false;
+        while ((pt.kind != FTOK_RPAREN || need_param) && pt.kind != FTOK_EOF && !pp->bailout)
         {
             if (pt.kind == FTOK_ELLIPSIS)
             {
@@ -4598,6 +5226,9 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
             if (pt.kind == FTOK_IDENT || (pt.kind >= 64u && pt.kind < 126u))
             {
                 const uint32_t pid = pt.data;
+                const uint64_t bit = UINT64_C(1) << (pid & 63u);
+                param_collision |= (uint32_t)((param_filter & bit) != 0) | (uint32_t)(pp->idents.entries[pid].pp_kw == FPP_KW_VA_ARGS);
+                param_filter |= bit;
                 pt = at < line_count ? body[at++] : none;
                 if (pt.kind == FTOK_ELLIPSIS)
                 {
@@ -4614,9 +5245,14 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
                 {
                     fast_pp_bail(pp, "too many macro params");
                 }
+                need_param = pt.kind == FTOK_COMMA;
                 if (pt.kind == FTOK_COMMA)
                 {
                     pt = at < line_count ? body[at++] : none;
+                }
+                else if (pt.kind != FTOK_RPAREN)
+                {
+                    fast_pp_bail(pp, "expected a comma in macro parameters");
                 }
             }
             else
@@ -4630,20 +5266,63 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
             fast_pp_bail(pp, "unterminated macro params");
             return;
         }
+        if (param_collision != 0)
+        {
+            for (uint32_t i = 0; i < param_count; i += 1)
+            {
+                for (uint32_t j = 0; j < i; j += 1)
+                {
+                    if (params[i] == params[j]) { fast_pp_bail(pp, "duplicate macro parameter"); }
+                }
+                if (params[i] == vararg_name || pp->idents.entries[params[i]].pp_kw == FPP_KW_VA_ARGS)
+                {
+                    fast_pp_bail(pp, "duplicate macro parameter");
+                }
+            }
+            if (vararg_name != 0 && pp->idents.entries[vararg_name].pp_kw == FPP_KW_VA_ARGS)
+            {
+                fast_pp_bail(pp, "__VA_ARGS__ as a parameter");
+            }
+        }
+        // (A list that ends in a comma reaches its ')' refused.)
+        if (pp->bailout)
+        {
+            return;
+        }
         memmove(body, body + at, (size_t)(line_count - at) * sizeof(FastTok));
     }
     const uint32_t body_count = line_count - at;
     bool has_ops = false;
-    // The first token without the space before it. Its one-byte store doesn't forward to the loop's load of the whole
-    // token, but writing every token again whole measured 0.04 ms slower on sqlite3.c's 5,757 defines (#3584).
+    // #3577: an object-like macro's body that starts with no blank after the name (C99's warning), one that starts with
+    // ##, and __VA_OPT__ in any but a variadic macro's (which leaves below): the full pipeline's.
+    uint32_t body_bad = 0;
+    const uint32_t va_opt_id = pp->idents.va_opt_id;
+    // The first token without the space before it, written again whole: the loop below loads its kind and flags as one
+    // word, which a one-byte store of the flags alone doesn't forward to (#3577: 0.4 M cycles a compile of sqlite3.c on
+    // the 9700X; writing every token again whole measured 0.04 ms slower on its 5,757 defines, #3584). The empty asm
+    // keeps Clang from narrowing the store back to the flags' byte.
     if (body_count != 0)
     {
-        body[0].flags &= (uint8_t)~(BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL);
+        uint64_t first;
+        memcpy(&first, body, sizeof(first));
+        __asm__("" : "+r"(first));
+        const uint32_t first_kind = (uint32_t)(first & 0xffu);
+        const uint32_t first_flags = (uint32_t)((first >> 8) & 0xffu);
+        body_bad = ((uint32_t)!is_func & (uint32_t)((first_flags & BUSTER_FTOK_SPACE) == 0)) | (uint32_t)(first_kind == FTOK_HASHHASH);
+        first &= ~((uint64_t)(BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL) << 8);
+        memcpy(body, &first, sizeof(first));
     }
     for (uint32_t i = 0; i < body_count; i += 1)
     {
         const FastTok bt = body[i];
         has_ops = has_ops || bt.kind == FTOK_HASH || bt.kind == FTOK_HASHHASH;
+        body_bad |= (uint32_t)(bt.kind == FTOK_IDENT) & (uint32_t)(bt.data == va_opt_id);
+        // #3577: a macro's `(` says it is one (its data 1; the file's are 0), for -Wparentheses-equality, which a
+        // macro's grouping quiets.
+        if (bt.kind == FTOK_LPAREN)
+        {
+            body[i] = fast_tok_make(FTOK_LPAREN, bt.flags, bt.extra, 1u);
+        }
         if (is_func && (bt.kind == FTOK_IDENT || (bt.kind >= 64u && bt.kind < 126u)))
         {
             uint16_t extra = 0;
@@ -4673,6 +5352,40 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
     }
     pp->macro_tok_count = body_start + body_count;
     fast_pp_skip_to_eol(pp, f);
+    // #3577: '#' before anything but a parameter in a function-like macro, '##' at the end, and __VA_ARGS__ in a macro
+    // whose variadic parameter has a name: the full pipeline's errors, looked for only in a body with '#' or '##' or in a
+    // named variadic macro's (the loop above has marked the parameters).
+    if (has_ops || vararg_name != 0)
+    {
+        uint32_t after_hash = 0;
+        for (uint32_t i = 0; i < body_count; i += 1)
+        {
+            const FastTok bt = body[i];
+            const uint32_t is_name = (uint32_t)(bt.kind == FTOK_IDENT) | ((uint32_t)(bt.kind >= 64u) & (uint32_t)(bt.kind < 126u));
+            const uint32_t parameter = is_name & (uint32_t)is_func & (uint32_t)(bt.extra != 0);
+            body_bad |= after_hash & (parameter ^ 1u);
+            body_bad |= (uint32_t)(vararg_name != 0 && is_name != 0 && pp->idents.entries[bt.data].pp_kw == FPP_KW_VA_ARGS);
+            after_hash = (uint32_t)is_func & (uint32_t)(bt.kind == FTOK_HASH);
+        }
+        body_bad |= after_hash | (uint32_t)(body_count != 0 && body[body_count - 1u].kind == FTOK_HASHHASH);
+    }
+    if (body_bad != 0)
+    {
+        fast_pp_bail(pp, "macro definition the full pipeline diagnoses");
+        return;
+    }
+    // #3577: a macro defined again: the same definition, unless it is a builtin's, or the full pipeline's warning, which
+    // a system header's line doesn't show (glibc's <stdint.h> spells the predefined __INT64_C(c) `c ## L`).
+    const uint32_t previous = pp->idents.entries[name_id].macro_idx;
+    if (previous != 0)
+    {
+        if (pp->macros[previous].language_defined != 0 ||
+            (!f->is_system && !fast_pp_same_definition(pp->macros + previous, pp->macro_texts + previous, is_func, text, (uint32_t)(text_end - text))))
+        {
+            fast_pp_bail(pp, "macro redefined");
+            return;
+        }
+    }
 
     // The parameters the body names plainly, by the walk fast_pp_run_calls's substitution makes: '#' and a parameter,
     // and '##' and the token after it, are taken together, and a parameter before '##' takes its argument as written.
@@ -4863,6 +5576,14 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
         .use_count = (uint16_t)use_count,
         .plain_subst = plain_subst ? 1u : 0u,
     });
+    const uint32_t midx = pp->macro_count;
+    pp->macro_texts[midx] = (FastMacroText){ .text = text, .length = (uint32_t)(text_end - text) };
+    if (pp->in_predefines)
+    {
+        // The predefines' __STDC macros and __FLT_EVAL_METHOD__ are the full pipeline's builtins.
+        const FastIdentEntry* const ne = pp->idents.entries + name_id;
+        pp->macros[midx].language_defined = fast_pp_language_defined_name((const uint8_t*)pp->idents.strings + ne->str_offset, ne->length);
+    }
 }
 
 static bool fast_pp_eval_if_line(FastPP* pp, FastIncludeFile* f)
@@ -4912,7 +5633,8 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
         memcpy(name_buf, start, name_len);
         name_buf[name_len] = '\0';
         f->ptr += 1;
-        fast_pp_skip_to_eol(pp, f);
+        // #3577: tokens after the name are the full pipeline's warning.
+        fast_pp_finish_directive(pp, f);
     }
     else
     {
@@ -4930,7 +5652,7 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
         fast_pp_skip_to_eol(pp, f);
         uint32_t ec = 0;
         fast_pp_expand_buffer(pp, raw, rc, exp, 256u, &ec, false);
-        if (ec == 1u && exp[0].kind == FTOK_STR_LIT)
+        if (ec == 1u && exp[0].kind == FTOK_STR_LIT && exp[0].extra == 0 && pp->lit_slices[exp[0].data].escaped == 0)
         {
             const FastLitSlice sl = pp->lit_slices[exp[0].data];
             if (sl.length < sizeof(name_buf))
@@ -4945,6 +5667,12 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
             angled = true;
             for (uint32_t i = 1u; i + 1u < ec && name_len + 8u < sizeof(name_buf); i += 1)
             {
+                // #3577: a header name spelled from its tokens as written, which blanks between them would change.
+                if (((uint32_t)((exp[i].flags & BUSTER_FTOK_SPACE) != 0) | (uint32_t)((exp[i + 1u].flags & BUSTER_FTOK_SPACE) != 0) |
+                     (uint32_t)(BUSTER_FAST_TOK_SPELLING_EXACT(pp, exp[i]) == 0)) != 0)
+                {
+                    fast_pp_bail(pp, "computed #include header name");
+                }
                 name_len += fast_tok_to_text(pp, exp[i], name_buf + name_len, sizeof(name_buf) - name_len);
             }
         }
@@ -4998,13 +5726,23 @@ static bool fast_pp_decimal_defines(FastPP* pp, FastIncludeFile* f)
             break;
         }
         const uint32_t id = fast_ident_intern(&pp->idents, name, length);
-        if (id == 0 || pp->idents.entries[id].kw_kind >= 126u) { break; }
+        // #3577: a name defined before (a redefinition is compared), a builtin's and, in the predefines, one the
+        // full pipeline takes for its own (a __STDC macro, __FLT_EVAL_METHOD__) take the directive reader.
+        const FastIdentEntry* const entry = pp->idents.entries + id;
+        if (id == 0 || entry->kw_kind >= 126u || entry->macro_idx != 0 ||
+            (entry->pp_kw >= FPP_KW_DEFINED && entry->pp_kw <= BUSTER_FPP_KW_LAST_BUILTIN) ||
+            (pp->in_predefines && fast_pp_language_defined_name(name, length)))
+        {
+            break;
+        }
         const uint32_t body = pp->macro_tok_count++;
         pp->macro_toks[body] = fast_tok_make(FTOK_INT_LIT, 0, 0, value);
         fast_pp_bind_macro(pp, id, (FastMacro){
             .body_start = body, .body_count = 1u, .fast_data = value,
             .active = 1u, .fast_mode = 1u, .fast_kind = FTOK_INT_LIT,
         });
+        // #3577: the text after the name, which a redefinition compares.
+        pp->macro_texts[pp->macro_count] = (FastMacroText){ .text = name + length, .length = (uint32_t)(q - (name + length)) };
         if (f->guard_state == 1u && id == f->guard_ident) { f->guard_state = 2u; }
         f->line += 1u;
         f->ptr = q + 1;
@@ -5020,16 +5758,37 @@ static bool fast_pp_decimal_defines(FastPP* pp, FastIncludeFile* f)
     return consumed;
 }
 
-// What follows a line marker's or #line's number: a file name, and a marker's flags, would change the system header level
-// -MD's records see (#3592) and __FILE__ (#3608), which this path doesn't follow, so a unit that collects the records
-// leaves at anything there.
-static inline void fast_pp_line_rest(FastPP* pp, const FastIncludeFile* f)
+// The operands of #line or of a line marker, its number's token read (#3577): a simple digit sequence (no suffix, no
+// base, no leading 0 but for 0 itself: the full pipeline's error or warning) under 2^32, and nothing after it. A file
+// name would change __FILE__, which this path doesn't follow, and a marker's flags would change the include stack:
+// both are refused. The next line is the number's.
+static __attribute__((noinline)) void fast_pp_line_operands(FastPP* pp, FastIncludeFile* f, FastTok number)
 {
-    const uint8_t* const rest = fast_skip_hspace(f->ptr, f->end);
-    if (pp->dependency_records != NULL && rest < f->end && *rest != '\n')
+    // The number's spelling ends where its token ended.
+    const uint8_t* const end = f->ptr;
+    const uint8_t* s = end;
+    while (s > f->base && (fast_char_class[s[-1]] & 1u) != 0)
     {
-        fast_pp_bail(pp, "a line marker's file name with -MD");
+        s -= 1;
     }
+    const uint32_t length = (uint32_t)(end - s);
+    bool valid = number.kind == FTOK_INT_LIT && length != 0 && length <= 10u && (s[0] != '0' || length == 1u);
+    uint64_t value = 0;
+    for (uint32_t i = 0; valid && i < length; i += 1)
+    {
+        valid = s[i] >= '0' && s[i] <= '9';
+        value = value * 10u + (uint64_t)(s[i] - '0');
+    }
+    FastTok rest = { 0 };
+    fast_pp_read_tok(pp, f, true, &rest);
+    if (!valid || value > UINT32_MAX || rest.kind != FTOK_EOF)
+    {
+        fast_pp_bail(pp, "#line or line marker the direct path doesn't take");
+        return;
+    }
+    fast_pp_finish_directive(pp, f);
+    // finish_directive counted the newline that ends the directive: the next line is the number's.
+    f->line = (uint32_t)value;
 }
 
 static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastIncludeFile* f)
@@ -5047,9 +5806,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
         // #line-marker `# 123 "file"` in preprocessed files
         if (kw_tok.kind == FTOK_INT_LIT)
         {
-            f->line = kw_tok.data;
-            fast_pp_line_rest(pp, f);
-            fast_pp_skip_to_eol(pp, f);
+            fast_pp_line_operands(pp, f, kw_tok);
             return;
         }
         fast_pp_bail(pp, "invalid directive");
@@ -5068,14 +5825,21 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
             break;
         case FPP_KW_UNDEF:
         {
+            // #3577: a name, not a builtin's (`defined`, __LINE__, a predefined __STDC macro, ...), and nothing after it;
+            // anything else is the full pipeline's error or warning.
             FastTok nt = { 0 };
             fast_pp_read_tok(pp, f, true, &nt);
-            if (nt.kind == FTOK_IDENT || (nt.kind >= 64u && nt.kind < 126u))
+            const bool named = nt.kind == FTOK_IDENT || (nt.kind >= 64u && nt.kind < 126u);
+            const uint8_t nk = named ? pp->idents.entries[nt.data].pp_kw : 0u;
+            const uint32_t previous = named ? pp->idents.entries[nt.data].macro_idx : 0u;
+            if (!named || (nk >= FPP_KW_DEFINED && nk <= BUSTER_FPP_KW_LAST_BUILTIN) || pp->macros[previous].language_defined != 0)
             {
-                pp->idents.entries[nt.data].macro_idx = 0;
-                fast_ident_set_macro_bit(&pp->idents, nt.data, false);
+                fast_pp_bail(pp, "#undef the full pipeline diagnoses");
+                break;
             }
-            fast_pp_skip_to_eol(pp, f);
+            pp->idents.entries[nt.data].macro_idx = 0;
+            fast_ident_set_macro_bit(&pp->idents, nt.data, false);
+            fast_pp_finish_directive(pp, f);
         } break;
         case FPP_KW_INCLUDE:
             fast_pp_handle_include(pp, f, false);
@@ -5115,7 +5879,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
                     f->guard_state = 1u;
                     is_guard = true;
                 }
-                fast_pp_skip_to_eol(pp, f);
+                fast_pp_finish_directive(pp, f);
             }
             pp->conds[pp->cond_depth++] = (FastCondFrame){
                 .active = cond ? 1u : 0u,
@@ -5137,10 +5901,26 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
             FastCondFrame* cf = pp->conds + (pp->cond_depth - 1u);
             if (cf->is_guard) { f->guard_state = 3u; cf->is_guard = 0; }
             if (cf->saw_else) { fast_pp_bail(pp, "duplicate #else"); break; }
+            // #3577: #elifdef and #elifndef before C23 are the full pipeline's warning; #else takes nothing after it.
+            if ((pkw == FPP_KW_ELIFDEF || pkw == FPP_KW_ELIFNDEF) && !pp->c23) { fast_pp_bail(pp, "#elifdef before C23"); break; }
             if (pkw == FPP_KW_ELSE) { cf->saw_else = 1u; }
             // Since we were in an active branch, the new branch is definitely inactive!
             cf->active = 0;
-            fast_pp_skip_to_eol(pp, f);
+            if (pkw == FPP_KW_ELSE)
+            {
+                fast_pp_finish_directive(pp, f);
+            }
+            else if (pkw == FPP_KW_ELIF)
+            {
+                fast_pp_skip_to_eol(pp, f);
+            }
+            else
+            {
+                FastTok nt = { 0 };
+                fast_pp_read_tok(pp, f, true, &nt);
+                if (nt.kind != FTOK_IDENT && !(nt.kind >= 64u && nt.kind < 126u)) { fast_pp_bail(pp, "bad #elifdef name"); break; }
+                fast_pp_finish_directive(pp, f);
+            }
         } break;
         case FPP_KW_ENDIF:
         {
@@ -5154,68 +5934,66 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
             {
                 f->guard_state = 4u; // Closed outer include guard!
             }
-            fast_pp_skip_to_eol(pp, f);
+            fast_pp_finish_directive(pp, f);
         } break;
         case FPP_KW_LINE:
         {
             FastTok lt = { 0 };
             fast_pp_read_tok(pp, f, true, &lt);
-            if (lt.kind == FTOK_INT_LIT) { f->line = lt.data; }
-            fast_pp_line_rest(pp, f);
-            fast_pp_skip_to_eol(pp, f);
+            fast_pp_line_operands(pp, f, lt);
         } break;
         case FPP_KW_PRAGMA:
         {
             FastTok pt = { 0 };
             fast_pp_read_tok(pp, f, true, &pt);
+            // #3577: the pragmas the full pipeline knows it acts on or reports (c_check_ignored_pragma.c: unroll, pack,
+            // align, comment, omp, acc, message, GCC's, clang's and STDC's, ...), but for once and GCC system_header outside
+            // the main file (in it, its warnings) and the predefines' push_macro, which this path does; an unknown one it
+            // ignores (-Wunknown-pragmas isn't on by default), its line's literals lexed (fast_pp_skip_to_eol, #3603).
             if (pt.kind == FTOK_IDENT && pp->idents.entries[pt.data].pp_kw == FPP_KW_ONCE)
             {
+                if (f->serial == pp->main_serial) { fast_pp_bail(pp, "#pragma once in the main file"); break; }
                 FastGuardEntry* ge = fast_guard_lookup(pp, f->path, f->path_len, true);
                 if (ge != NULL) { ge->once = 1u; }
                 if (ge != NULL && pp->dependency_records != NULL)
                 {
                     pp->guard_dependencies[ge - pp->guards] = (pp->guard_dependencies[ge - pp->guards] & BUSTER_FPP_SYSTEM_PRAGMA) | f->dependency;
                 }
-                fast_pp_skip_to_eol(pp, f);
+                fast_pp_finish_directive(pp, f);
             }
             else if (pt.kind == FTOK_IDENT)
             {
                 const char* s = pp->idents.strings + pp->idents.entries[pt.data].str_offset;
-                if (strcmp(s, "message") == 0)
+                if (strcmp(s, "GCC") == 0)
                 {
-                    fast_pp_bail(pp, "pragma message");
-                }
-                else if (strcmp(s, "GCC") == 0 || strcmp(s, "clang") == 0 || strcmp(s, "pack") == 0 ||
-                    strcmp(s, "weak") == 0 || strcmp(s, "redefine_extname") == 0 ||
-                    strcmp(s, "push_macro") == 0 || strcmp(s, "pop_macro") == 0 || strcmp(s, "STDC") == 0)
-                {
-                    // Check if GCC system_header (safe to ignore) vs diagnostic/visibility (bail)
                     FastTok pt2 = { 0 };
                     fast_pp_read_tok(pp, f, true, &pt2);
                     const char* s2 = (pt2.kind == FTOK_IDENT || pt2.kind >= 64u) ?
                                      pp->idents.strings + pp->idents.entries[pt2.data].str_offset : "";
-                    if (strcmp(s, "GCC") == 0 && strcmp(s2, "system_header") == 0)
+                    if (strcmp(s2, "system_header") == 0 && f->serial != pp->main_serial)
                     {
                         // The rest of the file is a system header, and so are the files it includes from here and the
-                        // file's later inclusions (-MD's records, #3592); clang and the full pipeline ignore it in the main
-                        // file.
-                        const bool marks = f->serial != pp->main_serial;
-                        f->is_system |= marks;
-                        FastGuardEntry* const ge = marks && pp->dependency_records != NULL ? fast_guard_lookup(pp, f->path, f->path_len, true) : NULL;
+                        // file's later inclusions (-MD's records, #3592).
+                        f->is_system = true;
+                        FastGuardEntry* const ge = pp->dependency_records != NULL ? fast_guard_lookup(pp, f->path, f->path_len, true) : NULL;
                         if (ge != NULL)
                         {
                             pp->guard_dependencies[ge - pp->guards] = BUSTER_FPP_SYSTEM_PRAGMA | f->dependency;
                         }
-                        fast_pp_skip_to_eol(pp, f);
-                    }
-                    else if (strcmp(s, "push_macro") == 0 && f->path != NULL && strcmp(f->path, "<predefines>") == 0)
-                    {
-                        fast_pp_skip_to_eol(pp, f);
+                        fast_pp_finish_directive(pp, f);
                     }
                     else
                     {
                         fast_pp_bail(pp, "semantic pragma");
                     }
+                }
+                else if (strcmp(s, "push_macro") == 0 && f->path != NULL && strcmp(f->path, "<predefines>") == 0)
+                {
+                    fast_pp_skip_to_eol(pp, f);
+                }
+                else if (fast_pp_pragma_known(s))
+                {
+                    fast_pp_bail(pp, "semantic pragma");
                 }
                 else
                 {
@@ -5265,8 +6043,12 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool 
         pp->lit_slices = (FastLitSlice*)fast_arena_alloc(arena, (uint64_t)pp->lit_cap * sizeof(FastLitSlice), 64);
         pp->lit_coded = (uint64_t*)fast_arena_alloc(arena, (uint64_t)pp->lit_cap / 8u, 64);
         pp->macros = (FastMacro*)fast_arena_alloc(arena, (uint64_t)BUSTER_FPP_MAX_MACROS * sizeof(FastMacro), 64);
+        pp->macro_texts = (FastMacroText*)fast_arena_alloc(arena, (uint64_t)BUSTER_FPP_MAX_MACROS * sizeof(FastMacroText), 64);
         pp->macro_toks = (FastTok*)fast_arena_alloc(arena, (uint64_t)pp->macro_tok_cap * sizeof(FastTok), 64);
         pp->macro_params = (uint32_t*)fast_arena_alloc(arena, (uint64_t)pp->macro_param_cap * sizeof(uint32_t), 64);
+        pp->mapped_cap = 4096u;
+        pp->mapped_bases = (const uint8_t**)fast_arena_alloc(arena, (uint64_t)pp->mapped_cap * sizeof(const uint8_t*), 64);
+        pp->mapped_sizes = (uint64_t*)fast_arena_alloc(arena, (uint64_t)pp->mapped_cap * sizeof(uint64_t), 64);
         pp->exp_buf = (FastTok*)fast_arena_alloc(scratch, (uint64_t)pp->exp_cap * sizeof(FastTok), 64);
         pp->arg_buf = (FastTok*)fast_arena_alloc(scratch, (uint64_t)pp->arg_cap * sizeof(FastTok), 64);
         pp->call_stack = (FastMacroCall*)fast_arena_alloc(scratch, (uint64_t)BUSTER_FPP_MAX_CALLS * sizeof(FastMacroCall), 64);
@@ -5275,7 +6057,8 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool 
         pp->win.starts = pp->win.kinds == NULL ? NULL : (uint16_t*)(void*)(pp->win.kinds + BUSTER_FWIN_STARTS_OFFSET);
 
         ok = pp->out_kind != NULL && pp->out_data != NULL && pp->num_pool != NULL && pp->lit_bytes != NULL &&
-             pp->lit_slices != NULL && pp->lit_coded != NULL && pp->macros != NULL && pp->macro_toks != NULL && pp->macro_params != NULL &&
+             pp->lit_slices != NULL && pp->lit_coded != NULL && pp->macros != NULL && pp->macro_texts != NULL && pp->macro_toks != NULL && pp->macro_params != NULL &&
+             pp->mapped_bases != NULL && pp->mapped_sizes != NULL &&
              pp->exp_buf != NULL && pp->arg_buf != NULL && pp->call_stack != NULL &&
              pp->win.kinds != NULL && pp->win.starts != NULL && pp->win.lens != NULL;
     }
@@ -5413,6 +6196,19 @@ static inline void fast_pp_emit_soa(FastPP* pp, FastTok tok)
         else if ((tok.flags & BUSTER_FTOK_LONGLONG) != 0)
         {
             kind = FTOK_FLOAT80;
+        }
+    }
+    else if (__builtin_expect(kind == FTOK_BAD_LITERAL, 0))
+    {
+        fast_pp_bail(pp, "literal the full pipeline diagnoses");
+    }
+    else if (__builtin_expect(((uint32_t)(kind == FTOK_CHAR_LIT) & ((uint32_t)tok.flags / BUSTER_FTOK_SPELLED)) & 1u, 0))
+    {
+        // #3577: a char16_t, char32_t or (C23) unsigned char constant, typed int here.
+        const char first = pp->lit_bytes[pp->lit_slices[tok.extra].offset];
+        if (first == 'u' || first == 'U')
+        {
+            fast_pp_bail(pp, "character constant of a type other than int");
         }
     }
     else if (kind == FTOK_STR_LIT && tok.extra >= 1u && tok.extra <= 3u)
@@ -6371,12 +7167,15 @@ static __attribute__((noinline)) bool fast_pp_window_macro(FastPP* pp, FastInclu
             return false;
         }
         // A one-parameter identity wrapper (ALWAYS(x) is (x)): its name goes, and `(x)` is the window's next tokens.
+        // Its `(` is the macro's (data 1, as the #define marks one, for -Wparentheses-equality): the window writes no
+        // punctuator's data, so the slot it takes says so (#3577).
         if (fmode == 5u)
         {
             const uint8_t* q = after_name;
             while (q < end && (*q == ' ' || *q == '\t')) { q += 1; }
             if (q < end && *q == '(')
             {
+                pp->out_data[pp->out_count] = 1u;
                 return false;
             }
         }
@@ -6724,6 +7523,10 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                     out_count += k;
                     w->pos = t;
                     pp->out_count = out_count;
+                    // #3577: the name's slot is the next token's where the expansion is empty, and a punctuator's data
+                    // isn't written here: it would keep the name's id, which the checks read as a macro's `(` and as
+                    // an access path's difference (`if (EMPTY (x == y))`, `s EMPTY .a == s.a`).
+                    out_data[out_count] = 0u;
                     leave = fast_pp_window_macro(pp, f, id, ident_kind);
                     out_count = pp->out_count;
                     i = w->serial == f->serial ? w->pos : 0u;
@@ -6868,11 +7671,12 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
             const uint8_t kw = fast_pp_skip_inactive(pp, f);
             if (pp->bailout) { break; }
             FastCondFrame* cf = pp->conds + (pp->cond_depth - 1u);
+            // #3577: #endif and #else take nothing after them (the full pipeline's warning).
             if (kw == FPP_KW_ENDIF)
             {
                 if (cf->is_guard && f->guard_state == 2u) { f->guard_state = 4u; }
                 pp->cond_depth -= 1u;
-                fast_pp_skip_to_eol(pp, f);
+                fast_pp_finish_directive(pp, f);
             }
             else if (kw == FPP_KW_ELSE)
             {
@@ -6880,7 +7684,7 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
                 if (cf->saw_else) { fast_pp_bail(pp, "duplicate #else"); break; }
                 cf->saw_else = 1u;
                 if (!cf->taken) { cf->active = 1u; cf->taken = 1u; }
-                fast_pp_skip_to_eol(pp, f);
+                fast_pp_finish_directive(pp, f);
             }
             else if (kw == FPP_KW_ELIF || kw == FPP_KW_ELIFDEF || kw == FPP_KW_ELIFNDEF)
             {
@@ -6892,17 +7696,26 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
                     if (kw == FPP_KW_ELIF) { cond = fast_pp_eval_if_line(pp, f); }
                     else
                     {
+                        // #3577: a name and nothing after it, or the full pipeline's error or warning.
                         FastTok nt = { 0 };
                         fast_pp_read_tok(pp, f, true, &nt);
-                        const bool def = (nt.kind == FTOK_IDENT || nt.kind >= 64u) && fast_pp_defined(pp, nt.data);
+                        if (nt.kind != FTOK_IDENT && !(nt.kind >= 64u && nt.kind < 126u)) { fast_pp_bail(pp, "bad #elifdef name"); break; }
+                        const bool def = fast_pp_defined(pp, nt.data);
                         cond = kw == FPP_KW_ELIFDEF ? def : !def;
-                        fast_pp_skip_to_eol(pp, f);
+                        fast_pp_finish_directive(pp, f);
                     }
                     if (cond) { cf->active = 1u; cf->taken = 1u; }
                 }
-                else
+                else if (kw == FPP_KW_ELIF)
                 {
                     fast_pp_skip_to_eol(pp, f);
+                }
+                else
+                {
+                    FastTok nt = { 0 };
+                    fast_pp_read_tok(pp, f, true, &nt);
+                    if (nt.kind != FTOK_IDENT && !(nt.kind >= 64u && nt.kind < 126u)) { fast_pp_bail(pp, "bad #elifdef name"); break; }
+                    fast_pp_finish_directive(pp, f);
                 }
             }
             continue;

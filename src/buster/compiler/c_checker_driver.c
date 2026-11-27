@@ -15531,6 +15531,61 @@ static void check_driver_direct_mark_stage(void* context, uint32_t stage_id)
     check_clock_mark((CheckClock*)context, (CheckStage)stage_id);
 }
 
+// The direct path's builtin feature queries (#3577), answered as the full pipeline answers them (pp_builtin_value): the
+// name as pp_feature_name reads it (an attribute's, feature's or extension's without "__" around it, 200 bytes at
+// most), the options' tables (pp_feature), and in clang's mode the target's builtins.
+static uint32_t check_driver_direct_feature(void* context, uint32_t query, const uint8_t* name, uint32_t length)
+{
+    static const PPBuiltin builtins[] = {
+        [C_DIRECT_QUERY_HAS_ATTRIBUTE] = PP_BUILTIN_HAS_ATTRIBUTE,
+        [C_DIRECT_QUERY_HAS_BUILTIN] = PP_BUILTIN_HAS_BUILTIN,
+        [C_DIRECT_QUERY_HAS_FEATURE] = PP_BUILTIN_HAS_FEATURE,
+        [C_DIRECT_QUERY_HAS_EXTENSION] = PP_BUILTIN_HAS_EXTENSION,
+        [C_DIRECT_QUERY_HAS_C_ATTRIBUTE] = PP_BUILTIN_HAS_C_ATTRIBUTE,
+        [C_DIRECT_QUERY_HAS_DECLSPEC_ATTRIBUTE] = PP_BUILTIN_HAS_DECLSPEC_ATTRIBUTE,
+        [C_DIRECT_QUERY_HAS_CONSTEXPR_BUILTIN] = PP_BUILTIN_HAS_CONSTEXPR_BUILTIN,
+        [C_DIRECT_QUERY_IS_TARGET_ARCH] = PP_BUILTIN_IS_TARGET_ARCH,
+        [C_DIRECT_QUERY_IS_TARGET_VENDOR] = PP_BUILTIN_IS_TARGET_VENDOR,
+        [C_DIRECT_QUERY_IS_TARGET_OS] = PP_BUILTIN_IS_TARGET_OS,
+        [C_DIRECT_QUERY_IS_TARGET_ENVIRONMENT] = PP_BUILTIN_IS_TARGET_ENVIRONMENT,
+        [C_DIRECT_QUERY_IS_TARGET_VARIANT_OS] = PP_BUILTIN_IS_TARGET_VARIANT_OS,
+        [C_DIRECT_QUERY_IS_TARGET_VARIANT_ENVIRONMENT] = PP_BUILTIN_IS_TARGET_VARIANT_ENVIRONMENT,
+        [C_DIRECT_QUERY_BUILDING_MODULE] = PP_BUILTIN_BUILDING_MODULE,
+    };
+    const PPOptions* options = (const PPOptions*)context;
+    uint32_t result = 0;
+    if (query == C_DIRECT_QUERY_PURE_LIBRARY_FUNCTION)
+    {
+        // A library builtin of the unit whose clang attributes say const ('c') or pure ('U').
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)name, length);
+        bool pure = false;
+        for (uint32_t i = 0; info != NULL && i < info->attributes_length; i += 1)
+        {
+            pure = pure || info->attributes[i] == 'c' || info->attributes[i] == 'U';
+        }
+        result = info != NULL && pure && pp_library_builtin(options, name, length);
+    }
+    else if (query < BUSTER_ARRAY_LENGTH(builtins))
+    {
+        const PPBuiltin builtin = builtins[query];
+        const bool attribute = builtin == PP_BUILTIN_HAS_ATTRIBUTE || builtin == PP_BUILTIN_HAS_C_ATTRIBUTE || builtin == PP_BUILTIN_HAS_DECLSPEC_ATTRIBUTE ||
+                               builtin == PP_BUILTIN_HAS_FEATURE || builtin == PP_BUILTIN_HAS_EXTENSION;
+        uint32_t n = length > 200u ? 200u : length;
+        const uint8_t* bytes = name;
+        if (attribute && n > 4u && bytes[0] == '_' && bytes[1] == '_' && bytes[n - 1u] == '_' && bytes[n - 2u] == '_')
+        {
+            bytes += 2;
+            n -= 4u;
+        }
+        result = pp_feature(options, builtin, bytes, n);
+        if (builtin == PP_BUILTIN_HAS_BUILTIN && result == 0 && options->clang_features)
+        {
+            result = x86_target_has_builtin(&options->target, bytes, n);
+        }
+    }
+    return result;
+}
+
 // A unit's dependency rule from the direct path's records of the files it read (#3592), made as the full pipeline makes
 // its own (pp_dependencies), into `arena`; the driver publishes it once the object is written.
 typedef struct CheckDriverDirectDependencies CheckDriverDirectDependencies;
@@ -16650,9 +16705,15 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             char* predef_buf = NULL;
             uint32_t predef_len = 0;
             uint32_t flt_eval_method = 0;
+            const char* direct_bail = "the driver's setup";
             if (direct_ready && options.predefines_path == NULL)
             {
                 direct_ready = pp_build_predefines(&options, &scratch, &predef_buf, &predef_len, &flt_eval_method);
+            }
+            else
+            {
+                // --predefines: the builtin __FLT_EVAL_METHOD__ the file doesn't define (#3577).
+                flt_eval_method = pp_predefines_eval_method(&options);
             }
             direct_dependencies = (CheckDriverDirectDependencies){
                 .options = &options.dependencies,
@@ -16698,6 +16759,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                     .stage_codegen = CHECK_STAGE_TIER0,
                     .stage_object_write = CHECK_STAGE_OBJECT_WRITE,
                     .out_token_count = &direct_tokens,
+                    .out_bail_reason = &direct_bail,
+                    .feature_query = check_driver_direct_feature,
+                    .feature_context = &options,
                     .dependencies = options.dependencies.enabled ? check_driver_direct_dependencies : NULL,
                     .dependency_context = &direct_dependencies,
                 };
@@ -16727,6 +16791,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                     check_clock_start(stage_clock);
                     stage_clock->pages_busy = arena_pages_busy;
                     stage_clock->pages_medium = arena_pages_medium;
+                }
+                // Why the direct path refused, where a test asks (#3577): a line of the rule and the input in the file
+                // BUSTER_TEST_DIRECT_BAILS names. Read on this fallback alone, so a direct compile never reads it.
+                const char* direct_bails = getenv("BUSTER_TEST_DIRECT_BAILS");
+                if (direct_bails != NULL && direct_bails[0] != 0)
+                {
+                    FILE* file = fopen(direct_bails, "a");
+                    if (file != NULL)
+                    {
+                        fprintf(file, "%s\t%s\n", direct_bail, path);
+                        fclose(file);
+                    }
                 }
             }
         }

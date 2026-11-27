@@ -22,13 +22,18 @@
 
 // A hosted program's main must return int without GNU's extensions (#3592): clang refuses `void main(void)` in
 // -std=c99, c11, c17 and c23, at file scope or in a block, and only warns in GNU's modes (c_check_input.c's
-// check_input_main). The direct path leaves such a declaration to the full pipeline, freestanding or not.
-static void fast_cc_check_main(FastCCState* cc, uint32_t name_id, FastType type)
+// check_input_main). The direct path leaves such a declaration to the full pipeline, freestanding or not; and an inline
+// main, the full pipeline's error in any mode (#3577).
+static void fast_cc_check_main(FastCCState* cc, uint32_t name_id, FastType type, bool is_inline)
 {
     if (cc->pp->strict_iso && name_id != 0 && name_id == cc->id_main && ftype_is_func(type) &&
         cc->ctypes[type & BUSTER_FTYPE_CIDX_MASK].inner != (FastType)FTYPE_I32)
     {
         fast_cc_bail(cc, "main returns other than int without GNU's extensions");
+    }
+    if (is_inline && name_id != 0 && name_id == cc->id_main)
+    {
+        fast_cc_bail(cc, "an inline main");
     }
 }
 
@@ -323,13 +328,33 @@ static inline void fast_cc_ready_task(FastCCState* cc, uint32_t task)
 static inline void fast_cc_reference(FastCCState* cc, FastSym* sym)
 {
     // A pending inline definition (C99's or GNU's) is decided at the unit's end, not by a reference (#3595).
-    if (!sym->referenced && (sym->inline_rules & BUSTER_FINLINE_PENDING) == 0)
+    if (sym->referenced != 1u && (sym->inline_rules & BUSTER_FINLINE_PENDING) == 0)
     {
-        sym->referenced = 1u;
-        for (uint32_t link = sym->deferred_task; link != 0; link = cc->deferred[link - 1u].previous_task)
+        // #3577: a use in an inline body compiled to be checked alone (fast_cc_check_body) is a use for the unit's end
+        // (-Wundefined-internal), but readies no body to emit.
+        if (cc->checking != 0)
         {
-            fast_cc_ready_task(cc, link - 1u);
+            sym->referenced = 2u;
         }
+        else
+        {
+            sym->referenced = 1u;
+            for (uint32_t link = sym->deferred_task; link != 0; link = cc->deferred[link - 1u].previous_task)
+            {
+                fast_cc_ready_task(cc, link - 1u);
+            }
+        }
+    }
+}
+
+// #3577: a use without code where evaluated, in #3592's dead branch (or an expression compiled again for its log): the
+// unit's end counts it (-Wundefined-internal), as fast_cc_reference does a body's checked alone, and it readies no body
+// to emit, as no code refers to one. sizeof's operand is no use.
+static inline void fast_cc_reference_dead(FastSym* sym)
+{
+    if (sym->referenced == 0u && (sym->inline_rules & BUSTER_FINLINE_PENDING) == 0)
+    {
+        sym->referenced = 2u;
     }
 }
 
@@ -360,6 +385,18 @@ static uint32_t fast_cc_ensure_obj_sym(FastCCState* cc, uint32_t sym_idx)
         cc->obj->syms[obj_idx].visibility = s->visibility;
     }
     s->obj_sym = obj_idx;
+    // #3577: a checked inline body's object symbols go with it (fast_cc_check_body).
+    if (cc->checking != 0)
+    {
+        if (cc->checked_obj_sym_count < BUSTER_FCHECKED_OBJ_SYMS)
+        {
+            cc->checked_obj_syms[cc->checked_obj_sym_count++] = sym_idx;
+        }
+        else
+        {
+            fast_cc_bail(cc, "too many symbols in a checked inline body");
+        }
+    }
     return obj_idx;
 }
 
@@ -526,10 +563,12 @@ struct FastStaticConst
     uint8_t is_float;     // 0 = int/ptr, 1 = f32, 2 = f64
     uint8_t is_unsigned;
     uint8_t is_string;    // 1 = raw string literal
-    uint8_t pad;
+    uint8_t folded;       // 1 = not an integer literal (a fold, a cast, a character, an enumerator): no null pointer (#3577)
     const char* str_ptr;
     uint32_t str_len;
     FastType type;
+    uint32_t enum_cidx;   // an enumerator's enum, for -Wimplicit-enum-enum-cast (#3577)
+    uint8_t op;           // the binary operator or `!` that made it, outside parentheses (#3577: the precedence checks)
 };
 
 static double fsc_as_double(FastStaticConst v)
@@ -562,10 +601,17 @@ static FastStaticConst fsc_from_double(double d, bool is_f32)
     return r;
 }
 
-static void fsc_cast_to(const FastCCState* cc, FastStaticConst* v, FastType target)
+static void fsc_cast_to(FastCCState* cc, FastStaticConst* v, FastType target)
 {
     if (v->sym_idx != 0)
     {
+        // #3577: an address converts to an integer or a pointer, and to _Bool as true but a weak symbol's (which may be
+        // null); to a floating type it is no constant, the full pipeline's error.
+        if (ftype_is_float(target) || (ftype_is_bool(target) && cc->obj->syms[v->sym_idx].binding == STB_WEAK))
+        {
+            fast_cc_bail(cc, "address converted in a static initializer");
+            return;
+        }
         if (ftype_is_bool(target))
         {
             v->sym_idx = 0;
@@ -580,14 +626,21 @@ static void fsc_cast_to(const FastCCState* cc, FastStaticConst* v, FastType targ
     if (ftype_is_float(target))
     {
         *v = fsc_from_double(fsc_as_double(*v), !ftype_is_f64(target));
+        v->folded = 1u;
         return;
     }
     uint64_t x = 0;
     if (v->is_float != 0)
     {
+        // #3577: a value the integer type can't hold (NaN, or out of its range) is undefined, which the full pipeline
+        // reports or refuses; the conversion below is defined for the others alone.
         const double d = fsc_as_double(*v);
+        const bool sgn_target = ftype_is_signed(cc, target);
+        const bool in_range = d == d && (sgn_target ? (d >= -9223372036854775808.0 && d < 9223372036854775808.0) :
+                                                      (d > -1.0 && d < 18446744073709551616.0));
         if (ftype_is_bool(target)) { x = d != 0.0 ? 1u : 0u; }
-        else if (ftype_is_signed(cc, target)) { x = (uint64_t)(int64_t)d; }
+        else if (!in_range) { fast_cc_bail(cc, "floating constant out of the integer's range"); }
+        else if (sgn_target) { x = (uint64_t)(int64_t)d; }
         else { x = (uint64_t)d; }
     }
     else
@@ -604,6 +657,16 @@ static void fsc_cast_to(const FastCCState* cc, FastStaticConst* v, FastType targ
     v->is_float = 0;
     v->is_unsigned = !sgn ? 1u : 0u;
     v->type = target;
+    v->folded = 1u;
+}
+
+// The value an operator just made (#3577): a fold (no null pointer constant), and its operator for the precedence
+// checks: a binary one's token, `!`'s FTOK_BANG, another unary one's none.
+static inline void fsc_made_by(FastStaticConst* vals, uint32_t vsp, uint32_t op)
+{
+    FastStaticConst* v = vals + (vsp - (uint32_t)(vsp != 0));
+    v->folded = 1u;
+    v->op = (uint8_t)((op & (UINT32_C(0) - (uint32_t)(op < 64u))) | ((uint32_t)FTOK_BANG * (uint32_t)(op == BUSTER_FPP_OP_UNARY_BANG)));
 }
 
 static void fsc_apply_op(FastCCState* cc, uint32_t op, FastStaticConst* vals, uint32_t* vsp_ptr)
@@ -648,6 +711,21 @@ static void fsc_apply_op(FastCCState* cc, uint32_t op, FastStaticConst* vals, ui
     const FastStaticConst a = vals[vsp - 2u];
     const FastStaticConst b = vals[vsp - 1u];
     *vsp_ptr = vsp - 1u;
+    // #3577: the runtime expressions' checks, in an initializer's constant too: an operand whose own operator the
+    // binary one's precedence questions (-Wparentheses' family), and a right operand of && or || that is a constant
+    // other than 0 or 1 (-Wconstant-logical-operand).
+    {
+        const uint32_t lclass = fast_expr_operand_class[a.op & 127u];
+        const uint32_t rclass = fast_expr_operand_class[b.op & 127u];
+        const uint32_t conflict = (((lclass | rclass) & fast_expr_conflicts_any[op & 127u]) | (lclass & fast_expr_conflicts_left[op & 127u])) != 0;
+        const uint32_t logical_constant = ((uint32_t)(op == FTOK_LAND) | (uint32_t)(op == FTOK_LOR)) & (uint32_t)(b.sym_idx == 0) &
+                                          (uint32_t)(b.is_float == 0) & (uint32_t)((uint64_t)b.val > 1u);
+        if ((conflict | logical_constant) != 0)
+        {
+            fast_cc_bail(cc, "constant expression the full pipeline questions");
+            return;
+        }
+    }
 
     // Address constant + / - integer offset (e.g. `&arr[0] + 4` or `(char*)&g + 8`)
     if (a.sym_idx != 0 || b.sym_idx != 0)
@@ -783,7 +861,7 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
             }
             else if (k == FTOK_CHAR_LIT)
             {
-                if (vsp < 64u) { vals[vsp++] = (FastStaticConst){ .val = (int64_t)(int32_t)fast_cc_data(cc), .type = FTYPE_I32 }; }
+                if (vsp < 64u) { vals[vsp++] = (FastStaticConst){ .val = (int64_t)(int32_t)fast_cc_data(cc), .folded = 1u, .type = FTYPE_I32 }; }
                 cc->pos += 1u; expect = false;
             }
             else if (k == FTOK_FLOAT_LIT)
@@ -858,13 +936,13 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                 if (sym->kind == FSYM_ENUM_CONST && !took_addr)
                 {
                     while (inner_parens > 0 && fast_cc_peek(cc) == FTOK_RPAREN) { inner_parens -= 1u; cc->pos += 1u; }
-                    if (vsp < 64u) { vals[vsp++] = (FastStaticConst){ .val = sym->const_val, .type = sym->type }; }
+                    if (vsp < 64u) { vals[vsp++] = (FastStaticConst){ .val = sym->const_val, .folded = 1u, .type = sym->type, .enum_cidx = sym->sec_off }; }
                     expect = false;
                     continue;
                 }
                 if (sym->kind == FSYM_FUNC)
                 {
-                    if (sym->is_unsupported) { fast_cc_bail(cc, "unsupported func ref in static init"); break; }
+                    if ((sym->use_flags & (BUSTER_FSYM_UNSUPPORTED | BUSTER_FSYM_DEPRECATED)) != 0) { fast_cc_bail(cc, "unsupported or deprecated func ref in static init"); break; }
                     fast_cc_reference(cc, sym);
                     const uint32_t obj_sym = fast_cc_ensure_obj_sym(cc, si);
                     while (inner_parens > 0 && fast_cc_peek(cc) == FTOK_RPAREN) { inner_parens -= 1u; cc->pos += 1u; }
@@ -936,7 +1014,7 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
             {
                 // Delegate directly to leaf constant evaluator (returns integer value!)
                 const int64_t v = fast_cc_const_int_expr(cc, true);
-                if (vsp < 64u) { vals[vsp++] = (FastStaticConst){ .val = v, .is_unsigned = 1u, .type = FTYPE_U64 }; }
+                if (vsp < 64u) { vals[vsp++] = (FastStaticConst){ .val = v, .is_unsigned = 1u, .folded = 1u, .type = FTYPE_U64 }; }
                 expect = false;
             }
             else
@@ -966,11 +1044,13 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                             fsc_cast_to(cc, &vals[vsp - 1u], cast_types[osp]);
                         }
                     }
-                    else { fsc_apply_op(cc, op, vals, &vsp); }
+                    else { fsc_apply_op(cc, op, vals, &vsp); fsc_made_by(vals, vsp, op); }
                 }
                 if (osp > 0) { osp -= 1u; }
                 pdepth -= 1u;
                 cc->pos += 1u;
+                // A parenthesized value's operator is no operand's to question (#3577).
+                if (vsp > 0) { vals[vsp - 1u].op = 0; }
                 continue;
             }
             if (k == FTOK_COLON)
@@ -986,7 +1066,7 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                 {
                     const uint16_t op = ops[--osp];
                     if (op == 0x2000u) { if (vsp > 0) { fsc_cast_to(cc, &vals[vsp - 1u], cast_types[osp]); } }
-                    else { fsc_apply_op(cc, op, vals, &vsp); }
+                    else { fsc_apply_op(cc, op, vals, &vsp); fsc_made_by(vals, vsp, op); }
                 }
                 if (osp > 0) { ops[osp - 1u] = BUSTER_FPP_OP_TERNARY; }
                 cc->pos += 1u;
@@ -1013,7 +1093,7 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                 {
                     osp -= 1u;
                     if (top == 0x2000u) { if (vsp > 0) { fsc_cast_to(cc, &vals[vsp - 1u], cast_types[osp]); } }
-                    else { fsc_apply_op(cc, top, vals, &vsp); }
+                    else { fsc_apply_op(cc, top, vals, &vsp); fsc_made_by(vals, vsp, top); }
                 }
                 else { break; }
             }
@@ -1041,11 +1121,13 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                 fsc_cast_to(cc, &vals[vsp - 1u], cast_types[osp]);
             }
         }
-        else { fsc_apply_op(cc, top, vals, &vsp); }
+        else { fsc_apply_op(cc, top, vals, &vsp); fsc_made_by(vals, vsp, top); }
     }
     if (vsp != 1u && !cc->bailout) { fast_cc_bail(cc, "bad static const expr"); }
     return (!cc->bailout && vsp == 1u) ? vals[0] : (FastStaticConst){ 0 };
 }
+
+static void fast_cc_check_static_initializer(FastCCState* cc, FastType target, const FastMemberInfo* bf, const FastStaticConst* v);
 
 // Write one scalar static constant into `sec_buf + byte_off` (adding `R_X86_64_64` relocation if sym_idx != 0).
 static void fast_cc_write_static_scalar(FastCCState* cc, FastSecId sec, uint32_t byte_off, FastType target,
@@ -1055,6 +1137,24 @@ static void fast_cc_write_static_scalar(FastCCState* cc, FastSecId sec, uint32_t
                        sec == FSEC_RODATA ? &cc->obj->rodata : &cc->obj->data_rel_ro;
     FastRelaBuf* rela = sec == FSEC_DATA ? &cc->obj->rela_data :
                         sec == FSEC_RODATA ? &cc->obj->rela_rodata : &cc->obj->rela_data_rel_ro;
+    // #3577: the initializer's implicit conversion, checked as an assignment's (fast_cc_check_static_initializer), but
+    // for an integer constant into a scalar integer field (no bit-field) that settles it in place, as the tables do.
+    const uint32_t tkind = target & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_CONST | BUSTER_FTYPE_VOL |
+                                     BUSTER_FTYPE_SCALAR_MASK);
+    const uint32_t vkind = v.type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK);
+    // (FTYPE_U8 is FTYPE_I8 + 1: the plain char's kind without a branch.)
+    const uint32_t plain_char_ptr = ((FTYPE_I8 + (uint32_t)cc->unsigned_char) | BUSTER_FTYPE_SCALAR_CHAR) + (UINT32_C(1) << BUSTER_FTYPE_PTR_SH);
+    const uint32_t settled = ((uint32_t)(v.sym_idx == 0) & (uint32_t)(v.is_string == 0) & (uint32_t)(v.is_float == 0) & (uint32_t)(bf == NULL) &
+                              (uint32_t)((tkind & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
+                              BUSTER_FAST_INT_SETTLED(v.val, vkind, tkind & BUSTER_FTYPE_SCALAR_MASK)) |
+                             // a string literal into a (const) plain char pointer
+                             ((uint32_t)(v.is_string != 0) & (uint32_t)(bf == NULL) &
+                              (uint32_t)((target & ~(BUSTER_FTYPE_CONST | BUSTER_FTYPE_VOL | BUSTER_FTYPE_PCONST)) == plain_char_ptr));
+    if (settled == 0)
+    {
+        fast_cc_check_static_initializer(cc, target, bf, &v);
+        if (cc->bailout) { return; }
+    }
     if (v.is_string)
     {
         const uint32_t so = fast_obj_add_string_lit(cc->obj, v.str_ptr, v.str_len);
@@ -1089,6 +1189,81 @@ static void fast_cc_write_static_scalar(FastCCState* cc, FastSecId sec, uint32_t
     {
         memcpy(buf->data + byte_off, &v.val, sz);
     }
+}
+
+// #3577: the bit of position IDX (a member's index or an element's) in an initializer frame's touched mask, 0 past 64. A
+// positional element whose bit a designator set before it overrides that initialization, the full pipeline's
+// -Winitializer-overrides: each initializer collects them, branch-free, and is refused at its end.
+#define BUSTER_FAST_INIT_BIT(idx) ((UINT64_C(1) << ((idx) & 63u)) & (UINT64_C(0) - (uint64_t)((idx) < 64u)))
+
+// #3577: where an initializer's frame has reached, in bits from its object's start: the next positional element's start
+// (an array's index times its element's size; a record's member, a bit-field's bit, past a flattened anonymous union's
+// siblings, or its end past the last one, or past a union's first). A designator whose target starts before it may
+// override what the frame initialized, the full pipeline's -Winitializer-overrides: refused, as an element a designator
+// skipped would be (out of order).
+static __attribute__((cold, noinline)) int64_t fast_cc_init_frame_reached(const FastCCState* cc, FastType type, uint32_t idx)
+{
+    int64_t reached = 0;
+    if (idx != 0 && ftype_is_array(type))
+    {
+        reached = (int64_t)idx * (int64_t)ftype_size(cc, cc->ctypes[type & BUSTER_FTYPE_CIDX_MASK].inner) * 8;
+    }
+    else if (idx != 0 && ftype_is_record(type))
+    {
+        const FastComplexType* rec = cc->ctypes + (type & BUSTER_FTYPE_CIDX_MASK);
+        // Past the siblings of a flattened anonymous union, which share its offset.
+        const FastMemberInfo* last = cc->member_info + rec->start + (idx - 1u);
+        while (idx < rec->count && last->bit_width == 0 && cc->member_info[rec->start + idx].bit_width == 0 &&
+               cc->member_info[rec->start + idx].byte_offset == last->byte_offset)
+        {
+            idx += 1u;
+        }
+        if (idx < rec->count && rec->kind == FCTYPE_STRUCT)
+        {
+            const FastMemberInfo* mi = cc->member_info + rec->start + idx;
+            reached = (int64_t)mi->byte_offset * 8 + (mi->bit_width != 0 ? mi->bit_offset : 0);
+        }
+        else
+        {
+            reached = (int64_t)rec->size * 8;
+        }
+    }
+    return reached;
+}
+
+// #3577: whether a designator whose first component is POSITION of an initializer frame of TYPE (a member's index or an
+// element's) overrides what the frame initialized, the full pipeline's -Winitializer-overrides (or "partially
+// overrides", where the position's subobject is a member's member): the frame's TOUCHED positions (a union's any, a
+// flattened anonymous union's siblings with its member), which it then marks; past the 64 positions a mask holds, a
+// target starting before what the frame reached (fast_cc_init_frame_reached at IDX, the frame's next positional element
+// before the designator) is refused, as out of order.
+static __attribute__((cold, noinline)) bool fast_cc_init_overrides(const FastCCState* cc, FastType type, int64_t base_off, uint32_t idx,
+                                                                    uint64_t* touched, uint32_t position, int64_t target)
+{
+    bool overrides = false;
+    if (position < 64u)
+    {
+        uint64_t bits = UINT64_C(1) << position;
+        bool shared = false;
+        if (ftype_is_record(type))
+        {
+            const FastComplexType* rec = cc->ctypes + (type & BUSTER_FTYPE_CIDX_MASK);
+            shared = rec->kind == FCTYPE_UNION;
+            const FastMemberInfo* mi = position < rec->count ? cc->member_info + rec->start + position : NULL;
+            for (uint32_t q = 0; mi != NULL && mi->bit_width == 0 && q < rec->count && q < 64u; q += 1)
+            {
+                const FastMemberInfo* other = cc->member_info + rec->start + q;
+                bits |= (uint64_t)(other->bit_width == 0 && other->byte_offset == mi->byte_offset) << q;
+            }
+        }
+        overrides = (*touched & bits) != 0 || (shared && *touched != 0);
+        *touched |= bits;
+    }
+    else
+    {
+        overrides = target < base_off * 8 + fast_cc_init_frame_reached(cc, type, idx);
+    }
+    return overrides;
 }
 
 // A literal followed by a comma is a complete initializer. Stop before expressions, designators,
@@ -1155,6 +1330,64 @@ static uint32_t fast_cc_init_int_run(FastCCState* cc, FastType type, uint32_t si
     return count;
 }
 
+// #3577: an incomplete array type T completed with COUNT elements, as a copy: T may be a typedef's, which its next object
+// completes again (`typedef int arr_t[]; arr_t a = {1, 2, 3}; arr_t b = {1};` made b three ints in main's direct path,
+// whose initializers wrote the count into the typedef's type).
+static __attribute__((noinline)) FastType fast_cc_completed_array(FastCCState* cc, FastType t, uint32_t count)
+{
+    const uint32_t cidx = t & BUSTER_FTYPE_CIDX_MASK;
+    const uint64_t size = (uint64_t)count * (uint64_t)ftype_size(cc, cc->ctypes[cidx].inner);
+    const uint32_t copy = size <= (uint64_t)INT32_MAX ? fast_cc_alloc_ctype(cc, FCTYPE_ARRAY) : 0u;
+    FastType result = t;
+    if (copy == 0)
+    {
+        fast_cc_bail(cc, "an incomplete array's completion");
+    }
+    else
+    {
+        cc->ctypes[copy] = cc->ctypes[cidx];
+        cc->ctypes[copy].count = count;
+        cc->ctypes[copy].size = (uint32_t)size;
+        cc->ctypes[copy].complete = 1u;
+        result = ftype_from_index(cc, copy) | (t & (BUSTER_FTYPE_CONST | BUSTER_FTYPE_VOL));
+    }
+    return result;
+}
+
+// #3577: the element count the braced initializer at POS gives an incomplete array of ELEM, counted on its tokens: its
+// top-level initializers, each one element's where the element is a scalar's, or where each is braced (or a string
+// literal, for an array of characters). A designator, an aggregate element's unbraced initializers (brace elision) and a
+// string literal for a character (which initializes the whole array) need the initializer's own walk: UINT32_MAX, and
+// the caller leaves. (Main's direct path counted the commas, so `int a[] = { [5] = 1 }` was one int and
+// `struct P a[] = { 1, 2, 3, 4 }` four records.) None, `{}`, is a zero-length array, the full pipeline's warning:
+// UINT32_MAX.
+static __attribute__((cold, noinline)) uint32_t fast_cc_incomplete_array_count(const FastCCState* cc, uint32_t pos, FastType elem)
+{
+    const bool aggregate = ftype_is_record(elem) || ftype_is_array(elem);
+    const bool characters = ftype_is_array(elem) && ftype_is_char_type(cc->ctypes[elem & BUSTER_FTYPE_CIDX_MASK].inner);
+    const bool character = ftype_is_char_type(elem);
+    uint32_t depth = 1u;
+    uint32_t elems = 0;
+    bool counted = true;
+    bool start = true;
+    for (uint32_t scan = pos + 1u; scan < cc->tcount && depth > 0 && counted; scan += 1u)
+    {
+        const uint8_t sk = cc->tk[scan];
+        if (depth == 1u && start && sk != FTOK_RBRACE)
+        {
+            // An initializer starts: a designator, or an aggregate's that isn't braced (nor a string), isn't counted.
+            counted = sk != FTOK_LBRACKET && sk != FTOK_DOT && (!aggregate || sk == FTOK_LBRACE || (characters && sk == FTOK_STR_LIT)) &&
+                      !(character && sk == FTOK_STR_LIT);
+            elems += 1u;
+            start = false;
+        }
+        if (sk == FTOK_LBRACE || sk == FTOK_LPAREN || sk == FTOK_LBRACKET) { depth += 1u; }
+        else if (sk == FTOK_RBRACE || sk == FTOK_RPAREN || sk == FTOK_RBRACKET) { depth -= 1u; }
+        else if (depth == 1u && sk == FTOK_COMMA) { start = true; }
+    }
+    return counted && depth == 0 && elems != 0 ? elems : UINT32_MAX;
+}
+
 // Iterative static/global initializer: allocates storage in `.rodata` / `.data.rel.ro` / `.data`,
 // sizes incomplete arrays (`int a[] = {...}` or `char s[] = "..."`), and emits bytes + relocations!
 static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, FastType* io_type, FastSecId sec, uint32_t align)
@@ -1167,8 +1400,10 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
         uint32_t idx;
         bool braced;
         bool is_incomplete_arr;
+        bool deep;          // the last designator reached into a member's member (#3577)
         uint32_t elem_size;
         uint32_t max_elem;
+        uint64_t touched;   // the positions (members, elements) under 64 initialized (#3577: fast_cc_init_overrides)
     };
 
     FastType root_t = *io_type;
@@ -1197,13 +1432,14 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
             if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
             if (fast_cc_peek(cc) == FTOK_RBRACE) { cc->pos += 1u; }
         }
-        FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
-        if (ar->count == UINT32_MAX)
+        if (cc->ctypes[root_t & BUSTER_FTYPE_CIDX_MASK].count == UINT32_MAX)
         {
-            ar->count = slen + 1u;
-            ar->size = slen + 1u;
-            ar->complete = 1u;
+            root_t = fast_cc_completed_array(cc, root_t, slen + 1u);
+            *io_type = root_t;
         }
+        const FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
+        // #3577: a string longer than its array (but for the null) is the full pipeline's -Wexcess-initializers.
+        if (slen > ar->size) { fast_cc_bail(cc, "a string initializer longer than its array"); return 0; }
         uint8_t* dst = NULL;
         const uint32_t off = fast_obj_alloc_section(cc->obj, sec, ar->size, align, &dst);
         if (dst != NULL)
@@ -1256,6 +1492,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
 
     SInitFrame st[32];
     uint32_t sp = 0;
+    uint64_t overridden = 0;
     cc->pos += 1u; // '{'
     st[sp++] = (SInitFrame){
         .type = root_t,
@@ -1287,8 +1524,12 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
             FastType cur_t = f->type;
             uint32_t cur_off = f->base_off;
             const FastMemberInfo* cur_bf = NULL;
+            const uint32_t idx_before = f->idx;
+            uint32_t position = UINT32_MAX;
+            uint32_t components = 0;
             while (fast_cc_peek(cc) == FTOK_DOT || fast_cc_peek(cc) == FTOK_LBRACKET)
             {
+                components += 1u;
                 if (fast_cc_peek(cc) == FTOK_DOT)
                 {
                     cc->pos += 1u;
@@ -1300,7 +1541,8 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                     if (mi == NULL) { fast_cc_bail(cc, "unknown static .designator"); break; }
                     if (cur_t == f->type)
                     {
-                        f->idx = (uint32_t)(mi - (cc->member_info + rec->start)) + 1u;
+                        position = (uint32_t)(mi - (cc->member_info + rec->start));
+                        f->idx = position + 1u;
                     }
                     cur_off += mi->byte_offset;
                     cur_t = mi->type;
@@ -1317,6 +1559,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                     const uint32_t esz = ftype_size(cc, ar->inner);
                     if (cur_t == f->type)
                     {
+                        position = (uint32_t)didx;
                         f->idx = (uint32_t)didx + 1u;
                         if (f->is_incomplete_arr && (uint32_t)didx + 1u > f->max_elem)
                         {
@@ -1331,8 +1574,18 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                     cur_bf = NULL;
                 }
             }
-            if (fast_cc_peek(cc) == FTOK_ASSIGN) { cc->pos += 1u; }
+            // #3577: a designator without its `=` is GNU's, the full pipeline's -Wgnu-designator.
+            if (fast_cc_peek(cc) != FTOK_ASSIGN) { fast_cc_bail(cc, "a designator without its ="); break; }
+            cc->pos += 1u;
             if (cc->bailout) { break; }
+            // #3577: a target the frame initialized (-Winitializer-overrides); and the positional elements after a designator
+            // into a member's member continue there, which this path doesn't follow.
+            if (fast_cc_init_overrides(cc, f->type, f->base_off, idx_before, &f->touched, position, (int64_t)cur_off * 8 + (cur_bf != NULL ? cur_bf->bit_offset : 0)))
+            {
+                fast_cc_bail(cc, "designator overriding what the initializer initialized");
+                break;
+            }
+            f->deep = components >= 2u;
             // Initialize target `cur_t` at `cur_off`
             if (ftype_is_scalar(cur_t))
             {
@@ -1350,6 +1603,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                 const char* sp_s = fast_cc_parse_string_lit(cc, &slen);
                 const uint32_t asz = ftype_size(cc, cur_t);
                 const uint32_t cpy = slen < asz ? slen : asz;
+                if (slen > asz) { fast_cc_bail(cc, "a string initializer longer than its array"); break; }
                 if (cur_off + cpy <= buf->cap) { memcpy(buf->data + cur_off, sp_s, cpy); }
                 if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
             }
@@ -1368,6 +1622,11 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
         }
 
         // Positional element of current frame `f`
+        if (f->deep)
+        {
+            fast_cc_bail(cc, "positional element after a designator into a member's member");
+            break;
+        }
         FastType elem_t = FTYPE_VOID;
         uint32_t elem_off = f->base_off;
         const FastMemberInfo* elem_bf = NULL;
@@ -1390,6 +1649,13 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                     const uint32_t count = fast_cc_init_int_run(cc, ar->inner, esz, buf, offset, ar->count - f->idx);
                     if (count != 0)
                     {
+                        // #3577: the run's elements are positional ones too, below 64 (BUSTER_FAST_INIT_BIT).
+                        const uint32_t run_end = f->idx + count;
+                        const uint32_t run_low = f->idx ^ ((f->idx ^ 64u) & (UINT32_C(0) - (uint32_t)(f->idx > 64u)));
+                        const uint32_t run_high = run_end ^ ((run_end ^ 64u) & (UINT32_C(0) - (uint32_t)(run_end > 64u)));
+                        const uint64_t run_bits = _bzhi_u64(UINT64_MAX, run_high) & ~_bzhi_u64(UINT64_MAX, run_low);
+                        overridden |= f->touched & run_bits;
+                        f->touched |= run_bits;
                         f->idx += count;
                         if (f->is_incomplete_arr && f->idx > f->max_elem)
                         {
@@ -1407,6 +1673,8 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                 }
                 elem_t = ar->inner;
                 elem_off = f->base_off + f->idx * esz;
+                overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                 f->idx += 1u;
             }
         }
@@ -1423,6 +1691,8 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                 elem_t = mi->type;
                 elem_off = f->base_off + mi->byte_offset;
                 elem_bf = mi->bit_width != 0 ? mi : NULL;
+                overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                 f->idx += 1u;
                 // Skip flattened anonymous-union siblings sharing the same byte_offset in a struct!
                 if (rec->kind == FCTYPE_STRUCT && mi->bit_width == 0)
@@ -1430,6 +1700,8 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                     while (f->idx < rec->count && cc->member_info[rec->start + f->idx].byte_offset == mi->byte_offset &&
                            cc->member_info[rec->start + f->idx].bit_width == 0)
                     {
+                        overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                        f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                         f->idx += 1u;
                     }
                 }
@@ -1455,6 +1727,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
             const char* sp_s = fast_cc_parse_string_lit(cc, &slen);
             const uint32_t asz = ftype_size(cc, elem_t);
             const uint32_t cpy = slen < asz ? slen : asz;
+            if (slen > asz) { fast_cc_bail(cc, "a string initializer longer than its array"); break; }
             if (elem_off + cpy <= buf->cap) { memcpy(buf->data + elem_off, sp_s, cpy); }
             if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
             continue;
@@ -1488,12 +1761,14 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
         }
     }
 
+    // #3577: a positional element over one a designator initialized (BUSTER_FAST_INIT_BIT).
+    if (overridden != 0)
+    {
+        fast_cc_bail(cc, "initializer overrides prior initialization");
+    }
     if (inc_arr && !cc->bailout)
     {
-        FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
-        ar->count = st[0].max_elem;
-        ar->size = st[0].max_elem * st[0].elem_size;
-        ar->complete = 1u;
+        *io_type = fast_cc_completed_array(cc, root_t, st[0].max_elem);
     }
     return root_off;
 }
@@ -1547,9 +1822,245 @@ struct FastVal
     uint8_t bf_width;
     uint8_t bf_unit;
     uint8_t bf_signed;
+    uint8_t marks;         // BUSTER_FVAL_MARK_*: what an operator on the value must refuse (#3577)
+    uint8_t op;            // the binary operator (FTOK_*) that made it, FTOK_BANG for `!`, or FTOK_STR_LIT or FTOK_CHAR_LIT for
+                           // a literal, outside parentheses (#3577)
+    uint8_t lasting;       // BUSTER_FVAL_LASTING_*: what a value keeps in any parentheses (#3577)
+    uint8_t seq_start;     // a variable by name (or in parentheses): its -Wunsequenced log entry + 1 (#3577); else 0
+    uint32_t seq_ident;    // ... and its name's identifier, the variable's identity in the log (where seq_start isn't 0)
 };
 
-_Static_assert(sizeof(FastVal) == 24u, "expression stack entry size");
+// The expression value with #3577's eight bytes (marks, op, lasting, seq_start, seq_ident) past the 24 of #3594.
+_Static_assert(sizeof(FastVal) == 32u, "expression stack entry size");
+
+// A value's first and last eight bytes as words (little-endian), for a hot push that writes an entry whole: the first
+// is its type, kind, reg (0), is_lvalue and the union's byte; the last its marks, op, lasting and seq_start (0) and
+// seq_ident. The second word is imm, the third sym_idx with the bit-field bytes (0).
+#define BUSTER_FVAL_WORD_HEAD(type, kind, lvalue, union_byte) \
+    ((uint64_t)(uint32_t)(type) | ((uint64_t)(uint8_t)(kind) << 32) | ((uint64_t)(uint8_t)(lvalue) << 48) | ((uint64_t)(uint8_t)(union_byte) << 56))
+#define BUSTER_FVAL_WORD_TAIL(marks, seq_ident) ((uint64_t)(uint8_t)(marks) | ((uint64_t)(uint32_t)(seq_ident) << 32))
+_Static_assert(offsetof(FastVal, kind) == 4u && offsetof(FastVal, reg) == 5u && offsetof(FastVal, is_lvalue) == 6u &&
+               offsetof(FastVal, is_func_sym) == 7u && offsetof(FastVal, imm) == 8u && offsetof(FastVal, sym_idx) == 16u &&
+               offsetof(FastVal, bf_off) == 20u && offsetof(FastVal, marks) == 24u && offsetof(FastVal, op) == 25u &&
+               offsetof(FastVal, seq_start) == 27u && offsetof(FastVal, seq_ident) == 28u,
+               "BUSTER_FVAL_WORD_*'s layout");
+
+// A value's lasting marks (#3577), kept in parentheses: a cast of a float to a wider floating type (-Wliteral-range),
+// and a string literal, in casts too (-Wstring-compare, whose literal the full pipeline finds through them).
+#define BUSTER_FVAL_LASTING_FLOAT_CAST 0x01u
+#define BUSTER_FVAL_LASTING_STRING     0x02u
+// A member below its type's alignment, or one of its members (`.`), whose address is -Waddress-of-packed-member.
+#define BUSTER_FVAL_LASTING_UNALIGNED  0x04u
+// sizeof's value of a pointer expression, which the memcpy family's size checks (-Wsizeof-pointer-memaccess).
+#define BUSTER_FVAL_LASTING_SIZEOF_POINTER 0x08u
+// A register's (or its spill's) sum of a known object's address and a constant (-Wfortify-source's destination): where it
+// points in addr_disp, which neither kind uses, a frame offset with sym_idx 0 or SYM_IDX's addend.
+#define BUSTER_FVAL_LASTING_ADDRESS 0x10u
+
+// A value's marks (#3577), lost where an operator makes a new value: a register variable, whose address is an error; a
+// function whose call's null constant arguments are -Wnonnull; the result of a call whose discarding is -Wunused-result;
+// a value with an effect (a call, an assignment, ++ or --, a cast to void), which a statement may discard quietly
+// (-Wunused-value); and a const or pure function, whose call has none.
+#define BUSTER_FVAL_MARK_REGISTER      0x01u
+#define BUSTER_FVAL_MARK_NONNULL       0x02u
+#define BUSTER_FVAL_MARK_UNUSED_RESULT 0x04u
+#define BUSTER_FVAL_MARK_EFFECT        0x08u
+#define BUSTER_FVAL_MARK_PURE          0x10u
+// A constant that isn't an integer literal (folded, a character, an enumerator, a cast): only the literal 0 is a null
+// pointer constant the full pipeline converts quietly (-Wnon-literal-null-conversion).
+#define BUSTER_FVAL_MARK_NONLITERAL    0x20u
+// A conditional with constant arms, which the implicit conversion of the value checks one by one
+// (fast_cc_constant_conversion_quiet): sym_idx says how imm holds them (FastArmsKind).
+#define BUSTER_FVAL_MARK_CONST_ARMS    0x40u
+// A constant `<<` result, which a boolean context finds always true (-Wtautological-constant-compare).
+#define BUSTER_FVAL_MARK_SHIFTED       0x80u
+// FARMS_BITS's flags above the bits: an arm is 0, an arm isn't, an arm isn't constant (a boolean context of a
+// conditional whose arms are all constant and all 0 or all not is -Wtautological-constant-compare's).
+#define BUSTER_FARMS_ZERO              0x10000u
+#define BUSTER_FARMS_NONZERO           0x20000u
+#define BUSTER_FARMS_VARIABLE          0x40000u
+// A FARMS_FLOAT arm's summary (fast_cc_float_summary): the double is 0 or 1 (a _Bool takes it quietly), and bit
+// BUSTER_FARMS_FLOAT_INT(bytes log2, signed) where it is integral and within that integer type's range.
+#define BUSTER_FARMS_FLOAT_BOOL        0x1u
+#define BUSTER_FARMS_FLOAT_INT(log2, sign) (UINT32_C(2) << ((log2) * 2u + (sign)))
+// A conditional's arms in its value's sym_idx (#3577): the kind (a FastArmsKind) in the low 2 bits, the description
+// (FastArm's value: FARMS_BITS' and FARMS_FLOATING's bits and flags, FARMS_FLOAT's summary, all under 30 bits) above,
+// where a spill, which writes the slot over imm's low half, leaves it.
+#define BUSTER_FARMS_PACK(kind, value) ((uint32_t)(kind) | ((uint32_t)(value) << 2))
+#define BUSTER_FARMS_KIND(v) ((v)->sym_idx & 3u)
+#define BUSTER_FARMS_VALUE(v) ((v)->sym_idx >> 2)
+
+// How a conditional's value (FVAL_REG or FVAL_XMM, whose sym_idx and imm are otherwise unused) holds its constant arms.
+typedef enum FastArmsKind
+{
+    FARMS_NONE = 0,
+    FARMS_BITS = 1,        // integer arms: imm's low byte the unsigned bits of the largest non-negative one, the next
+                           // byte the signed bits of the most negative one (fast_cc_int_bits_quiet)
+    FARMS_FLOAT = 2,       // one floating arm, its summary (BUSTER_FARMS_FLOAT_*: what its conversions keep)
+    FARMS_FLOATING = 3,    // floating arms, or a floating and integer ones (imm the integer ones' bits, as FARMS_BITS)
+} FastArmsKind;
+
+// One arm, for the conditional's completion: its kind (a FastArmsKind, FARMS_NONE for an arm that isn't constant) and
+// value, and whether an integer arm is other than the literal 0 (which a pointer conditional's arm may be alone).
+typedef struct FastArm FastArm;
+struct FastArm
+{
+    int64_t value;
+    uint8_t kind;
+    uint8_t not_null_literal;
+};
+
+// An integer constant's bits as FARMS_BITS holds them: the unsigned bits of a non-negative value (0 for 0), the signed
+// bits of a negative one (its sign included) in the next byte.
+static uint32_t fast_cc_value_bits(int64_t value, bool unsigned_value)
+{
+    uint32_t bits = 0;
+    if (value < 0 && !unsigned_value)
+    {
+        bits = (64u - (uint32_t)__builtin_clrsbll(value)) << 8;
+    }
+    else
+    {
+        bits = value == 0 ? 0u : 64u - (uint32_t)__builtin_clzll((uint64_t)value);
+    }
+    return bits;
+}
+
+// Whether integer constants of those bits (fast_cc_value_bits, merged by maximum) convert quietly to an integer of
+// `target` bits (a type's, or a bit-field's width), `dst_signed` or not, from a source type `src_signed` or not, as the
+// full pipeline's
+// -Wconstant-conversion decides: a non-negative value that needs fewer bits than the target, or as many where target
+// or source is unsigned (`unsigned char c = 255`, `int i = 4294967295u`); a negative one whose signed bits the target
+// holds (`unsigned char c = -1` too). Where the full pipeline is quieter still (a hex literal into a signed char),
+// this is stricter.
+static bool fast_cc_int_bits_quiet(uint32_t bits, uint32_t target, bool dst_signed, bool src_signed)
+{
+    const uint32_t positive = bits & 0xffu;
+    const uint32_t negative = (bits >> 8) & 0xffu;
+    return negative <= target && (positive < target || (positive == target && (!dst_signed || !src_signed)));
+}
+
+// #3577: an arm of a conditional, as fast_cc_constant_conversion_quiet will check it: an integer constant (a literal or
+// a fold) by its bits, a floating constant by its value, and a nested conditional by its own arms. A pointer constant
+// (`(char *)0`) is no integer arm.
+// #3577: a floating arm's summary (BUSTER_FARMS_FLOAT_*): what the constant conversion checks ask of its double.
+static uint32_t fast_cc_float_summary(double d)
+{
+    uint32_t summary = (uint32_t)((d == 0.0) | (d == 1.0)) * BUSTER_FARMS_FLOAT_BOOL;
+    for (uint32_t log2 = 0; log2 < 4u; log2 += 1)
+    {
+        const double half = (double)(UINT64_C(1) << ((8u << log2) - 1u));
+        for (uint32_t sign = 0; sign < 2u; sign += 1)
+        {
+            const double top = sign != 0 ? half : 2.0 * half;
+            const double bottom = sign != 0 ? -half : 0.0;
+            // The range first, then the integrality test's conversion, which the range makes defined.
+            const bool kept = d == d && d >= bottom && d < top && (d >= 0.0 ? (double)(uint64_t)d == d : (double)(int64_t)d == d);
+            summary |= (uint32_t)kept * BUSTER_FARMS_FLOAT_INT(log2, sign);
+        }
+    }
+    return summary;
+}
+
+static FastArm fast_cc_arm(const FastCCState* cc, const FastVal* v)
+{
+    FastArm arm = { 0 };
+    if (v->kind == FVAL_IMM && !ftype_is_ptr(v->type))
+    {
+        const bool unsigned64 = ftype_size(cc, v->type) == 8u && !ftype_is_signed(cc, v->type);
+        arm.kind = FARMS_BITS;
+        arm.value = (int64_t)(fast_cc_value_bits(v->imm, unsigned64) | (v->imm == 0 ? BUSTER_FARMS_ZERO : BUSTER_FARMS_NONZERO));
+        arm.not_null_literal = (uint8_t)(v->imm != 0 || (v->marks & BUSTER_FVAL_MARK_NONLITERAL) != 0);
+    }
+    else if (v->kind == FVAL_FIMM)
+    {
+        double d = 0.0;
+        if (ftype_is_f64(v->type)) { memcpy(&d, &v->imm, 8); }
+        else { float f = 0.0f; const uint32_t b = (uint32_t)v->imm; memcpy(&f, &b, 4); d = (double)f; }
+        arm.kind = FARMS_FLOAT;
+        arm.value = (int64_t)fast_cc_float_summary(d);
+        arm.not_null_literal = 1u;
+    }
+    else if ((v->marks & BUSTER_FVAL_MARK_CONST_ARMS) != 0)
+    {
+        arm.kind = (uint8_t)BUSTER_FARMS_KIND(v);
+        arm.value = (int64_t)BUSTER_FARMS_VALUE(v);
+        arm.not_null_literal = 1u;
+    }
+    return arm;
+}
+
+// Two arms' constants as one description: integer arms' bits by maximum, one arm's where the other isn't constant,
+// and floating where either is floating (with the integer arms' bits).
+static FastArm fast_cc_arms_merge(FastArm a, FastArm b)
+{
+    FastArm m = a.kind == FARMS_NONE ? b : a;
+    if (a.kind != FARMS_NONE && b.kind != FARMS_NONE)
+    {
+        const uint32_t abits = a.kind == FARMS_FLOAT ? 0u : (uint32_t)a.value;
+        const uint32_t bbits = b.kind == FARMS_FLOAT ? 0u : (uint32_t)b.value;
+        const uint32_t positive = (abits & 0xffu) > (bbits & 0xffu) ? (abits & 0xffu) : (bbits & 0xffu);
+        const uint32_t negative = (abits & 0xff00u) > (bbits & 0xff00u) ? (abits & 0xff00u) : (bbits & 0xff00u);
+        m.kind = a.kind == FARMS_BITS && b.kind == FARMS_BITS ? FARMS_BITS : FARMS_FLOATING;
+        m.value = (int64_t)(positive | negative | ((abits | bbits) & (BUSTER_FARMS_ZERO | BUSTER_FARMS_NONZERO | BUSTER_FARMS_VARIABLE)));
+        m.not_null_literal = (uint8_t)(a.not_null_literal | b.not_null_literal);
+    }
+    else if (m.kind != FARMS_NONE && m.kind != FARMS_FLOAT)
+    {
+        m.value |= (int64_t)BUSTER_FARMS_VARIABLE;
+    }
+    return m;
+}
+
+// Whether a value is a condition as the full pipeline takes one quietly (#3577): a scalar (anything else is its error),
+// and neither a constant `<<` nor a conditional of integer constant arms all non-zero or all zero, which it finds always
+// true or false (-Wtautological-constant-compare). For a condition, the operands of ! && || and conversion to _Bool.
+// And not an array, a function or an address, which is never null (-Wpointer-bool-conversion).
+// (A macro, not a function: every condition takes it.) 1 when quiet, else 0.
+// The conditions BUSTER_FAST_CONDITION_QUIET may question, by the value's kind, type and marks alone: a comparison's
+// flags never; a record, enum, array or function by value, void or a type this path doesn't support, an address, a
+// function, or a constant shift's or a conditional's constant arms' value may (#3577).
+#define BUSTER_FAST_CONDITION_SUSPECT(v) \
+    ((uint32_t)((v)->kind != FVAL_FLAGS) & \
+     ((uint32_t)(((v)->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT) | \
+      ((uint32_t)(((v)->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) & \
+       (uint32_t)((BUSTER_FAST_OTHER_SCALARS >> ((v)->type & BUSTER_FTYPE_SCALAR_MASK)) & 1u)) | \
+      (uint32_t)((v)->kind == FVAL_LOCAL_ADDR) | (uint32_t)((v)->kind == FVAL_GLOBAL_ADDR) | (uint32_t)((v)->kind == FVAL_GLOBAL) | \
+      (uint32_t)(((v)->marks & (BUSTER_FVAL_MARK_SHIFTED | BUSTER_FVAL_MARK_CONST_ARMS)) != 0)))
+// The scalar kinds of no operand class (void, the unsupported ones), a bit each.
+#define BUSTER_FAST_OTHER_SCALARS ((1u << FTYPE_VOID) | (1u << FTYPE_UNSUP16) | (1u << FTYPE_UNSUP2))
+// (A comparison's flags, 58% of sqlite3.c's 20,000 conditions, are tested first, alone.)
+#define BUSTER_FAST_CONDITION_QUIET(cc, v) \
+    ((v)->kind == FVAL_FLAGS || BUSTER_FAST_CONDITION_SUSPECT(v) == 0 || BUSTER_FAST_CONDITION_EXACT(cc, v))
+#define BUSTER_FAST_CONDITION_EXACT(cc, v) \
+    ((((uint32_t)((v)->kind != FVAL_FLAGS) & (uint32_t)(BUSTER_FAST_OPERAND_CLASS(cc, (v)->type) == BUSTER_FOPERAND_OTHER)) | \
+      ((uint32_t)((v)->type >> 31) & (uint32_t)(((v)->type & BUSTER_FTYPE_PTR_MASK) == 0) & \
+       ((uint32_t)((cc)->ctypes[(v)->type & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL((v)->type)].kind == FCTYPE_ARRAY) | \
+        (uint32_t)((cc)->ctypes[(v)->type & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL((v)->type)].kind == FCTYPE_FUNC))) | \
+      (uint32_t)((v)->kind == FVAL_LOCAL_ADDR) | (uint32_t)((v)->kind == FVAL_GLOBAL_ADDR) | \
+      ((uint32_t)((v)->kind == FVAL_GLOBAL) & (uint32_t)((v)->is_func_sym != 0)) | \
+      ((uint32_t)((v)->kind == FVAL_IMM) & (uint32_t)(((v)->marks & BUSTER_FVAL_MARK_SHIFTED) != 0)) | \
+      ((uint32_t)(((v)->marks & BUSTER_FVAL_MARK_CONST_ARMS) != 0) & (uint32_t)(BUSTER_FARMS_KIND(v) == FARMS_BITS) & \
+       (uint32_t)((BUSTER_FARMS_VALUE(v) & BUSTER_FARMS_VARIABLE) == 0) & \
+       (uint32_t)((BUSTER_FARMS_VALUE(v) & (BUSTER_FARMS_ZERO | BUSTER_FARMS_NONZERO)) != (BUSTER_FARMS_ZERO | BUSTER_FARMS_NONZERO)))) == 0)
+
+// Whether a function symbol is one of the library's builtins that are const or pure (#3577: `abs`, `isalpha`), whose
+// discarded call the full pipeline warns of as of an attributed one: asked of the driver at the symbol's first use by
+// name (its push_marks are BUSTER_FSYM_PUSH_UNASKED until then), and only of a function with external linkage. Its
+// push marks, then, PURE or none.
+static __attribute__((cold, noinline)) uint8_t fast_cc_library_pure_query(FastCCState* cc, FastSym* sym)
+{
+    const FastIdentEntry* e = cc->pp->idents.entries + sym->ident_id;
+    const bool external = sym->storage != 1u && sym->storage != 4u;
+    const uint8_t* name = (const uint8_t*)(cc->pp->idents.strings + e->str_offset);
+    const bool pure = external && cc->pp->feature_query != NULL &&
+                      cc->pp->feature_query(cc->pp->feature_context, C_DIRECT_QUERY_PURE_LIBRARY_FUNCTION, name, e->length) != 0;
+    const bool checked = external && e->pp_kw >= FPP_KW_MEMACCESS_FUNCTION && e->pp_kw <= FPP_KW_FABS_FUNCTION;
+    sym->push_marks = (uint8_t)((pure ? BUSTER_FSYM_PUSH_PURE : 0u) | (checked ? BUSTER_FSYM_PUSH_CHECKED : 0u));
+    return sym->push_marks;
+}
+_Static_assert(BUSTER_FSYM_PUSH_PURE == BUSTER_FVAL_MARK_PURE && BUSTER_FSYM_PUSH_NONLITERAL == BUSTER_FVAL_MARK_NONLITERAL &&
+               BUSTER_FSYM_PUSH_CHECKED == BUSTER_FVAL_MARK_NONNULL, "a symbol's push marks are its value's");
 
 // Scratch register allocation order (RAX, R10, R11 first so ABI arg regs stay free longer!)
 static const uint8_t fast_gp_pool[9] = {
@@ -1560,14 +2071,162 @@ typedef struct FastExprCtx FastExprCtx;
 struct FastExprCtx
 {
     FastCCState* cc;
-    FastVal vstack[128];
+    // The scalars first, apart from the stacks (#3577): a 32-byte value makes vstack 4096 bytes, so a scalar right past
+    // it would share its 4 KiB offset with vstack[0], the entry every expression writes and reads (4K aliasing).
     uint32_t vsp;
-    FastVal call_args[128];
-    uint32_t arg_sp;
-    uint16_t gp_used;      // bitmask of live GP scratch regs in vstack/call_args
+    uint16_t gp_used;      // bitmask of live GP scratch regs in vstack
     uint8_t xmm_used;      // bitmask of live XMM scratch regs (0..7)
-    uint8_t eval_only;     // >0 inside sizeof(expr) / _Alignof(expr) / _Generic ctrl: emit ZERO machine code!
+    uint8_t eval_only;     // >0 inside sizeof(expr) / _Alignof(expr) / _Generic ctrl, a dead branch (#3592) or a compile
+                           // again for the log (#3577): emit ZERO machine code!
+    uint8_t unevaluated;   // #3577: >0 inside sizeof(expr) / _Alignof(expr) / _Generic ctrl alone, C's unevaluated operands
+    uint8_t seq_logging;   // #3577: 1 where the -Wunsequenced log below is kept (a compile again); 0 where seq_mod_* count
+    // #3577: without the log, the variables the expression's ++, -- and assignments modify (each lvalue's seq_ident; the
+    // first four), how many, and the expression's first token: the end decides from them, and compiles again for the log
+    // where they leave it open (fast_cc_sequenced_lazy).
+    uint32_t seq_mod_count;
+    uint32_t seq_mod_ids[4];
+    uint32_t seq_start_pos;
+    uint32_t cmp_pos;      // #3577: the token of the binary operator fval_emit_binary emits (fast_cc_comparison_reported)
+    uint32_t call_open;    // #3577: the `(` of the call fval_emit_call emits (its arguments' tokens for -Wfortify-source)
+    // #3577: for -Wunsequenced, a log of the variables the expression names where evaluated and the lvalues its ++, --
+    // and assignments modify, in order, by identity (BUSTER_FSEQ_*; 0 for an lvalue that isn't a variable by name): bit i
+    // of seq_mods marks entry i a modification, seq_own its own operands' first entry + 1 (0 unknown). A variable modified
+    // and then named or modified again, or named earlier than its modification's operands, sets seq_hit (by the modified
+    // variables' hash bits, seq_bloom), and only then does the end of the expression look at the log, with the regions
+    // that sequence points order (`&&`, `||`, `,`, `?:`: entries [lo, mid) before [mid, hi), each + 1).
+    uint32_t seq_count;
+    uint32_t seq_hit;
+    uint32_t seq_regions;
+    uint64_t seq_mods;
+    uint64_t seq_bloom;
+    FastVal vstack[128];
+    uint64_t seq_log[64];
+    uint8_t seq_own[64];
+    uint8_t seq_region[32][3];
 };
+
+// #3577: a variable's identity for -Wunsequenced is its name's identifier (never 0): an expression declares nothing, so
+// a name is one variable throughout it. An lvalue has one where it is a local or global variable by name (seq_start
+// isn't 0, and its seq_ident is the name's); any other lvalue has none (0).
+#define BUSTER_FSEQ_LVALUE(v) \
+    ((uint64_t)(v)->seq_ident & \
+     (UINT64_C(0) - (uint64_t)((uint32_t)((v)->seq_start != 0) & ((uint32_t)((v)->kind == FVAL_LOCAL) | (uint32_t)((v)->kind == FVAL_GLOBAL)))))
+// An identity's hash bit in seq_bloom.
+#define BUSTER_FSEQ_BIT(identity) (UINT64_C(1) << ((uint64_t)(identity) * UINT64_C(0x9E3779B97F4A7C15) >> 58))
+// Log a naming where LOGGED (0 or 1: a use of a variable by name where evaluated); a modified variable's sets seq_hit.
+// Every name takes one: the hash is taken only once something was modified (seq_bloom), which few names see, behind a
+// branch.
+#define BUSTER_FSEQ_NAME(ex, identity, logged) \
+    if (__builtin_expect((ex)->seq_logging != 0, 0)) \
+    { \
+        fast_cc_seq_name(ex, identity, logged); \
+    }
+// A region's bounds, which the end's check reads when unknown ones (0) aren't counted.
+#define BUSTER_FSEQ_REGION(ex, lo, mid, hi) \
+    if (__builtin_expect((ex)->seq_logging != 0, 0)) \
+    { \
+        fast_cc_seq_region(ex, lo, mid, hi); \
+    }
+// The log's count + 1 as a seq_start or an operator's seq_mid, in the byte it fits: past 253 entries the positions
+// wrap, and the expression's end refuses a log that long once anything in it was modified (seq_bloom), as the log's
+// 64 entries would anyway. Every use of a variable and every operator takes one.
+#define BUSTER_FSEQ_MARK(ex) ((uint8_t)((ex)->seq_count + 1u))
+// Where an operator about to be pushed on OPS (OSP of them) has its left operand begin: the operator below's seq_mid, or
+// the expression's first entry; 0 where that operator doesn't keep it.
+// Both where the expression keeps the log (LOGGING, a constant of fast_cc_expr_compile); 0 where it doesn't.
+#define BUSTER_FSEQ_MARK_IF(ex, logging) ((uint8_t)((logging) ? BUSTER_FSEQ_MARK(ex) : 0u))
+#define BUSTER_FSEQ_BELOW_IF(ops, osp, logging) ((uint8_t)((logging) ? BUSTER_FSEQ_BELOW(ops, osp) : 0u))
+#define BUSTER_FSEQ_BELOW(ops, osp) \
+    ((uint8_t)(((uint32_t)(ops)[(osp) - (uint32_t)((osp) != 0)].seq_mid & (UINT32_C(0) - (uint32_t)((osp) != 0))) | (uint32_t)((osp) == 0)))
+
+// #3577: the seq_ident of the value a modification of a variable by name makes (no name's identifier): where it is the
+// expression's value, the modification is its last operator (BUSTER_FSEQ_RESULT of the lvalue, taken before).
+#define BUSTER_FSEQ_MODIFIED UINT32_C(0xffffffff)
+#define BUSTER_FSEQ_RESULT(v) (BUSTER_FSEQ_MODIFIED & (UINT32_C(0) - (uint32_t)((v)->seq_ident != 0)))
+
+// #3577: the -Wunsequenced log's work where it is kept (a compile again, seq_logging), out of the hot functions that
+// test for it: a name's entry (BUSTER_FSEQ_NAME), a sequence point's region (BUSTER_FSEQ_REGION), a modification
+// (BUSTER_FSEQ_MODIFY).
+static __attribute__((cold, noinline)) void fast_cc_seq_name(FastExprCtx* ex, uint32_t identity, uint32_t logged)
+{
+    ex->seq_log[ex->seq_count & 63u] = identity;
+    if (ex->seq_bloom != 0)
+    {
+        ex->seq_hit |= (uint32_t)((ex->seq_bloom & BUSTER_FSEQ_BIT(identity)) != 0) & logged;
+    }
+    ex->seq_count += logged;
+}
+
+static __attribute__((cold, noinline)) void fast_cc_seq_region(FastExprCtx* ex, uint32_t lo, uint32_t mid, uint32_t hi)
+{
+    ex->seq_region[ex->seq_regions & 31u][0] = (uint8_t)lo;
+    ex->seq_region[ex->seq_regions & 31u][1] = (uint8_t)mid;
+    ex->seq_region[ex->seq_regions & 31u][2] = (uint8_t)hi;
+    ex->seq_regions += (uint32_t)(lo != 0) & (uint32_t)(mid != 0);
+}
+
+// A use by name pushed (PUSHED) on the stack: a variable's (VARIABLE) entry + 1 as its seq_start, and its entry where
+// evaluated.
+static __attribute__((cold, noinline)) void fast_cc_seq_push(FastExprCtx* ex, uint32_t identity, uint32_t variable, uint32_t pushed)
+{
+    if (pushed != 0)
+    {
+        ex->vstack[ex->vsp - 1u].seq_start = (uint8_t)(BUSTER_FSEQ_MARK(ex) & (UINT32_C(0) - variable));
+    }
+    fast_cc_seq_name(ex, identity, variable & (uint32_t)(ex->unevaluated == 0));
+}
+
+// A modification of lvalue V, whose own operands' entries start at V's seq_start: a variable modified before (its hash
+// bit), named before its operands (the vector compare looks at the log's first 16; more of them set it too) sets
+// seq_hit. A variable by name alone (an lvalue an operator made, an element or a member, has no known start), as the
+// full pipeline follows. The search runs where there is something to find.
+static __attribute__((cold, noinline)) void fast_cc_seq_modify(FastExprCtx* ex, const FastVal* v)
+{
+    const uint64_t seq_identity = BUSTER_FSEQ_LVALUE(v);
+    const uint32_t seq_tracked = (uint32_t)(seq_identity != 0);
+    const uint32_t seq_count = ex->seq_count;
+    const uint32_t seq_own = v->seq_start;
+    // Earlier entries outside the operands: [0, own - 1), or all of them where the start isn't known.
+    const uint32_t seq_earlier = seq_own - 1u + (uint32_t)(seq_own == 0) * (seq_count + 1u);
+    // Only where there is something to find: entries before the operands, or an earlier modification (an assignment's
+    // lvalue is most often the expression's first name, and its first modification).
+    if (seq_tracked != 0)
+    {
+        if (((uint32_t)(seq_earlier != 0) | (uint32_t)(ex->seq_bloom != 0)) != 0)
+        {
+            const uint32_t seq_looked = seq_count ^ ((seq_earlier ^ seq_count) & (UINT32_C(0) - (uint32_t)(seq_earlier < seq_count)));
+            const uint32_t seq_within = seq_looked ^ ((seq_looked ^ 16u) & (UINT32_C(0) - (uint32_t)(seq_looked > 16u)));
+            const __mmask16 seq_valid = (__mmask16)_bzhi_u32(0xffffu, seq_within);
+            const __m512i seq_wanted = _mm512_set1_epi64((long long)seq_identity);
+            const __mmask8 seq_low = _mm512_mask_cmpeq_epi64_mask((__mmask8)seq_valid, _mm512_maskz_loadu_epi64((__mmask8)seq_valid, ex->seq_log), seq_wanted);
+            const __mmask8 seq_high = _mm512_mask_cmpeq_epi64_mask((__mmask8)(seq_valid >> 8),
+                                                                   _mm512_maskz_loadu_epi64((__mmask8)(seq_valid >> 8), ex->seq_log + 8), seq_wanted);
+            const uint32_t seq_named_before = (uint32_t)((seq_low | seq_high) != 0);
+            const uint32_t seq_modified_before = (uint32_t)((ex->seq_bloom & BUSTER_FSEQ_BIT(seq_identity)) != 0);
+            ex->seq_hit |= seq_named_before | seq_modified_before | (uint32_t)(seq_looked > 16u);
+        }
+        ex->seq_bloom |= BUSTER_FSEQ_BIT(seq_identity);
+    }
+    ex->seq_log[seq_count & 63u] = seq_identity;
+    ex->seq_own[seq_count & 63u] = (uint8_t)seq_own;
+    ex->seq_mods |= (uint64_t)seq_tracked << (seq_count & 63u);
+    ex->seq_count = seq_count + 1u;
+}
+
+// A modification of lvalue V: without the log, V's seq_ident counted where it isn't 0 (a variable by name's identifier;
+// a member and the comma's value clear it, as they clear seq_start, and any other lvalue with one only makes the end
+// look closer); with it, fast_cc_seq_modify. A block, not a function, whose counter would tick at each.
+#define BUSTER_FSEQ_MODIFY(ex, v) \
+    if (__builtin_expect((ex)->seq_logging == 0, 1)) \
+    { \
+        const uint32_t seq_plain = (v)->seq_ident; \
+        (ex)->seq_mod_ids[(ex)->seq_mod_count & 3u] = seq_plain; \
+        (ex)->seq_mod_count += (uint32_t)(seq_plain != 0); \
+    } \
+    else \
+    { \
+        fast_cc_seq_modify(ex, v); \
+    }
 
 static inline bool fval_holds_gp(const FastVal* v)
 {
@@ -1655,7 +2314,7 @@ static inline __attribute__((always_inline)) void fval_spill_one(FastExprCtx* ex
     if (spills != 0) { fval_spill_one_full(ex, v); }
 }
 
-// Materialize any FVAL_FLAGS currently on vstack/call_args before emitting an instruction that modifies EFLAGS!
+// Materialize any FVAL_FLAGS currently on vstack before emitting an instruction that modifies EFLAGS!
 static __attribute__((noinline, cold)) void fval_flush_flags_full(FastExprCtx* ex)
 {
     for (uint32_t i = 0; i < ex->vsp; i += 1)
@@ -1679,10 +2338,6 @@ static __attribute__((noinline, cold)) void fval_flush_flags_full(FastExprCtx* e
             }
         }
     }
-    for (uint32_t i = 0; i < ex->arg_sp; i += 1)
-    {
-        if (ex->call_args[i].kind == FVAL_FLAGS) { fval_spill_one(ex, &ex->call_args[i]); }
-    }
 }
 
 // Whether any value below holds the flags, as a leaf scan: sqlite3.c asks 30,000 times and finds flags 7 times. The
@@ -1691,7 +2346,6 @@ static __attribute__((noinline)) void fval_flush_flags(FastExprCtx* ex)
 {
     uint32_t found = 0;
     for (uint32_t i = 0; i < ex->vsp; i += 1) { found |= (uint32_t)(ex->vstack[i].kind == FVAL_FLAGS); }
-    for (uint32_t i = 0; i < ex->arg_sp; i += 1) { found |= (uint32_t)(ex->call_args[i].kind == FVAL_FLAGS); }
     if ((found & (uint32_t)(ex->eval_only == 0)) != 0) { fval_flush_flags_full(ex); }
 }
 
@@ -1720,15 +2374,13 @@ static inline void fval_materialize_flags(FastExprCtx* ex, FastVal* v)
     }
 }
 
-// Spill all live registers in vstack[0..v_limit) and call_args[0..a_limit)
-static void fval_spill_all(FastExprCtx* ex, uint32_t v_limit, uint32_t a_limit)
+// Spill all live registers in vstack[0..v_limit)
+static void fval_spill_all(FastExprCtx* ex, uint32_t v_limit)
 {
     if (ex->eval_only > 0) { return; }
     // Flush flags first while EFLAGS is still valid!
     for (uint32_t i = 0; i < v_limit; i += 1) { if (ex->vstack[i].kind == FVAL_FLAGS) { fval_spill_one(ex, &ex->vstack[i]); } }
-    for (uint32_t i = 0; i < a_limit; i += 1) { if (ex->call_args[i].kind == FVAL_FLAGS) { fval_spill_one(ex, &ex->call_args[i]); } }
     for (uint32_t i = 0; i < v_limit; i += 1) { fval_spill_one(ex, &ex->vstack[i]); }
-    for (uint32_t i = 0; i < a_limit; i += 1) { fval_spill_one(ex, &ex->call_args[i]); }
 }
 
 // Allocate a free GP scratch register (spilling oldest live GP if all 9 are occupied).
@@ -1746,17 +2398,7 @@ static __attribute__((noinline)) uint32_t fval_alloc_gp_avoid_full(FastExprCtx* 
             return r;
         }
     }
-    // Spill oldest GP holder not in avoid_mask from call_args or vstack
-    for (uint32_t i = 0; i < ex->arg_sp; i += 1)
-    {
-        if (fval_holds_gp(&ex->call_args[i]) && (avoid_mask & (1u << ex->call_args[i].reg)) == 0)
-        {
-            const uint32_t r = ex->call_args[i].reg;
-            fval_spill_one(ex, &ex->call_args[i]);
-            ex->gp_used |= (uint16_t)(1u << r);
-            return r;
-        }
-    }
+    // Spill oldest GP holder not in avoid_mask from vstack
     for (uint32_t i = 0; i < ex->vsp; i += 1)
     {
         if (fval_holds_gp(&ex->vstack[i]) && (avoid_mask & (1u << ex->vstack[i].reg)) == 0)
@@ -1768,7 +2410,7 @@ static __attribute__((noinline)) uint32_t fval_alloc_gp_avoid_full(FastExprCtx* 
         }
     }
     // Fallback: spill all and pick first non-avoided reg
-    fval_spill_all(ex, ex->vsp, ex->arg_sp);
+    fval_spill_all(ex, ex->vsp);
     for (uint32_t i = 0; i < 9u; i += 1)
     {
         const uint32_t r = fast_gp_pool[i];
@@ -1810,16 +2452,6 @@ static uint32_t fval_alloc_xmm(FastExprCtx* ex)
     {
         if ((ex->xmm_used & (1u << r)) == 0)
         {
-            ex->xmm_used |= (uint8_t)(1u << r);
-            return r;
-        }
-    }
-    for (uint32_t i = 0; i < ex->arg_sp; i += 1)
-    {
-        if (ex->call_args[i].kind == FVAL_XMM)
-        {
-            const uint32_t r = ex->call_args[i].reg;
-            fval_spill_one(ex, &ex->call_args[i]);
             ex->xmm_used |= (uint8_t)(1u << r);
             return r;
         }
@@ -2166,6 +2798,34 @@ static uint32_t fval_to_xmm(FastExprCtx* ex, FastVal* v, bool consume)
     return fval_alloc_xmm(ex);
 }
 
+// #3577: whether a checked inline body (fast_cc_check_body, whose code is dropped) takes A and B, each a long double
+// (BUSTER_FTYPE_LONG_DOUBLE, whatever its qualifiers), without code. The operations that ask are a copy to its own type
+// (an initializer, an assignment, a return, a call's argument for a long double parameter), a cast to void and a
+// comparison of two; the full pipeline's rules for them are a double's, and none has a default warning for a long
+// double that a double lacks. A long double anywhere else leaves, as before, and so does any body that is emitted (musl's
+// <math.h> defines __islessl and its kin, and its libm.h fp_barrierl and fp_force_evall, which a unit rarely calls).
+static __attribute__((cold, noinline)) bool fast_cc_checked_long_double(const FastCCState* cc, FastType a, FastType b)
+{
+    return cc->checking != 0 && BUSTER_FTYPE_UNQUAL(a) == BUSTER_FTYPE_LONG_DOUBLE && BUSTER_FTYPE_UNQUAL(b) == BUSTER_FTYPE_LONG_DOUBLE;
+}
+
+// #3577: a checked inline body's long double converts to its own type, or to void (a cast's), without code.
+static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_convert(FastExprCtx* ex, FastVal* v, FastType dst_type)
+{
+    const bool to_void = ftype_is_void(dst_type);
+    const bool taken = fast_cc_checked_long_double(ex->cc, v->type, to_void ? v->type : dst_type);
+    if (taken && to_void)
+    {
+        fval_release(ex, v);
+        *v = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
+    }
+    else if (taken)
+    {
+        v->type = ftype_unqual(dst_type);
+    }
+    return taken;
+}
+
 // Convert FastVal `*v` in-place to `dst_type` (all scalar/pointer/float/bool C17 conversions, including exact u64<->fp!).
 // A path that sets the flags materializes any comparison still in them first (fval_flush_flags): a call converts its
 // arguments in order, and its last one can be a comparison, whose value the flags still hold (#3659).
@@ -2175,7 +2835,7 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
     FastObj* obj = cc->obj;
     if (ftype_is_unsupported(dst_type) || ftype_is_unsupported(v->type))
     {
-        fast_cc_bail(cc, "unsupported scalar conversion");
+        if (!fast_cc_checked_long_double_convert(ex, v, dst_type)) { fast_cc_bail(cc, "unsupported scalar conversion"); }
         return;
     }
     if (ftype_is_void(dst_type))
@@ -2187,7 +2847,7 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
     const FastType src_t = ftype_decay(cc, v->type);
     const FastType dst_u = ftype_unqual(dst_type);
     const FastType src_u = ftype_unqual(src_t);
-    if (src_u == dst_u && !ftype_is_array(v->type) && !ftype_is_func(v->type))
+    if (BUSTER_FTYPE_CODEGEN(src_u) == BUSTER_FTYPE_CODEGEN(dst_u) && !ftype_is_array(v->type) && !ftype_is_func(v->type))
     {
         v->type = dst_u;
         return;
@@ -2311,10 +2971,19 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
             v->type = dst_u;
             return;
         }
-        uint64_t x = dst_bool ? (d != 0.0 ? 1u : 0u) :
-                     ftype_is_signed(cc, dst_u) ? (uint64_t)(int64_t)d : (uint64_t)d;
+        // #3577: a value the integer type can't hold (NaN, or out of int64_t's or uint64_t's range) is undefined, here as
+        // in the program; the full pipeline compiles it its own way, so the unit leaves (as fsc_convert's fold does).
+        const bool to_signed = ftype_is_signed(cc, dst_u);
+        const bool in_range = d == d && (to_signed ? (d >= -9223372036854775808.0 && d < 9223372036854775808.0) :
+                                                     (d > -1.0 && d < 18446744073709551616.0));
+        if (!dst_bool && !in_range)
+        {
+            fast_cc_bail(cc, "floating constant out of the integer's range");
+            d = 0.0;
+        }
+        uint64_t x = dst_bool ? (d != 0.0 ? 1u : 0u) : to_signed ? (uint64_t)(int64_t)d : (uint64_t)d;
         const uint32_t dsz = ftype_size(cc, dst_u);
-        const bool dsgn = ftype_is_signed(cc, dst_u);
+        const bool dsgn = to_signed;
         if (!dst_bool && dsz == 1u) { x = dsgn ? (uint64_t)(int64_t)(int8_t)x : (x & 0xffu); }
         else if (!dst_bool && dsz == 2u) { x = dsgn ? (uint64_t)(int64_t)(int16_t)x : (x & 0xffffu); }
         else if (!dst_bool && dsz == 4u) { x = dsgn ? (uint64_t)(int64_t)(int32_t)x : (x & 0xffffffffu); }
@@ -2508,6 +3177,107 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
     *v = (FastVal){ .type = dst_u, .kind = FVAL_REG, .reg = (uint8_t)g };
 }
 
+// Whether an implicit conversion of a constant, or of a conditional with constant arms, to dst_t keeps the value as the
+// full pipeline sees it (#3577): -Wconstant-conversion, -Wliteral-conversion (a floating constant made integral or
+// out of range, made bool other than from 0 or 1), -Wimplicit-const-int-float-conversion (an integer the floating
+// type doesn't hold exactly), -Wnon-literal-null-conversion (a null pointer from anything but the literal 0) and
+// -Wimplicit-enum-enum-cast (an enumerator of another enum). Cold: constants alone come here.
+static __attribute__((cold, noinline)) bool fast_cc_constant_conversion_quiet(FastCCState* cc, FastType dst_t, const FastVal* src)
+{
+    const FastType dt = ftype_unqual(dst_t);
+    const FastType st = ftype_decay(cc, src->type);
+    // The constant as integer bits (an integer constant, or a conditional's integer arms), or a floating value (a
+    // floating constant, or a conditional's one floating arm), or floating arms with integer bits (FARMS_FLOATING).
+    const FastArmsKind arms = src->kind == FVAL_IMM || src->kind == FVAL_FIMM ? FARMS_NONE : (FastArmsKind)BUSTER_FARMS_KIND(src);
+    const bool unsigned64 = src->kind == FVAL_IMM && ftype_size(cc, st) == 8u && !ftype_is_signed(cc, st);
+    const bool is_int = src->kind == FVAL_IMM || arms == FARMS_BITS;
+    const bool is_float = src->kind == FVAL_FIMM || arms == FARMS_FLOAT;
+    const uint32_t bits = src->kind == FVAL_IMM ? fast_cc_value_bits(src->imm, unsigned64) : BUSTER_FARMS_VALUE(src);
+    // A floating constant's summary, or a floating arm's (BUSTER_FARMS_FLOAT_*).
+    uint32_t fsummary = 0;
+    if (src->kind == FVAL_FIMM)
+    {
+        double fvalue = 0.0;
+        if (ftype_is_f64(st)) { memcpy(&fvalue, &src->imm, 8); }
+        else { float f = 0.0f; const uint32_t b = (uint32_t)src->imm; memcpy(&f, &b, 4); fvalue = (double)f; }
+        fsummary = fast_cc_float_summary(fvalue);
+    }
+    else if (arms == FARMS_FLOAT)
+    {
+        fsummary = BUSTER_FARMS_VALUE(src);
+    }
+    bool quiet = false;
+    if (!is_int && !is_float && arms != FARMS_FLOATING)
+    {
+        quiet = false;  // a value with no constant description: nothing this check knows
+    }
+    else if (ftype_is_ptr(dt))
+    {
+        // A null pointer constant from an integer: the literal 0 alone (`1-1`, '\0', an enumerator, a cast warn).
+        quiet = src->kind != FVAL_IMM || !ftype_is_int(st) || src->imm != 0 || (src->marks & BUSTER_FVAL_MARK_NONLITERAL) == 0;
+        quiet = quiet && arms == FARMS_NONE;
+    }
+    else if (ftype_is_complex(dt))
+    {
+        // An enum: an enumerator of another enum is -Wimplicit-enum-enum-cast; a conditional's arms aren't tracked.
+        const uint32_t cidx = dt & BUSTER_FTYPE_CIDX_MASK;
+        quiet = arms == FARMS_NONE && cc->ctypes[cidx].kind == FCTYPE_ENUM && ftype_ptr_depth(dt) == 0 &&
+                (src->kind != FVAL_IMM || src->sym_idx == 0 || src->sym_idx == cidx);
+    }
+    else if (ftype_is_bool(dt))
+    {
+        // An integer is quiet; a floating constant other than 0 or 1, or floating arms, are not.
+        quiet = is_int || (is_float && (fsummary & BUSTER_FARMS_FLOAT_BOOL) != 0);
+    }
+    else if (ftype_is_float(dt))
+    {
+        // An integer the floating type doesn't hold exactly (its bits past the significand's); a floating constant
+        // converts quietly, even out of range.
+        const uint32_t significand = ftype_is_f64(dt) ? 53u : 24u;
+        quiet = is_float || ((bits & 0xffu) <= significand && ((bits >> 8) & 0xffu) <= significand + 1u);
+    }
+    else if (ftype_is_int(dt) && !ftype_is_i128(dt) && !ftype_is_i128(st))
+    {
+        const uint32_t width = ftype_size(cc, dt);
+        const bool dst_signed = ftype_is_signed(cc, dt);
+        if (is_int)
+        {
+            // The source's signedness is the constant's type's, or the conditional's (to which its arms convert).
+            quiet = fast_cc_int_bits_quiet(bits, width * 8u, dst_signed, ftype_is_signed(cc, st));
+        }
+        else if (is_float)
+        {
+            // A floating constant: integral and within the target's range (C's, without the unsigned leeway).
+            const uint32_t log2 = (uint32_t)__builtin_ctz(width);
+            quiet = (fsummary & BUSTER_FARMS_FLOAT_INT(log2, (uint32_t)dst_signed)) != 0;
+        }
+    }
+    return quiet;
+}
+
+// Whether a constant (or a conditional's integer arms) stored into a bit-field keeps its value as the full pipeline
+// sees it (#3577): fast_cc_int_bits_quiet with the field's width and signedness.
+static __attribute__((cold, noinline)) bool fast_cc_bitfield_constant_quiet(FastCCState* cc, const FastVal* lhs, const FastVal* rhs)
+{
+    const FastType st = ftype_decay(cc, rhs->type);
+    const bool unsigned64 = rhs->kind == FVAL_IMM && ftype_size(cc, st) == 8u && !ftype_is_signed(cc, st);
+    bool quiet = rhs->kind == FVAL_IMM || BUSTER_FARMS_KIND(rhs) == FARMS_BITS;
+    if (quiet)
+    {
+        const uint32_t bits = rhs->kind == FVAL_IMM ? fast_cc_value_bits(rhs->imm, unsigned64) : BUSTER_FARMS_VALUE(rhs);
+        quiet = fast_cc_int_bits_quiet(bits, lhs->bf_width, lhs->bf_signed != 0, ftype_is_signed(cc, st));
+    }
+    return quiet;
+}
+
+static bool fast_cc_types_redeclarable(const FastCCState* cc, FastType a, FastType b);
+
+// #3577: a conversion of SRC to its own type DST_T, a scalar's or a pointer's (whose decay is itself): the first return of
+// fast_cc_check_implicit_conv below, ahead of its call, which most conversions take.
+#define BUSTER_FAST_CONV_OWN(dst_t, src) \
+    ((uint32_t)(BUSTER_FTYPE_UNQUAL(dst_t) == BUSTER_FTYPE_UNQUAL((src)->type)) & \
+     (uint32_t)(((src)->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) != BUSTER_FTYPE_COMPLEX_BIT))
+
 // An integer constant converted to another integer or a pointer is folded: truncated and extended to the target's size
 // and signedness, as the full function's fold does once its other cases are excluded (sqlite3.c: 10,800 a compile).
 // Floats, bool, 128-bit integers, void, the unsupported types, arrays, functions and sizeof's operands go to it.
@@ -2565,6 +3335,63 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv_full(FastCCSta
 {
     const FastType dt = ftype_unqual(dst_t);
     const FastType st = ftype_decay(cc, src->type);
+    // #3577: a conversion to the source's own type questions nothing (no value changes, no qualifier is dropped, no enum
+    // or record is another), and most conversions are one: only the others take the checks below.
+    if (dt == BUSTER_FTYPE_UNQUAL(st))
+    {
+        return;
+    }
+    // #3577: a constant's (or a conditional's constant arms') conversion the full pipeline questions; and one enum's
+    // value into another's (-Wimplicit-enum-enum-cast). An integer constant (not an unsigned 64-bit one's bits) from
+    // -128 to 127 into any integer, _Bool or floating type, and one in the int32 range into a 32- or 64-bit integer,
+    // _Bool or double, converts quietly whatever the target: that test is a few instructions with no branch, and the
+    // full check runs for the other constants alone.
+    const uint32_t constant = (uint32_t)(src->kind == FVAL_IMM) | (uint32_t)(src->kind == FVAL_FIMM) |
+                              (uint32_t)((src->marks & BUSTER_FVAL_MARK_CONST_ARMS) != 0);
+    const uint32_t dkind = dt & BUSTER_FTYPE_SCALAR_MASK;
+    const uint32_t dst_scalar = (uint32_t)((dt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
+    if (constant != 0)
+    {
+        const uint32_t skind = src->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK);
+        const uint32_t small = (uint32_t)(src->kind == FVAL_IMM) & dst_scalar & BUSTER_FAST_INT_SETTLED(src->imm, skind, dkind);
+        // A pointer target from a pointer constant, or from the literal 0; a floating constant into a floating type.
+        const uint32_t dst_pointer = (uint32_t)((dt & BUSTER_FTYPE_PTR_MASK) != 0);
+        const uint32_t src_pointer = (uint32_t)((src->type & BUSTER_FTYPE_PTR_MASK) != 0);
+        const uint32_t null_literal = (uint32_t)(src->kind == FVAL_IMM) & dst_pointer &
+                                      (src_pointer | ((uint32_t)(src->imm == 0) & (uint32_t)((src->marks & BUSTER_FVAL_MARK_NONLITERAL) == 0)));
+        const uint32_t floating = (uint32_t)(src->kind == FVAL_FIMM) & dst_scalar & ((uint32_t)(dkind == FTYPE_F32) | (uint32_t)(dkind == FTYPE_F64));
+        if ((small | null_literal | floating) == 0 && !fast_cc_constant_conversion_quiet(cc, dst_t, src))
+        {
+            fast_cc_bail(cc, "constant conversion the full pipeline questions");
+            return;
+        }
+    }
+    if (((uint32_t)((dt & st & BUSTER_FTYPE_COMPLEX_BIT) != 0) & (uint32_t)(((dt | st) & BUSTER_FTYPE_PTR_MASK) == 0) & (uint32_t)(dt != st)) != 0)
+    {
+        if (cc->ctypes[dt & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_ENUM || cc->ctypes[st & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_ENUM)
+        {
+            fast_cc_bail(cc, "conversion between enum types");
+            return;
+        }
+    }
+    // #3577: a conversion to _Bool is a condition's (a constant `<<`, constant arms).
+    if (dkind == FTYPE_BOOL && dst_scalar != 0 && !BUSTER_FAST_CONDITION_QUIET(cc, src))
+    {
+        fast_cc_bail(cc, "conversion to _Bool the full pipeline questions");
+        return;
+    }
+    // #3577: a struct or union converts to its own type alone, and nothing else (void included) converts to one. (A
+    // scalar this path doesn't support, a long double, converts as the full pipeline converts it; code for one isn't made.)
+    const uint32_t record_or_void = (uint32_t)((dt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT) |
+                                    (uint32_t)((st & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT) |
+                                    (uint32_t)((dt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID) |
+                                    (uint32_t)((st & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
+    if (record_or_void != 0 &&
+        ((BUSTER_FAST_RECORD_OR_VOID(cc, dt) | BUSTER_FAST_RECORD_OR_VOID(cc, st)) & (uint32_t)(BUSTER_FTYPE_CODEGEN(dt) != BUSTER_FTYPE_CODEGEN(BUSTER_FTYPE_UNQUAL(st)))) != 0)
+    {
+        fast_cc_bail(cc, "conversion to or from a struct, union or void");
+        return;
+    }
     const bool dp = ftype_is_ptr(dt);
     const bool sp = ftype_is_ptr(st);
     if (dp && !sp)
@@ -2588,7 +3415,26 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv_full(FastCCSta
     {
         const FastType d0 = ftype_deref(cc, dt);
         const FastType s0 = ftype_deref(cc, st);
-        if (ftype_is_void(d0) || ftype_is_void(s0))
+        // #3577: a conversion that drops the pointee's const or volatile (-Wincompatible-pointer-types-discards-
+        // qualifiers), or that changes a deeper level's (in nested pointer types: there they must match). With masks
+        // rather than branches: every pointer assignment and argument comes here.
+        const uint32_t s_complex = UINT32_C(0) - (s0 >> 31);
+        const uint32_t d_complex = UINT32_C(0) - (d0 >> 31);
+        const uint32_t s_const = (uint32_t)((s0 & BUSTER_FTYPE_CONST) != 0);
+        const uint32_t s_vol = (uint32_t)((s0 & BUSTER_FTYPE_VOL) != 0);
+        const uint32_t d_const = (uint32_t)((d0 & BUSTER_FTYPE_CONST) != 0);
+        const uint32_t d_vol = (uint32_t)((d0 & BUSTER_FTYPE_VOL) != 0);
+        const uint32_t deep = BUSTER_FTYPE_PCONST | BUSTER_FTYPE_PVOL | BUSTER_FTYPE_QDEEP;
+        // (To or from void, the deeper levels are no one's: `const char **` converts to `const void *` quietly. Of two
+        // kinds, the types differ anyway, which the checks below judge.)
+        const bool void_pointee = ftype_is_void(d0) || ftype_is_void(s0);
+        const uint32_t nested = (uint32_t)!void_pointee & (uint32_t)(s_complex == d_complex) & (uint32_t)(((s0 ^ d0) & deep) != 0);
+        if (((s_const & (d_const ^ 1u)) | (s_vol & (d_vol ^ 1u)) | nested) != 0)
+        {
+            fast_cc_bail(cc, "pointer conversion that changes qualifiers");
+            return;
+        }
+        if (void_pointee)
         {
             return;
         }
@@ -2598,7 +3444,8 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv_full(FastCCSta
         {
             return;
         }
-        // Check scalar vs scalar pointer compatibility (must match size, signedness, floatness, and char-ness!)
+        // Check scalar vs scalar pointer compatibility (must match size, signedness, floatness, and char-ness!). #3577: and
+        // long-ness: a `long *` and a `long long *` are the full pipeline's -Wincompatible-pointer-types error.
         const bool dc = (du & BUSTER_FTYPE_COMPLEX_BIT) != 0;
         const bool sc = (su & BUSTER_FTYPE_COMPLEX_BIT) != 0;
         if (!dc && !sc)
@@ -2607,8 +3454,7 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv_full(FastCCSta
             const uint32_t sb = su & BUSTER_FTYPE_SCALAR_MASK;
             const uint32_t ddepth = ftype_ptr_depth(du);
             const uint32_t sdepth = ftype_ptr_depth(su);
-            if (ddepth != sdepth || db != sb ||
-                ((du & BUSTER_FTYPE_SCALAR_CHAR) != (su & BUSTER_FTYPE_SCALAR_CHAR)))
+            if (ddepth != sdepth || db != sb || ((du ^ su) & (BUSTER_FTYPE_SCALAR_CHAR | BUSTER_FTYPE_SCALAR_LONG)) != 0)
             {
                 fast_cc_bail(cc, "incompatible pointer conversion");
             }
@@ -2628,18 +3474,84 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv_full(FastCCSta
                 fast_cc_bail(cc, "incompatible struct pointer conversion");
                 return;
             }
+            // #3577: an enum's, an array's, a function's or a deeper pointer's type must be the other's, part by part
+            // (-Wincompatible-pointer-types, -Wincompatible-function-pointer-types).
+            if (du != su && !fast_cc_types_redeclarable(cc, du, su))
+            {
+                fast_cc_bail(cc, "incompatible pointer target conversion");
+                return;
+            }
             return;
         }
         fast_cc_bail(cc, "incompatible pointer target conversion");
     }
 }
 
-// Without a pointer on either side there is nothing to check: 31,000 of sqlite3.c's 62,000 (#3581).
+// Without a pointer on either side there is nothing to check (#3581: 31,000 of sqlite3.c's 62,000 conversions) but for
+// #3577's own: a constant's value, an enum's or a record's type, a conversion to _Bool and one to or from void, which the
+// full function checks (fast_cc_check_implicit_conv_full's other returns); a scalar's other conversions return here.
 static inline __attribute__((always_inline)) void fast_cc_check_implicit_conv(FastCCState* cc, FastType dst_t, const FastVal* src)
 {
     const FastType st = ftype_decay(cc, src->type);
-    const uint32_t pointers = (uint32_t)ftype_is_ptr(dst_t) | (uint32_t)ftype_is_ptr(st);
-    if (pointers != 0) { fast_cc_check_implicit_conv_full(cc, dst_t, src); }
+    const FastType dt = ftype_unqual(dst_t);
+    const uint32_t shape = BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK;
+    // The full function's first return, a conversion to the source's own type, and a constant from -128 to 127 (not an
+    // unsigned 64-bit one's bits) of an integer type into an integer type but _Bool, which it takes quietly by
+    // BUSTER_FAST_INT_SETTLED and then checks nothing else of: 8,000 of sqlite3.c's 14,000 calls were one of these.
+    if (dt != BUSTER_FTYPE_UNQUAL(st))
+    {
+        const uint32_t small_integer = (uint32_t)(src->kind == FVAL_IMM) & (uint32_t)(((dt | src->type) & shape) == 0) &
+                                       (uint32_t)((uint64_t)src->imm + UINT64_C(128) < UINT64_C(256)) &
+                                       (uint32_t)((dt & BUSTER_FTYPE_SCALAR_MASK) - FTYPE_I8 <= FTYPE_U64 - FTYPE_I8) &
+                                       (uint32_t)((src->type & BUSTER_FTYPE_SCALAR_MASK) - FTYPE_BOOL <= FTYPE_U64 - FTYPE_BOOL) &
+                                       (uint32_t)(((src->type & BUSTER_FTYPE_SCALAR_MASK) != FTYPE_U64) | (uint32_t)(src->imm >= 0)) &
+                                       (uint32_t)((src->marks & BUSTER_FVAL_MARK_CONST_ARMS) == 0);
+        const uint32_t questioned = (uint32_t)(((dt | st) & shape) != 0) | (uint32_t)(src->kind == FVAL_IMM) | (uint32_t)(src->kind == FVAL_FIMM) |
+                                    (uint32_t)((src->marks & BUSTER_FVAL_MARK_CONST_ARMS) != 0) |
+                                    (uint32_t)((dt & (shape | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_BOOL) |
+                                    (uint32_t)((dt & (shape | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID) |
+                                    (uint32_t)((st & (shape | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
+        if ((questioned & (small_integer ^ 1u)) != 0) { fast_cc_check_implicit_conv_full(cc, dst_t, src); }
+    }
+}
+
+// #3577: a static initializer's implicit conversion to the object's type, checked as an assignment's is
+// (fast_cc_check_implicit_conv: a constant's value, a pointer's target and qualifiers, an enum's identity); a string
+// literal is a plain char array, as in an expression. A 128-bit scalar is one this 64-bit evaluator can't hold, and a
+// bit-field's width is checked as fval_store checks a constant's.
+static void fast_cc_check_static_initializer(FastCCState* cc, FastType target, const FastMemberInfo* bf, const FastStaticConst* v)
+{
+    const FastType plain_char = (cc->unsigned_char ? FTYPE_U8 : FTYPE_I8) | BUSTER_FTYPE_SCALAR_CHAR;
+    FastVal cv = { .type = v->is_string ? ftype_make_ptr(cc, plain_char) : v->type, .kind = FVAL_GLOBAL_ADDR };
+    if (!v->is_string && v->sym_idx == 0)
+    {
+        cv.kind = v->is_float != 0 ? FVAL_FIMM : FVAL_IMM;
+        cv.imm = v->val;
+        cv.sym_idx = v->enum_cidx;
+        cv.marks = (uint8_t)(BUSTER_FVAL_MARK_NONLITERAL * v->folded);
+    }
+    fast_cc_check_implicit_conv(cc, target, &cv);
+    if (!cc->bailout && ftype_size(cc, target) > 8u) { fast_cc_bail(cc, "128-bit static scalar"); }
+    if (!cc->bailout && bf != NULL && bf->bit_width != 0 && v->sym_idx == 0 && !v->is_string && v->is_float == 0 &&
+        !fast_cc_int_bits_quiet(fast_cc_value_bits(v->val, v->is_unsigned != 0 && v->val < 0), bf->bit_width, ftype_is_signed(cc, target),
+                                v->is_unsigned == 0))
+    {
+        fast_cc_bail(cc, "bit-field constant conversion");
+    }
+}
+
+// #3577: a checked inline body's long double stores into a long double without code (fast_cc_checked_long_double); its
+// result is the value as sizeof's compile gives it.
+static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_store(FastExprCtx* ex, FastVal* lhs, FastVal* rhs, bool release_lhs, FastVal* out_res)
+{
+    const bool taken = fast_cc_checked_long_double(ex->cc, lhs->type, rhs->type);
+    if (taken)
+    {
+        fval_release(ex, rhs);
+        if (release_lhs) { fval_release(ex, lhs); }
+        if (out_res != NULL) { *out_res = (FastVal){ .type = ftype_unqual(lhs->type), .kind = FVAL_REG }; }
+    }
+    return taken;
 }
 
 // Store rvalue `rhs` into lvalue `lhs` (scalar, float, bitfield, or struct copy).
@@ -2650,10 +3562,21 @@ static BUSTER_DIRECT_HOT void fval_store(FastExprCtx* ex, FastVal* lhs, FastVal*
     FastObj* obj = cc->obj;
     if (ftype_is_unsupported(lhs->type) || ftype_is_unsupported(rhs->type))
     {
-        fast_cc_bail(cc, "unsupported type store");
+        if (!fast_cc_checked_long_double_store(ex, lhs, rhs, release_lhs, out_res)) { fast_cc_bail(cc, "unsupported type store"); }
         return;
     }
-    fast_cc_check_implicit_conv(cc, lhs->type, rhs);
+    if (BUSTER_FAST_CONV_OWN(lhs->type, rhs) == 0)
+    {
+        fast_cc_check_implicit_conv(cc, lhs->type, rhs);
+    }
+    // #3577: a constant into a bit-field narrower than its value (-Wbitfield-constant-conversion, a one-bit signed
+    // field's 1 too).
+    if (((uint32_t)(lhs->kind == FVAL_BITFIELD) & ((uint32_t)(rhs->kind == FVAL_IMM) | (uint32_t)((rhs->marks & BUSTER_FVAL_MARK_CONST_ARMS) != 0))) != 0 &&
+        !fast_cc_bitfield_constant_quiet(cc, lhs, rhs))
+    {
+        fast_cc_bail(cc, "bit-field constant conversion");
+        return;
+    }
     if (cc->bailout) { return; }
     if (ex->eval_only > 0)
     {
@@ -2669,7 +3592,7 @@ static BUSTER_DIRECT_HOT void fval_store(FastExprCtx* ex, FastVal* lhs, FastVal*
         if (sz > 64u)
         {
             // Spill outer regs because `rep movsb` uses rdi/rsi/rcx
-            fval_spill_all(ex, ex->vsp, ex->arg_sp);
+            fval_spill_all(ex, ex->vsp);
         }
         const uint32_t dst_a = fval_addr_to_gp(ex, lhs, release_lhs);
         const uint32_t src_a = fval_addr_to_gp(ex, rhs, true);
@@ -2856,6 +3779,12 @@ static BUSTER_DIRECT_HOT void fval_store(FastExprCtx* ex, FastVal* lhs, FastVal*
 // Emit conditional branch on `v` (`jump_if_true=true`: jump if nonzero; `false`: jump if zero). Consumes `v`!
 static void fval_branch(FastExprCtx* ex, FastVal* v, bool jump_if_true, uint32_t target_label)
 {
+    // #3577: a condition (and && || ?: !'s operand) the full pipeline takes quietly.
+    if (!BUSTER_FAST_CONDITION_QUIET(ex->cc, v))
+    {
+        fast_cc_bail(ex->cc, "condition the full pipeline refuses or questions");
+        return;
+    }
     if (ex->eval_only > 0) { fval_release(ex, v); return; }
     FastCCState* cc = ex->cc;
     FastObj* obj = cc->obj;
@@ -2913,17 +3842,1011 @@ static void fval_branch(FastExprCtx* ex, FastVal* v, bool jump_if_true, uint32_t
     ex->gp_used &= (uint16_t)~(1u << g);
 }
 
+// Whether a _Generic (its `(` at `open`) is one whose selected association the full pipeline's checks of all of them
+// come to (#3577): glibc's qualifier-generic string functions, `_Generic (0 ? (S) : (void *) 1, const void *:
+// (const char *) (CALL), default: CALL)`. Two associations, a default and one pointer type (its last token `*`: not
+// qualified, and compatible with no other), whose expressions are the same tokens, one of them or both behind a cast.
+// A cast between pointers says nothing; anything else in an unselected association could, and is refused.
+static __attribute__((cold, noinline)) bool fast_cc_generic_shape_ok(const FastCCState* cc, uint32_t open)
+{
+    uint32_t bounds[3][4] = { { 0 } }; // per association: type begin, type end (its ':'), expression begin, end
+    uint32_t count = 0;
+    bool ok = open < cc->tcount && cc->tk[open] == FTOK_LPAREN;
+    uint32_t depth = 0;
+    uint32_t i = open + 1u;
+    bool in_ctrl = true;
+    bool done = false;
+    while (ok && !done && i < cc->tcount)
+    {
+        const uint8_t k = cc->tk[i];
+        const bool top = depth == 0;
+        if (k == FTOK_LPAREN || k == FTOK_LBRACKET || k == FTOK_LBRACE) { depth += 1u; }
+        else if ((k == FTOK_RPAREN || k == FTOK_RBRACKET || k == FTOK_RBRACE) && !top) { depth -= 1u; }
+        else if (top && k == FTOK_COLON && !in_ctrl && count != 0 && bounds[count - 1u][1] == 0)
+        {
+            bounds[count - 1u][1] = i;
+            bounds[count - 1u][2] = i + 1u;
+        }
+        if (top && (k == FTOK_COMMA || k == FTOK_RPAREN))
+        {
+            if (!in_ctrl)
+            {
+                ok = bounds[count - 1u][1] != 0;
+                bounds[count - 1u][3] = i;
+            }
+            in_ctrl = false;
+            done = k == FTOK_RPAREN;
+            if (!done)
+            {
+                ok = ok && count < 3u;
+                if (ok)
+                {
+                    bounds[count][0] = i + 1u;
+                    count += 1u;
+                }
+            }
+        }
+        i += 1u;
+    }
+    ok = ok && done && count == 2u;
+    // One default, and one pointer type.
+    uint32_t defaults = 0;
+    uint32_t pointers = 0;
+    uint32_t core_begin[2] = { 0, 0 };
+    uint32_t core_end[2] = { 0, 0 };
+    for (uint32_t a = 0; ok && a < 2u; a += 1)
+    {
+        const uint32_t tb = bounds[a][0];
+        const uint32_t te = bounds[a][1];
+        const bool is_default = te == tb + 1u && cc->tk[tb] == FTOK_KW_DEFAULT;
+        defaults += is_default ? 1u : 0u;
+        pointers += !is_default && te > tb && cc->tk[te - 1u] == FTOK_STAR ? 1u : 0u;
+        // The expression's tokens after a leading cast `(type)`.
+        uint32_t cb = bounds[a][2];
+        if (cb < bounds[a][3] && cc->tk[cb] == FTOK_LPAREN && fast_cc_is_type_start(cc, cb + 1u))
+        {
+            uint32_t d = 0;
+            uint32_t j = cb;
+            do
+            {
+                d += cc->tk[j] == FTOK_LPAREN ? 1u : 0u;
+                d -= cc->tk[j] == FTOK_RPAREN ? 1u : 0u;
+                j += 1u;
+            } while (d != 0 && j < bounds[a][3]);
+            cb = j;
+        }
+        // And without parentheses around all of it.
+        uint32_t ce = bounds[a][3];
+        bool wrapped = true;
+        while (wrapped && ce > cb + 1u && cc->tk[cb] == FTOK_LPAREN && cc->tk[ce - 1u] == FTOK_RPAREN)
+        {
+            uint32_t d = 0;
+            uint32_t j = cb;
+            do
+            {
+                d += cc->tk[j] == FTOK_LPAREN ? 1u : 0u;
+                d -= cc->tk[j] == FTOK_RPAREN ? 1u : 0u;
+                j += 1u;
+            } while (d != 0 && j < ce);
+            wrapped = j == ce;
+            cb += wrapped ? 1u : 0u;
+            ce -= wrapped ? 1u : 0u;
+        }
+        core_begin[a] = cb;
+        core_end[a] = ce;
+    }
+    ok = ok && defaults == 1u && pointers == 1u;
+    const uint32_t n0 = ok ? core_end[0] - core_begin[0] : 0u;
+    const uint32_t n1 = ok ? core_end[1] - core_begin[1] : 1u;
+    ok = ok && n0 == n1 && n0 != 0;
+    for (uint32_t t = 0; ok && t < n0; t += 1)
+    {
+        ok = cc->tk[core_begin[0] + t] == cc->tk[core_begin[1] + t] && cc->td[core_begin[0] + t] == cc->td[core_begin[1] + t];
+    }
+    return ok;
+}
+
+// The pairs of operand classes (left * 4 + right, BUSTER_FAST_OPERAND_CLASS) C refuses each binary operator, by its token
+// (#3577): all but arithmetic (0x0033), integers (0x0001), a pointer and an integer (0x0100; an integer and a pointer
+// 0x0004) or two pointers (0x0400), as the operator allows. An operator not listed (0) is checked elsewhere.
+static const uint16_t fast_binary_refused[64] = {
+    [FTOK_STAR] = 0xffccu, [FTOK_SLASH] = 0xffccu,
+    [FTOK_PERCENT] = 0xfffeu, [FTOK_AMP] = 0xfffeu, [FTOK_PIPE] = 0xfffeu, [FTOK_CARET] = 0xfffeu,
+    [FTOK_LSHIFT] = 0xfffeu, [FTOK_RSHIFT] = 0xfffeu,
+    [FTOK_PLUS] = 0xfec8u, [FTOK_MINUS] = 0xfaccu,
+    [FTOK_LT] = 0xfbccu, [FTOK_GT] = 0xfbccu, [FTOK_LE] = 0xfbccu, [FTOK_GE] = 0xfbccu,
+    [FTOK_EQ] = 0xfbccu, [FTOK_NE] = 0xfbccu,
+};
+
+// Whether two pointers of different types may meet in `op` as the full pipeline lets them (#3577): to compatible types
+// but for their qualifiers (a function's of one signature, an array's of one element), or for == and != one to void
+// and the other to an object; anything else is its error or warning (distinct pointer types, a function pointer against
+// void *).
+static __attribute__((noinline)) bool fast_cc_pointer_pair_valid(FastCCState* cc, uint8_t op, FastType lt, FastType rt)
+{
+    const FastType le = BUSTER_FTYPE_CODEGEN(ftype_unqual(ftype_deref(cc, lt)));
+    const FastType re = BUSTER_FTYPE_CODEGEN(ftype_unqual(ftype_deref(cc, rt)));
+    const bool equality = op == FTOK_EQ || op == FTOK_NE;
+    const bool l_void = le == FTYPE_VOID;
+    const bool r_void = re == FTYPE_VOID;
+    return le == re || (equality && ((l_void && !ftype_is_func(re)) || (r_void && !ftype_is_func(le)))) ||
+           (!l_void && !r_void && fast_cc_types_redeclarable(cc, le, re));
+}
+
+// #3577: the end of a bracketed group whose opening `(`, `[` or `{` is at POS: the token after its closing one, or the
+// token count.
+static uint32_t fast_cc_group_end(const FastCCState* cc, uint32_t pos)
+{
+    uint32_t depth = 0;
+    uint32_t p = pos;
+    while (p < cc->tcount)
+    {
+        const uint8_t t = cc->tk[p];
+        depth += (uint32_t)(t == FTOK_LPAREN) | (uint32_t)(t == FTOK_LBRACKET) | (uint32_t)(t == FTOK_LBRACE);
+        depth -= (uint32_t)(t == FTOK_RPAREN) | (uint32_t)(t == FTOK_RBRACKET) | (uint32_t)(t == FTOK_RBRACE);
+        p += 1u;
+        if (depth == 0) { break; }
+    }
+    return p;
+}
+
+// #3577: what tokens [START, END) fold to through the variables they name (FastSym's pad_sym[1], BUSTER_FFOLD_*), as bits:
+// 1 a variable foldable to a value that may be zero, or one known not zero among other tokens; 2 the tokens are a
+// variable known not zero alone, in any parentheses; 4 a variable or function that doesn't fold. A member's name isn't
+// a variable.
+#define BUSTER_FFOLD_SCAN_ZERO     1u
+#define BUSTER_FFOLD_SCAN_NONZERO  2u
+#define BUSTER_FFOLD_SCAN_VARIABLE 4u
+static uint32_t fast_cc_tokens_fold(const FastCCState* cc, uint32_t start, uint32_t end)
+{
+    uint32_t zero = 0;
+    uint32_t nonzero = 0;
+    uint32_t variable = 0;
+    uint32_t tokens = 0;
+    for (uint32_t p = start; p < end && p < cc->tcount; p += 1u)
+    {
+        const uint8_t t = cc->tk[p];
+        tokens += (uint32_t)(t != FTOK_LPAREN) & (uint32_t)(t != FTOK_RPAREN);
+        const bool member = p > start && (cc->tk[p - 1u] == FTOK_DOT || cc->tk[p - 1u] == FTOK_ARROW);
+        if (t == FTOK_IDENT && !member)
+        {
+            const uint32_t id = cc->td[p];
+            const uint32_t si = id < cc->env_cap ? cc->sym_cur[id] : 0u;
+            const FastSym* sym = cc->syms + si;
+            const uint32_t object = (uint32_t)(si != 0) & ((uint32_t)(sym->kind == FSYM_LOCAL) | (uint32_t)(sym->kind == FSYM_GLOBAL));
+            const uint32_t fold = object != 0 ? sym->pad_sym[1] : BUSTER_FFOLD_NONE;
+            zero |= (uint32_t)(fold == BUSTER_FFOLD_ZERO);
+            nonzero |= (uint32_t)(fold == BUSTER_FFOLD_NONZERO);
+            variable |= ((object | (uint32_t)(si != 0 && sym->kind == FSYM_FUNC)) & (uint32_t)(fold == BUSTER_FFOLD_NONE));
+        }
+    }
+    const uint32_t lone = nonzero & (zero ^ 1u) & (uint32_t)(tokens == 1u);
+    return ((zero | (nonzero & (lone ^ 1u))) * BUSTER_FFOLD_SCAN_ZERO) | (lone * BUSTER_FFOLD_SCAN_NONZERO) | (variable * BUSTER_FFOLD_SCAN_VARIABLE);
+}
+
+// #3577: whether tokens [START, END) name a variable or a function outside a sizeof or _Alignof operand (a subscript
+// that does isn't a constant address). A member's name isn't one.
+static bool fast_cc_tokens_name_variable(const FastCCState* cc, uint32_t start, uint32_t end)
+{
+    bool result = false;
+    uint32_t p = start;
+    while (!result && p < end && p < cc->tcount)
+    {
+        const uint8_t t = cc->tk[p];
+        if (t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF)
+        {
+            p = p + 1u < cc->tcount && cc->tk[p + 1u] == FTOK_LPAREN ? fast_cc_group_end(cc, p + 1u) : p + 2u;
+        }
+        else
+        {
+            const bool member = p > start && (cc->tk[p - 1u] == FTOK_DOT || cc->tk[p - 1u] == FTOK_ARROW);
+            if (t == FTOK_IDENT && !member)
+            {
+                const uint32_t id = cc->td[p];
+                const uint32_t si = id < cc->env_cap ? cc->sym_cur[id] : 0u;
+                const uint8_t kind = cc->syms[si].kind;
+                result = si != 0 && (kind == FSYM_LOCAL || kind == FSYM_GLOBAL || kind == FSYM_FUNC);
+            }
+            p += 1u;
+        }
+    }
+    return result;
+}
+
+// #3577: whether the divisor that starts at START (with WHOLE an assignment-expression, `/=`'s and `%=`'s; else a
+// cast-expression) is one the full pipeline's -Wdivision-by-zero loads as zero from a const object
+// (check_common_zero_divisor): past casts, `*`, `&` and grouping parentheses, an object whose fold class may be zero,
+// with members and subscripts whose indices name no variable. An operator's value, a call or a step it doesn't load.
+static bool fast_cc_divisor_may_fold_zero(const FastCCState* cc, uint32_t start, bool whole)
+{
+    bool shaped = true;
+    bool operand = false;
+    bool ended = false;
+    uint32_t depth = 0;
+    uint32_t root = 0;
+    uint32_t p = start;
+    while (shaped && !ended && p < cc->tcount)
+    {
+        const uint8_t t = cc->tk[p];
+        if (!operand)
+        {
+            if (t == FTOK_LPAREN && fast_cc_is_type_start(cc, p + 1u))
+            {
+                p = fast_cc_group_end(cc, p);
+            }
+            else if (t == FTOK_LPAREN)
+            {
+                depth += 1u;
+                p += 1u;
+            }
+            else if (t == FTOK_STAR || t == FTOK_AMP || t == FTOK_KW_EXTENSION)
+            {
+                p += 1u;
+            }
+            else if (t == FTOK_IDENT)
+            {
+                root = p;
+                operand = true;
+                p += 1u;
+            }
+            else
+            {
+                shaped = false;
+            }
+        }
+        else if (t == FTOK_RPAREN && depth != 0)
+        {
+            depth -= 1u;
+            p += 1u;
+        }
+        else if (t == FTOK_DOT || t == FTOK_ARROW)
+        {
+            p += 2u;
+        }
+        else if (t == FTOK_LBRACKET)
+        {
+            const uint32_t close = fast_cc_group_end(cc, p);
+            shaped = !fast_cc_tokens_name_variable(cc, p + 1u, close - 1u);
+            p = close;
+        }
+        else if (t == FTOK_LPAREN || t == FTOK_INC || t == FTOK_DEC || depth != 0)
+        {
+            // A call's or a step's value, or an operator's inside the parentheses.
+            shaped = false;
+        }
+        else
+        {
+            // The divisor ends: a cast-expression at any operator, an assignment-expression where the expression does.
+            shaped = !whole || t == FTOK_SEMI || t == FTOK_COMMA || t == FTOK_RPAREN || t == FTOK_RBRACKET || t == FTOK_RBRACE || t == FTOK_COLON;
+            ended = true;
+        }
+    }
+    bool result = false;
+    if (shaped && operand && depth == 0)
+    {
+        const uint32_t id = cc->td[root];
+        const uint32_t si = id < cc->env_cap ? cc->sym_cur[id] : 0u;
+        const FastSym* sym = cc->syms + si;
+        result = si != 0 && (sym->kind == FSYM_LOCAL || sym->kind == FSYM_GLOBAL) && sym->pad_sym[1] == BUSTER_FFOLD_ZERO;
+    }
+    return result;
+}
+
+// #3577: the fold class (BUSTER_FFOLD_*) of an object of type T with an initializer, from its integer VALUE where KNOWN:
+// none unless T, or its arrays' element, is const and not volatile; else nonzero for a known integer not zero, zero
+// otherwise (a floating or pointer value, or an aggregate's, may be).
+static uint8_t fast_cc_fold_class(const FastCCState* cc, FastType t, bool known, uint64_t value)
+{
+    FastType element = t;
+    while (ftype_is_array(element))
+    {
+        element = cc->ctypes[element & BUSTER_FTYPE_CIDX_MASK].inner;
+    }
+    const uint32_t qualifiers = element & BUSTER_FTYPE_CONST;
+    const uint32_t volatiles = element & BUSTER_FTYPE_VOL;
+    uint8_t result = BUSTER_FFOLD_NONE;
+    if (qualifiers != 0 && volatiles == 0)
+    {
+        const bool integer = BUSTER_FAST_OPERAND_CLASS(cc, t) == BUSTER_FOPERAND_INTEGER;
+        result = integer && known && value != 0 ? BUSTER_FFOLD_NONZERO : BUSTER_FFOLD_ZERO;
+    }
+    return result;
+}
+
+// #3577: the fold class of a static object (a global or a static local) just initialized at SEC_OFF of SEC: an integer's
+// value is the section's bytes.
+static uint8_t fast_cc_static_fold_class(const FastCCState* cc, FastType t, FastSecId sec, uint32_t sec_off)
+{
+    const uint32_t size = ftype_size(cc, t);
+    uint64_t value = 0;
+    const bool known = sec == FSEC_RODATA && size <= 8u && (uint64_t)sec_off + size <= cc->obj->rodata.len;
+    if (known)
+    {
+        memcpy(&value, cc->obj->rodata.data + sec_off, size);
+    }
+    return fast_cc_fold_class(cc, t, known, value);
+}
+
+// #3577: the fold class of a local just initialized from tokens [START, END): an integer constant's value where the
+// initializer was one; else zero where its tokens name a foldable variable, or no variable at all.
+static uint8_t fast_cc_local_fold_class(const FastCCState* cc, FastType t, uint32_t start, uint32_t end)
+{
+    const bool integer = BUSTER_FAST_OPERAND_CLASS(cc, t) == BUSTER_FOPERAND_INTEGER;
+    const bool known = integer && cc->init_kind == FVAL_IMM;
+    uint8_t result = fast_cc_fold_class(cc, t, known, (uint64_t)cc->init_value);
+    if (result != BUSTER_FFOLD_NONE && integer && !known)
+    {
+        const uint32_t fold = fast_cc_tokens_fold(cc, start, end);
+        result = (fold & BUSTER_FFOLD_SCAN_NONZERO) != 0 ? BUSTER_FFOLD_NONZERO :
+                 (fold & (BUSTER_FFOLD_SCAN_ZERO | BUSTER_FFOLD_SCAN_VARIABLE)) == BUSTER_FFOLD_SCAN_VARIABLE ? BUSTER_FFOLD_NONE : BUSTER_FFOLD_ZERO;
+    }
+    return result;
+}
+
+// #3577: an automatic object's rules, which a block's declaration and a for clause's take alike. Blocks, not functions,
+// whose counters would tick at every local.
+//
+// The fold class of local LSI of TYPE just initialized from tokens [START, cc->pos), where it is const (or an array,
+// whose element may be): a divisor naming it reads it (fast_cc_local_fold_class).
+#define BUSTER_FAST_LOCAL_FOLD(cc, lsi, type, start) \
+    { \
+        const uint32_t lf_complex = UINT32_C(0) - ((uint32_t)(type) >> 31); \
+        const uint32_t lf_foldable = (uint32_t)(((type) & BUSTER_FTYPE_CONST) != 0) | \
+                                     (uint32_t)((cc)->ctypes[(type) & BUSTER_FTYPE_CIDX_MASK & lf_complex].kind == FCTYPE_ARRAY); \
+        if ((lf_foldable & (uint32_t)((lsi) != 0)) != 0) \
+        { \
+            (cc)->syms[lsi].pad_sym[1] = fast_cc_local_fold_class((cc), (type), (start), (cc)->pos); \
+        } \
+    }
+// RESULT: 1 where an object of TYPE left uninitialized is the full pipeline's -Wdefault-const-init-var-unsafe or
+// -field-unsafe (a const object, a struct or union with a const member, an array of const elements: a multidimensional
+// array's element is found by ftype_is_object_const's loop), else 0.
+#define BUSTER_FAST_UNINITIALIZED_CONST(cc, type, result) \
+    if (((type) & (BUSTER_FTYPE_CONST | BUSTER_FTYPE_COMPLEX_BIT)) != 0) \
+    { \
+        const uint32_t uc_object = (uint32_t)((uint32_t)(type) >> 31) & (uint32_t)(((type) & BUSTER_FTYPE_PTR_MASK) == 0); \
+        const FastComplexType* uc_ct = (cc)->ctypes + ((type) & BUSTER_FTYPE_CIDX_MASK & (UINT32_C(0) - uc_object)); \
+        const uint32_t uc_record_const = uc_object & (uint32_t)uc_ct->has_const_mbr & \
+                                         ((uint32_t)(uc_ct->kind == FCTYPE_STRUCT) | (uint32_t)(uc_ct->kind == FCTYPE_UNION)); \
+        const uint32_t uc_array = uc_object & (uint32_t)(uc_ct->kind == FCTYPE_ARRAY); \
+        const FastType uc_element = uc_ct->inner; \
+        const uint32_t uc_element_complex = BUSTER_FTYPE_COMPLEX_ALL(uc_element); \
+        const uint32_t uc_element_array = (uc_element_complex & 1u) & (uint32_t)((uc_element & BUSTER_FTYPE_PTR_MASK) == 0) & \
+                                          (uint32_t)((cc)->ctypes[uc_element & BUSTER_FTYPE_CIDX_MASK & uc_element_complex].kind == FCTYPE_ARRAY); \
+        (result) = (uint32_t)(((type) & BUSTER_FTYPE_CONST) != 0) | uc_record_const | (uc_array & (uint32_t)((uc_element & BUSTER_FTYPE_CONST) != 0)); \
+        if ((uc_array & uc_element_array) != 0) \
+        { \
+            (result) |= (uint32_t)ftype_is_object_const((cc), (type)); \
+        } \
+    }
+
+// #3577: whether a `+`'s operands are what the full pipeline's -Wstring-plus-int or -Wstring-plus-char reports (clang's
+// diagnoseStringPlusInt and diagnoseStringPlusChar): an unparenthesized string literal (op FTOK_STR_LIT) and an integer
+// (an enumeration or _Bool included), or an unparenthesized character literal (op FTOK_CHAR_LIT) and a pointer to, or an
+// array of, a character type. Asked only where one operand is such a literal.
+static uint32_t fast_cc_string_plus(const FastCCState* cc, const FastVal* lhs, const FastVal* rhs)
+{
+    uint32_t result = 0;
+    for (uint32_t side = 0; side < 2u; side += 1u)
+    {
+        const FastVal* literal = side == 0 ? lhs : rhs;
+        const FastVal* other = side == 0 ? rhs : lhs;
+        const FastType t = other->type;
+        FastType element = FTYPE_VOID | BUSTER_FTYPE_PTR_MASK;
+        if (ftype_is_array(t))
+        {
+            element = cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].inner;
+        }
+        else if (ftype_is_ptr(t))
+        {
+            element = ftype_deref(cc, t);
+        }
+        const uint32_t string_plus_int = (uint32_t)(literal->op == FTOK_STR_LIT) & (uint32_t)(BUSTER_FAST_OPERAND_CLASS(cc, t) == BUSTER_FOPERAND_INTEGER);
+        const uint32_t string_plus_char = (uint32_t)(literal->op == FTOK_CHAR_LIT) & (uint32_t)ftype_is_char_type(element);
+        result |= string_plus_int | string_plus_char;
+    }
+    return result;
+}
+
 // Emit binary operator `op` on `lhs` and `rhs`, returning result in `*out`. Consumes `lhs` and `rhs`!
+// The operators whose operands compare: < > <= >= == !=, a bit each (#3577).
+#define BUSTER_FAST_COMPARISON_OPS ((UINT64_C(1) << FTOK_LT) | (UINT64_C(1) << FTOK_GT) | (UINT64_C(1) << FTOK_LE) | \
+                                    (UINT64_C(1) << FTOK_GE) | (UINT64_C(1) << FTOK_EQ) | (UINT64_C(1) << FTOK_NE))
+// The integer scalar kinds, _Bool to the 64-bit ones and __int128's, a bit each (#3577).
+#define BUSTER_FAST_INTEGER_KINDS (((1u << (FTYPE_U64 + 1u)) - (1u << FTYPE_BOOL)) | (1u << FTYPE_I128) | (1u << FTYPE_U128))
+// The scalar kinds a comparison with a constant may question (#3577): narrower than int (_Bool, the chars, the shorts),
+// and float, a bit each.
+#define BUSTER_FAST_QUESTIONED_KINDS ((1u << FTYPE_BOOL) | (1u << FTYPE_I8) | (1u << FTYPE_U8) | (1u << FTYPE_I16) | (1u << FTYPE_U16) | \
+                                      (1u << FTYPE_F32))
+// #3577: a superset, in registers, of the comparisons of two integers that fast_cc_binary_operands_quiet questions (KINDS
+// is the operands' value kinds, a bit each): a constant against a flag value, an address, a narrow or float-cast operand
+// or a function; two constants (enumerators carry their enum); or an enum's value (an enum type before its conversion).
+#define BUSTER_FAST_INT_COMPARE_ASKED(lhs, rhs, lt, rt, kinds) \
+    (((((kinds) >> FVAL_IMM) | ((kinds) >> FVAL_FIMM)) & 1u & \
+      ((uint32_t)(((kinds) & ((UINT32_C(1) << FVAL_FLAGS) | (UINT32_C(1) << FVAL_LOCAL_ADDR) | (UINT32_C(1) << FVAL_GLOBAL_ADDR))) != 0) | \
+       ((BUSTER_FAST_QUESTIONED_KINDS >> ((lt) & BUSTER_FTYPE_SCALAR_MASK)) & 1u) | \
+       ((BUSTER_FAST_QUESTIONED_KINDS >> ((rt) & BUSTER_FTYPE_SCALAR_MASK)) & 1u) | \
+       (uint32_t)(((lhs)->is_func_sym | (rhs)->is_func_sym | (lhs)->lasting | (rhs)->lasting) != 0) | \
+       (uint32_t)((kinds) == (UINT32_C(1) << FVAL_IMM)))) | \
+     (uint32_t)((((lhs)->type | (rhs)->type) & BUSTER_FTYPE_COMPLEX_BIT) != 0))
+
+// #3577: a comparison BUSTER_FAST_INT_COMPARE_ASKED asks of that every family fast_cc_binary_operands_quiet and
+// fast_cc_binary_questioned look at is quiet on: a narrow integer (_Bool, a char, a short) by value (no flag value,
+// address, bit-field or function) against a plain integer constant (no enumerator) in its range, no lasting mark and no
+// relational sum, both types plain scalars. The commonest asked comparison (1,900 of sqlite3.c's 2,600 calls of the check, `p->flags == 3`) then
+// takes no call. Both operands are integers (the gate's `integers`).
+static inline bool fast_cc_narrow_constant_quiet(const FastVal* lhs, const FastVal* rhs, FastType lt, FastType rt, uint8_t op)
+{
+    static const int32_t narrow_lo[32] = { [FTYPE_BOOL] = 0, [FTYPE_I8] = -128, [FTYPE_U8] = 0, [FTYPE_I16] = -32768, [FTYPE_U16] = 0 };
+    static const int32_t narrow_hi[32] = { [FTYPE_BOOL] = 1, [FTYPE_I8] = 127, [FTYPE_U8] = 255, [FTYPE_I16] = 32767, [FTYPE_U16] = 65535 };
+    const uint32_t narrow_kinds = (1u << FTYPE_BOOL) | (1u << FTYPE_I8) | (1u << FTYPE_U8) | (1u << FTYPE_I16) | (1u << FTYPE_U16);
+    const uint32_t value_kinds = (UINT32_C(1) << FVAL_REG) | (UINT32_C(1) << FVAL_LOCAL) | (UINT32_C(1) << FVAL_GLOBAL) |
+                                 (UINT32_C(1) << FVAL_INDIRECT) | (UINT32_C(1) << FVAL_SPILL);
+    const bool left_constant = lhs->kind == FVAL_IMM;
+    const FastVal* constant = left_constant ? lhs : rhs;
+    const FastVal* value = left_constant ? rhs : lhs;
+    const uint32_t kind = (left_constant ? rt : lt) & BUSTER_FTYPE_SCALAR_MASK;
+    const uint32_t relational = (uint32_t)(op == FTOK_LT) | (uint32_t)(op == FTOK_GT) | (uint32_t)(op == FTOK_LE) | (uint32_t)(op == FTOK_GE);
+    bool quiet = false;
+    if (constant->kind == FVAL_IMM && constant->sym_idx == 0 && ((value_kinds >> value->kind) & 1u) != 0 && ((narrow_kinds >> kind) & 1u) != 0)
+    {
+        quiet = (lhs->lasting | rhs->lasting | lhs->is_func_sym | rhs->is_func_sym) == 0 && ((lhs->type | rhs->type) & BUSTER_FTYPE_COMPLEX_BIT) == 0 &&
+                constant->imm >= narrow_lo[kind] &&
+                constant->imm <= narrow_hi[kind] && (relational & ((uint32_t)(lhs->op == FTOK_PLUS) | (uint32_t)(rhs->op == FTOK_PLUS))) == 0;
+    }
+    return quiet;
+}
+
+// #3577: whether a binary operator's operands, of types LT and RT, are ones the full pipeline questions, where
+// fval_emit_binary's gate let them past: a comparison of a constant out of a narrower operand's range
+// (-Wtautological-constant-out-of-range-compare), of two enums' values (-Wenum-compare), of an array, a function or an
+// address with a null pointer constant (-Wtautological-pointer-compare), of a float with a double constant it may not
+// hold (-Wliteral-range); and under any operator, a bit-field of a 64-bit type and 32 bits or fewer, which promotes to
+// int where this path keeps its type.
+static __attribute__((noinline)) bool fast_cc_binary_questioned(const FastCCState* cc, uint8_t op, const FastVal* lhs, const FastVal* rhs, FastType lt, FastType rt)
+{
+    // Each family is looked at where its operands can be one (most calls are one family's: a narrow operand against a
+    // constant), a test at a time.
+    static const int32_t range_lo[32] = { [FTYPE_BOOL] = 0, [FTYPE_I8] = -128, [FTYPE_I16] = -32768 };
+    static const int32_t range_hi[32] = { [FTYPE_BOOL] = 1, [FTYPE_I8] = 127, [FTYPE_U8] = 255, [FTYPE_I16] = 32767, [FTYPE_U16] = 65535 };
+    static const uint8_t range_narrow[32] = { [FTYPE_BOOL] = 1, [FTYPE_I8] = 1, [FTYPE_U8] = 1, [FTYPE_I16] = 1, [FTYPE_U16] = 1 };
+    const uint32_t equality = (uint32_t)(op == FTOK_EQ) | (uint32_t)(op == FTOK_NE);
+    const uint32_t comparison = (uint32_t)(op == FTOK_LT) | (uint32_t)(op == FTOK_GT) | (uint32_t)(op == FTOK_LE) | (uint32_t)(op == FTOK_GE) | equality;
+    uint32_t questioned = 0;
+    // A bit-field of a 64-bit type and 32 bits or fewer promotes to int, where this path keeps its type: refused under any
+    // operator.
+    if ((uint32_t)(lhs->kind == FVAL_BITFIELD) | (uint32_t)(rhs->kind == FVAL_BITFIELD))
+    {
+        const uint32_t l_long = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) & (uint32_t)((lt & BUSTER_FTYPE_SCALAR_MASK) - FTYPE_I64 <= 1u);
+        const uint32_t r_long = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) & (uint32_t)((rt & BUSTER_FTYPE_SCALAR_MASK) - FTYPE_I64 <= 1u);
+        questioned = ((uint32_t)(lhs->kind == FVAL_BITFIELD) & l_long & (uint32_t)(lhs->bf_width <= 32u)) |
+                     ((uint32_t)(rhs->kind == FVAL_BITFIELD) & r_long & (uint32_t)(rhs->bf_width <= 32u));
+    }
+    const uint32_t l_const = (uint32_t)(lhs->kind == FVAL_IMM);
+    const uint32_t r_const = (uint32_t)(rhs->kind == FVAL_IMM);
+    // A comparison of an integer constant with a value of a narrower range (_Bool, a char, a short, a boolean
+    // expression) that the constant is out of: -Wtautological-constant-out-of-range-compare. The side that isn't
+    // constant is picked by mask.
+    if (questioned == 0 && (comparison & (l_const ^ r_const)) != 0)
+    {
+        const uint32_t pick_left = l_const;            // the left side is the constant
+        const uint64_t left_mask = UINT64_C(0) - (uint64_t)pick_left;
+        const int64_t constant = (int64_t)(((uint64_t)rhs->imm & ~left_mask) | ((uint64_t)lhs->imm & left_mask));
+        const FastType other = (FastType)((lt & ~(uint32_t)left_mask) | (rt & (uint32_t)left_mask));
+        const uint32_t other_flags = (uint32_t)(((uint32_t)lhs->kind & ~(uint32_t)left_mask) | ((uint32_t)rhs->kind & (uint32_t)left_mask)) == FVAL_FLAGS;
+        const uint32_t other_scalar = (uint32_t)((other & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
+        const uint32_t kind = other & BUSTER_FTYPE_SCALAR_MASK;
+        const uint32_t narrow = ((uint32_t)range_narrow[kind] & other_scalar) | other_flags;
+        const uint64_t flags_mask = UINT64_C(0) - (uint64_t)other_flags;
+        const int64_t lo = (int64_t)((uint64_t)(int64_t)range_lo[kind] & ~flags_mask);
+        const int64_t hi = (int64_t)(((uint64_t)(int64_t)range_hi[kind] & ~flags_mask) | (UINT64_C(1) & flags_mask));
+        questioned = narrow & ((uint32_t)(constant < lo) | (uint32_t)(constant > hi));
+    }
+    // -Wenum-compare: a comparison of two enums' values (an enumerator, whose enum rides in sym_idx, or a value of the
+    // enum's type) of different enums. (An unnamed enum's isn't warned of; refused the same.) Asked where both sides
+    // can be one: an enum type's value or an enumerator.
+    const uint32_t l_candidate = ((uint32_t)(lt >> 31) & (uint32_t)((lt & BUSTER_FTYPE_PTR_MASK) == 0)) | (l_const & (uint32_t)(lhs->sym_idx != 0));
+    const uint32_t r_candidate = ((uint32_t)(rt >> 31) & (uint32_t)((rt & BUSTER_FTYPE_PTR_MASK) == 0)) | (r_const & (uint32_t)(rhs->sym_idx != 0));
+    if (questioned == 0 && (comparison & l_candidate & r_candidate) != 0)
+    {
+        const uint32_t l_cidx = lt & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(lt) & (UINT32_C(0) - (uint32_t)((lt & BUSTER_FTYPE_PTR_MASK) == 0));
+        const uint32_t r_cidx = rt & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(rt) & (UINT32_C(0) - (uint32_t)((rt & BUSTER_FTYPE_PTR_MASK) == 0));
+        const uint32_t l_enum = (l_cidx & (UINT32_C(0) - (uint32_t)(cc->ctypes[l_cidx].kind == FCTYPE_ENUM))) | (lhs->sym_idx & (UINT32_C(0) - l_const));
+        const uint32_t r_enum = (r_cidx & (UINT32_C(0) - (uint32_t)(cc->ctypes[r_cidx].kind == FCTYPE_ENUM))) | (rhs->sym_idx & (UINT32_C(0) - r_const));
+        questioned = (uint32_t)(l_enum != 0) & (uint32_t)(r_enum != 0) & (uint32_t)(l_enum != r_enum);
+    }
+    // -Wtautological-pointer-compare: an array's, a function's or an address's equality with a null pointer constant.
+    // (A weak function's isn't warned of; refused the same.) Asked where a side is the constant 0.
+    const uint32_t l_zero = l_const & (uint32_t)(lhs->imm == 0);
+    const uint32_t r_zero = r_const & (uint32_t)(rhs->imm == 0);
+    if (questioned == 0 && (equality & (l_zero | r_zero)) != 0)
+    {
+        const uint32_t l_kind = cc->ctypes[lhs->type & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(lhs->type)].kind;
+        const uint32_t r_kind = cc->ctypes[rhs->type & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(rhs->type)].kind;
+        const uint32_t l_aggregate = (uint32_t)(lhs->type >> 31) & (uint32_t)((lhs->type & BUSTER_FTYPE_PTR_MASK) == 0) &
+                                     ((uint32_t)(l_kind == FCTYPE_ARRAY) | (uint32_t)(l_kind == FCTYPE_FUNC));
+        const uint32_t r_aggregate = (uint32_t)(rhs->type >> 31) & (uint32_t)((rhs->type & BUSTER_FTYPE_PTR_MASK) == 0) &
+                                     ((uint32_t)(r_kind == FCTYPE_ARRAY) | (uint32_t)(r_kind == FCTYPE_FUNC));
+        // (is_func_sym shares its byte with other kinds' fields: a function designator's is FVAL_GLOBAL's.)
+        const uint32_t l_nonnull = l_aggregate | (uint32_t)(lhs->kind == FVAL_LOCAL_ADDR) | (uint32_t)(lhs->kind == FVAL_GLOBAL_ADDR) |
+                                   ((uint32_t)(lhs->kind == FVAL_GLOBAL) & (uint32_t)(lhs->is_func_sym != 0));
+        const uint32_t r_nonnull = r_aggregate | (uint32_t)(rhs->kind == FVAL_LOCAL_ADDR) | (uint32_t)(rhs->kind == FVAL_GLOBAL_ADDR) |
+                                   ((uint32_t)(rhs->kind == FVAL_GLOBAL) & (uint32_t)(rhs->is_func_sym != 0));
+        questioned = (l_nonnull & r_zero) | (r_nonnull & l_zero);
+    }
+    // -Wliteral-range: `==` or `!=` of a float (or a cast of one to double) and a double constant, which a float may not
+    // hold exactly (clang's CheckFloatComparison): asked where one is.
+    const uint32_t l_double = (uint32_t)(lhs->kind == FVAL_FIMM) & (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64);
+    const uint32_t r_double = (uint32_t)(rhs->kind == FVAL_FIMM) & (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64);
+    if (questioned == 0 && (equality & (l_double | r_double)) != 0)
+    {
+        const uint32_t l_float = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32) | (uint32_t)(lhs->lasting & BUSTER_FVAL_LASTING_FLOAT_CAST);
+        const uint32_t r_float = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32) | (uint32_t)(rhs->lasting & BUSTER_FVAL_LASTING_FLOAT_CAST);
+        if (((l_float & r_double) | (r_float & l_double)) != 0)
+        {
+            const uint64_t bits = (uint64_t)(r_double != 0 ? rhs->imm : lhs->imm);
+            double value = 0.0;
+            memcpy(&value, &bits, sizeof(value));
+            // Out of float's range (or NaN) a float can't hold it; within, exactly where float's rounding gives it back.
+            const bool in_range = value >= -(double)__FLT_MAX__ && value <= (double)__FLT_MAX__;
+            questioned = !in_range || (double)(float)value != value ? 1u : 0u;
+        }
+    }
+    return questioned != 0;
+}
+
+// #3577: two lvalues at one place, their types, kinds and places (an object's frame offset, an address's addend and
+// symbol, an indirect member's displacement) alike: a comparison of them may be a self-comparison, which their tokens
+// decide (fast_cc_same_paths). 1 or 0, field by field (a vector load would miss the fields' recent stores).
+#define BUSTER_FAST_SAME_PLACE(lhs, rhs) \
+    ((uint32_t)((lhs)->type == (rhs)->type) & (uint32_t)((lhs)->kind == (rhs)->kind) & (uint32_t)((lhs)->imm == (rhs)->imm) & \
+     (uint32_t)((lhs)->sym_idx == (rhs)->sym_idx) & (uint32_t)(lhs)->is_lvalue & (uint32_t)(rhs)->is_lvalue)
+
+// #3577: a token's class in an access path as the full pipeline's check_expression_same compares one (a name, its
+// members by `.` and `->`, subscripts of an integer literal or a path, and parentheses): BUSTER_FPATH_OTHER for any
+// other token. fast_path_follows[a] holds b's bit where a path's token of class a may come right before one of class b,
+// BUSTER_FPATH_EDGE standing for the path's start (as a) and its end (as b).
+#define BUSTER_FPATH_OTHER 0u
+#define BUSTER_FPATH_NAME 1u
+#define BUSTER_FPATH_NUMBER 2u
+#define BUSTER_FPATH_MEMBER 3u
+#define BUSTER_FPATH_OPEN_SUB 4u
+#define BUSTER_FPATH_CLOSE_SUB 5u
+#define BUSTER_FPATH_OPEN_PAREN 6u
+#define BUSTER_FPATH_CLOSE_PAREN 7u
+#define BUSTER_FPATH_EDGE 8u
+#define BUSTER_FPATH_AFTER_CLOSE ((1u << BUSTER_FPATH_MEMBER) | (1u << BUSTER_FPATH_OPEN_SUB) | (1u << BUSTER_FPATH_CLOSE_SUB) | \
+                                  (1u << BUSTER_FPATH_CLOSE_PAREN) | (1u << BUSTER_FPATH_EDGE))
+
+static const uint16_t fast_path_follows[9] = {
+    [BUSTER_FPATH_NAME] = BUSTER_FPATH_AFTER_CLOSE,
+    [BUSTER_FPATH_NUMBER] = 1u << BUSTER_FPATH_CLOSE_SUB,
+    [BUSTER_FPATH_MEMBER] = 1u << BUSTER_FPATH_NAME,
+    [BUSTER_FPATH_OPEN_SUB] = (1u << BUSTER_FPATH_NAME) | (1u << BUSTER_FPATH_NUMBER) | (1u << BUSTER_FPATH_OPEN_PAREN),
+    [BUSTER_FPATH_CLOSE_SUB] = BUSTER_FPATH_AFTER_CLOSE,
+    [BUSTER_FPATH_OPEN_PAREN] = (1u << BUSTER_FPATH_NAME) | (1u << BUSTER_FPATH_OPEN_PAREN),
+    [BUSTER_FPATH_CLOSE_PAREN] = BUSTER_FPATH_AFTER_CLOSE,
+    [BUSTER_FPATH_EDGE] = (1u << BUSTER_FPATH_NAME) | (1u << BUSTER_FPATH_OPEN_PAREN),
+};
+
+static uint32_t fast_path_class(uint8_t k)
+{
+    uint32_t cls = BUSTER_FPATH_OTHER;
+    if (k == FTOK_IDENT) { cls = BUSTER_FPATH_NAME; }
+    else if (k == FTOK_INT_LIT) { cls = BUSTER_FPATH_NUMBER; }
+    else if (k == FTOK_DOT || k == FTOK_ARROW) { cls = BUSTER_FPATH_MEMBER; }
+    else if (k == FTOK_LBRACKET) { cls = BUSTER_FPATH_OPEN_SUB; }
+    else if (k == FTOK_RBRACKET) { cls = BUSTER_FPATH_CLOSE_SUB; }
+    else if (k == FTOK_LPAREN) { cls = BUSTER_FPATH_OPEN_PAREN; }
+    else if (k == FTOK_RPAREN) { cls = BUSTER_FPATH_CLOSE_PAREN; }
+    return cls;
+}
+
+// #3577: the end (one past its last token) of the access path that starts at POS, or POS where none does: its tokens in
+// an order fast_path_follows allows and its brackets matched. It ends before a token that continues it otherwise, or a
+// `)` or `]` it didn't open; one that leaves a bracket open is none.
+static uint32_t fast_cc_path_end(const FastCCState* cc, uint32_t pos)
+{
+    uint64_t subscripts = 0; // a bit a level open: 1 for `[`, 0 for `(`
+    uint32_t depth = 0;
+    uint32_t before = BUSTER_FPATH_EDGE;
+    uint32_t i = pos;
+    bool more = true;
+    while (more)
+    {
+        const uint32_t cls = i < cc->tcount ? fast_path_class(cc->tk[i]) : BUSTER_FPATH_OTHER;
+        const bool opens = cls == BUSTER_FPATH_OPEN_SUB || cls == BUSTER_FPATH_OPEN_PAREN;
+        const bool closes = cls == BUSTER_FPATH_CLOSE_SUB || cls == BUSTER_FPATH_CLOSE_PAREN;
+        more = cls != BUSTER_FPATH_OTHER && !(closes && depth == 0) && ((fast_path_follows[before] >> cls) & 1u) != 0 &&
+               depth < 64u && !(closes && (subscripts & 1u) != (uint64_t)(cls == BUSTER_FPATH_CLOSE_SUB));
+        if (more)
+        {
+            subscripts = opens ? (subscripts << 1) | (uint64_t)(cls == BUSTER_FPATH_OPEN_SUB) : closes ? subscripts >> 1 : subscripts;
+            depth = depth + (uint32_t)opens - (uint32_t)closes;
+            before = cls;
+            i += 1u;
+        }
+    }
+    const bool ok = i > pos && depth == 0 && ((fast_path_follows[before] >> BUSTER_FPATH_EDGE) & 1u) != 0;
+    return ok ? i : pos;
+}
+
+// #3577: the first token of the access path that ends just before END, or END where none does (fast_cc_path_end's,
+// read backward).
+static uint32_t fast_cc_path_begin(const FastCCState* cc, uint32_t end)
+{
+    uint64_t subscripts = 0; // a bit a level open: 1 for `]`, 0 for `)`
+    uint32_t depth = 0;
+    uint32_t after = BUSTER_FPATH_EDGE;
+    uint32_t i = end;
+    bool more = true;
+    while (more)
+    {
+        const uint32_t cls = i > 0 && i <= cc->tcount ? fast_path_class(cc->tk[i - 1u]) : BUSTER_FPATH_OTHER;
+        const bool opens = cls == BUSTER_FPATH_OPEN_SUB || cls == BUSTER_FPATH_OPEN_PAREN;
+        const bool closes = cls == BUSTER_FPATH_CLOSE_SUB || cls == BUSTER_FPATH_CLOSE_PAREN;
+        more = cls != BUSTER_FPATH_OTHER && !(opens && depth == 0) && ((fast_path_follows[cls] >> after) & 1u) != 0 &&
+               depth < 64u && !(opens && (subscripts & 1u) != (uint64_t)(cls == BUSTER_FPATH_OPEN_SUB));
+        if (more)
+        {
+            subscripts = closes ? (subscripts << 1) | (uint64_t)(cls == BUSTER_FPATH_CLOSE_SUB) : opens ? subscripts >> 1 : subscripts;
+            depth = depth + (uint32_t)closes - (uint32_t)opens;
+            after = cls;
+            i -= 1u;
+        }
+    }
+    const bool ok = i < end && depth == 0 && ((fast_path_follows[BUSTER_FPATH_EDGE] >> after) & 1u) != 0;
+    return ok ? i : end;
+}
+
+// #3577: whether the token K that comes right before (BEFORE) or after an operand's path makes the comparison OP's
+// operand more than the path: a prefix or a cast's `)` before it, a postfix or a call's `(` after it, a multiplicative,
+// additive or shift operator on either side, a relational one around an equality's operand, and one of OP's own
+// precedence before it (left to right). PREVIOUS is the token before K, which tells a binary `&` (looser) from a unary one.
+static bool fast_cc_path_bound_tighter(uint8_t k, uint8_t previous, uint8_t op, bool before)
+{
+    const bool equality = op == FTOK_EQ || op == FTOK_NE;
+    const bool relational_k = k == FTOK_LT || k == FTOK_GT || k == FTOK_LE || k == FTOK_GE;
+    const bool binary = k == FTOK_STAR || k == FTOK_SLASH || k == FTOK_PERCENT || k == FTOK_PLUS || k == FTOK_MINUS ||
+                        k == FTOK_LSHIFT || k == FTOK_RSHIFT || k == FTOK_INC || k == FTOK_DEC;
+    const bool operand_end = previous == FTOK_IDENT || previous == FTOK_INT_LIT || previous == FTOK_FLOAT_LIT || previous == FTOK_CHAR_LIT ||
+                             previous == FTOK_STR_LIT || previous == FTOK_RPAREN || previous == FTOK_RBRACKET;
+    const bool prefix = k == FTOK_BANG || k == FTOK_TILDE || k == FTOK_KW_SIZEOF || k == FTOK_KW_ALIGNOF || k == FTOK_RPAREN ||
+                        (k == FTOK_AMP && !operand_end);
+    const bool tighter = binary || (relational_k && (equality || before)) || (before && (prefix || (equality && (k == FTOK_EQ || k == FTOK_NE)))) ||
+                         (!before && k == FTOK_LPAREN);
+    return tighter;
+}
+
+// #3577: whether the comparison at AT (its token OP there) has one access path on both sides, parentheses aside: the
+// full pipeline's self-comparison (check_expression_same), asked where both operands are lvalues at one place. Where its
+// token isn't the comparison, it says so (failing closed).
+static __attribute__((cold, noinline)) bool fast_cc_same_paths(const FastCCState* cc, uint8_t op, uint32_t at)
+{
+    bool same = at >= cc->tcount || cc->tk[at] != op;
+    if (!same)
+    {
+        const uint32_t r_end = fast_cc_path_end(cc, at + 1u);
+        const uint32_t l_begin = fast_cc_path_begin(cc, at);
+        const uint8_t follower = r_end < cc->tcount ? cc->tk[r_end] : FTOK_EOF;
+        const uint8_t predecessor = l_begin > 0 ? cc->tk[l_begin - 1u] : FTOK_EOF;
+        const uint8_t before_predecessor = l_begin > 1u ? cc->tk[l_begin - 2u] : FTOK_EOF;
+        const bool paths = r_end > at + 1u && l_begin < at && !fast_cc_path_bound_tighter(follower, FTOK_EOF, op, false) &&
+                           !fast_cc_path_bound_tighter(predecessor, before_predecessor, op, true);
+        // The two token runs, parentheses skipped, alike in kind and data.
+        uint32_t l = l_begin;
+        uint32_t r = at + 1u;
+        bool alike = paths;
+        while (alike && (l < at || r < r_end))
+        {
+            while (l < at && (cc->tk[l] == FTOK_LPAREN || cc->tk[l] == FTOK_RPAREN)) { l += 1u; }
+            while (r < r_end && (cc->tk[r] == FTOK_LPAREN || cc->tk[r] == FTOK_RPAREN)) { r += 1u; }
+            const bool l_more = l < at;
+            const bool r_more = r < r_end;
+            alike = l_more == r_more && (!l_more || (cc->tk[l] == cc->tk[r] && cc->td[l] == cc->td[r]));
+            l += (uint32_t)l_more;
+            r += (uint32_t)r_more;
+        }
+        same = alike;
+    }
+    return same;
+}
+
+// #3577: -Wtautological-compare's pointer bounds (the full pipeline's check_expression_bounds): a sum `p + n` outside
+// parentheses on the left of `<` or `>=` (SUM_LEFT), or on the right of `>` or `<=`, whose pointer is the other side's
+// access path, for any offset (the full pipeline's is unsigned alone: this fails closed). True where the other side's
+// path is one of the access paths in the sum's tokens, up to the operators looser than `+`; and where the comparison's
+// token isn't at AT.
+static __attribute__((cold, noinline)) bool fast_cc_sum_bounds(const FastCCState* cc, uint8_t op, uint32_t at, bool sum_left)
+{
+    bool found = at >= cc->tcount || cc->tk[at] != op;
+    // The other side's path [b_begin, b_end).
+    uint32_t b_begin = at;
+    uint32_t b_end = at;
+    if (sum_left)
+    {
+        b_begin = at + 1u;
+        b_end = fast_cc_path_end(cc, b_begin);
+        const uint8_t follower = b_end < cc->tcount ? cc->tk[b_end] : FTOK_EOF;
+        b_end = fast_cc_path_bound_tighter(follower, FTOK_EOF, op, false) ? b_begin : b_end;
+    }
+    else
+    {
+        b_begin = fast_cc_path_begin(cc, at);
+        const uint8_t predecessor = b_begin > 0 ? cc->tk[b_begin - 1u] : FTOK_EOF;
+        const uint8_t before_predecessor = b_begin > 1u ? cc->tk[b_begin - 2u] : FTOK_EOF;
+        b_begin = fast_cc_path_bound_tighter(predecessor, before_predecessor, op, true) ? at : b_begin;
+    }
+    // The sum's tokens [s_begin, s_end): from the comparison to an operator looser than `+` or a bracket it didn't open.
+    uint32_t s_begin = sum_left ? at : at + 1u;
+    uint32_t s_end = sum_left ? at : at + 1u;
+    uint32_t depth = 0;
+    bool more = !found && b_end > b_begin;
+    while (more)
+    {
+        const uint32_t i = sum_left ? s_begin - 1u : s_end;
+        const bool inside = sum_left ? s_begin > 0 : s_end < cc->tcount;
+        const uint8_t k = inside ? cc->tk[i] : FTOK_EOF;
+        const bool opens = sum_left ? (k == FTOK_RPAREN || k == FTOK_RBRACKET) : (k == FTOK_LPAREN || k == FTOK_LBRACKET);
+        const bool closes = sum_left ? (k == FTOK_LPAREN || k == FTOK_LBRACKET) : (k == FTOK_RPAREN || k == FTOK_RBRACKET);
+        const bool looser = k == FTOK_EOF || k == FTOK_SEMI || k == FTOK_COMMA || k == FTOK_QUESTION || k == FTOK_COLON || k == FTOK_LBRACE ||
+                            k == FTOK_RBRACE || k == FTOK_ASSIGN || k == FTOK_LAND || k == FTOK_LOR || k == FTOK_PIPE || k == FTOK_CARET ||
+                            k == FTOK_AMP || k == FTOK_EQ || k == FTOK_NE || k == FTOK_LT || k == FTOK_GT || k == FTOK_LE || k == FTOK_GE ||
+                            (k >= FTOK_ADD_ASSIGN && k <= FTOK_SHR_ASSIGN);
+        more = inside && !(depth == 0 && (looser || closes)) && depth < 1024u;
+        if (more)
+        {
+            depth = depth + (uint32_t)opens - (uint32_t)closes;
+            s_begin -= (uint32_t)sum_left;
+            s_end += (uint32_t)!sum_left;
+        }
+    }
+    const uint32_t b_tokens = b_end - b_begin;
+    for (uint32_t j = s_begin; !found && j < s_end; j += 1u)
+    {
+        const uint32_t e = fast_cc_path_end(cc, j);
+        bool alike = e > j && e <= s_end;
+        uint32_t x = j;
+        uint32_t y = b_begin;
+        while (alike && (x < e || y < b_end))
+        {
+            while (x < e && (cc->tk[x] == FTOK_LPAREN || cc->tk[x] == FTOK_RPAREN)) { x += 1u; }
+            while (y < b_end && (cc->tk[y] == FTOK_LPAREN || cc->tk[y] == FTOK_RPAREN)) { y += 1u; }
+            const bool x_more = x < e;
+            const bool y_more = y < b_end;
+            alike = x_more == y_more && (!x_more || (cc->tk[x] == cc->tk[y] && cc->td[x] == cc->td[y]));
+            x += (uint32_t)x_more;
+            y += (uint32_t)y_more;
+        }
+        found = alike && b_tokens != 0;
+    }
+    return found;
+}
+
+// #3577: whether a comparison is one the full pipeline's -Wtautological-compare or -Wstring-compare reports where
+// evaluated: of two arrays; of a string literal (in parentheses or casts) and anything but a null pointer constant; of
+// one access path with itself, not floating (asked where the operands are lvalues at one place); or of a pointer sum and
+// its pointer (fast_cc_sum_bounds). AT is the comparison's token.
+static __attribute__((cold, noinline)) bool fast_cc_comparison_reported(const FastCCState* cc, uint8_t op, const FastVal* lhs, const FastVal* rhs,
+                                                                         FastType lt, FastType rt, uint32_t at)
+{
+    const bool arrays = ftype_is_array(lhs->type) && ftype_is_array(rhs->type);
+    const bool l_null = lhs->kind == FVAL_IMM && lhs->imm == 0;
+    const bool r_null = rhs->kind == FVAL_IMM && rhs->imm == 0;
+    const bool strings = ((lhs->lasting & BUSTER_FVAL_LASTING_STRING) != 0 && !r_null) || ((rhs->lasting & BUSTER_FVAL_LASTING_STRING) != 0 && !l_null);
+    const bool self = !arrays && !strings && BUSTER_FAST_SAME_PLACE(lhs, rhs) != 0 && !ftype_is_float(lt) && fast_cc_same_paths(cc, op, at);
+    const bool sum_left = lhs->op == FTOK_PLUS && ftype_is_ptr(lt) && (op == FTOK_LT || op == FTOK_GE);
+    const bool sum_right = rhs->op == FTOK_PLUS && ftype_is_ptr(rt) && (op == FTOK_GT || op == FTOK_LE);
+    const bool bounds = !arrays && !strings && !self && (sum_left || sum_right) && fast_cc_sum_bounds(cc, op, at, sum_left);
+    return arrays || strings || self || bounds;
+}
+
+// #3577: a binary operator's operands, as fval_emit_binary's gate sends them (two integer scalars that aren't compared
+// or a bit-field don't come): false, with the bailout made, where the full pipeline's error or warning is.
+// (Out of line: its values would take fval_emit_binary's registers, whose every operator spilled them.)
+static __attribute__((noinline)) bool fast_cc_binary_operands_quiet(FastCCState* cc, uint8_t op, const FastVal* lhs, const FastVal* rhs,
+                                                                   FastType lt, FastType rt, uint32_t integers, uint32_t at, uint32_t evaluated)
+{
+    bool quiet = true;
+    // #3577: the operands C allows each operator, or the full pipeline's error or warning: * / arithmetic; % & | ^ << >>
+    // integers; + arithmetic, or a pointer and an integer; - those, or two pointers; < > <= >= arithmetic or two
+    // pointers; == != those, or a pointer and a literal 0. A pair of classes (left * 4 + right) is a bit of the
+    // operator's mask; two pointers must be to one type (fast_cc_pointer_pair_valid).
+    // Two integer scalars (no enum, pointer or record) are every operator's operands: the classes are looked up for the
+    // others alone.
+    if (integers == 0)
+    {
+        const uint32_t lc = BUSTER_FAST_OPERAND_CLASS(cc, lt);
+        const uint32_t rc = BUSTER_FAST_OPERAND_CLASS(cc, rt);
+        const uint32_t pair = lc * 4u + rc;
+        const uint32_t equality = (uint32_t)(op == FTOK_EQ) | (uint32_t)(op == FTOK_NE);
+        const uint32_t lnull = (uint32_t)(lc == BUSTER_FOPERAND_INTEGER) & (uint32_t)(lhs->kind == FVAL_IMM) & (uint32_t)(lhs->imm == 0) &
+                               (uint32_t)((lhs->marks & BUSTER_FVAL_MARK_NONLITERAL) == 0);
+        const uint32_t rnull = (uint32_t)(rc == BUSTER_FOPERAND_INTEGER) & (uint32_t)(rhs->kind == FVAL_IMM) & (uint32_t)(rhs->imm == 0) &
+                               (uint32_t)((rhs->marks & BUSTER_FVAL_MARK_NONLITERAL) == 0);
+        const uint32_t null_pair = equality & (((uint32_t)(lc == BUSTER_FOPERAND_POINTER) & rnull) | ((uint32_t)(rc == BUSTER_FOPERAND_POINTER) & lnull));
+        const uint32_t refused = ((uint32_t)fast_binary_refused[op & 63u] >> pair) & 1u;
+        if ((refused & (null_pair ^ 1u)) != 0)
+        {
+            fast_cc_bail(cc, "operands of a binary operator");
+            quiet = false;
+        }
+        else if (pair == BUSTER_FOPERAND_POINTER * 5u && lt != rt && !fast_cc_pointer_pair_valid(cc, op, lt, rt))
+        {
+            fast_cc_bail(cc, "operands of distinct pointer types");
+            quiet = false;
+        }
+    }
+    // #3577: the comparisons and operands the full pipeline questions (fast_cc_binary_questioned) have a constant against
+    // a narrow, flag, enum, aggregate, address or float operand, two enum values, or a bit-field: a comparison or a
+    // bit-field alone looks further, at the operands' kinds and types, in registers, and the exact check runs past that.
+    // (A test at a time below: most calls are a pointer's operator, which none of the families is.)
+    const bool comparison = ((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0;
+    const uint32_t kinds = (UINT32_C(1) << lhs->kind) | (UINT32_C(1) << rhs->kind);
+    const uint32_t bitfield = (kinds >> FVAL_BITFIELD) & 1u;
+    if (quiet && (comparison || bitfield != 0))
+    {
+        uint32_t questioned = bitfield;
+        if (comparison)
+        {
+            // An array, a function or an enum before decay (not a pointer to a record, which compares quietly).
+            const uint32_t l_aggregate = (uint32_t)((lhs->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT);
+            const uint32_t r_aggregate = (uint32_t)((rhs->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT);
+            const uint32_t l_enum = l_aggregate | ((uint32_t)(lhs->kind == FVAL_IMM) & (uint32_t)(lhs->sym_idx != 0));
+            const uint32_t r_enum = r_aggregate | ((uint32_t)(rhs->kind == FVAL_IMM) & (uint32_t)(rhs->sym_idx != 0));
+            questioned |= l_enum & r_enum;
+            if (questioned == 0 && (kinds & ((UINT32_C(1) << FVAL_IMM) | (UINT32_C(1) << FVAL_FIMM))) != 0)
+            {
+                // (A scalar kind's bit, below the pointer and complex bits; a pointer's or a record's scalar bits are 0, void's.)
+                const uint32_t l_scalar = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
+                const uint32_t r_scalar = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
+                questioned = (uint32_t)((kinds & ((UINT32_C(1) << FVAL_FLAGS) | (UINT32_C(1) << FVAL_LOCAL_ADDR) | (UINT32_C(1) << FVAL_GLOBAL_ADDR))) != 0) |
+                             ((l_scalar & (BUSTER_FAST_QUESTIONED_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK))) & 1u) |
+                             ((r_scalar & (BUSTER_FAST_QUESTIONED_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK))) & 1u) | l_aggregate | r_aggregate |
+                             ((uint32_t)(lhs->kind == FVAL_GLOBAL) & (uint32_t)(lhs->is_func_sym != 0)) |
+                             ((uint32_t)(rhs->kind == FVAL_GLOBAL) & (uint32_t)(rhs->is_func_sym != 0)) |
+                             (uint32_t)((lhs->lasting & BUSTER_FVAL_LASTING_FLOAT_CAST) != 0) | (uint32_t)((rhs->lasting & BUSTER_FVAL_LASTING_FLOAT_CAST) != 0);
+            }
+        }
+        if (questioned != 0 && fast_cc_binary_questioned(cc, op, lhs, rhs, lt, rt))
+        {
+            fast_cc_bail(cc, "comparison or operand the full pipeline questions");
+            quiet = false;
+        }
+    }
+    // #3577: a comparison -Wtautological-compare or -Wstring-compare reports, where evaluated (not sizeof's operand):
+    // asked of two lvalues at one place, two non-pointer aggregates, a string literal or a relational pointer sum, the
+    // rest by fast_cc_comparison_reported.
+    if (quiet && comparison && evaluated != 0)
+    {
+        const uint32_t relational = (uint32_t)(op == FTOK_LT) | (uint32_t)(op == FTOK_GT) | (uint32_t)(op == FTOK_LE) | (uint32_t)(op == FTOK_GE);
+        const uint32_t reported_asked = BUSTER_FAST_SAME_PLACE(lhs, rhs) |
+                                        ((uint32_t)((lhs->type & rhs->type & BUSTER_FTYPE_COMPLEX_BIT) != 0) &
+                                         (uint32_t)(((lhs->type | rhs->type) & BUSTER_FTYPE_PTR_MASK) == 0)) |
+                                        (uint32_t)(((lhs->lasting | rhs->lasting) & BUSTER_FVAL_LASTING_STRING) != 0) |
+                                        (relational & ((uint32_t)(lhs->op == FTOK_PLUS) | (uint32_t)(rhs->op == FTOK_PLUS)));
+        if (reported_asked != 0 && fast_cc_comparison_reported(cc, op, lhs, rhs, lt, rt, at))
+        {
+            fast_cc_bail(cc, "a comparison the full pipeline's -Wtautological-compare or -Wstring-compare reports");
+            quiet = false;
+        }
+    }
+    return quiet;
+}
+
+// #3577: a register's sum of a known object's address (BASE: a local's or a global's array or address, or such a sum) and
+// DELTA, kept for -Wfortify-source (BUSTER_FVAL_LASTING_ADDRESS); a place past 32 bits isn't kept.
+static __attribute__((cold, noinline)) void fast_cc_address_sum(FastVal* v, const FastVal* base, int64_t delta)
+{
+    const bool summed = (base->lasting & BUSTER_FVAL_LASTING_ADDRESS) != 0;
+    const bool local = summed ? base->sym_idx == 0 : (base->kind == FVAL_LOCAL_ADDR || base->kind == FVAL_LOCAL);
+    const int64_t place = summed ? (int64_t)base->addr_disp : local ? (int64_t)base->off : base->imm;
+    int64_t at = 0;
+    const bool overflowed = __builtin_add_overflow(place, delta, &at);
+    if (!overflowed && at >= INT32_MIN && at <= INT32_MAX)
+    {
+        v->lasting |= BUSTER_FVAL_LASTING_ADDRESS;
+        v->sym_idx = local ? 0u : base->sym_idx;
+        v->addr_disp = (int32_t)at;
+    }
+}
+
+// #3577: a checked inline body compares two long doubles as two doubles (fast_cc_checked_long_double): the checks are a
+// floating comparison's, and the code is dropped.
+static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_compare(const FastCCState* cc, uint8_t op, FastVal* lhs, FastVal* rhs)
+{
+    const bool taken = ((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0 && fast_cc_checked_long_double(cc, lhs->type, rhs->type);
+    if (taken)
+    {
+        lhs->type = FTYPE_F64;
+        rhs->type = FTYPE_F64;
+    }
+    return taken;
+}
+
 static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, FastVal* lhs, FastVal* rhs, FastVal* out)
 {
     FastCCState* cc = ex->cc;
     FastObj* obj = cc->obj;
-    const FastType lt = ftype_decay(cc, lhs->type);
-    const FastType rt = ftype_decay(cc, rhs->type);
+    FastType lt = ftype_decay(cc, lhs->type);
+    FastType rt = ftype_decay(cc, rhs->type);
     if (ftype_is_unsupported(lt) || ftype_is_unsupported(rt))
     {
-        fast_cc_bail(cc, "unsupported type binary op");
-        return;
+        if (!fast_cc_checked_long_double_compare(cc, op, lhs, rhs)) { fast_cc_bail(cc, "unsupported type binary op"); return; }
+        lt = FTYPE_F64;
+        rt = FTYPE_F64;
+    }
+    // #3577: the operands C allows each operator, and the comparisons and operands the full pipeline questions: two integer
+    // scalars (no enum, pointer or record) that aren't a bit-field are every operator's operands, and are questioned only
+    // compared, where a superset of what fast_cc_binary_operands_quiet questions is looked at first, in registers; any
+    // other pair takes it.
+    const uint32_t integers = (uint32_t)(((lt | rt) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
+                              (BUSTER_FAST_INTEGER_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK)) & (BUSTER_FAST_INTEGER_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK)) & 1u;
+    const uint32_t kinds = (UINT32_C(1) << lhs->kind) | (UINT32_C(1) << rhs->kind);
+    bool asked = (integers == 0) || ((kinds >> FVAL_BITFIELD) & 1u) != 0;
+    // Two integers compared (11,000 of sqlite3.c's 27,000 binary operators): a test at a time, the constant's first.
+    if (!asked && ((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0)
+    {
+        if ((kinds & ((UINT32_C(1) << FVAL_IMM) | (UINT32_C(1) << FVAL_FIMM))) != 0)
+        {
+            asked = BUSTER_FAST_INT_COMPARE_ASKED(lhs, rhs, lt, rt, kinds) != 0 && !fast_cc_narrow_constant_quiet(lhs, rhs, lt, rt, op);
+        }
+        else
+        {
+            asked = ((lhs->type | rhs->type) & BUSTER_FTYPE_COMPLEX_BIT) != 0;
+        }
+        if (!asked && (lhs->is_lvalue & rhs->is_lvalue) != 0)
+        {
+            asked = BUSTER_FAST_SAME_PLACE(lhs, rhs) != 0;
+        }
+    }
+    // A pointer's common operators, which fast_cc_binary_operands_quiet's tables take quietly, are taken without its call
+    // (6,000 of sqlite3.c's 8,300 calls): a pointer (or an array) plus or minus an integer, and an integer plus one; two
+    // pointers of one type compared (no constant, string, place of both or pointer sum, which it asks about); and a
+    // pointer's equality with the literal 0. A bit-field operand goes to it.
+    if (asked && ((kinds >> FVAL_BITFIELD) & 1u) == 0)
+    {
+        // (A test chain, the operator's first: each pattern asks only its own operands.)
+        const uint32_t l_pointer = (uint32_t)((lt & BUSTER_FTYPE_PTR_MASK) != 0);
+        const uint32_t r_pointer = (uint32_t)((rt & BUSTER_FTYPE_PTR_MASK) != 0);
+        if (op == FTOK_PLUS || op == FTOK_MINUS)
+        {
+            const uint32_t l_integer = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
+                                       (BUSTER_FAST_INTEGER_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK)) & 1u;
+            const uint32_t r_integer = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
+                                       (BUSTER_FAST_INTEGER_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK)) & 1u;
+            asked = ((l_pointer & r_integer) | ((uint32_t)(op == FTOK_PLUS) & l_integer & r_pointer)) == 0;
+        }
+        else if (((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0 &&
+                 ((lhs->lasting | rhs->lasting) & (BUSTER_FVAL_LASTING_STRING | BUSTER_FVAL_LASTING_FLOAT_CAST)) == 0)
+        {
+            // (Pointers as written, not an array's or a function's decay, which the comparisons' checks ask about.)
+            const uint32_t l_written = (uint32_t)((lhs->type & BUSTER_FTYPE_PTR_MASK) != 0);
+            const uint32_t r_written = (uint32_t)((rhs->type & BUSTER_FTYPE_PTR_MASK) != 0);
+            if ((l_written & r_written) != 0)
+            {
+                const uint32_t relational = (uint32_t)(op == FTOK_LT) | (uint32_t)(op == FTOK_GT) | (uint32_t)(op == FTOK_LE) | (uint32_t)(op == FTOK_GE);
+                const uint32_t constants = (UINT32_C(1) << FVAL_IMM) | (UINT32_C(1) << FVAL_FIMM);
+                asked = ((uint32_t)(lt == rt) & (uint32_t)((kinds & constants) == 0) & (BUSTER_FAST_SAME_PLACE(lhs, rhs) ^ 1u) &
+                         ((relational & ((uint32_t)(lhs->op == FTOK_PLUS) | (uint32_t)(rhs->op == FTOK_PLUS))) ^ 1u)) == 0;
+            }
+            else if ((op == FTOK_EQ || op == FTOK_NE) &&
+                     (kinds & ((UINT32_C(1) << FVAL_FLAGS) | (UINT32_C(1) << FVAL_LOCAL_ADDR) | (UINT32_C(1) << FVAL_GLOBAL_ADDR))) == 0)
+            {
+                const uint32_t l_null = (uint32_t)(lhs->kind == FVAL_IMM) & (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_I32) &
+                                        (uint32_t)(lhs->imm == 0) & (uint32_t)(lhs->sym_idx == 0) & (uint32_t)((lhs->marks & BUSTER_FVAL_MARK_NONLITERAL) == 0);
+                const uint32_t r_null = (uint32_t)(rhs->kind == FVAL_IMM) & (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_I32) &
+                                        (uint32_t)(rhs->imm == 0) & (uint32_t)(rhs->sym_idx == 0) & (uint32_t)((rhs->marks & BUSTER_FVAL_MARK_NONLITERAL) == 0);
+                asked = ((l_written & (uint32_t)(lhs->kind != FVAL_IMM) & r_null) | (r_written & (uint32_t)(rhs->kind != FVAL_IMM) & l_null)) == 0;
+            }
+        }
+    }
+    if (asked)
+    {
+        if (!fast_cc_binary_operands_quiet(cc, op, lhs, rhs, lt, rt, integers, ex->cmp_pos, (uint32_t)(ex->unevaluated == 0)))
+        {
+            return;
+        }
     }
 
     // Materialize popped FVAL_FLAGS BEFORE loading the other operand (e.g. `0 == (a >= b)` emits `xor eax,eax` for 0!).
@@ -2939,6 +4862,7 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
         if (op == FTOK_MINUS && lp && rp)
         {
             const FastType elem = ftype_deref(cc, lt);
+            if (BUSTER_FAST_TYPE_INCOMPLETE(cc, elem) != 0) { fast_cc_bail(cc, "arithmetic on a pointer to an incomplete type"); return; }
             const uint32_t esz = ftype_size(cc, elem);
             if (ex->eval_only > 0) { *out = (FastVal){ .type = FTYPE_I64, .kind = FVAL_REG }; return; }
             fval_flush_flags(ex);
@@ -2955,7 +4879,7 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
                 else
                 {
                     // Signed 64-bit idiv by esz
-                    fval_spill_all(ex, ex->vsp, ex->arg_sp);
+                    fval_spill_all(ex, ex->vsp);
                     if (rl != FREG_RAX)
                     {
                         x86_mov_rr(obj, true, FREG_RAX, rl);
@@ -2979,11 +4903,21 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
         FastVal* iv = lp ? rhs : lhs;
         const FastType pt = lp ? lt : rt;
         const FastType elem = ftype_deref(cc, pt);
+        // #3577: a pointer to an incomplete type has no step, the full pipeline's error.
+        if (BUSTER_FAST_TYPE_INCOMPLETE(cc, elem) != 0) { fast_cc_bail(cc, "arithmetic on a pointer to an incomplete type"); return; }
         const uint32_t esz = ftype_size(cc, elem) != 0 ? ftype_size(cc, elem) : 1u;
         if (ex->eval_only > 0) { *out = (FastVal){ .type = ftype_unqual(pt), .kind = FVAL_REG }; return; }
         fval_flush_flags(ex);
         if (iv->kind == FVAL_IMM)
         {
+            // #3577: a known object's address (a local's or a global's, an array decaying, or such a sum) plus a constant
+            // keeps where it points (BUSTER_FVAL_LASTING_ADDRESS), which -Wfortify-source's check of a library call reads.
+            const FastVal base = *pv;
+            const uint32_t addressed = (uint32_t)(((UINT32_C(1) << base.kind) & ((UINT32_C(1) << FVAL_LOCAL_ADDR) | (UINT32_C(1) << FVAL_GLOBAL_ADDR))) != 0) |
+                                       ((uint32_t)(((UINT32_C(1) << base.kind) & ((UINT32_C(1) << FVAL_LOCAL) | (UINT32_C(1) << FVAL_GLOBAL))) != 0) &
+                                        (uint32_t)(base.type != pt)) |
+                                       ((uint32_t)(((UINT32_C(1) << base.kind) & ((UINT32_C(1) << FVAL_REG) | (UINT32_C(1) << FVAL_SPILL))) != 0) &
+                                        (uint32_t)((base.lasting & BUSTER_FVAL_LASTING_ADDRESS) != 0));
             const uint32_t pr = fval_to_gp(ex, pv, true);
             const int64_t delta = (op == FTOK_PLUS ? iv->imm : -iv->imm) * (int64_t)esz;
             if (delta != 0)
@@ -2998,6 +4932,10 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
                 }
             }
             *out = (FastVal){ .type = ftype_unqual(pt), .kind = FVAL_REG, .reg = (uint8_t)pr };
+            if (addressed != 0)
+            {
+                fast_cc_address_sum(out, &base, delta);
+            }
             return;
         }
         fval_convert(ex, iv, FTYPE_I64);
@@ -3120,6 +5058,18 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
     if (op == FTOK_LSHIFT || op == FTOK_RSHIFT)
     {
         const FastType res_t = ftype_promote_int(cc, lt);
+        // #3577: a constant count out of the promoted type's width, or negative, is the full pipeline's warning in an
+        // unevaluated operand too (a 128-bit type's width is 128); a bit-field of a 64-bit type and 32 bits or fewer
+        // promotes to int there, where this path keeps its type.
+        {
+            const uint32_t width = ftype_is_i128(res_t) ? 128u : ftype_size(cc, res_t) * 8u;
+            const uint32_t count_bad = (uint32_t)(rhs->kind == FVAL_IMM) & ((uint32_t)(rhs->imm < 0) | (uint32_t)((uint64_t)rhs->imm >= width));
+            if (count_bad != 0)
+            {
+                fast_cc_bail(cc, "shift count out of range");
+                return;
+            }
+        }
         if (ex->eval_only > 0) { *out = (FastVal){ .type = res_t, .kind = FVAL_REG }; return; }
         fval_flush_flags(ex);
         if (ftype_is_i128(res_t))
@@ -3178,14 +5128,29 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
             fast_cc_bail(cc, "shift count out of range");
             return;
         }
+        // #3577: a negative signed constant shifted left is -Wshift-negative-value, whatever the count.
+        if (op == FTOK_LSHIFT && sgn && lhs->kind == FVAL_IMM && (w64 ? lhs->imm < 0 : (int32_t)lhs->imm < 0))
+        {
+            fast_cc_bail(cc, "negative value shifted left");
+            return;
+        }
         if (lhs->kind == FVAL_IMM && rhs->kind == FVAL_IMM)
         {
             const uint32_t sh = (uint32_t)rhs->imm & (w64 ? 63u : 31u);
+            // #3577: a signed left shift whose bits leave the type is -Wshift-overflow (the sign bit alone is quiet).
+            const uint32_t type_bits = w64 ? 64u : 32u;
+            const uint64_t shifted_out = sh == 0 ? 0u : (w64 ? (uint64_t)lhs->imm : (uint32_t)lhs->imm) >> (type_bits - sh);
+            if (op == FTOK_LSHIFT && sgn && shifted_out != 0)
+            {
+                fast_cc_bail(cc, "signed shift overflow");
+                return;
+            }
             uint64_t v = w64 ? (uint64_t)lhs->imm : (uint32_t)lhs->imm;
             if (op == FTOK_LSHIFT) { v = w64 ? (v << sh) : (uint32_t)(v << sh); }
             else if (sgn) { v = w64 ? (uint64_t)((int64_t)v >> sh) : (uint64_t)(int64_t)((int32_t)v >> sh); }
             else { v = w64 ? (v >> sh) : ((uint32_t)v >> sh); }
-            *out = (FastVal){ .type = res_t, .kind = FVAL_IMM, .imm = (int64_t)v };
+            *out = (FastVal){ .type = res_t, .kind = FVAL_IMM, .imm = (int64_t)v,
+                              .marks = (uint8_t)(BUSTER_FVAL_MARK_NONLITERAL | (BUSTER_FVAL_MARK_SHIFTED * (uint32_t)(op == FTOK_LSHIFT))) };
             return;
         }
         if (rhs->kind == FVAL_IMM)
@@ -3211,7 +5176,6 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
         if ((ex->gp_used & (1u << FREG_RCX)) != 0 && !(fval_holds_gp(rhs) && rhs->reg == FREG_RCX))
         {
             for (uint32_t i = 0; i < ex->vsp; i += 1) { if (fval_holds_gp(&ex->vstack[i]) && ex->vstack[i].reg == FREG_RCX) { fval_spill_one(ex, &ex->vstack[i]); } }
-            for (uint32_t i = 0; i < ex->arg_sp; i += 1) { if (fval_holds_gp(&ex->call_args[i]) && ex->call_args[i].reg == FREG_RCX) { fval_spill_one(ex, &ex->call_args[i]); } }
         }
         const uint32_t rr = fval_to_gp(ex, rhs, true);
         if (rr != FREG_RCX) { x86_mov_rr(obj, false, FREG_RCX, rr); }
@@ -3231,7 +5195,7 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
     // 128-bit integer arithmetic (+, -, *, &, |, ^)!
     if (ftype_is_i128(ct))
     {
-        fval_spill_all(ex, ex->vsp, ex->arg_sp);
+        fval_spill_all(ex, ex->vsp);
         const int32_t slot = fast_cc_alloc_tmp(cc, 16u, 16u);
         const uint32_t la = fval_addr_to_gp(ex, lhs, true);
         if (la != FREG_R8) { x86_mov_rr(obj, true, FREG_R8, la); ex->gp_used &= (uint16_t)~(1u << la); ex->gp_used |= (1u << FREG_R8); }
@@ -3302,6 +5266,34 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
     if (lhs->kind == FVAL_IMM && rhs->kind == FVAL_IMM &&
         !((op == FTOK_SLASH || op == FTOK_PERCENT) && rhs->imm == 0))
     {
+        // #3577: a signed fold that overflows (INT_MAX + 1, INT_MIN / -1) is -Winteger-overflow: the full pipeline's.
+        if (sgn)
+        {
+            bool overflow = false;
+            if (w64)
+            {
+                int64_t t = 0;
+                overflow = (op == FTOK_PLUS && __builtin_add_overflow(lhs->imm, rhs->imm, &t)) ||
+                           (op == FTOK_MINUS && __builtin_sub_overflow(lhs->imm, rhs->imm, &t)) ||
+                           (op == FTOK_STAR && __builtin_mul_overflow(lhs->imm, rhs->imm, &t)) ||
+                           ((op == FTOK_SLASH || op == FTOK_PERCENT) && lhs->imm == INT64_MIN && rhs->imm == -1);
+            }
+            else
+            {
+                int32_t t = 0;
+                const int32_t l32 = (int32_t)lhs->imm;
+                const int32_t r32 = (int32_t)rhs->imm;
+                overflow = (op == FTOK_PLUS && __builtin_add_overflow(l32, r32, &t)) ||
+                           (op == FTOK_MINUS && __builtin_sub_overflow(l32, r32, &t)) ||
+                           (op == FTOK_STAR && __builtin_mul_overflow(l32, r32, &t)) ||
+                           ((op == FTOK_SLASH || op == FTOK_PERCENT) && l32 == INT32_MIN && r32 == -1);
+            }
+            if (overflow)
+            {
+                fast_cc_bail(cc, "signed overflow in a constant");
+                return;
+            }
+        }
         uint64_t a = w64 ? (uint64_t)lhs->imm : (uint32_t)lhs->imm;
         uint64_t b = w64 ? (uint64_t)rhs->imm : (uint32_t)rhs->imm;
         uint64_t r = 0;
@@ -3342,19 +5334,12 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
             fast_cc_bail(cc, "division by zero");
             return;
         }
-        // Save/spill RAX and RDX from outer vstack/call_args if occupied
+        // Save/spill RAX and RDX from the value stack if occupied
         for (uint32_t i = 0; i < ex->vsp; i += 1)
         {
             if (fval_holds_gp(&ex->vstack[i]) && (ex->vstack[i].reg == FREG_RAX || ex->vstack[i].reg == FREG_RDX))
             {
                 fval_spill_one(ex, &ex->vstack[i]);
-            }
-        }
-        for (uint32_t i = 0; i < ex->arg_sp; i += 1)
-        {
-            if (fval_holds_gp(&ex->call_args[i]) && (ex->call_args[i].reg == FREG_RAX || ex->call_args[i].reg == FREG_RDX))
-            {
-                fval_spill_one(ex, &ex->call_args[i]);
             }
         }
         // Load divisor into a register that is neither RAX nor RDX!
@@ -3435,7 +5420,30 @@ static void fval_emit_incdec(FastExprCtx* ex, FastVal* lv, bool is_inc, bool is_
         return;
     }
     const FastType t = ftype_unqual(lv->type);
-    if (ex->eval_only > 0) { *out = (FastVal){ .type = t, .kind = FVAL_REG }; return; }
+    // #3577: a scalar, and a pointer's to a complete type, or the full pipeline's error.
+    {
+        const uint32_t operand = BUSTER_FAST_OPERAND_CLASS(cc, t);
+        uint32_t target_incomplete = 0;
+        if (operand == BUSTER_FOPERAND_POINTER)
+        {
+            const FastType target = ftype_deref(cc, t);
+            target_incomplete = BUSTER_FAST_TYPE_INCOMPLETE(cc, target);
+        }
+        if (((uint32_t)(operand == BUSTER_FOPERAND_OTHER) | target_incomplete) != 0)
+        {
+            fast_cc_bail(cc, "increment the full pipeline refuses");
+            return;
+        }
+    }
+    // #3577: a step in an unevaluated operand (sizeof's) is the full pipeline's -Wunevaluated-expression.
+    if (ex->unevaluated > 0) { fast_cc_bail(cc, "side effect in an unevaluated operand"); return; }
+    BUSTER_FSEQ_MODIFY(ex, lv)
+    // A compile again for the log, or a dead branch's (#3592), makes no code.
+    if (ex->eval_only > 0)
+    {
+        *out = (FastVal){ .type = t, .kind = FVAL_REG };
+        return;
+    }
     fval_flush_flags(ex);
 
     // Load old value WITHOUT releasing `lv`!
@@ -3500,6 +5508,14 @@ static void fval_emit_compound_assign(FastExprCtx* ex, uint8_t assign_op, FastVa
         FTOK_AMP, FTOK_PIPE, FTOK_CARET, FTOK_LSHIFT, FTOK_RSHIFT
     };
     const uint8_t bin_op = op_map[assign_op - FTOK_ADD_ASSIGN];
+    // #3577: an assignment in an unevaluated operand (sizeof's) is the full pipeline's -Wunevaluated-expression.
+    if (ex->unevaluated > 0)
+    {
+        fast_cc_bail(ex->cc, "side effect in an unevaluated operand");
+        return;
+    }
+    BUSTER_FSEQ_MODIFY(ex, lhs)
+    // A compile again for the log, or a dead branch's (#3592), makes no code.
     if (ex->eval_only > 0)
     {
         *out = (FastVal){ .type = ftype_unqual(lhs->type), .kind = FVAL_REG };
@@ -3564,7 +5580,7 @@ static __attribute__((cold, noinline)) void fval_emit_round_builtin(FastExprCtx*
         return;
     }
     fval_convert(ex, &args[0], ft);
-    fval_spill_all(ex, ex->vsp, ex->arg_sp);
+    fval_spill_all(ex, ex->vsp);
     const uint32_t xr = fval_to_xmm(ex, &args[0], true);
     const int32_t mxcsr = fast_cc_alloc_tmp(cc, 4u, 4u);
     const bool w = is_double;
@@ -3647,6 +5663,32 @@ static __attribute__((cold, noinline)) void fval_emit_round_builtin(FastExprCtx*
 }
 
 // Emit recognized __builtin_* call (clz, ctz, bswap, popcount, expect, constant_p, unreachable, inf/nan, memcpy/memset/...)
+// Whether `t` is a va_list (#3577): __builtin_va_list, an array of one __va_list_tag, which decays to a pointer to it.
+static bool fast_cc_is_va_list(FastCCState* cc, FastType t)
+{
+    const FastType d = BUSTER_FTYPE_CODEGEN(ftype_unqual(ftype_decay(cc, t)));
+    return ftype_is_ptr(d) && BUSTER_FTYPE_CODEGEN(ftype_unqual(ftype_deref(cc, d))) == cc->va_list_tag_type;
+}
+
+// The argument count each builtin takes (#3577), UINT32_MAX for one this list doesn't hold; another count is the full
+// pipeline's error.
+static uint32_t fast_cc_builtin_arity(const FastCCState* cc, uint32_t id)
+{
+    uint32_t arity = UINT32_MAX;
+    if (id == cc->id_builtin_expect) { arity = 2u; }
+    else if (id == cc->id_builtin_constant_p || id == cc->id_builtin_clz || id == cc->id_builtin_clzll || id == cc->id_builtin_ctz ||
+             id == cc->id_builtin_ctzll || id == cc->id_builtin_bswap16 || id == cc->id_builtin_bswap32 || id == cc->id_builtin_bswap64 ||
+             id == cc->id_builtin_popcount || id == cc->id_builtin_popcountll || id == cc->id_builtin_nan || id == cc->id_builtin_nanf ||
+             id == cc->id_builtin_strlen || id == cc->id_builtin_ceil || id == cc->id_builtin_floor || id == cc->id_builtin_ceilf ||
+             id == cc->id_builtin_floorf) { arity = 1u; }
+    else if (id == cc->id_builtin_unreachable || id == cc->id_builtin_inf || id == cc->id_builtin_inff || id == cc->id_builtin_huge_val ||
+             id == cc->id_builtin_huge_valf || id == cc->id_sync_synchronize) { arity = 0u; }
+    else if (id == cc->id_builtin_memcpy || id == cc->id_builtin_memset || id == cc->id_builtin_memmove || id == cc->id_builtin_memcmp) { arity = 3u; }
+    else if (id == cc->id_atomic_load_n) { arity = 2u; }
+    else if (id == cc->id_atomic_store_n) { arity = 3u; }
+    return arity;
+}
+
 static __attribute__((noinline)) void fval_emit_builtin_call(FastExprCtx* ex, uint32_t id, FastVal* args, uint32_t argc, FastVal* out)
 {
     FastCCState* cc = ex->cc;
@@ -3782,23 +5824,766 @@ static __attribute__((noinline)) void fval_emit_builtin_call(FastExprCtx* ex, ui
     fast_cc_bail(cc, "unhandled builtin call");
 }
 
-// A call without code, in a sizeof or a dead arm (#3592), is checked as one with code is, but for its argument types: a
-// dead arm of musl's isnan() of a double calls __fpclassifyl(long double). Out of line: few calls are without code.
-static __attribute__((cold, noinline)) void fast_cc_check_call_without_code(FastCCState* cc, const FastComplexType* fn, const FastVal* args, uint32_t argc)
+// Emit full SysV AMD64 ABI function call (direct or indirect, 6 GP + 8 XMM + stack args, 1-16B & >16B structs, variadic!)
+// Whether a nonnull function's call passes no null constant for a parameter the attribute names (#3577); the function
+// type keeps their mask (FastComplexType's tag_ident), its declarations' together.
+static __attribute__((cold, noinline)) bool fast_cc_nonnull_arguments_clean(const FastCCState* cc, const FastComplexType* fn,
+                                                                           const FastVal* args, uint32_t argc)
 {
-    if (!fn->is_oldstyle && ((!fn->is_variadic && argc != fn->count) || (fn->is_variadic && argc < fn->count)))
+    const uint32_t passed = argc < fn->count ? argc : fn->count;
+    uint32_t named = fn->tag_ident & (passed >= 32u ? UINT32_MAX : (UINT32_C(1) << passed) - 1u);
+    uint32_t nulls = 0;
+    while (named != 0)
     {
-        fast_cc_bail(cc, "call argument count mismatch");
+        const uint32_t i = (uint32_t)__builtin_ctz(named);
+        named &= named - 1u;
+        nulls |= (uint32_t)(args[i].kind == FVAL_IMM) & (uint32_t)(args[i].imm == 0) &
+                 (uint32_t)ftype_is_ptr(ftype_unqual(cc->param_types[fn->start + i]));
     }
-    const uint32_t checked = argc < fn->count ? argc : fn->count;
-    for (uint32_t i = 0; i < checked; i += 1)
+    return nulls == 0;
+}
+
+// #3577: whether tokens [A, A_END) and [B, B_END) are one expression's, but for their parentheses, which the full
+// pipeline's -Wsizeof-pointer-memaccess doesn't compare (`(s)->buf` and `s->buf` are one; a macro's `(`, data 1 from
+// the #define, is one too). Skipping them all joins `(a + b) * c` and `a + b * c` as well, which fails closed.
+static bool fast_cc_same_tokens(const FastCCState* cc, uint32_t a, uint32_t a_end, uint32_t b, uint32_t b_end)
+{
+    bool same = true;
+    bool any = false;
+    while (same && (a < a_end || b < b_end))
     {
-        fast_cc_check_implicit_conv(cc, ftype_unqual(cc->param_types[fn->start + i]), &args[i]);
+        while (a < a_end && (cc->tk[a] == FTOK_LPAREN || cc->tk[a] == FTOK_RPAREN)) { a += 1u; }
+        while (b < b_end && (cc->tk[b] == FTOK_LPAREN || cc->tk[b] == FTOK_RPAREN)) { b += 1u; }
+        const bool a_more = a < a_end;
+        const bool b_more = b < b_end;
+        same = a_more == b_more && (!a_more || (cc->tk[a] == cc->tk[b] && cc->td[a] == cc->td[b]));
+        any = any || a_more;
+        a += (uint32_t)a_more;
+        b += (uint32_t)b_more;
     }
+    return same && any;
+}
+
+static uint32_t fast_cc_loosest_operator(const FastCCState* cc, uint32_t s, uint32_t e, uint32_t* out_precedence);
+
+// #3577: -Wfortify-source's calls (the full pipeline's check_common_call_fortify), by what the amount is: a string literal
+// (strcpy, stpcpy, strcat), a size whose excess is "size argument is too large" (strncpy, stpncpy, strncat), a size
+// (memcpy, memmove, mempcpy, memset; bzero's second argument; bcopy's third, into its second).
+#define BUSTER_FFORTIFY_NONE    0u
+#define BUSTER_FFORTIFY_STRING  1u
+#define BUSTER_FFORTIFY_LIMITED 2u
+#define BUSTER_FFORTIFY_MEMORY  3u
+#define BUSTER_FFORTIFY_BZERO   4u
+#define BUSTER_FFORTIFY_BCOPY   5u
+
+// What the full pipeline's walk of a call's argument down to an object (check_common_call_object) finds of tokens: no
+// object, an object (a name or a string literal), or a shape the direct path's walk doesn't read.
+#define BUSTER_FWALK_UNKNOWN   0u
+#define BUSTER_FWALK_KNOWN     1u
+#define BUSTER_FWALK_UNDECIDED 2u
+
+// #3577: whether tokens [S, E) may be one of the full pipeline's integer constants (check_common_call_integer): none of
+// them a variable or a function named outside an operand that is no evaluation (sizeof's, _Alignof's, _Generic's, a
+// builtin's), an assignment, `++` or `--`. A superset: where it can't tell, true. A member's name, a tag and a typedef's
+// name are no variables.
+static bool fast_cc_tokens_constant(const FastCCState* cc, uint32_t s, uint32_t e)
+{
+    bool constant = s < e;
+    uint32_t p = s;
+    while (constant && p < e)
+    {
+        const uint8_t t = cc->tk[p];
+        const uint8_t before = p > s ? cc->tk[p - 1u] : FTOK_EOF;
+        const uint32_t id = cc->td[p];
+        const uint32_t si = t == FTOK_IDENT && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+        const uint8_t sym_kind = cc->syms[si].kind;
+        const bool opaque = (t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF || t == FTOK_KW_GENERIC) ||
+                            (t == FTOK_IDENT && si == 0 && p + 1u < e && cc->tk[p + 1u] == FTOK_LPAREN);
+        if (opaque && p + 1u < e && cc->tk[p + 1u] == FTOK_LPAREN)
+        {
+            p = fast_cc_group_end(cc, p + 1u);
+        }
+        else if (opaque)
+        {
+            // sizeof's or _Alignof's operand without parentheses: `*`s, a name, then its postfix operators.
+            p += 1u;
+            while (p < e && (cc->tk[p] == FTOK_STAR || cc->tk[p] == FTOK_AMP))
+            {
+                p += 1u;
+            }
+            p += (uint32_t)(p < e);
+            while (p < e && (cc->tk[p] == FTOK_LBRACKET || cc->tk[p] == FTOK_DOT || cc->tk[p] == FTOK_ARROW))
+            {
+                p = cc->tk[p] == FTOK_LBRACKET ? fast_cc_group_end(cc, p) : p + 2u;
+            }
+        }
+        else
+        {
+            const bool named = t == FTOK_IDENT && before != FTOK_DOT && before != FTOK_ARROW && before != FTOK_KW_STRUCT &&
+                               before != FTOK_KW_UNION && before != FTOK_KW_ENUM;
+            const bool variable = named && si != 0 && (sym_kind == FSYM_LOCAL || sym_kind == FSYM_GLOBAL || sym_kind == FSYM_FUNC);
+            const bool effect = t == FTOK_INC || t == FTOK_DEC || ((uint32_t)t - (uint32_t)FTOK_ASSIGN) <= (uint32_t)(FTOK_SHR_ASSIGN - FTOK_ASSIGN);
+            constant = !variable && !effect;
+            p += 1u;
+        }
+    }
+    return constant;
+}
+
+// #3577: the full pipeline's walk of a call's argument down to the object it points into (check_common_call_object), over
+// its tokens [S, E): through grouping parentheses, `__extension__`, a cast to a pointer, `&`, a `+` or `-` of a constant, a
+// subscript by a constant and `.`, to a name (an array, or any object whose address the walk took) or a string literal,
+// whose token goes in *ROOT (BUSTER_FWALK_KNOWN; *STEPPED where a step moved off its start). A pointer's value, `->`, `*`,
+// a call, a variable's index, a cast to an integer, a conditional, a comma, an assignment and a compound literal stop it
+// (BUSTER_FWALK_UNKNOWN), as they stop the full pipeline's; another shape is BUSTER_FWALK_UNDECIDED. A cast to a typedef's
+// name is followed (it may name a pointer).
+static uint32_t fast_cc_fortify_walk(const FastCCState* cc, uint32_t s, uint32_t e, uint32_t* root, bool* stepped)
+{
+    uint32_t result = BUSTER_FWALK_UNDECIDED;
+    bool address = false;
+    bool done = false;
+    *stepped = false;
+    for (uint32_t steps = 0; !done && steps < 256u; steps += 1u)
+    {
+        while (s < e && cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e && !fast_cc_is_type_start(cc, s + 1u))
+        {
+            s += 1u;
+            e -= 1u;
+        }
+        uint32_t precedence = 99u;
+        const uint32_t at = s + 1u < e ? fast_cc_loosest_operator(cc, s, e, &precedence) : UINT32_MAX;
+        const uint8_t first = s < e ? cc->tk[s] : FTOK_EOF;
+        const uint8_t last = s < e ? cc->tk[e - 1u] : FTOK_EOF;
+        if (s >= e)
+        {
+            done = true;
+        }
+        else if (at != UINT32_MAX && cc->tk[at] != FTOK_PLUS && cc->tk[at] != FTOK_MINUS)
+        {
+            // A comma, an assignment, a conditional, or an operator whose value is no pointer.
+            result = BUSTER_FWALK_UNKNOWN;
+            done = true;
+        }
+        else if (at != UINT32_MAX)
+        {
+            // The pointer operand of `+` (either) or `-` (the left), and the other a constant.
+            const bool swap = cc->tk[at] == FTOK_PLUS && fast_cc_tokens_constant(cc, s, at) && !fast_cc_tokens_constant(cc, at + 1u, e);
+            const uint32_t index_start = swap ? s : at + 1u;
+            const uint32_t index_end = swap ? at : e;
+            if (!fast_cc_tokens_constant(cc, index_start, index_end))
+            {
+                result = BUSTER_FWALK_UNKNOWN;
+                done = true;
+            }
+            else
+            {
+                s = swap ? at + 1u : s;
+                e = swap ? e : at;
+                address = false;
+                *stepped = true;
+            }
+        }
+        else if (first == FTOK_LPAREN && fast_cc_is_type_start(cc, s + 1u))
+        {
+            // A cast (the group isn't the whole), or a compound literal.
+            const uint32_t close = fast_cc_group_end(cc, s);
+            bool pointer = false;
+            bool arithmetic = true;
+            for (uint32_t q = s + 1u; q + 1u < close; q += 1u)
+            {
+                pointer = pointer || cc->tk[q] == FTOK_STAR || cc->tk[q] == FTOK_LBRACKET;
+                arithmetic = arithmetic && cc->tk[q] != FTOK_IDENT && cc->tk[q] != FTOK_KW_TYPEOF;
+            }
+            if (close < e && cc->tk[close] == FTOK_LBRACE)
+            {
+                result = fast_cc_group_end(cc, close) == e ? BUSTER_FWALK_UNKNOWN : BUSTER_FWALK_UNDECIDED;
+                done = true;
+            }
+            else if (!pointer && arithmetic)
+            {
+                result = BUSTER_FWALK_UNKNOWN;
+                done = true;
+            }
+            else
+            {
+                s = close;
+            }
+        }
+        else if (first == FTOK_AMP)
+        {
+            address = true;
+            s += 1u;
+        }
+        else if (first == FTOK_KW_EXTENSION)
+        {
+            s += 1u;
+        }
+        else if (first == FTOK_STAR || first == FTOK_PLUS || first == FTOK_MINUS || first == FTOK_BANG || first == FTOK_TILDE ||
+                 first == FTOK_INC || first == FTOK_DEC || first == FTOK_KW_SIZEOF || first == FTOK_KW_ALIGNOF)
+        {
+            result = BUSTER_FWALK_UNKNOWN;
+            done = true;
+        }
+        else if (last == FTOK_RBRACKET)
+        {
+            // A subscript: back to its `[`, the base before it, the index inside (either way round).
+            uint32_t open = e - 1u;
+            uint32_t depth = 0;
+            while (open > s)
+            {
+                const uint8_t u = cc->tk[open];
+                depth += (uint32_t)(u == FTOK_RPAREN) | (uint32_t)(u == FTOK_RBRACKET) | (uint32_t)(u == FTOK_RBRACE);
+                depth -= (uint32_t)(u == FTOK_LPAREN) | (uint32_t)(u == FTOK_LBRACKET) | (uint32_t)(u == FTOK_LBRACE);
+                if (depth == 0)
+                {
+                    break;
+                }
+                open -= 1u;
+            }
+            const bool swap = fast_cc_tokens_constant(cc, s, open) && !fast_cc_tokens_constant(cc, open + 1u, e - 1u);
+            const uint32_t index_start = swap ? s : open + 1u;
+            const uint32_t index_end = swap ? open : e - 1u;
+            if (open <= s || cc->tk[open] != FTOK_LBRACKET)
+            {
+                done = true;
+            }
+            else if (!fast_cc_tokens_constant(cc, index_start, index_end))
+            {
+                result = BUSTER_FWALK_UNKNOWN;
+                done = true;
+            }
+            else
+            {
+                const uint32_t base_start = swap ? open + 1u : s;
+                const uint32_t base_end = swap ? e - 1u : open;
+                s = base_start;
+                e = base_end;
+                address = false;
+                *stepped = true;
+            }
+        }
+        else if (last == FTOK_IDENT && e >= s + 3u && (cc->tk[e - 2u] == FTOK_DOT || cc->tk[e - 2u] == FTOK_ARROW))
+        {
+            if (cc->tk[e - 2u] == FTOK_ARROW)
+            {
+                result = BUSTER_FWALK_UNKNOWN;
+                done = true;
+            }
+            else
+            {
+                e -= 2u;
+                address = true;
+                *stepped = true;
+            }
+        }
+        else if (last == FTOK_RPAREN || last == FTOK_INC || last == FTOK_DEC)
+        {
+            // A call (the group that is the whole is gone), `++` or `--`.
+            result = BUSTER_FWALK_UNKNOWN;
+            done = true;
+        }
+        else
+        {
+            bool literals = true;
+            for (uint32_t q = s; q < e; q += 1u)
+            {
+                literals = literals && cc->tk[q] == FTOK_STR_LIT;
+            }
+            const uint32_t id = cc->td[s];
+            const uint32_t si = first == FTOK_IDENT && e == s + 1u && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+            const uint8_t sym_kind = cc->syms[si].kind;
+            if (literals)
+            {
+                *root = s;
+                result = BUSTER_FWALK_KNOWN;
+            }
+            else if (si != 0 && (sym_kind == FSYM_LOCAL || sym_kind == FSYM_GLOBAL))
+            {
+                *root = s;
+                result = (address || ftype_is_array(cc->syms[si].type)) ? BUSTER_FWALK_KNOWN : BUSTER_FWALK_UNKNOWN;
+            }
+            else if ((si != 0 && sym_kind == FSYM_ENUM_CONST) || (e == s + 1u && (first == FTOK_INT_LIT || first == FTOK_INT_U32 ||
+                     first == FTOK_INT_I64 || first == FTOK_INT_U64 || first == FTOK_CHAR_LIT)))
+            {
+                result = BUSTER_FWALK_UNKNOWN;
+            }
+            done = true;
+        }
+    }
+    return result;
+}
+
+// #3577: where the argument V, whose walk found the object named at ROOT (a local's or a global's name), points into it:
+// the bytes left from there to its end into *REMAINING (none from before its start or past its end, as the full
+// pipeline's unsigned offset), from V's place: an array or address of a local or a global, or a register's sum of one
+// (BUSTER_FVAL_LASTING_ADDRESS). 0 where V doesn't say where it points, 1 sized, 2 where the object's type is incomplete,
+// no object to the full pipeline either.
+static uint32_t fast_cc_fortify_remaining(const FastCCState* cc, uint32_t root, const FastVal* v, uint64_t* remaining)
+{
+    uint32_t result = 0;
+    const uint32_t id = cc->td[root];
+    const uint32_t si = cc->tk[root] == FTOK_IDENT && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+    const FastSym* sym = cc->syms + si;
+    if (si != 0 && (sym->kind == FSYM_LOCAL || sym->kind == FSYM_GLOBAL) && BUSTER_FAST_TYPE_INCOMPLETE(cc, sym->type) != 0)
+    {
+        result = 2u;
+    }
+    else if (si != 0 && (sym->kind == FSYM_LOCAL || sym->kind == FSYM_GLOBAL))
+    {
+        const bool array = ftype_is_array(v->type);
+        const bool summed = (v->kind == FVAL_REG || v->kind == FVAL_SPILL) && (v->lasting & BUSTER_FVAL_LASTING_ADDRESS) != 0;
+        const bool at_local = (v->kind == FVAL_LOCAL && array) || v->kind == FVAL_LOCAL_ADDR || (summed && v->sym_idx == 0);
+        const bool at_global = (v->kind == FVAL_GLOBAL && array) || v->kind == FVAL_GLOBAL_ADDR || (summed && v->sym_idx != 0);
+        const uint64_t size = ftype_size(cc, sym->type);
+        int64_t offset = 0;
+        if (at_local && sym->kind == FSYM_LOCAL)
+        {
+            offset = (summed ? (int64_t)v->addr_disp : (int64_t)v->off) - (int64_t)sym->stack_off;
+            result = 1u;
+        }
+        else if (at_global && sym->kind == FSYM_GLOBAL && sym->obj_sym != 0 && v->sym_idx == sym->obj_sym)
+        {
+            offset = summed ? (int64_t)v->addr_disp : v->imm;
+            result = 1u;
+        }
+        const uint64_t start = (uint64_t)offset < size ? (uint64_t)offset : size;
+        *remaining = size - start;
+    }
+    return result;
+}
+
+// #3577: a string literal's bytes up to its first NUL and that NUL, its adjacent literals' joined (strcpy's amount).
+static uint64_t fast_cc_literal_amount(const FastCCState* cc, uint32_t literal)
+{
+    uint64_t amount = 0;
+    bool ended = false;
+    for (uint32_t p = literal; !ended && p < cc->tcount && cc->tk[p] == FTOK_STR_LIT; p += 1u)
+    {
+        const FastLitSlice slice = cc->pp->lit_slices[cc->td[p]];
+        const void* nul = memchr(cc->pp->lit_bytes + slice.offset, 0, slice.length);
+        ended = nul != NULL;
+        amount += ended ? (uint64_t)((const char*)nul - (cc->pp->lit_bytes + slice.offset)) : slice.length;
+    }
+    return amount + 1u;
+}
+
+// #3577: whether the full pipeline's -Wfortify-source is quiet on a call of FORTIFY's kind (BUSTER_FFORTIFY_*), ARGS its
+// arguments before conversion, at tokens [STARTS[i], ENDS[i]): no amount it knows (a constant, or a string literal's
+// length), no object it knows the destination points into, or an amount within what is left of it. Where the walk can't
+// tell (an amount that may be a constant to the full pipeline but isn't one here, a shape the walk doesn't read, a
+// destination whose place the value lost), it isn't quiet.
+static bool fast_cc_fortify_quiet(const FastCCState* cc, uint32_t fortify, const FastVal* args, uint32_t argc, const uint32_t* starts,
+                                  const uint32_t* ends)
+{
+    const bool two = fortify == BUSTER_FFORTIFY_STRING || fortify == BUSTER_FFORTIFY_BZERO;
+    const uint32_t destination = fortify == BUSTER_FFORTIFY_BCOPY ? 1u : 0u;
+    const uint32_t sized = two ? 1u : 2u;
+    bool quiet = true;
+    if (argc >= sized + 1u)
+    {
+        uint64_t amount = 0;
+        uint32_t amount_state = BUSTER_FWALK_UNKNOWN;
+        if (fortify == BUSTER_FFORTIFY_STRING)
+        {
+            uint32_t root = 0;
+            bool stepped = false;
+            const uint32_t source = fast_cc_fortify_walk(cc, starts[1], ends[1], &root, &stepped);
+            const bool literal = source == BUSTER_FWALK_KNOWN && cc->tk[root] == FTOK_STR_LIT;
+            amount = literal && !stepped ? fast_cc_literal_amount(cc, root) : 0u;
+            amount_state = literal ? (stepped ? BUSTER_FWALK_UNDECIDED : BUSTER_FWALK_KNOWN) :
+                           source == BUSTER_FWALK_UNDECIDED ? BUSTER_FWALK_UNDECIDED : BUSTER_FWALK_UNKNOWN;
+        }
+        else if (args[sized].kind == FVAL_IMM && ftype_is_int(args[sized].type))
+        {
+            amount = (uint64_t)args[sized].imm;
+            amount_state = BUSTER_FWALK_KNOWN;
+        }
+        else if (fast_cc_tokens_constant(cc, starts[sized], ends[sized]))
+        {
+            amount_state = BUSTER_FWALK_UNDECIDED;
+        }
+        if (amount_state != BUSTER_FWALK_UNKNOWN)
+        {
+            uint32_t root = 0;
+            bool stepped = false;
+            const uint32_t object = fast_cc_fortify_walk(cc, starts[destination], ends[destination], &root, &stepped);
+            uint64_t remaining = 0;
+            const uint32_t sizing = object == BUSTER_FWALK_KNOWN ? fast_cc_fortify_remaining(cc, root, args + destination, &remaining) : 0u;
+            quiet = object == BUSTER_FWALK_UNKNOWN || sizing == 2u ||
+                    (sizing == 1u && amount_state == BUSTER_FWALK_KNOWN && amount <= remaining);
+        }
+    }
+    return quiet;
+}
+
+// #3577: the token ranges of the first WANT (at most 8) arguments of the call whose `(` is at OPEN (the expression
+// compiler's call frame keeps it) and whose `)` is just before cc->pos, split at the commas outside brackets, into STARTS
+// and ENDS; their count (all of them where there are fewer), or UINT32_MAX where those aren't a `(` and a `)`.
+static uint32_t fast_cc_call_arguments(const FastCCState* cc, uint32_t open, uint32_t want, uint32_t* starts, uint32_t* ends)
+{
+    uint32_t count = UINT32_MAX;
+    const uint32_t close = cc->pos - 1u;
+    if (open < close && close < cc->tcount && cc->tk[open] == FTOK_LPAREN && cc->tk[close] == FTOK_RPAREN)
+    {
+        const uint32_t limit = want < 8u ? want : 8u;
+        uint32_t p = open + 1u;
+        uint32_t from = p;
+        count = 0;
+        while (p < close && count < limit)
+        {
+            const uint8_t t = cc->tk[p];
+            if (t == FTOK_LPAREN || t == FTOK_LBRACKET || t == FTOK_LBRACE)
+            {
+                p = fast_cc_group_end(cc, p);
+            }
+            else
+            {
+                if (t == FTOK_COMMA)
+                {
+                    starts[count] = from;
+                    ends[count] = p;
+                    count += 1u;
+                    from = p + 1u;
+                }
+                p += 1u;
+            }
+        }
+        if (count < limit && from < close)
+        {
+            starts[count] = from;
+            ends[count] = close;
+            count += 1u;
+        }
+    }
+    return count;
+}
+
+// #3577: byte INDEX of the string literal tokens [S, E) joined (their bytes without the null), 0 past them.
+static uint8_t fast_cc_format_at(const FastCCState* cc, uint32_t s, uint32_t e, uint32_t index)
+{
+    uint8_t byte = 0;
+    uint32_t left = index;
+    bool found = false;
+    for (uint32_t p = s; !found && p < e; p += 1u)
+    {
+        const FastLitSlice slice = cc->pp->lit_slices[cc->td[p]];
+        found = left < slice.length;
+        byte = found ? (uint8_t)cc->pp->lit_bytes[slice.offset + left] : 0u;
+        left -= found ? 0u : slice.length;
+    }
+    return byte;
+}
+
+// #3577: an argument type's integer width as the full pipeline's format checks read it (check_action_integer_type): an
+// integer's bits (an enum's underlying type's; _Bool's 1), with *LONG_CLASS 1 for long and unsigned long, 2 for long long
+// and unsigned long long, 0 otherwise; 0 bits for any other type.
+static uint32_t fast_cc_format_integer_bits(const FastCCState* cc, FastType t, uint32_t* long_class)
+{
+    static const uint8_t widths[16] = {
+        [FTYPE_BOOL] = 1u,
+        [FTYPE_I8] = 8u,
+        [FTYPE_U8] = 8u,
+        [FTYPE_I16] = 16u,
+        [FTYPE_U16] = 16u,
+        [FTYPE_I32] = 32u,
+        [FTYPE_U32] = 32u,
+        [FTYPE_I64] = 64u,
+        [FTYPE_U64] = 64u,
+        [FTYPE_I128] = 128u,
+        [FTYPE_U128] = 128u,
+    };
+    FastType base = ftype_unqual(t);
+    const FastComplexType* complex = ftype_is_complex(base) ? cc->ctypes + (base & BUSTER_FTYPE_CIDX_MASK) : NULL;
+    if (complex != NULL && complex->kind == FCTYPE_ENUM && complex->complete != 0)
+    {
+        base = ftype_unqual(complex->inner);
+    }
+    const bool scalar = !ftype_is_complex(base) && (base & BUSTER_FTYPE_PTR_MASK) == 0;
+    const uint32_t bits = scalar ? widths[base & 15u] : 0u;
+    *long_class = bits == 64u ? ((base & BUSTER_FTYPE_SCALAR_LONG) != 0 ? 1u : 2u) : 0u;
+    return bits;
+}
+
+// #3577: whether a call of printf (FORMAT_AT 0), fprintf or sprintf (1) or snprintf (2), its arguments ARGS before
+// conversion at the tokens fast_cc_call_arguments splits from OPEN, is quiet in the full pipeline's format checks
+// (check_common_format: -Wformat, -Wformat-security, -Wformat-extra-args, -Wformat-insufficient-args,
+// -Wformat-invalid-specifier). A format that is a string literal (in parentheses or not) is read as it reads one: each
+// conversion's flags, width and precision (a `*` takes an argument of an int's width or less), length and specifier,
+// then the next data argument of the class they name: an integer of a width the length allows (long and long long by
+// name), a pointer to an 8-bit integer, a pointer, a double; with none left over and none missing. What it reads past
+// that (positions, `%n`, wide and binary forms, C23's widths, `%Lf`, an embedded null, `%c` of a _Bool, a function's
+// `%p`) isn't quiet here. A format that isn't a literal is quiet with data arguments (-Wformat-nonliteral is off) and is
+// -Wformat-security's without; one with a literal among its tokens (a conditional's arms) isn't quiet here.
+static __attribute__((cold, noinline)) bool fast_cc_format_quiet(const FastCCState* cc, uint32_t format_at, const FastVal* args, uint32_t argc,
+                                                                 uint32_t open)
+{
+    uint32_t starts[8];
+    uint32_t ends[8];
+    const uint32_t count = argc > format_at ? fast_cc_call_arguments(cc, open, format_at + 1u, starts, ends) : 0u;
+    bool quiet = count == format_at + 1u;
+    const uint32_t first = quiet ? starts[format_at] : 0u;
+    const uint32_t last = quiet ? ends[format_at] : 0u;
+    uint32_t s = first;
+    uint32_t e = last;
+    while (s + 2u < e && cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e && !fast_cc_is_type_start(cc, s + 1u))
+    {
+        s += 1u;
+        e -= 1u;
+    }
+    bool any_literal = false;
+    for (uint32_t p = first; p < last; p += 1u)
+    {
+        any_literal = any_literal || cc->tk[p] == FTOK_STR_LIT;
+    }
+    bool literal = quiet && s < e;
+    for (uint32_t p = s; literal && p < e; p += 1u)
+    {
+        literal = cc->tk[p] == FTOK_STR_LIT;
+    }
+    const FastVal* format = args + (quiet ? format_at : 0u);
+    literal = literal && (format->lasting & BUSTER_FVAL_LASTING_STRING) != 0 && ftype_is_array(format->type) &&
+              (cc->ctypes[format->type & BUSTER_FTYPE_CIDX_MASK].inner & BUSTER_FTYPE_SCALAR_CHAR) != 0;
+    uint32_t argument = format_at + 1u;
+    if (quiet && !literal)
+    {
+        // Not a literal: quiet where the call passes data arguments and no literal hides in its tokens.
+        quiet = !any_literal && argc > format_at + 1u;
+        argument = argc;
+    }
+    uint32_t remaining = 0;
+    for (uint32_t p = s; quiet && literal && p < e; p += 1u)
+    {
+        remaining += cc->pp->lit_slices[cc->td[p]].length;
+    }
+    uint32_t index = 0;
+    while (quiet && literal && index < remaining)
+    {
+        const uint8_t byte = fast_cc_format_at(cc, s, e, index);
+        index += 1u;
+        // A null inside the body is the full pipeline's "format string contains '\0'".
+        quiet = byte != 0;
+        uint8_t c = byte == '%' && index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+        if (byte != '%' || !quiet)
+        {
+            continue;
+        }
+        if (c == '%')
+        {
+            index += 1u;
+            continue;
+        }
+        // A position (digits, then `$`) isn't read here.
+        uint32_t d = index;
+        while (d < remaining && fast_cc_format_at(cc, s, e, d) >= '0' && fast_cc_format_at(cc, s, e, d) <= '9')
+        {
+            d += 1u;
+        }
+        const bool positioned = d > index && d < remaining && fast_cc_format_at(cc, s, e, d) == '$';
+        while (index < remaining && (c == '-' || c == '+' || c == ' ' || c == '#' || c == '0' || c == '\''))
+        {
+            index += 1u;
+            c = index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+        }
+        // The width, then the precision after a `.`: digits, or a `*` that takes an argument.
+        uint32_t stars = 0;
+        for (uint32_t part = 0; part < 2u; part += 1u)
+        {
+            const bool precision = part == 1u && c == '.';
+            index += (uint32_t)precision;
+            c = precision && index < remaining ? fast_cc_format_at(cc, s, e, index) : c;
+            if ((part == 0u || precision) && c == '*')
+            {
+                stars += 1u;
+                index += 1u;
+            }
+            else if (part == 0u || precision)
+            {
+                while (index < remaining && c >= '0' && c <= '9')
+                {
+                    index += 1u;
+                    c = index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+                }
+            }
+            c = index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+        }
+        // The length, as the full pipeline names them: hh 'H', ll 'L'.
+        uint8_t length = 0;
+        bool doubled = false;
+        if (c == 'h' || c == 'l' || c == 'j' || c == 'z' || c == 't' || c == 'L')
+        {
+            length = c;
+            index += 1u;
+            const uint8_t again = index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+            doubled = again == c && (c == 'h' || c == 'l');
+            length = doubled ? (c == 'h' ? (uint8_t)'H' : (uint8_t)'L') : length;
+            index += (uint32_t)doubled;
+        }
+        const uint8_t conversion = index < remaining ? fast_cc_format_at(cc, s, e, index) : 0u;
+        index += 1u;
+        const bool integer = conversion == 'd' || conversion == 'i' || conversion == 'u' || conversion == 'o' ||
+                             conversion == 'x' || conversion == 'X';
+        const bool character = conversion == 'c';
+        const bool string = conversion == 's';
+        const bool pointer = conversion == 'p';
+        const bool floating = conversion == 'f' || conversion == 'F' || conversion == 'e' || conversion == 'E' ||
+                              conversion == 'g' || conversion == 'G' || conversion == 'a' || conversion == 'A';
+        // Each length's conversions as the full pipeline's modifier check owns them: h, hh, j, z and t the integers'; l
+        // the integers' and the floats' (a no-op); ll the integers'; L the integers' (as ll) and the floats'.
+        const bool length_valid = length == 0 ? (integer || character || string || pointer || floating) :
+                                  (length == 'h' || length == 'H' || length == 'j' || length == 'z' || length == 't') ? integer :
+                                  length == 'l' ? (integer || floating) :
+                                  doubled ? integer : (integer || floating);
+        // `%m` takes no argument.
+        const bool errno_text = conversion == 'm' && length == 0 && stars == 0;
+        quiet = !positioned && ((length_valid && (integer || character || string || pointer || floating)) || errno_text);
+        for (uint32_t k = 0; quiet && k < stars; k += 1u)
+        {
+            uint32_t long_class = 0;
+            const uint32_t bits = argument < argc ? fast_cc_format_integer_bits(cc, args[argument].type, &long_class) : 0u;
+            quiet = bits != 0 && bits <= 32u;
+            argument += 1u;
+        }
+        if (quiet && !errno_text)
+        {
+            quiet = argument < argc;
+            const FastType t = quiet ? ftype_unqual(args[argument].type) : (FastType)FTYPE_VOID;
+            argument += 1u;
+            uint32_t long_class = 0;
+            const uint32_t bits = fast_cc_format_integer_bits(cc, t, &long_class);
+            const FastType decayed = ftype_is_func(t) ? t : ftype_decay((FastCCState*)cc, t);
+            if (quiet && (integer || character))
+            {
+                // check_common_format_integer_class without a pointer (a character's length none); `%c` of a _Bool is
+                // its "argument has boolean value".
+                const uint8_t l = character ? 0u : length;
+                quiet = bits != 0 && ((l == 0 || l == 'h') ? bits <= 32u :
+                                      l == 'H' ? (bits <= 32u && bits != 16u) :
+                                      l == 'L' ? long_class == 2u : long_class == 1u);
+                quiet = quiet && !(character && ftype_is_bool(t));
+            }
+            else if (quiet && string)
+            {
+                // A pointer to (or an array of) an 8-bit integer; a _Bool's is no string.
+                const FastType element = ftype_is_ptr(decayed) ? ftype_unqual(ftype_deref((FastCCState*)cc, decayed)) : (FastType)FTYPE_VOID;
+                uint32_t element_class = 0;
+                quiet = fast_cc_format_integer_bits(cc, element, &element_class) == 8u;
+            }
+            else if (quiet && pointer)
+            {
+                quiet = ftype_is_ptr(decayed) && !ftype_is_func(t);
+            }
+            else if (quiet && floating)
+            {
+                quiet = length != 'L' && ftype_is_float(t);
+            }
+        }
+    }
+    // Data arguments left over are -Wformat-extra-args.
+    return quiet && argument == argc;
+}
+
+// #3577: whether a call of a library function checked by its name (KIND, its identifier's FPP_KW_*_FUNCTION) is quiet in
+// the full pipeline: the memcpy family's size argument `sizeof(E)` with E another argument's expression, a pointer to an
+// object (-Wsizeof-pointer-memaccess; any argument against any other, a superset of its positions and names), read from
+// the call's tokens only where an argument is sizeof's of a pointer (BUSTER_FVAL_LASTING_SIZEOF_POINTER); an absolute value
+// function's argument unsigned (_Bool and an unsigned enum too), floating for an integer one or integral for a floating
+// one, or wider than its parameter (-Wabsolute-value); and a memcpy family's or strcpy family's call that EVALUATED,
+// -Wfortify-source's (fast_cc_fortify_quiet). cc->pos is past the call's `)`, OPEN its `(`. Arguments ARGS, their types
+// before conversion.
+static __attribute__((cold, noinline)) bool fast_cc_library_call_clean(const FastCCState* cc, uint32_t kind, const FastComplexType* fn,
+                                                                       const FastVal* args, uint32_t argc, bool evaluated, uint32_t open)
+{
+    static const uint8_t fortify_kinds[5] = {
+        BUSTER_FFORTIFY_MEMORY,
+        BUSTER_FFORTIFY_LIMITED,
+        BUSTER_FFORTIFY_BZERO,
+        BUSTER_FFORTIFY_BCOPY,
+        BUSTER_FFORTIFY_STRING,
+    };
+    bool clean = true;
+    uint32_t sized = 0;
+    for (uint32_t i = 0; i < argc; i += 1u)
+    {
+        sized |= args[i].lasting & BUSTER_FVAL_LASTING_SIZEOF_POINTER;
+    }
+    // -Wfortify-source asks an evaluated call only, as the full pipeline's (a dead branch's or sizeof's is quiet there), and
+    // one whose amount may be a constant: a variable's value, or one through a pointer, is none (a const object's isn't
+    // either, to the full pipeline), so such a call is quiet without its tokens. A string's copy asks its source.
+    const uint32_t fortify_at = kind - (uint32_t)FPP_KW_FORTIFY_MEMORY_FUNCTION;
+    uint32_t fortify = evaluated && fortify_at < 5u ? fortify_kinds[fortify_at] : BUSTER_FFORTIFY_NONE;
+    const uint32_t amount_at = (fortify == BUSTER_FFORTIFY_BZERO || fortify == BUSTER_FFORTIFY_STRING) ? 1u : 2u;
+    // So is one whose destination's value is read (a pointer variable's, a member's or an element's that isn't an array):
+    // it points into no object the full pipeline knows, whose walk stops at the read.
+    const uint32_t destination = fortify == BUSTER_FFORTIFY_BCOPY ? 1u : 0u;
+    const uint32_t loaded_kinds = (UINT32_C(1) << FVAL_LOCAL) | (UINT32_C(1) << FVAL_GLOBAL) | (UINT32_C(1) << FVAL_INDIRECT) |
+                                  (UINT32_C(1) << FVAL_SPILL_ADDR) | (UINT32_C(1) << FVAL_BITFIELD);
+    const bool amount_loaded = fortify != BUSTER_FFORTIFY_STRING && argc > amount_at && ((UINT32_C(1) << args[amount_at].kind) & loaded_kinds) != 0;
+    const bool destination_read = argc > destination && ((UINT32_C(1) << args[destination].kind) & loaded_kinds) != 0 &&
+                                  !ftype_is_array(args[destination].type);
+    if (fortify != BUSTER_FFORTIFY_NONE && (argc <= amount_at || amount_loaded || destination_read))
+    {
+        fortify = BUSTER_FFORTIFY_NONE;
+    }
+    const bool memaccess = kind >= FPP_KW_MEMACCESS_FUNCTION && kind <= FPP_KW_FORTIFY_BCOPY_FUNCTION && sized != 0;
+    if ((memaccess || fortify != BUSTER_FFORTIFY_NONE) && argc <= 8u)
+    {
+        // The arguments' token ranges.
+        uint32_t starts[8];
+        uint32_t ends[8];
+        // All of them for the sizes' check; for -Wfortify-source's, through the destination, and through the amount where
+        // it isn't a constant here or is a string's source.
+        const uint32_t want = memaccess ? argc :
+                              (fortify != BUSTER_FFORTIFY_STRING && args[amount_at].kind == FVAL_IMM) ? destination + 1u : amount_at + 1u;
+        const uint32_t expected = argc < want ? argc : want;
+        const uint32_t count = fast_cc_call_arguments(cc, open, want, starts, ends);
+        for (uint32_t i = 0; memaccess && clean && i < count && count == expected; i += 1u)
+        {
+            // `sizeof(E)` or `sizeof E`, in parentheses or not.
+            uint32_t s0 = starts[i];
+            uint32_t s1 = ends[i];
+            while (s0 < s1 && cc->tk[s0] == FTOK_LPAREN && fast_cc_group_end(cc, s0) == s1) { s0 += 1u; s1 -= 1u; }
+            if (s0 + 1u < s1 && cc->tk[s0] == FTOK_KW_SIZEOF)
+            {
+                for (uint32_t j = 0; clean && j < count; j += 1u)
+                {
+                    const FastType t = args[j].type;
+                    const bool object_pointer = j != i && ftype_is_ptr(t) && !ftype_is_void(ftype_deref(cc, t));
+                    clean = !(object_pointer && fast_cc_same_tokens(cc, s0 + 1u, s1, starts[j], ends[j]));
+                }
+            }
+        }
+        clean = clean && count == expected;
+        clean = clean && (fortify == BUSTER_FFORTIFY_NONE || fast_cc_fortify_quiet(cc, fortify, args, argc, starts, ends));
+    }
+    else if ((kind == FPP_KW_ABS_FUNCTION || kind == FPP_KW_FABS_FUNCTION) && argc == 1u && fn->count >= 1u)
+    {
+        const FastType arg = args[0].type;
+        const FastType under = ftype_is_complex(arg) && cc->ctypes[arg & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_ENUM ? cc->ctypes[arg & BUSTER_FTYPE_CIDX_MASK].inner : arg;
+        const FastType param = ftype_unqual(cc->param_types[fn->start]);
+        const bool integral = ftype_is_int(under);
+        const bool floating = ftype_is_float(under);
+        clean = (integral || floating) && !(integral && !ftype_is_signed(cc, under)) && !(kind == FPP_KW_ABS_FUNCTION && floating) &&
+                !(kind == FPP_KW_FABS_FUNCTION && integral) &&
+                ftype_size(cc, under) <= ftype_size(cc, param);
+    }
+    return clean;
+}
+
+// #3577: a checked inline body's long double argument for a long double parameter (fast_cc_checked_long_double) is
+// passed without code: the call's checks have read it, and the call takes a placeholder in its place.
+static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_argument(FastExprCtx* ex, FastVal* arg, FastType pt)
+{
+    const bool taken = fast_cc_checked_long_double(ex->cc, arg->type, pt);
+    if (taken)
+    {
+        fval_release(ex, arg);
+        *arg = (FastVal){ .type = FTYPE_I64, .kind = FVAL_IMM };
+    }
+    return taken;
 }
 
 // Emit full SysV AMD64 ABI function call (direct or indirect, 6 GP + 8 XMM + stack args, 1-16B & >16B structs, variadic!)
-static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc, uint32_t outer_arg_sp)
+static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc)
 {
     FastCCState* cc = ex->cc;
     FastObj* obj = cc->obj;
@@ -3807,6 +6592,12 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     if (callee->kind == FVAL_BUILTIN)
     {
         const uint32_t bid = callee->sym_idx;
+        // #3577: each with its own argument count, or the full pipeline's error.
+        if (fast_cc_builtin_arity(cc, bid) != argc)
+        {
+            fast_cc_bail(cc, "builtin call's argument count");
+            return;
+        }
         // Forward __builtin_memcpy/memset/memmove/memcmp/strlen to standard libc symbol calls!
         const char* libc_name = NULL;
         FastType ret_t = FTYPE_VOID;
@@ -3818,7 +6609,15 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         if (libc_name == NULL)
         {
             fval_emit_builtin_call(ex, bid, args, argc, callee);
+            // A void builtin (__builtin_unreachable, __sync_synchronize, ...) is an effect; a value's is not (#3577).
+            callee->marks = (uint8_t)(BUSTER_FVAL_MARK_EFFECT * (uint32_t)(callee->kind == FVAL_VOID));
             return;
+        }
+        // #3577: these builtins' pointer arguments are nonnull to the full pipeline (-Wnonnull for a null constant).
+        const uint32_t pointers = (bid == cc->id_builtin_memset || bid == cc->id_builtin_strlen) ? 1u : 2u;
+        for (uint32_t i = 0; i < argc && i < pointers; i += 1)
+        {
+            if (args[i].kind == FVAL_IMM && args[i].imm == 0) { fast_cc_bail(cc, "null constant argument to a nonnull builtin"); return; }
         }
         // Synthesize direct call to libc function!
         const uint32_t lid = fast_ident_intern_cstr(&cc->pp->idents, libc_name);
@@ -3832,7 +6631,9 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
             si = fast_cc_sym_bind(cc, lid, (FastSym){ .kind = FSYM_FUNC, .storage = 2u, .type = ftype_from_index(cc, fc) });
         }
         const uint32_t osym = fast_cc_ensure_obj_sym(cc, si);
-        *callee = (FastVal){ .type = cc->syms[si].type, .kind = FVAL_GLOBAL, .sym_idx = osym, .is_func_sym = 1u };
+        // memcmp and strlen are pure: a discarded call is -Wunused-value (#3577).
+        const uint8_t pure = (uint8_t)(BUSTER_FVAL_MARK_PURE * (uint32_t)((bid == cc->id_builtin_memcmp) | (bid == cc->id_builtin_strlen)));
+        *callee = (FastVal){ .type = cc->syms[si].type, .kind = FVAL_GLOBAL, .sym_idx = osym, .is_func_sym = 1u, .marks = pure };
     }
 
     // Resolve function type (handles both `func` and `func_ptr`!)
@@ -3846,18 +6647,79 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     const FastComplexType* fn = cc->ctypes + (ft & BUSTER_FTYPE_CIDX_MASK);
     const FastType ret_t = ftype_unqual(fn->inner);
     if (ftype_is_unsupported(ret_t)) { fast_cc_bail(cc, "unsupported call return type"); return; }
+    // A call the full pipeline checks (#3577): a nonnull function's null constant for a pointer parameter is -Wnonnull
+    // (any pointer parameter, a superset of the attribute's), and a warn_unused_result call's result keeps the mark for
+    // the statement that would discard it.
+    const uint8_t callee_marks = callee->marks;
+    if ((callee_marks & BUSTER_FVAL_MARK_NONNULL) != 0 && !fast_cc_nonnull_arguments_clean(cc, fn, args, argc))
+    {
+        fast_cc_bail(cc, "null constant argument to a nonnull function");
+        return;
+    }
+    // #3577: a library function checked by its name (its nonnull mark brings it here, BUSTER_FSYM_PUSH_CHECKED; the name,
+    // its identifier's kind, rides in the callee's seq_ident).
+    if ((callee_marks & BUSTER_FVAL_MARK_NONNULL) != 0)
+    {
+        const uint32_t library = callee->seq_ident != 0 ? cc->pp->idents.entries[callee->seq_ident].pp_kw : 0u;
+        if (library >= FPP_KW_MEMACCESS_FUNCTION && library <= FPP_KW_FABS_FUNCTION &&
+            !fast_cc_library_call_clean(cc, library, fn, args, argc, ex->eval_only == 0, ex->call_open))
+        {
+            fast_cc_bail(cc, "a library call the full pipeline questions by its name");
+            return;
+        }
+        // printf's format the first argument, fprintf's and sprintf's the second, snprintf's the third (by their names'
+        // lengths: 6, 7 and 8), in a dead branch's call too, as the full pipeline checks every call's.
+        if (library == FPP_KW_FORMAT_FUNCTION &&
+            !fast_cc_format_quiet(cc, cc->pp->idents.entries[callee->seq_ident].length - 6u, args, argc, ex->call_open))
+        {
+            fast_cc_bail(cc, "a format the full pipeline questions");
+            return;
+        }
+    }
+    // #3577: the argument count, in an unevaluated call (sizeof's) too; arguments to a function without a prototype are
+    // the full pipeline's -Wdeprecated-non-prototype.
+    {
+        const uint32_t oldstyle = (uint32_t)(fn->is_oldstyle != 0);
+        const uint32_t variadic = (uint32_t)(fn->is_variadic != 0);
+        const uint32_t count_bad = (oldstyle ^ 1u) & (((variadic ^ 1u) & (uint32_t)(argc != fn->count)) | (variadic & (uint32_t)(argc < fn->count)));
+        if ((count_bad | (oldstyle & (uint32_t)(argc != 0))) != 0)
+        {
+            fast_cc_bail(cc, "call argument count mismatch, or arguments without a prototype");
+            return;
+        }
+    }
 
     if (ex->eval_only > 0)
     {
-        fast_cc_check_call_without_code(cc, fn, args, argc);
+        // #3577: an unevaluated call's arguments convert to their parameters as an evaluated call's do (below); a void
+        // argument to `...` is the full pipeline's error.
+        for (uint32_t i = 0; i < argc && !cc->bailout; i += 1)
+        {
+            if (i < fn->count)
+            {
+                if (BUSTER_FAST_CONV_OWN(cc->param_types[fn->start + i], &args[i]) == 0)
+                {
+                    fast_cc_check_implicit_conv(cc, BUSTER_FTYPE_UNQUAL(cc->param_types[fn->start + i]), &args[i]);
+                }
+            }
+            else if ((args[i].type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID)
+            {
+                fast_cc_bail(cc, "void argument");
+            }
+        }
+        if (cc->bailout) { return; }
         for (uint32_t i = 0; i < argc; i += 1) { fval_release(ex, &args[i]); }
         fval_release(ex, callee);
-        *callee = (FastVal){ .type = ret_t, .kind = ftype_is_void(ret_t) ? FVAL_VOID : FVAL_REG };
+        // The marks the code below gives the result: a dead branch's statement discards it (#3592).
+        *callee = (FastVal){ .type = ret_t, .kind = ftype_is_void(ret_t) ? FVAL_VOID : FVAL_REG,
+                             .marks = (uint8_t)((callee_marks & BUSTER_FVAL_MARK_UNUSED_RESULT) |
+                                                (BUSTER_FVAL_MARK_EFFECT * (uint32_t)((callee_marks & BUSTER_FVAL_MARK_PURE) == 0))) };
         return;
     }
 
-    // Spill ALL live values below this call (both vstack and outer call_args!)
-    fval_spill_all(ex, ex->vsp, outer_arg_sp);
+    // Spill ALL live values below this call: the stack below the callee, which stands below its arguments, as an
+    // enclosing call's arguments do (fast_expr_finish_call).
+    fval_spill_all(ex, (uint32_t)(callee - ex->vstack));
 
     // Also spill callee if it's in a register, and spill all args that live in registers so ABI reg loading has ZERO conflicts!
     if (callee->kind != FVAL_GLOBAL || !callee->is_func_sym)
@@ -3873,11 +6735,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     }
 
     // Convert each argument to prototype parameter type (or default argument promotions) and spill any live reg/flags!
-    if (!fn->is_oldstyle && ((!fn->is_variadic && argc != fn->count) || (fn->is_variadic && argc < fn->count)))
-    {
-        fast_cc_bail(cc, "call argument count mismatch");
-        return;
-    }
+    // (The count was checked above.)
     const bool is_var = fn->is_variadic != 0 || fn->is_oldstyle != 0;
     for (uint32_t i = 0; i < argc; i += 1)
     {
@@ -3885,8 +6743,11 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         if (i < fn->count)
         {
             pt = ftype_unqual(cc->param_types[fn->start + i]);
-            fast_cc_check_implicit_conv(cc, pt, &args[i]);
-            if (cc->bailout) { return; }
+            if (BUSTER_FAST_CONV_OWN(pt, &args[i]) == 0)
+            {
+                fast_cc_check_implicit_conv(cc, pt, &args[i]);
+                if (cc->bailout) { return; }
+            }
         }
         else
         {
@@ -3896,10 +6757,17 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
             else if (ftype_is_int(at) && ftype_size(cc, at) < 4u) { pt = FTYPE_I32; }
             else { pt = ftype_unqual(at); }
         }
-        if (ftype_is_unsupported(pt) || ftype_is_unsupported(args[i].type))
+        // #3577: a void argument to `...` is the full pipeline's error.
+        const uint32_t void_argument = (uint32_t)((args[i].type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
+        if (((uint32_t)ftype_is_unsupported(pt) | (uint32_t)ftype_is_unsupported(args[i].type) | void_argument) != 0)
         {
-            fast_cc_bail(cc, "unsupported call arg type");
-            return;
+            // #3577: a checked inline body passes a long double for a long double parameter without code.
+            if (((uint32_t)(i >= fn->count) | void_argument) != 0 || !fast_cc_checked_long_double_argument(ex, &args[i], pt))
+            {
+                fast_cc_bail(cc, "unsupported call arg type, or a void argument");
+                return;
+            }
+            pt = FTYPE_I64;
         }
         if (!ftype_is_record(pt))
         {
@@ -3918,6 +6786,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     if (ftype_is_record(ret_t))
     {
         const FastComplexType* rct = cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK);
+        if (BUSTER_FAST_RECORD_OVERALIGNED(rct)) { fast_cc_bail(cc, "an aligned typedef's record by value"); }
         if (rct->abi_lo == FABI_MEM)
         {
             has_sret = true;
@@ -3943,6 +6812,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         if (ftype_is_record(at))
         {
             const FastComplexType* rct = cc->ctypes + (at & BUSTER_FTYPE_CIDX_MASK);
+            if (BUSTER_FAST_RECORD_OVERALIGNED(rct)) { fast_cc_bail(cc, "an aligned typedef's record by value"); }
             locs[i].sz = rct->size;
             if (rct->abi_lo != FABI_MEM)
             {
@@ -4144,16 +7014,21 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         ex->gp_used |= (1u << FREG_RAX);
         *callee = (FastVal){ .type = ret_t, .kind = FVAL_REG, .reg = FREG_RAX };
     }
+    // An effect unless the callee is const or pure (whose discarded call -Wunused-value questions).
+    callee->marks = (uint8_t)((callee_marks & BUSTER_FVAL_MARK_UNUSED_RESULT) |
+                              (BUSTER_FVAL_MARK_EFFECT * (uint32_t)((callee_marks & BUSTER_FVAL_MARK_PURE) == 0)));
 }
 
-// While the call is emitted, its callee sits just outside the live value stack.
-// The returned value occupies that same slot.
+// The callee stands on the value stack with its arguments above it (FIRST_ARG is the first's place, the stack's top
+// past the last), all live while the call is emitted: the scans for flags and for a register to spill find the
+// arguments after the values below the callee, which fval_emit_call spills first, and the arguments before the last,
+// which each `,` spilled. The returned value occupies the callee's slot. An argument stays where it was computed
+// (#3577): main moved each to a stack of its own, copying a value just written a field at a time, and the copy waited
+// for its stores.
 static inline void fast_expr_finish_call(FastExprCtx* ex, uint32_t first_arg, uint32_t argc)
 {
-    FastVal* callee = &ex->vstack[--ex->vsp];
-    fval_emit_call(ex, callee, ex->call_args + first_arg, argc, first_arg);
-    ex->arg_sp = first_arg;
-    ex->vsp += 1u;
+    fval_emit_call(ex, ex->vstack + (first_arg - 1u), ex->vstack + first_arg, argc);
+    ex->vsp = first_arg;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -4194,7 +7069,7 @@ typedef enum FastExprOpKind
     FEOP_TOK_BASE = 64
 } FastExprOpKind;
 
-// What a condition folded to (#3592), in a `?:`'s FastExprOp.extra and in FastCCState.branch_constant. The dead side of
+// What a condition folded to (#3592), in a `?:`'s FastExprOp.constant and in FastCCState.branch_constant. The dead side of
 // a constant condition is checked as an operand of sizeof is, with no code and no symbol.
 #define BUSTER_FCONSTANT_NONE 0u
 #define BUSTER_FCONSTANT_FALSE 1u
@@ -4204,13 +7079,79 @@ typedef struct FastExprOp FastExprOp;
 struct FastExprOp
 {
     uint16_t op;
-    uint16_t extra;        // arg_count (CALL), elem_idx (COMPOUND_LIT), BUSTER_FCONSTANT_* (TERNARY_Q, TERNARY_C), decided (&&, ||)
-    uint32_t lbl0;         // false/true/else_lbl, or arg_start (CALL), or end_pos (GENERIC_SEL)
+    uint16_t extra;        // the commas so far (CALL), elem_idx (COMPOUND_LIT), the then value's marks (TERNARY_C)
+    uint32_t lbl0;         // false/true/else_lbl, or the first argument's place on the value stack (CALL), or end_pos (GENERIC_SEL)
     uint32_t lbl1;         // then_tail_lbl (TERNARY_C)
-    uint32_t lbl2;         // end_lbl (TERNARY_C)
+    uint32_t lbl2;         // end_lbl (TERNARY_C), or a binary operator's token (#3577: ex->cmp_pos)
     FastType type;         // cast target, then_type (TERNARY_C), compound lit type
     int32_t slot;          // tern_slot or compound lit stack slot
+    // #3577: the -Wunsequenced log's count + 1 where the operator's (right) operand begins: at its push, or a call's or a
+    // compound literal's last separator (0 for an operator that doesn't keep it); and a sequence point's left operand's
+    // first entry + 1 (`&&`, `||`, `,`, `?:`: where the operator below it began), and a conditional's else arm's.
+    uint8_t seq_lo;
+    uint8_t seq_mid;
+    uint8_t seq_mid2;
+    uint8_t constant;      // BUSTER_FCONSTANT_* (TERNARY_Q, TERNARY_C), or 1 where a constant left operand decided (&&, ||)
 };
+
+// An operator stack entry written whole, as three 8-byte words and its last four bytes (#3577): a compound literal of
+// the 28 bytes took a 2-byte store of op and an unaligned 8-byte one right after it, and the reduction's load of op
+// and extra (4 bytes) spans both, which no store forwards: it waited for them to retire.
+static inline __attribute__((always_inline)) void fast_expr_op_write(FastExprOp* entry, FastExprOp value)
+{
+    const uint64_t words[3] = {
+        (uint64_t)value.op | ((uint64_t)value.extra << 16) | ((uint64_t)value.lbl0 << 32),
+        (uint64_t)value.lbl1 | ((uint64_t)value.lbl2 << 32),
+        (uint64_t)value.type | ((uint64_t)(uint32_t)value.slot << 32),
+    };
+    const uint32_t tail = (uint32_t)value.seq_lo | ((uint32_t)value.seq_mid << 8) | ((uint32_t)value.seq_mid2 << 16) | ((uint32_t)value.constant << 24);
+    memcpy(entry, words, sizeof(words));
+    memcpy((uint8_t*)entry + sizeof(words), &tail, sizeof(tail));
+}
+_Static_assert(sizeof(FastExprOp) == 28u && offsetof(FastExprOp, extra) == 2u && offsetof(FastExprOp, lbl0) == 4u &&
+               offsetof(FastExprOp, lbl1) == 8u && offsetof(FastExprOp, lbl2) == 12u && offsetof(FastExprOp, type) == 16u &&
+               offsetof(FastExprOp, slot) == 20u && offsetof(FastExprOp, seq_lo) == 24u && offsetof(FastExprOp, constant) == 27u,
+               "fast_expr_op_write's layout");
+
+// #3577: whether compound literal CL stores its element of type ELEMENT at its position (extra: a member's index or an
+// element's) as the full pipeline does, quietly: within CL's type (a scalar's one element, an array's count, a record's
+// members; past them, -Wexcess-initializers), into a scalar or a record of the element's own type (an array or another
+// record would take its elements by brace elision, which this path doesn't do), and over nothing an earlier element
+// initialized (-Winitializer-overrides: fast_cc_init_overrides, from the positional element before a designator, lbl0,
+// and the positions initialized, lbl1 and lbl2, which it marks). The next positional element is then past it.
+static __attribute__((cold, noinline)) bool fast_cc_compound_element_quiet(const FastCCState* cc, FastExprOp* cl, FastType element)
+{
+    const uint32_t position = cl->extra;
+    const FastComplexType* ct = cc->ctypes + (cl->type & BUSTER_FTYPE_CIDX_MASK);
+    uint64_t touched = (uint64_t)cl->lbl1 | (uint64_t)cl->lbl2 << 32;
+    FastType target = cl->type;
+    int64_t target_bits = 0;
+    bool within = position == 0;
+    if (ftype_is_array(cl->type))
+    {
+        target = ct->inner;
+        target_bits = (int64_t)position * ftype_size(cc, target) * 8;
+        within = position < ct->count;
+    }
+    else if (ftype_is_record(cl->type))
+    {
+        within = position < ct->count;
+        if (within)
+        {
+            const FastMemberInfo* mi = cc->member_info + ct->start + position;
+            target = mi->type;
+            target_bits = (int64_t)mi->byte_offset * 8 + (mi->bit_width != 0 ? mi->bit_offset : 0);
+        }
+    }
+    const bool own_record = ftype_is_record(target) &&
+                            BUSTER_FTYPE_CODEGEN(BUSTER_FTYPE_UNQUAL(target)) == BUSTER_FTYPE_CODEGEN(BUSTER_FTYPE_UNQUAL(element));
+    const bool scalar = !ftype_is_array(target) && !ftype_is_record(target);
+    const bool quiet = within && (scalar || own_record) && !fast_cc_init_overrides(cc, cl->type, 0, cl->lbl0, &touched, position, target_bits);
+    cl->lbl0 = position + 1u;
+    cl->lbl1 = (uint32_t)touched;
+    cl->lbl2 = (uint32_t)(touched >> 32);
+    return quiet;
+}
 
 static inline uint8_t fast_expr_tok_prec(uint8_t k)
 {
@@ -4299,6 +7240,7 @@ static __attribute__((noinline)) void fval_emit_va_arg(FastExprCtx* ex, FastVal*
     if (ftype_is_record(arg_t))
     {
         const FastComplexType* rct = cc->ctypes + (arg_t & BUSTER_FTYPE_CIDX_MASK);
+        if (BUSTER_FAST_RECORD_OVERALIGNED(rct)) { fast_cc_bail(cc, "an aligned typedef's record by value"); }
         const int32_t rslot = fast_cc_alloc_tmp(cc, rct->size < 16u ? 16u : rct->size, rct->align < 8u ? 8u : rct->align);
         if (rct->abi_lo == FABI_MEM)
         {
@@ -4368,7 +7310,8 @@ static __attribute__((noinline)) void fval_emit_va_arg(FastExprCtx* ex, FastVal*
 // A constant condition's `?:` (#3592): the live arm is the value, in the common type and as an rvalue, as the branches'
 // join in fast_expr_reduce_top makes it. A live then arm's value is under the dead else arm's placeholder. Out of
 // line: few conditions are constants.
-static __attribute__((cold, noinline)) void fast_expr_constant_ternary(FastExprCtx* ex, uint32_t constant, FastVal else_v, FastType common_t)
+static __attribute__((cold, noinline)) void fast_expr_constant_ternary(FastExprCtx* ex, uint32_t constant, FastVal else_v, FastType common_t,
+                                                                       uint8_t marks, uint32_t arms)
 {
     FastCCState* cc = ex->cc;
     ex->eval_only = (uint8_t)(ex->eval_only - (constant == BUSTER_FCONSTANT_TRUE));
@@ -4380,7 +7323,9 @@ static __attribute__((cold, noinline)) void fast_expr_constant_ternary(FastExprC
         if (!ok) { fast_cc_bail(cc, "ternary stack underflow"); }
         else { live = ex->vstack[--ex->vsp]; }
     }
-    FastVal result = { .type = common_t, .kind = FVAL_VOID };
+    // #3577: the marks and the arms' constants of the other path's value (both arms', which the full pipeline checks
+    // whatever the condition).
+    FastVal result = { .type = common_t, .kind = FVAL_VOID, .marks = marks };
     if (ok && ftype_is_void(common_t))
     {
         fval_release(ex, &live);
@@ -4389,6 +7334,7 @@ static __attribute__((cold, noinline)) void fast_expr_constant_ternary(FastExprC
     {
         const FastComplexType* rct = cc->ctypes + (common_t & BUSTER_FTYPE_CIDX_MASK);
         result.kind = FVAL_LOCAL;
+        result.marks = (uint8_t)(marks & BUSTER_FVAL_MARK_EFFECT);
         result.off = ex->eval_only > 0 ? 0 : fast_cc_alloc_tmp(cc, rct->size, rct->align < 8u ? 8u : rct->align);
         FastVal dst = result;
         fval_store(ex, &dst, &live, false, NULL);
@@ -4399,13 +7345,14 @@ static __attribute__((cold, noinline)) void fast_expr_constant_ternary(FastExprC
         const bool fp = ftype_is_float(common_t);
         result.kind = fp ? FVAL_XMM : FVAL_REG;
         result.reg = fp ? fval_to_xmm(ex, &live, true) : fval_to_gp(ex, &live, true);
+        result.sym_idx = arms;
     }
     if (ok) { ex->vstack[ex->vsp++] = result; }
 }
 
 // A left side of `&&` or `||` that decided the value (#3592): the dead right side must still be a scalar, and the value
 // is 0 for `&&` and 1 for `||`, an rvalue as the branches in fast_expr_reduce_top make it. Out of line, as above.
-static __attribute__((cold, noinline)) void fast_expr_decided_logic(FastExprCtx* ex, uint8_t tok, const FastVal* rhs)
+static __attribute__((cold, noinline)) void fast_expr_decided_logic(FastExprCtx* ex, uint8_t tok, const FastVal* rhs, uint8_t marks)
 {
     ex->eval_only -= 1u;
     if (!ftype_is_scalar(ftype_decay(ex->cc, rhs->type)))
@@ -4416,11 +7363,539 @@ static __attribute__((cold, noinline)) void fast_expr_decided_logic(FastExprCtx*
     {
         FastVal value = { .type = FTYPE_I32, .kind = FVAL_IMM, .imm = tok == FTOK_LOR };
         const uint32_t reg = fval_to_gp(ex, &value, true);
-        ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG, .reg = reg };
+        ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG, .reg = reg, .marks = marks };
     }
 }
 
 // Apply the top operator from `ops[--osp]` onto `ex->vstack`!
+// Whether a value an expression discards (a statement's, a comma's left operand's) is one the full pipeline lets go
+// quietly (#3577): one with an effect, or a volatile lvalue's read, and not a warn_unused_result call's. 1 or 0, from
+// the value's marks, its lvalue bit and its type, computed in place (no call, no branch) where a value is discarded.
+#define BUSTER_FAST_DISCARD_QUIET(v) \
+    ((((uint32_t)(((v).marks & BUSTER_FVAL_MARK_EFFECT) != 0)) | \
+      ((uint32_t)(v).is_lvalue & (uint32_t)(((v).type & BUSTER_FTYPE_VOL) != 0))) & \
+     (uint32_t)(((v).marks & BUSTER_FVAL_MARK_UNUSED_RESULT) == 0))
+
+// #3577: whether the tokens [START, END) are a stack object, as the full pipeline's -Wreturn-stack-address finds it: a
+// name of a variable of the function's (a parameter's too; a static one's is FSYM_GLOBAL) that holds an array or a record,
+// through subscripts and members (`a[i]`, `s.b[i]`, `a[i][j]`), in parentheses. A pointer member's subscript (`s.p[i]`)
+// passes too, past what the full pipeline finds.
+static __attribute__((cold, noinline)) bool fast_cc_stack_object_tokens(const FastCCState* cc, uint32_t start, uint32_t end)
+{
+    uint32_t s = start;
+    uint32_t e = end;
+    while (s < e && cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e)
+    {
+        s += 1u;
+        e -= 1u;
+    }
+    const uint32_t id = s < e && cc->tk[s] == FTOK_IDENT ? cc->td[s] : 0u;
+    const uint32_t si = id != 0 && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+    const FastType t = si != 0 ? cc->syms[si].type : FTYPE_VOID;
+    bool result = si != 0 && cc->syms[si].kind == FSYM_LOCAL && (ftype_is_array(t) || ftype_is_record(t));
+    uint32_t p = s + 1u;
+    while (result && p < e)
+    {
+        const uint8_t k = cc->tk[p];
+        if (k == FTOK_LBRACKET)
+        {
+            p = fast_cc_group_end(cc, p);
+        }
+        else if (k == FTOK_DOT && p + 1u < e && cc->tk[p + 1u] == FTOK_IDENT)
+        {
+            p += 2u;
+        }
+        else
+        {
+            result = false;
+        }
+    }
+    return result && p == e;
+}
+
+// #3577: whether `&` at AMP, applied to a value whose operand ends at cc->pos, makes the value a return returns, as the
+// full pipeline's check_common_in_return walks up from it: through parentheses, casts, unary `-` and `~`, sizeof,
+// arithmetic, a comma's right operand, a conditional's arms and a compound literal's elements. A call's argument, a
+// subscript's index, `*`, `!`, a comparison, a logical operator and an assignment take it instead (an operator pending
+// below `&`), and so do a conditional's `?`, a comma, a subscript, a member operator or an assignment just after it. LOCAL:
+// the operand is a stack object's lvalue ([rbp + off]); otherwise its tokens are asked. An address the full pipeline lets
+// go past an operator this can't see leaves all the same (`(&x)[0]`).
+static __attribute__((cold, noinline)) bool fast_cc_stack_address_returned(const FastCCState* cc, const FastExprOp* ops, uint32_t osp, uint32_t amp, bool local)
+{
+    bool taken = false;
+    for (uint32_t i = 0; i < osp && !taken; i += 1u)
+    {
+        const uint32_t op = ops[i].op;
+        const uint32_t tok = op >= FEOP_TOK_BASE ? op - FEOP_TOK_BASE : 0u;
+        taken = op == FEOP_CALL || op == FEOP_SUBSCRIPT || op == FEOP_DEREF || op == FEOP_UNARY_BANG || (op >= FEOP_VA_START && op <= FEOP_VA_COPY) ||
+                (tok >= FTOK_LT && tok <= FTOK_SHR_ASSIGN);
+    }
+    const uint8_t next = cc->pos < cc->tcount ? cc->tk[cc->pos] : FTOK_EOF;
+    taken = taken || next == FTOK_QUESTION || next == FTOK_COMMA || next == FTOK_LBRACKET || next == FTOK_DOT || next == FTOK_ARROW ||
+            (next >= FTOK_LT && next <= FTOK_SHR_ASSIGN);
+    const bool stack = !taken && (local || fast_cc_stack_object_tokens(cc, amp + 1u, cc->pos));
+    return stack;
+}
+
+// #3577: whether a constant index past a complete array's bounds, at the subscript whose `[` is at LBRACKET (cc->pos is
+// past its `]`), is the full pipeline's -Warray-bounds: an array a name gives (in parentheses, or a row of one, `b[2][0]`)
+// or a string literal's, not a member's (`s->arr[5]` is quiet there, a trailing one's or not). ONE_PAST_ADDRESSED: the
+// index is the array's count and `&` takes the subscript whole, its end's address, quiet too.
+static __attribute__((cold, noinline)) bool fast_cc_array_index_questioned(const FastCCState* cc, uint32_t lbracket, bool one_past_addressed)
+{
+    const uint8_t next = cc->pos < cc->tcount ? cc->tk[cc->pos] : FTOK_EOF;
+    const bool whole = next != FTOK_LBRACKET && next != FTOK_DOT && next != FTOK_ARROW && next != FTOK_LPAREN && next != FTOK_INC && next != FTOK_DEC;
+    // The base's last token, past any `]`s of earlier subscripts (a row) and `)`s around it, to its first.
+    uint32_t at = lbracket;
+    bool found = false;
+    bool member = false;
+    for (uint32_t steps = 0; !found && at > 0 && steps < 64u; steps += 1)
+    {
+        at -= 1u;
+        const uint8_t t = cc->tk[at];
+        if (t == FTOK_RBRACKET || t == FTOK_RPAREN)
+        {
+            // Back to its opening bracket; a `)` closes a group around the base, whose last token is before it.
+            uint32_t depth = 0;
+            uint32_t q = at + 1u;
+            while (q > 0)
+            {
+                q -= 1u;
+                const uint8_t u = cc->tk[q];
+                depth += (uint32_t)(u == FTOK_RBRACKET) | (uint32_t)(u == FTOK_RPAREN);
+                depth -= (uint32_t)(u == FTOK_LBRACKET) | (uint32_t)(u == FTOK_LPAREN);
+                if (depth == 0) { break; }
+            }
+            at = t == FTOK_RPAREN ? at : q;
+            if (t == FTOK_RPAREN)
+            {
+                // `(a)[5]`: the group's last token is the base's.
+                continue;
+            }
+        }
+        else
+        {
+            found = true;
+            member = t == FTOK_IDENT && at > 0 && (cc->tk[at - 1u] == FTOK_DOT || cc->tk[at - 1u] == FTOK_ARROW);
+        }
+    }
+    return !(one_past_addressed && whole) && !(found && member);
+}
+
+static bool fast_cc_sizeof_decays(const FastCCState* cc, uint32_t lparen);
+
+// #3577: whether a cast between a pointer and an integer is the full pipeline's -Wpointer-to-int-cast family: to an integer
+// type narrower than a pointer from one (TO_INTEGER), _Bool aside, or to a pointer from a narrower integer that isn't a
+// constant.
+static __attribute__((cold, noinline)) bool fast_cc_cast_size_questioned(const FastCCState* cc, const FastVal* v, FastType to, bool to_integer)
+{
+    const bool questioned = to_integer ? (!ftype_is_bool(to) && ftype_size(cc, to) < 8u) : (v->kind != FVAL_IMM && ftype_size(cc, v->type) < 8u);
+    return questioned;
+}
+
+// A unary operator's reduction (#3577: out of fast_expr_reduce_top, whose binary operators, three in four of sqlite3.c's
+// 56,000 reductions, then save fewer registers on their way in and out): the operator popped is ops[*osp_ptr].
+static __attribute__((noinline)) void fast_expr_reduce_unary(FastExprCtx* ex, FastExprOp* ops, uint32_t* osp_ptr)
+{
+    FastCCState* cc = ex->cc;
+    FastObj* obj = cc->obj;
+    const FastExprOp cur = ops[*osp_ptr];
+    const uint16_t op = cur.op;
+    if (ex->vsp < 1u) { fast_cc_bail(cc, "unary stack underflow"); return; }
+    FastVal* v = ex->vstack + (ex->vsp - 1u);
+    // A unary operator's value has none of its operand's marks (#3577): `-g()` discards a value with no effect.
+    const uint8_t vmarks = v->marks;
+    const uint8_t vlasting = v->lasting;
+    const uint32_t from_float = (uint32_t)((v->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32);
+    v->marks = BUSTER_FVAL_MARK_NONLITERAL;
+    v->op = 0;
+    v->lasting = 0;
+    // #3577: the operand C allows each, or the full pipeline's error or warning: + and - arithmetic, ~ an integer,
+    // ! ++ -- a scalar; sizeof a complete type that isn't a bit-field's (void's and a function's are GNU's 1);
+    // _Alignof of an expression is GNU's warning. Masks of the classes, by operator.
+    {
+        static const uint8_t unary_operands[32] = {
+            [FEOP_UNARY_PLUS] = 3u, [FEOP_UNARY_MINUS] = 3u, [FEOP_UNARY_TILDE] = 1u, [FEOP_UNARY_BANG] = 7u,
+            [FEOP_DEREF] = 15u, [FEOP_ADDR] = 15u, [FEOP_PRE_INC] = 7u, [FEOP_PRE_DEC] = 7u, [FEOP_CAST] = 15u,
+            [FEOP_SIZEOF_UNARY] = 15u, [FEOP_ALIGNOF_UNARY] = 0u,
+        };
+        // (An operator that takes every class, or an integer scalar where integers are taken, is quiet without the
+        // class: sizeof aside, which measures.)
+        const uint32_t allowed = unary_operands[op & 31u];
+        const uint32_t integer_scalar = (uint32_t)((v->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
+                                        (BUSTER_FAST_INTEGER_KINDS >> (v->type & BUSTER_FTYPE_SCALAR_MASK));
+        if (((uint32_t)(op == FEOP_SIZEOF_UNARY) | ((uint32_t)(allowed != 15u) & ((integer_scalar & allowed & 1u) ^ 1u))) != 0)
+        {
+            const uint32_t operand = BUSTER_FAST_OPERAND_CLASS(cc, v->type);
+            const uint32_t sized = (uint32_t)(op == FEOP_SIZEOF_UNARY) & (BUSTER_FAST_TYPE_INCOMPLETE(cc, v->type) | (uint32_t)(v->kind == FVAL_BITFIELD));
+            if ((((allowed >> operand) & 1u) == 0) | sized)
+            {
+                fast_cc_bail(cc, "operand of a unary operator");
+                return;
+            }
+        }
+    }
+    if (op == FEOP_SIZEOF_UNARY || op == FEOP_ALIGNOF_UNARY)
+    {
+        const uint64_t val = op == FEOP_SIZEOF_UNARY ? ftype_size(cc, v->type) : ftype_align(cc, v->type);
+        const uint8_t pointer = (uint8_t)(BUSTER_FVAL_LASTING_SIZEOF_POINTER * (uint32_t)((op == FEOP_SIZEOF_UNARY) & ftype_is_ptr(v->type)));
+        if (ex->eval_only > 0) { ex->eval_only -= 1u; }
+        if (ex->unevaluated > 0) { ex->unevaluated -= 1u; }
+        *v = (FastVal){ .type = FTYPE_U64, .kind = FVAL_IMM, .imm = (int64_t)val, .marks = BUSTER_FVAL_MARK_NONLITERAL, .lasting = pointer };
+        return;
+    }
+    if (op == FEOP_CAST)
+    {
+        // #3577: a cast to void, or between scalars but a floating value and a pointer, or the full pipeline's error.
+        {
+            const uint32_t from = BUSTER_FAST_OPERAND_CLASS(cc, v->type);
+            const uint32_t to = BUSTER_FAST_OPERAND_CLASS(cc, cur.type);
+            const uint32_t to_void = (uint32_t)((cur.type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
+            const uint32_t pair = from * 4u + to;
+            // Allowed pairs: integer, floating and pointer among themselves but floating with pointer.
+            const uint32_t allowed = (UINT32_C(0x0537) >> pair) & 1u;
+            if ((allowed | to_void) == 0)
+            {
+                fast_cc_bail(cc, "cast the full pipeline refuses");
+                return;
+            }
+            // #3577: a pointer to a smaller integer type (_Bool aside), or a smaller integer that isn't a constant to a
+            // pointer, is the full pipeline's -Wpointer-to-int-cast family, in dead branches and sizeof too.
+            if (((UINT32_C(0x104) >> pair) & 1u) != 0 && fast_cc_cast_size_questioned(cc, v, cur.type, pair == 8u))
+            {
+                fast_cc_bail(cc, "a cast between a pointer and a smaller integer");
+                return;
+            }
+        }
+        fval_convert(ex, v, cur.type);
+        v->is_lvalue = 0;
+        v->lasting = (uint8_t)((BUSTER_FVAL_LASTING_FLOAT_CAST *
+                                (from_float & (uint32_t)((cur.type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64))) |
+                               (vlasting & BUSTER_FVAL_LASTING_STRING));
+        // A cast to void is an effect a statement discards quietly; a discarded warn_unused_result call stays one.
+        const uint32_t to_void = (uint32_t)((cur.type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
+        v->marks = (uint8_t)(((BUSTER_FVAL_MARK_EFFECT | (vmarks & BUSTER_FVAL_MARK_UNUSED_RESULT)) * to_void) |
+                             (BUSTER_FVAL_MARK_NONLITERAL * (to_void ^ 1u)));
+        return;
+    }
+    if (op == FEOP_ADDR)
+    {
+        if (v->kind == FVAL_BITFIELD) { fast_cc_bail(cc, "address of bitfield"); return; }
+        // #3577: a misaligned member's address is the full pipeline's -Waddress-of-packed-member (which a cast to a
+        // pointer it is aligned for, or a conversion to void *, quiets there: it leaves here all the same).
+        if ((vlasting & BUSTER_FVAL_LASTING_UNALIGNED) != 0) { fast_cc_bail(cc, "the address of a misaligned member"); return; }
+        // #3577: a stack object's address that a return's value carries is the full pipeline's -Wreturn-stack-address,
+        // in a dead branch's or sizeof's operand too (fast_cc_stack_address_returned). The expression's first token
+        // follows its `return`.
+        if (ex->seq_start_pos != 0 && cc->tk[ex->seq_start_pos - 1u] == FTOK_KW_RETURN && v->kind != FVAL_GLOBAL &&
+            fast_cc_stack_address_returned(cc, ops, *osp_ptr, cur.lbl0, v->kind == FVAL_LOCAL))
+        {
+            fast_cc_bail(cc, "a stack object's address a return returns");
+            return;
+        }
+        if ((vmarks & BUSTER_FVAL_MARK_REGISTER) != 0) { fast_cc_bail(cc, "address of register variable"); return; }
+        const FastType pt = ftype_make_ptr(cc, v->type);
+        // An object's address keeps its kind without code too (#3592's dead branches): a comparison's or a
+        // condition's check reads it (-Wtautological-pointer-compare, -Wpointer-bool-conversion), and it makes none.
+        if (v->kind == FVAL_LOCAL) { v->kind = FVAL_LOCAL_ADDR; v->type = pt; v->is_lvalue = 0; return; }
+        if (v->kind == FVAL_GLOBAL) { v->kind = FVAL_GLOBAL_ADDR; v->type = pt; v->is_lvalue = 0; return; }
+        if (ex->eval_only > 0) { *v = (FastVal){ .type = pt, .kind = FVAL_REG }; return; }
+        const uint32_t r = fval_addr_to_gp(ex, v, true);
+        *v = (FastVal){ .type = pt, .kind = FVAL_REG, .reg = (uint8_t)r };
+        return;
+    }
+    if (op == FEOP_DEREF)
+    {
+        const FastType dt = ftype_decay(cc, v->type);
+        if (!ftype_is_ptr(dt)) { fast_cc_bail(cc, "deref non-pointer"); return; }
+        const FastType elem = ftype_deref(cc, dt);
+        // #3577: `*` of a pointer to void is the full pipeline's -Wvoid-ptr-dereference where evaluated, a dead
+        // branch's too, but under `&` (`&*p`).
+        const uint32_t void_elem = (uint32_t)((elem & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
+        if ((void_elem & (uint32_t)(ex->unevaluated == 0)) != 0 && (*osp_ptr == 0 || ops[*osp_ptr - 1u].op != FEOP_ADDR))
+        {
+            fast_cc_bail(cc, "indirection of a pointer to void");
+            return;
+        }
+        if (ex->eval_only > 0) { *v = (FastVal){ .type = elem, .kind = FVAL_INDIRECT, .is_lvalue = 1u }; return; }
+        // #3577: `*` of a null pointer constant whose result isn't volatile is the full pipeline's -Wnull-dereference
+        // ("indirection of non-volatile null pointer will be deleted, not trap").
+        const uint32_t elem_volatile = (uint32_t)((elem & BUSTER_FTYPE_VOL) != 0);
+        if (((uint32_t)(v->kind == FVAL_IMM) & (uint32_t)(v->imm == 0) & (elem_volatile ^ 1u)) != 0)
+        {
+            fast_cc_bail(cc, "indirection of a null pointer constant");
+            return;
+        }
+        if (ftype_is_func(elem))
+        {
+            // `(*direct_func)` stays direct; `(*fn_ptr_lvalue)` MUST load the pointer from memory!
+            if (v->kind == FVAL_GLOBAL && v->is_func_sym)
+            {
+                v->type = elem;
+                return;
+            }
+            const uint32_t r = fval_to_gp(ex, v, true);
+            *v = (FastVal){ .type = elem, .kind = FVAL_REG, .reg = (uint8_t)r };
+            return;
+        }
+        const uint32_t r = fval_to_gp(ex, v, true);
+        *v = (FastVal){ .type = elem, .kind = FVAL_INDIRECT, .reg = (uint8_t)r, .off = 0, .is_lvalue = 1u };
+        return;
+    }
+    if (op == FEOP_PRE_INC || op == FEOP_PRE_DEC)
+    {
+        const uint32_t seq_result = BUSTER_FSEQ_RESULT(v);
+        FastVal res = { 0 };
+        fval_emit_incdec(ex, v, op == FEOP_PRE_INC, false, &res);
+        *v = res;
+        v->marks = BUSTER_FVAL_MARK_EFFECT;
+        v->seq_ident = seq_result;
+        return;
+    }
+    if (op == FEOP_UNARY_PLUS)
+    {
+        const FastType pt = ftype_is_float(v->type) ? ftype_unqual(v->type) : ftype_promote_int(cc, v->type);
+        fval_convert(ex, v, pt);
+        v->is_lvalue = 0;
+        return;
+    }
+    if (op == FEOP_UNARY_MINUS)
+    {
+        const FastType pt = ftype_is_float(v->type) ? ftype_unqual(v->type) : ftype_promote_int(cc, v->type);
+        if (ex->eval_only > 0) { *v = (FastVal){ .type = pt, .kind = FVAL_REG }; return; }
+        fval_flush_flags(ex);
+        fval_convert(ex, v, pt);
+        if (ftype_is_float(pt))
+        {
+            if (v->kind == FVAL_FIMM)
+            {
+                v->imm ^= ftype_is_f64(pt) ? (int64_t)UINT64_C(0x8000000000000000) : (int64_t)UINT32_C(0x80000000);
+                return;
+            }
+            const bool is_f64 = ftype_is_f64(pt);
+            const uint32_t x = fval_to_xmm(ex, v, true);
+            const uint32_t ro = is_f64 ? fast_cc_get_sign_f64(cc) : fast_cc_get_sign_f32(cc);
+            x86_sse_xor_rip(obj, is_f64, x, obj->sec_sym_rodata, (int64_t)ro);
+            *v = (FastVal){ .type = pt, .kind = FVAL_XMM, .reg = (uint8_t)x };
+            return;
+        }
+        if (v->kind == FVAL_IMM)
+        {
+            const bool w64 = ftype_size(cc, pt) == 8u;
+            // #3577: negating a signed type's minimum overflows (-Winteger-overflow); the negation below is then
+            // defined.
+            if (ftype_is_signed(cc, pt) && (w64 ? v->imm == INT64_MIN : (int32_t)v->imm == INT32_MIN))
+            {
+                fast_cc_bail(cc, "signed overflow in a constant");
+                return;
+            }
+            v->imm = w64 ? (int64_t)(UINT64_C(0) - (uint64_t)v->imm) :
+                     (ftype_is_signed(cc, pt) ? (int64_t)(-(int32_t)v->imm) : (int64_t)(uint64_t)(-(uint32_t)v->imm));
+            return;
+        }
+        const uint32_t r = fval_to_gp(ex, v, true);
+        x86_f7(obj, ftype_size(cc, pt) == 8u, 3u, r); // neg r
+        *v = (FastVal){ .type = pt, .kind = FVAL_REG, .reg = (uint8_t)r };
+        return;
+    }
+    if (op == FEOP_UNARY_TILDE)
+    {
+        const FastType pt = ftype_promote_int(cc, v->type);
+        if (ex->eval_only > 0) { *v = (FastVal){ .type = pt, .kind = FVAL_REG }; return; }
+        fval_flush_flags(ex);
+        fval_convert(ex, v, pt);
+        if (v->kind == FVAL_IMM)
+        {
+            const bool w64 = ftype_size(cc, pt) == 8u;
+            v->imm = w64 ? ~v->imm : (ftype_is_signed(cc, pt) ? (int64_t)(~(int32_t)v->imm) : (int64_t)(uint64_t)(~(uint32_t)v->imm));
+            return;
+        }
+        const uint32_t r = fval_to_gp(ex, v, true);
+        x86_f7(obj, ftype_size(cc, pt) == 8u, 2u, r); // not r
+        *v = (FastVal){ .type = pt, .kind = FVAL_REG, .reg = (uint8_t)r };
+        return;
+    }
+    if (op == FEOP_UNARY_BANG)
+    {
+        // Each value `!` makes is FTOK_BANG's, for -Wlogical-not-parentheses (`!a == b`, #3577); its operand is a
+        // condition.
+        v->marks = vmarks;
+        if (!BUSTER_FAST_CONDITION_QUIET(cc, v)) { fast_cc_bail(cc, "condition the full pipeline refuses or questions"); return; }
+        v->marks = BUSTER_FVAL_MARK_NONLITERAL;
+        if (ex->eval_only > 0) { *v = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG, .op = FTOK_BANG }; return; }
+        if (v->kind == FVAL_FLAGS)
+        {
+            v->cc_code ^= 1u; // invert condition code in 0 instructions!!
+            v->type = FTYPE_I32;
+            v->op = FTOK_BANG;
+            return;
+        }
+        if (v->kind == FVAL_IMM)
+        {
+            *v = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = v->imm == 0 ? 1 : 0, .marks = BUSTER_FVAL_MARK_NONLITERAL, .op = FTOK_BANG };
+            return;
+        }
+        const FastType t = ftype_decay(cc, v->type);
+        if (ftype_is_float(t))
+        {
+            const bool is_f64 = ftype_is_f64(t);
+            const uint32_t x = fval_to_xmm(ex, v, true);
+            const uint32_t xz = fval_alloc_xmm(ex);
+            const uint32_t r1 = fval_alloc_gp(ex);
+            const uint32_t r2 = fval_alloc_gp(ex);
+            x86_sse_zero(obj, xz);
+            x86_ucomis(obj, is_f64, x, xz);
+            x86_setcc_zext(obj, FCC_E, r1);
+            x86_setcc_zext(obj, FCC_NP, r2);
+            x86_alu_rr(obj, false, 0x21u, r1, r2);
+            ex->gp_used &= (uint16_t)~(1u << r2);
+            ex->xmm_used &= (uint8_t)~((1u << x) | (1u << xz));
+            *v = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG, .reg = (uint8_t)r1, .op = FTOK_BANG };
+            return;
+        }
+        const uint32_t r = fval_to_gp(ex, v, true);
+        const uint32_t sz = ftype_size(cc, t);
+        if (sz < 4u) { x86_extend(obj, r, r, sz, false); }
+        x86_alu_rr(obj, sz == 8u, 0x85u, r, r);
+        ex->gp_used &= (uint16_t)~(1u << r);
+        *v = (FastVal){ .type = FTYPE_I32, .kind = FVAL_FLAGS, .cc_code = FCC_E, .op = FTOK_BANG };
+        return;
+    }
+    return;
+}
+
+// A conditional's completion (`FEOP_TERNARY_C`), out of fast_expr_reduce_top as the unary operators are (#3577).
+static __attribute__((noinline)) void fast_expr_reduce_ternary(FastExprCtx* ex, FastExprOp* ops, uint32_t* osp_ptr)
+{
+    FastCCState* cc = ex->cc;
+    FastObj* obj = cc->obj;
+    const FastExprOp cur = ops[*osp_ptr];
+    if (ex->vsp < 1u) { fast_cc_bail(cc, "ternary stack underflow"); return; }
+    FastVal else_v = ex->vstack[--ex->vsp];
+    // #3577: the condition's entries are sequenced before the arms', and one arm's are never evaluated with the other's.
+    BUSTER_FSEQ_REGION(ex, cur.seq_lo, cur.seq_mid, BUSTER_FSEQ_MARK(ex));
+    BUSTER_FSEQ_REGION(ex, cur.seq_mid, cur.seq_mid2, BUSTER_FSEQ_MARK(ex));
+    const FastType then_t = cur.type;
+    // The arms' constants together (BUSTER_FVAL_MARK_CONST_ARMS), and an effect where either arm has one.
+    const FastArm then_arm = {
+        .value = (int64_t)(((uint64_t)(uint32_t)cur.slot << 32) | cur.lbl0),
+        .kind = (uint8_t)((cur.extra >> 8) & 15u),
+        .not_null_literal = (uint8_t)((cur.extra >> 12) & 1u),
+    };
+    FastArm arms = fast_cc_arms_merge(then_arm, fast_cc_arm(cc, &else_v));
+    const int64_t tarms = arms.value;
+    const FastType else_t = ftype_decay(cc, else_v.type);
+    FastType common_t = FTYPE_VOID;
+    if (ftype_is_void(then_t) || ftype_is_void(else_t)) { common_t = FTYPE_VOID; }
+    else if (ftype_is_record(then_t)) { common_t = then_t; }
+    else if (ftype_is_ptr(then_t) && ftype_is_ptr(else_t))
+    {
+        // #3577: pointers to incompatible types (but for qualifiers, and void's with an object's) are the full
+        // pipeline's -Wpointer-type-mismatch, in a dead branch's conditional too.
+        if (then_t != else_t && !fast_cc_pointer_pair_valid(cc, FTOK_EQ, then_t, else_t))
+        {
+            fast_cc_bail(cc, "a conditional's pointers to incompatible types");
+            return;
+        }
+        // Prefer non-void* pointer if the other is void*
+        common_t = ftype_is_void(ftype_deref(cc, then_t)) ? else_t : then_t;
+    }
+    else if (ftype_is_ptr(then_t)) { common_t = then_t; }
+    else if (ftype_is_ptr(else_t)) { common_t = else_t; }
+    else { common_t = ftype_usual_arith(cc, then_t, else_t); }
+    // A pointer conditional's integer arm is its null pointer: the literal 0 alone is quiet, and the value holds no
+    // constant arms an implicit conversion would check.
+    if (ftype_is_ptr(common_t))
+    {
+        if (arms.kind != FARMS_NONE && arms.not_null_literal != 0) { fast_cc_bail(cc, "conditional's integer arm as a pointer"); return; }
+        arms.kind = FARMS_NONE;
+    }
+    const uint8_t tmarks = (uint8_t)(((cur.extra | else_v.marks) & BUSTER_FVAL_MARK_EFFECT) |
+                                     (BUSTER_FVAL_MARK_CONST_ARMS * (uint32_t)(arms.kind != FARMS_NONE)));
+    const uint32_t tkind = arms.kind;
+
+    if (cur.constant != BUSTER_FCONSTANT_NONE)
+    {
+        fast_expr_constant_ternary(ex, cur.constant, else_v, common_t, tmarks, BUSTER_FARMS_PACK(tkind, tarms));
+        return;
+    }
+
+    if (ex->eval_only > 0)
+    {
+        ex->vstack[ex->vsp++] = (FastVal){ .type = common_t, .kind = ftype_is_void(common_t) ? FVAL_VOID : FVAL_REG, .sym_idx = BUSTER_FARMS_PACK(tkind, tarms),
+                                           .marks = tmarks };
+        return;
+    }
+    if (ftype_is_void(common_t))
+    {
+        (void)tarms;
+        fval_release(ex, &else_v);
+        x86_jmp_label(obj, cur.lbl2);
+        fast_label_bind(obj, cur.lbl1);
+        fast_label_bind(obj, cur.lbl2);
+        ex->gp_used = 0;
+        ex->xmm_used = 0;
+        ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID, .marks = tmarks };
+        return;
+    }
+    if (ftype_is_record(common_t))
+    {
+        FastVal dst = { .type = common_t, .kind = FVAL_LOCAL, .off = cur.slot };
+        fval_store(ex, &dst, &else_v, false, NULL);
+        x86_jmp_label(obj, cur.lbl2);
+        fast_label_bind(obj, cur.lbl1);
+        fast_label_bind(obj, cur.lbl2);
+        ex->gp_used = 0;
+        ex->xmm_used = 0;
+        ex->vstack[ex->vsp++] = (FastVal){ .type = common_t, .kind = FVAL_LOCAL, .off = cur.slot,
+                                           .marks = (uint8_t)(tmarks & BUSTER_FVAL_MARK_EFFECT) };
+        return;
+    }
+    // Scalar/float common type: put `else` in RAX/XMM0, jump to end, then convert `then` in tail trampoline if needed!
+    fval_convert(ex, &else_v, common_t);
+    if (ftype_is_float(common_t))
+    {
+        const uint32_t x = fval_to_xmm(ex, &else_v, true);
+        if (x != 0u) { x86_sse_rr(obj, ftype_is_f64(common_t), 0x10u, 0u, x); }
+        x86_jmp_label(obj, cur.lbl2);
+        fast_label_bind(obj, cur.lbl1);
+        if (BUSTER_FTYPE_CODEGEN(ftype_unqual(then_t)) != BUSTER_FTYPE_CODEGEN(ftype_unqual(common_t)))
+        {
+            ex->gp_used = ftype_is_float(then_t) ? 0u : (uint16_t)(1u << FREG_RAX);
+            ex->xmm_used = ftype_is_float(then_t) ? 1u : 0u;
+            FastVal tv = { .type = then_t, .kind = ftype_is_float(then_t) ? FVAL_XMM : FVAL_REG, .reg = 0u };
+            fval_convert(ex, &tv, common_t);
+            const uint32_t tx = fval_to_xmm(ex, &tv, true);
+            if (tx != 0u) { x86_sse_rr(obj, ftype_is_f64(common_t), 0x10u, 0u, tx); }
+        }
+        fast_label_bind(obj, cur.lbl2);
+        ex->gp_used = 0;
+        ex->xmm_used = 1u;
+        ex->vstack[ex->vsp++] = (FastVal){ .type = common_t, .kind = FVAL_XMM, .reg = 0u, .sym_idx = BUSTER_FARMS_PACK(tkind, tarms), .marks = tmarks };
+    }
+    else
+    {
+        const uint32_t g = fval_to_gp(ex, &else_v, true);
+        if (g != FREG_RAX) { x86_mov_rr(obj, true, FREG_RAX, g); }
+        x86_jmp_label(obj, cur.lbl2);
+        fast_label_bind(obj, cur.lbl1);
+        if (BUSTER_FTYPE_CODEGEN(ftype_unqual(then_t)) != BUSTER_FTYPE_CODEGEN(ftype_unqual(common_t)))
+        {
+            ex->gp_used = (uint16_t)(1u << FREG_RAX);
+            ex->xmm_used = 0u;
+            FastVal tv = { .type = then_t, .kind = FVAL_REG, .reg = FREG_RAX };
+            fval_convert(ex, &tv, common_t);
+            const uint32_t tg = fval_to_gp(ex, &tv, true);
+            if (tg != FREG_RAX) { x86_mov_rr(obj, true, FREG_RAX, tg); }
+        }
+        fast_label_bind(obj, cur.lbl2);
+        ex->gp_used = (uint16_t)(1u << FREG_RAX);
+        ex->xmm_used = 0;
+        ex->vstack[ex->vsp++] = (FastVal){ .type = common_t, .kind = FVAL_REG, .reg = FREG_RAX, .sym_idx = BUSTER_FARMS_PACK(tkind, tarms), .marks = tmarks };
+    }
+    return;
+}
+
 static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* ops, uint32_t* osp_ptr)
 {
     FastCCState* cc = ex->cc;
@@ -4430,254 +7905,14 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
 
     if (op >= FEOP_UNARY_PLUS && op <= FEOP_ALIGNOF_UNARY)
     {
-        if (ex->vsp < 1u) { fast_cc_bail(cc, "unary stack underflow"); return; }
-        FastVal* v = ex->vstack + (ex->vsp - 1u);
-        if (op == FEOP_SIZEOF_UNARY || op == FEOP_ALIGNOF_UNARY)
-        {
-            const uint64_t val = op == FEOP_SIZEOF_UNARY ? ftype_size(cc, v->type) : ftype_align(cc, v->type);
-            if (ex->eval_only > 0) { ex->eval_only -= 1u; }
-            *v = (FastVal){ .type = FTYPE_U64, .kind = FVAL_IMM, .imm = (int64_t)val };
-            return;
-        }
-        if (op == FEOP_CAST)
-        {
-            fval_convert(ex, v, cur.type);
-            v->is_lvalue = 0;
-            return;
-        }
-        if (op == FEOP_ADDR)
-        {
-            if (v->kind == FVAL_BITFIELD) { fast_cc_bail(cc, "address of bitfield"); return; }
-            const FastType pt = ftype_make_ptr(cc, v->type);
-            if (ex->eval_only > 0) { *v = (FastVal){ .type = pt, .kind = FVAL_REG }; return; }
-            if (v->kind == FVAL_LOCAL) { v->kind = FVAL_LOCAL_ADDR; v->type = pt; v->is_lvalue = 0; return; }
-            if (v->kind == FVAL_GLOBAL) { v->kind = FVAL_GLOBAL_ADDR; v->type = pt; v->is_lvalue = 0; return; }
-            const uint32_t r = fval_addr_to_gp(ex, v, true);
-            *v = (FastVal){ .type = pt, .kind = FVAL_REG, .reg = (uint8_t)r };
-            return;
-        }
-        if (op == FEOP_DEREF)
-        {
-            const FastType dt = ftype_decay(cc, v->type);
-            if (!ftype_is_ptr(dt)) { fast_cc_bail(cc, "deref non-pointer"); return; }
-            const FastType elem = ftype_deref(cc, dt);
-            if (ex->eval_only > 0) { *v = (FastVal){ .type = elem, .kind = FVAL_INDIRECT, .is_lvalue = 1u }; return; }
-            if (ftype_is_func(elem))
-            {
-                // `(*direct_func)` stays direct; `(*fn_ptr_lvalue)` MUST load the pointer from memory!
-                if (v->kind == FVAL_GLOBAL && v->is_func_sym)
-                {
-                    v->type = elem;
-                    return;
-                }
-                const uint32_t r = fval_to_gp(ex, v, true);
-                *v = (FastVal){ .type = elem, .kind = FVAL_REG, .reg = (uint8_t)r };
-                return;
-            }
-            const uint32_t r = fval_to_gp(ex, v, true);
-            *v = (FastVal){ .type = elem, .kind = FVAL_INDIRECT, .reg = (uint8_t)r, .off = 0, .is_lvalue = 1u };
-            return;
-        }
-        if (op == FEOP_PRE_INC || op == FEOP_PRE_DEC)
-        {
-            FastVal res = { 0 };
-            fval_emit_incdec(ex, v, op == FEOP_PRE_INC, false, &res);
-            *v = res;
-            return;
-        }
-        if (op == FEOP_UNARY_PLUS)
-        {
-            const FastType pt = ftype_is_float(v->type) ? ftype_unqual(v->type) : ftype_promote_int(cc, v->type);
-            fval_convert(ex, v, pt);
-            v->is_lvalue = 0;
-            return;
-        }
-        if (op == FEOP_UNARY_MINUS)
-        {
-            const FastType pt = ftype_is_float(v->type) ? ftype_unqual(v->type) : ftype_promote_int(cc, v->type);
-            if (ex->eval_only > 0) { *v = (FastVal){ .type = pt, .kind = FVAL_REG }; return; }
-            fval_flush_flags(ex);
-            fval_convert(ex, v, pt);
-            if (ftype_is_float(pt))
-            {
-                if (v->kind == FVAL_FIMM)
-                {
-                    v->imm ^= ftype_is_f64(pt) ? (int64_t)UINT64_C(0x8000000000000000) : (int64_t)UINT32_C(0x80000000);
-                    return;
-                }
-                const bool is_f64 = ftype_is_f64(pt);
-                const uint32_t x = fval_to_xmm(ex, v, true);
-                const uint32_t ro = is_f64 ? fast_cc_get_sign_f64(cc) : fast_cc_get_sign_f32(cc);
-                x86_sse_xor_rip(obj, is_f64, x, obj->sec_sym_rodata, (int64_t)ro);
-                *v = (FastVal){ .type = pt, .kind = FVAL_XMM, .reg = (uint8_t)x };
-                return;
-            }
-            if (v->kind == FVAL_IMM)
-            {
-                const bool w64 = ftype_size(cc, pt) == 8u;
-                v->imm = w64 ? -v->imm : (ftype_is_signed(cc, pt) ? (int64_t)(-(int32_t)v->imm) : (int64_t)(uint64_t)(-(uint32_t)v->imm));
-                return;
-            }
-            const uint32_t r = fval_to_gp(ex, v, true);
-            x86_f7(obj, ftype_size(cc, pt) == 8u, 3u, r); // neg r
-            *v = (FastVal){ .type = pt, .kind = FVAL_REG, .reg = (uint8_t)r };
-            return;
-        }
-        if (op == FEOP_UNARY_TILDE)
-        {
-            const FastType pt = ftype_promote_int(cc, v->type);
-            if (ex->eval_only > 0) { *v = (FastVal){ .type = pt, .kind = FVAL_REG }; return; }
-            fval_flush_flags(ex);
-            fval_convert(ex, v, pt);
-            if (v->kind == FVAL_IMM)
-            {
-                const bool w64 = ftype_size(cc, pt) == 8u;
-                v->imm = w64 ? ~v->imm : (ftype_is_signed(cc, pt) ? (int64_t)(~(int32_t)v->imm) : (int64_t)(uint64_t)(~(uint32_t)v->imm));
-                return;
-            }
-            const uint32_t r = fval_to_gp(ex, v, true);
-            x86_f7(obj, ftype_size(cc, pt) == 8u, 2u, r); // not r
-            *v = (FastVal){ .type = pt, .kind = FVAL_REG, .reg = (uint8_t)r };
-            return;
-        }
-        if (op == FEOP_UNARY_BANG)
-        {
-            if (ex->eval_only > 0) { *v = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG }; return; }
-            if (v->kind == FVAL_FLAGS)
-            {
-                v->cc_code ^= 1u; // invert condition code in 0 instructions!!
-                v->type = FTYPE_I32;
-                return;
-            }
-            if (v->kind == FVAL_IMM)
-            {
-                *v = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = v->imm == 0 ? 1 : 0 };
-                return;
-            }
-            const FastType t = ftype_decay(cc, v->type);
-            if (ftype_is_float(t))
-            {
-                const bool is_f64 = ftype_is_f64(t);
-                const uint32_t x = fval_to_xmm(ex, v, true);
-                const uint32_t xz = fval_alloc_xmm(ex);
-                const uint32_t r1 = fval_alloc_gp(ex);
-                const uint32_t r2 = fval_alloc_gp(ex);
-                x86_sse_zero(obj, xz);
-                x86_ucomis(obj, is_f64, x, xz);
-                x86_setcc_zext(obj, FCC_E, r1);
-                x86_setcc_zext(obj, FCC_NP, r2);
-                x86_alu_rr(obj, false, 0x21u, r1, r2);
-                ex->gp_used &= (uint16_t)~(1u << r2);
-                ex->xmm_used &= (uint8_t)~((1u << x) | (1u << xz));
-                *v = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG, .reg = (uint8_t)r1 };
-                return;
-            }
-            const uint32_t r = fval_to_gp(ex, v, true);
-            const uint32_t sz = ftype_size(cc, t);
-            if (sz < 4u) { x86_extend(obj, r, r, sz, false); }
-            x86_alu_rr(obj, sz == 8u, 0x85u, r, r);
-            ex->gp_used &= (uint16_t)~(1u << r);
-            *v = (FastVal){ .type = FTYPE_I32, .kind = FVAL_FLAGS, .cc_code = FCC_E };
-            return;
-        }
+        fast_expr_reduce_unary(ex, ops, osp_ptr);
         return;
     }
 
     // Ternary `?:` completion (`FEOP_TERNARY_C`)
     if (op == FEOP_TERNARY_C)
     {
-        if (ex->vsp < 1u) { fast_cc_bail(cc, "ternary stack underflow"); return; }
-        FastVal else_v = ex->vstack[--ex->vsp];
-        const FastType then_t = cur.type;
-        const FastType else_t = ftype_decay(cc, else_v.type);
-        FastType common_t = FTYPE_VOID;
-        if (ftype_is_void(then_t) || ftype_is_void(else_t)) { common_t = FTYPE_VOID; }
-        else if (ftype_is_record(then_t)) { common_t = then_t; }
-        else if (ftype_is_ptr(then_t) && ftype_is_ptr(else_t))
-        {
-            // Prefer non-void* pointer if the other is void*
-            common_t = ftype_is_void(ftype_deref(cc, then_t)) ? else_t : then_t;
-        }
-        else if (ftype_is_ptr(then_t)) { common_t = then_t; }
-        else if (ftype_is_ptr(else_t)) { common_t = else_t; }
-        else { common_t = ftype_usual_arith(cc, then_t, else_t); }
-
-        if (cur.extra != BUSTER_FCONSTANT_NONE)
-        {
-            fast_expr_constant_ternary(ex, cur.extra, else_v, common_t);
-            return;
-        }
-
-        if (ex->eval_only > 0)
-        {
-            ex->vstack[ex->vsp++] = (FastVal){ .type = common_t, .kind = ftype_is_void(common_t) ? FVAL_VOID : FVAL_REG };
-            return;
-        }
-        if (ftype_is_void(common_t))
-        {
-            fval_release(ex, &else_v);
-            x86_jmp_label(obj, cur.lbl2);
-            fast_label_bind(obj, cur.lbl1);
-            fast_label_bind(obj, cur.lbl2);
-            ex->gp_used = 0;
-            ex->xmm_used = 0;
-            ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
-            return;
-        }
-        if (ftype_is_record(common_t))
-        {
-            FastVal dst = { .type = common_t, .kind = FVAL_LOCAL, .off = cur.slot };
-            fval_store(ex, &dst, &else_v, false, NULL);
-            x86_jmp_label(obj, cur.lbl2);
-            fast_label_bind(obj, cur.lbl1);
-            fast_label_bind(obj, cur.lbl2);
-            ex->gp_used = 0;
-            ex->xmm_used = 0;
-            ex->vstack[ex->vsp++] = (FastVal){ .type = common_t, .kind = FVAL_LOCAL, .off = cur.slot };
-            return;
-        }
-        // Scalar/float common type: put `else` in RAX/XMM0, jump to end, then convert `then` in tail trampoline if needed!
-        fval_convert(ex, &else_v, common_t);
-        if (ftype_is_float(common_t))
-        {
-            const uint32_t x = fval_to_xmm(ex, &else_v, true);
-            if (x != 0u) { x86_sse_rr(obj, ftype_is_f64(common_t), 0x10u, 0u, x); }
-            x86_jmp_label(obj, cur.lbl2);
-            fast_label_bind(obj, cur.lbl1);
-            if (ftype_unqual(then_t) != ftype_unqual(common_t))
-            {
-                ex->gp_used = ftype_is_float(then_t) ? 0u : (uint16_t)(1u << FREG_RAX);
-                ex->xmm_used = ftype_is_float(then_t) ? 1u : 0u;
-                FastVal tv = { .type = then_t, .kind = ftype_is_float(then_t) ? FVAL_XMM : FVAL_REG, .reg = 0u };
-                fval_convert(ex, &tv, common_t);
-                const uint32_t tx = fval_to_xmm(ex, &tv, true);
-                if (tx != 0u) { x86_sse_rr(obj, ftype_is_f64(common_t), 0x10u, 0u, tx); }
-            }
-            fast_label_bind(obj, cur.lbl2);
-            ex->gp_used = 0;
-            ex->xmm_used = 1u;
-            ex->vstack[ex->vsp++] = (FastVal){ .type = common_t, .kind = FVAL_XMM, .reg = 0u };
-        }
-        else
-        {
-            const uint32_t g = fval_to_gp(ex, &else_v, true);
-            if (g != FREG_RAX) { x86_mov_rr(obj, true, FREG_RAX, g); }
-            x86_jmp_label(obj, cur.lbl2);
-            fast_label_bind(obj, cur.lbl1);
-            if (ftype_unqual(then_t) != ftype_unqual(common_t))
-            {
-                ex->gp_used = (uint16_t)(1u << FREG_RAX);
-                ex->xmm_used = 0u;
-                FastVal tv = { .type = then_t, .kind = FVAL_REG, .reg = FREG_RAX };
-                fval_convert(ex, &tv, common_t);
-                const uint32_t tg = fval_to_gp(ex, &tv, true);
-                if (tg != FREG_RAX) { x86_mov_rr(obj, true, FREG_RAX, tg); }
-            }
-            fast_label_bind(obj, cur.lbl2);
-            ex->gp_used = (uint16_t)(1u << FREG_RAX);
-            ex->xmm_used = 0;
-            ex->vstack[ex->vsp++] = (FastVal){ .type = common_t, .kind = FVAL_REG, .reg = FREG_RAX };
-        }
+        fast_expr_reduce_ternary(ex, ops, osp_ptr);
         return;
     }
 
@@ -4687,14 +7922,29 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
     {
         if (ex->vsp < 1u) { fast_cc_bail(cc, "logical stack underflow"); return; }
         FastVal rhs = ex->vstack[--ex->vsp];
-        if (cur.extra != 0)
+        // #3577: the left operand's entries are sequenced before the right's.
+        BUSTER_FSEQ_REGION(ex, cur.seq_lo, cur.seq_mid, BUSTER_FSEQ_MARK(ex));
+        const uint8_t lmarks = (uint8_t)(rhs.marks & BUSTER_FVAL_MARK_EFFECT);
+        // #3577: a right operand that is an integer constant but 0 or 1 is -Wconstant-logical-operand's; and the
+        // operand is a condition (fval_branch checks it where code is made).
         {
-            fast_expr_decided_logic(ex, tok, &rhs);
+            const uint32_t constant = (uint32_t)(rhs.kind == FVAL_IMM) & (uint32_t)(BUSTER_FAST_OPERAND_CLASS(cc, rhs.type) == BUSTER_FOPERAND_INTEGER) &
+                                      (uint32_t)((rhs.type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) != FTYPE_BOOL) &
+                                      (uint32_t)((uint64_t)rhs.imm > 1u);
+            if ((constant | (uint32_t)(BUSTER_FAST_CONDITION_QUIET(cc, &rhs) == 0)) != 0)
+            {
+                fast_cc_bail(cc, "logical operator's operand the full pipeline questions");
+                return;
+            }
+        }
+        if (cur.constant != 0)
+        {
+            fast_expr_decided_logic(ex, tok, &rhs, lmarks);
             return;
         }
         if (ex->eval_only > 0)
         {
-            ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG };
+            ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG, .marks = lmarks };
             return;
         }
         const uint32_t end_lbl = fast_label_new(obj);
@@ -4718,7 +7968,7 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         }
         ex->gp_used = (uint16_t)(1u << FREG_RAX);
         ex->xmm_used = 0;
-        ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG, .reg = FREG_RAX };
+        ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG, .reg = FREG_RAX, .marks = lmarks };
         return;
     }
 
@@ -4731,39 +7981,88 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
 
     if (tok == FTOK_COMMA)
     {
+        // The left operand is discarded: one with no effect is -Wunused-value (BUSTER_FAST_DISCARD_QUIET), which the full
+        // pipeline doesn't give in an unevaluated operand (sizeof's).
+        if (((uint32_t)(ex->unevaluated == 0) & (uint32_t)(BUSTER_FAST_DISCARD_QUIET(*lhs) == 0)) != 0) { fast_cc_bail(cc, "comma's left operand has no effect"); return; }
         fval_release(ex, lhs);
+        // #3577: the left operand's entries are sequenced before the right's.
+        BUSTER_FSEQ_REGION(ex, cur.seq_lo, cur.seq_mid, BUSTER_FSEQ_MARK(ex));
+        rhs->seq_start = 0;
+        rhs->seq_ident = 0;
         ex->vstack[ex->vsp++] = *rhs;
         return;
     }
     if (tok == FTOK_ASSIGN)
     {
-        if (!lhs->is_lvalue || ftype_is_const(lhs->type))
+        // #3577: a struct or union with a const member can't be assigned either (its record looked at where the lvalue is
+        // a complex type that isn't a pointer).
+        uint32_t record_const = 0;
+        if (((uint32_t)(lhs->type >> 31) & (uint32_t)((lhs->type & BUSTER_FTYPE_PTR_MASK) == 0)) != 0)
         {
-            fast_cc_bail(cc, "assign to const or non-lvalue");
+            record_const = (uint32_t)cc->ctypes[lhs->type & BUSTER_FTYPE_CIDX_MASK].has_const_mbr;
+        }
+        const uint32_t lhs_const = (uint32_t)((lhs->type & BUSTER_FTYPE_CONST) != 0);
+        // And one in an unevaluated operand (sizeof's) is the full pipeline's -Wunevaluated-expression.
+        if (((uint32_t)(lhs->is_lvalue == 0) | lhs_const | record_const | (uint32_t)(ex->unevaluated > 0)) != 0)
+        {
+            fast_cc_bail(cc, "assign to const or non-lvalue, or in an unevaluated operand");
             return;
         }
-        FastVal res = { 0 };
-        fval_store(ex, lhs, rhs, true, &res);
-        ex->vstack[ex->vsp++] = res;
+        const uint32_t seq_result = BUSTER_FSEQ_RESULT(lhs);
+        BUSTER_FSEQ_MODIFY(ex, lhs)
+        // The result where the left operand stands, as the binary operators' below: fval_store writes it last, after
+        // its last read of the operand, or bails out. A local copied to the stack waited for its stores, none of which
+        // holds the copy's 32 bytes (0.9 M cycles a compile of sqlite3.c on the 9700X, #3577).
+        fval_store(ex, lhs, rhs, true, lhs);
+        lhs->marks = BUSTER_FVAL_MARK_EFFECT;
+        lhs->op = FTOK_ASSIGN;
+        lhs->seq_ident = seq_result;
+        ex->vsp += 1u;
         return;
     }
     if (tok >= FTOK_ADD_ASSIGN && tok <= FTOK_SHR_ASSIGN)
     {
-        FastVal res = { 0 };
-        fval_emit_compound_assign(ex, tok, lhs, rhs, &res);
-        ex->vstack[ex->vsp++] = res;
+        const uint32_t seq_result = BUSTER_FSEQ_RESULT(lhs);
+        fval_emit_compound_assign(ex, tok, lhs, rhs, lhs);
+        lhs->marks = BUSTER_FVAL_MARK_EFFECT;
+        lhs->op = tok;
+        lhs->seq_ident = seq_result;
+        ex->vsp += 1u;
         return;
     }
+    // #3577: an operand whose own operator C's precedence would question (-Wparentheses' family): a shift's `+` or
+    // `-`, a bitwise operator's comparison, a relational operator's (a chained comparison), and a comparison's left
+    // `!` (-Wlogical-not-parentheses). One table look-up a side, no branch while none is found.
+    const uint32_t lclass = fast_expr_operand_class[lhs->op & 127u];
+    const uint32_t rclass = fast_expr_operand_class[rhs->op & 127u];
+    if ((((lclass | rclass) & fast_expr_conflicts_any[tok & 127u]) | (lclass & fast_expr_conflicts_left[tok & 127u])) != 0)
+    {
+        fast_cc_bail(cc, "operator precedence the full pipeline questions");
+        return;
+    }
+    // #3577: a `+` with an unparenthesized string or character literal operand (op FTOK_STR_LIT or FTOK_CHAR_LIT) is
+    // checked for -Wstring-plus-int and -Wstring-plus-char; one compare a side while there is none.
+    const uint32_t literal_operand = (uint32_t)(((uint32_t)lhs->op - (uint32_t)FTOK_CHAR_LIT) < 2u) | (uint32_t)(((uint32_t)rhs->op - (uint32_t)FTOK_CHAR_LIT) < 2u);
+    if ((literal_operand & (uint32_t)(tok == FTOK_PLUS)) != 0)
+    {
+        if (fast_cc_string_plus(cc, lhs, rhs) != 0)
+        {
+            fast_cc_bail(cc, "a string literal plus an integer, or a character literal plus a string");
+            return;
+        }
+    }
+    ex->cmp_pos = cur.lbl2;
     // The result where the left operand stands, which is where it goes. fval_emit_binary writes it once, as the last
     // thing it does, or bails out. A result in a local of this function was 40 cycles of waiting: the local is zeroed
     // through the stack pointer, written through fval_emit_binary's pointer and loaded through the stack pointer,
     // and the load is paired with the wrong store (#2850's profile on the 9700X: half of this function's cycles).
     fval_emit_binary(ex, tok, lhs, rhs, lhs);
+    // #3577: the result's marks (a constant `<<`'s stays for the conditions that ask) and its operator.
+    lhs->marks = (uint8_t)(BUSTER_FVAL_MARK_NONLITERAL | (lhs->marks & BUSTER_FVAL_MARK_SHIFTED));
+    lhs->op = tok;
     ex->vsp += 1u;
 }
 
-// Main iterative C17 expression compiler (ZERO recursion!).
-// If `is_branch` is true, emits a direct branch to `branch_label` and releases the result.
 // glibc's assert in GNU's modes (#3592) is a statement expression:
 //     ((void) sizeof ((e) ? 1 : 0), __extension__ ({ if (e) ; else __assert_fail (#e, __FILE__, __LINE__, f); }))
 // and SQLite's ALWAYS and NEVER put one in an expression. The direct path compiles no statement in an expression, so
@@ -4835,8 +8134,273 @@ static __attribute__((cold, noinline)) void fast_cc_assert_rewrite(FastCCState* 
     }
 }
 
-static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
-                         bool is_branch, bool branch_on_true, uint32_t branch_label, FastVal* out_val)
+// #3577: whether an expression's log (FastExprCtx's seq_*) is one the full pipeline's -Wunsequenced is quiet on: each
+// modification's variable named or modified elsewhere only where a region sequences the two, or, a naming, within the
+// modification's own operands. More entries than the log holds are refused; past the regions it keeps, fewer are apart.
+// Entries are bits of 64-bit masks: the log's lanes compared at once, and each region's bounds a mask.
+static __attribute__((cold, noinline)) bool fast_cc_sequenced(const FastExprCtx* ex)
+{
+    const uint32_t count = ex->seq_count;
+    const uint32_t regions = ex->seq_regions < 32u ? ex->seq_regions : 32u;
+    const uint64_t valid = _bzhi_u64(~UINT64_C(0), count);
+    uint64_t pending = ex->seq_mods & valid;
+    uint64_t conflicts = (uint64_t)(count > 64u);
+    while (pending != 0 && conflicts == 0)
+    {
+        const uint32_t m = (uint32_t)__builtin_ctzll(pending);
+        pending &= pending - 1u;
+        const __m512i wanted = _mm512_set1_epi64((long long)ex->seq_log[m]);
+#define BUSTER_FSEQ_SAME(chunk) \
+    ((uint64_t)_mm512_mask_cmpeq_epi64_mask((__mmask8)(valid >> ((chunk) * 8u)), \
+                                            _mm512_maskz_loadu_epi64((__mmask8)(valid >> ((chunk) * 8u)), ex->seq_log + (chunk) * 8u), wanted) << ((chunk) * 8u))
+        uint64_t same = BUSTER_FSEQ_SAME(0) | BUSTER_FSEQ_SAME(1) | BUSTER_FSEQ_SAME(2) | BUSTER_FSEQ_SAME(3) |
+                        BUSTER_FSEQ_SAME(4) | BUSTER_FSEQ_SAME(5) | BUSTER_FSEQ_SAME(6) | BUSTER_FSEQ_SAME(7);
+#undef BUSTER_FSEQ_SAME
+        same &= ~(UINT64_C(1) << m);
+        // Namings within the modification's own operands, [own - 1, m).
+        const uint32_t own = ex->seq_own[m];
+        const uint64_t operands = (_bzhi_u64(~UINT64_C(0), m) & ~_bzhi_u64(~UINT64_C(0), own - (uint32_t)(own != 0))) & (UINT64_C(0) - (uint64_t)(own != 0));
+        same &= ~(operands & ~ex->seq_mods);
+        // A region's other side: [mid, hi) where the modification is in [lo, mid), and the reverse.
+        for (uint32_t r = 0; r < regions; r += 1)
+        {
+            const uint32_t lo = ex->seq_region[r][0];
+            const uint32_t mid = ex->seq_region[r][1];
+            const uint32_t hi = ex->seq_region[r][2];
+            const uint32_t known = (uint32_t)(lo != 0) & (uint32_t)(mid != 0) & (uint32_t)(hi != 0);
+            const uint64_t left = _bzhi_u64(~UINT64_C(0), mid - known) & ~_bzhi_u64(~UINT64_C(0), lo - known);
+            const uint64_t right = _bzhi_u64(~UINT64_C(0), hi - known) & ~_bzhi_u64(~UINT64_C(0), mid - known);
+            const uint64_t in_left = UINT64_C(0) - ((left >> m) & 1u);
+            const uint64_t in_right = UINT64_C(0) - ((right >> m) & 1u);
+            same &= ~(((right & in_left) | (left & in_right)) & (UINT64_C(0) - (uint64_t)known));
+        }
+        conflicts |= same;
+    }
+    return conflicts == 0;
+}
+
+// #3577: whether sizeof's operand, at the current token, is a parameter declared an array by name, in up to two
+// parentheses (FastSym's pad_sym[0]); deeper ones are taken as one.
+static __attribute__((cold, noinline)) bool fast_cc_sizeof_array_param(const FastCCState* cc)
+{
+    uint32_t at = cc->pos;
+    uint32_t depth = 0;
+    while (at < cc->tcount && cc->tk[at] == FTOK_LPAREN)
+    {
+        at += 1u;
+        depth += 1u;
+    }
+    bool result = false;
+    if (at < cc->tcount && cc->tk[at] == FTOK_IDENT)
+    {
+        const uint32_t id = cc->td[at];
+        const uint32_t si = id < cc->env_cap ? cc->sym_cur[id] : 0u;
+        result = si != 0 && cc->syms[si].kind == FSYM_LOCAL && cc->syms[si].pad_sym[0] != 0;
+        // The name alone: its parentheses close, and no postfix operator follows.
+        uint32_t closing = at + 1u;
+        while (result && depth > 0 && closing < cc->tcount && cc->tk[closing] == FTOK_RPAREN)
+        {
+            closing += 1u;
+            depth -= 1u;
+        }
+        const uint8_t next = closing < cc->tcount ? cc->tk[closing] : FTOK_SEMI;
+        result = result && depth == 0 && next != FTOK_LBRACKET && next != FTOK_LPAREN && next != FTOK_DOT && next != FTOK_ARROW &&
+                 next != FTOK_INC && next != FTOK_DEC;
+    }
+    return result;
+}
+
+static __attribute__((cold, noinline)) void fast_cc_expr_logged(FastCCState* cc, bool stop_at_comma);
+
+// #3577: the expression that ends at cc->pos compiled again from its first token (START) for its -Wunsequenced log, as a
+// compile with the log makes it: without code (eval_only; its unevaluated operands are counted apart); its end
+// bails where the full pipeline warns. The types it makes (a string literal's array) are dropped after. One that
+// declares anything (a tag, an enumerator, a member, a parameter: its first compile declared it already, and the
+// second's types are dropped) is the full pipeline's, as is one that ends elsewhere than the first compile. False
+// where it bailed.
+static __attribute__((cold, noinline)) bool fast_cc_sequenced_again(FastCCState* cc, uint32_t start, bool stop_at_comma)
+{
+    const uint32_t end = cc->pos;
+    const uint32_t ctypes = cc->ctype_count;
+    const uint32_t declared = cc->sym_count + cc->undo_count + cc->member_count + cc->param_type_count + cc->param_name_count;
+    cc->pos = start;
+    fast_cc_expr_logged(cc, stop_at_comma);
+    if (!cc->bailout && cc->sym_count + cc->undo_count + cc->member_count + cc->param_type_count + cc->param_name_count != declared)
+    {
+        fast_cc_bail(cc, "an expression compiled again for -Wunsequenced declares something");
+    }
+    if (!cc->bailout && cc->pos != end)
+    {
+        fast_cc_bail(cc, "an expression compiled again for -Wunsequenced ends elsewhere");
+    }
+    cc->ctype_count = ctypes;
+    cc->pos = end;
+    return !cc->bailout;
+}
+
+// #3577: -Wunsequenced for an expression compiled without the log that modified variables (EX's seq_mod_*) where the one
+// modification isn't its last operator: each modified variable's name once among the expression's tokens, and none
+// modified twice, is quiet (a warning needs another use or modification of the variable); else the expression is compiled
+// again for its log (fast_cc_sequenced_again). The tokens 64 at a time, in masks of the names and their identifiers.
+// False where it bailed.
+static __attribute__((cold, noinline)) bool fast_cc_sequenced_lazy(FastCCState* cc, const FastExprCtx* ex, bool stop_at_comma)
+{
+    const uint32_t count = ex->seq_mod_count;
+    const uint32_t start = ex->seq_start_pos;
+    const uint32_t end = cc->pos;
+    uint32_t once = (uint32_t)(count <= 4u);
+    for (uint32_t m = 0; m < count && m < 4u && once != 0; m += 1)
+    {
+        const uint32_t id = ex->seq_mod_ids[m];
+        const __m512i wanted = _mm512_set1_epi32((int)id);
+        const __m512i name = _mm512_set1_epi8((char)FTOK_IDENT);
+        uint32_t named = 0;
+        for (uint32_t at = start; at < end; at += 64u)
+        {
+            const uint32_t left = end - at;
+            const __mmask64 valid = _bzhi_u64(~UINT64_C(0), left < 64u ? left : 64u);
+            const __mmask64 names = _mm512_mask_cmpeq_epi8_mask(valid, _mm512_maskz_loadu_epi8(valid, cc->tk + at), name);
+            uint64_t same = 0;
+            for (uint32_t part = 0; part < 4u; part += 1)
+            {
+                const __mmask16 lanes = (__mmask16)(valid >> (part * 16u));
+                same |= (uint64_t)_mm512_mask_cmpeq_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, cc->td + at + part * 16u), wanted)
+                        << (part * 16u);
+            }
+            named += (uint32_t)__builtin_popcountll(names & same);
+        }
+        once &= (uint32_t)(named == 1u);
+        for (uint32_t earlier = 0; earlier < m; earlier += 1)
+        {
+            once &= (uint32_t)(ex->seq_mod_ids[earlier] != id);
+        }
+    }
+    bool quiet = once != 0;
+    if (!quiet)
+    {
+        quiet = fast_cc_sequenced_again(cc, start, stop_at_comma);
+    }
+    return quiet;
+}
+
+// Push a use of a symbol with use flags (#3577): a register variable as any local, marked so that `&` refuses it; a
+// function whose calls the full pipeline checks as any function, marked for a call by its name (nonnull,
+// warn_unused_result), where a format function's call is the full pipeline's, and so is a name in parentheses, which
+// a call may follow; and anything else (an unsupported type, a deprecated declaration) is the full pipeline's too.
+static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCState* cc, FastExprCtx* ex, FastSym* sym, uint32_t si)
+{
+    const uint8_t flags = sym->use_flags;
+    const uint8_t next = fast_cc_peek(cc);
+    // #3577: printf, fprintf, sprintf and snprintf, whose formats the full pipeline checks by their names: a call's is
+    // checked where it is made (fast_cc_format_quiet, behind the nonnull mark); another function with a format
+    // attribute leaves.
+    const uint32_t named_format = (uint32_t)(cc->pp->idents.entries[sym->ident_id].pp_kw == FPP_KW_FORMAT_FUNCTION);
+    bool pushed = false;
+    if ((flags & BUSTER_FSYM_UNSUPPORTED) != 0)
+    {
+        fast_cc_bail(cc, "use of unsupported-type symbol");
+    }
+    else if ((flags & BUSTER_FSYM_DEPRECATED) != 0)
+    {
+        fast_cc_bail(cc, "use of a deprecated declaration");
+    }
+    else if (flags == BUSTER_FSYM_REGISTER && sym->kind == FSYM_LOCAL)
+    {
+        if (ex->vsp < 128u)
+        {
+            ex->vstack[ex->vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_LOCAL, .off = sym->stack_off, .is_lvalue = 1u,
+                                               .marks = BUSTER_FVAL_MARK_REGISTER, .seq_start = BUSTER_FSEQ_MARK(ex),
+                                               .seq_ident = sym->ident_id };
+        }
+        BUSTER_FSEQ_NAME(ex, sym->ident_id, (uint32_t)(ex->unevaluated == 0));
+        pushed = true;
+    }
+    else if (((uint32_t)(sym->kind != FSYM_FUNC) | (uint32_t)(next == FTOK_RPAREN) |
+              ((uint32_t)(next == FTOK_LPAREN) & (uint32_t)((flags & BUSTER_FSYM_FORMAT) != 0) & (named_format ^ 1u))) != 0)
+    {
+        fast_cc_bail(cc, "use of a checked symbol");
+    }
+    else
+    {
+        if (ex->eval_only == 0) { fast_cc_reference(cc, sym); }
+        else if (ex->unevaluated == 0) { fast_cc_reference_dead(sym); }
+        const uint32_t osym = ex->eval_only > 0 ? 0u : fast_cc_ensure_obj_sym(cc, si);
+        const uint32_t called = (uint32_t)(next == FTOK_LPAREN);
+        // #3577: a library function checked by its name (BUSTER_FSYM_PUSH_CHECKED) whatever its attributes made it.
+        uint8_t push_marks = sym->push_marks;
+        if ((push_marks & BUSTER_FSYM_PUSH_UNASKED) != 0) { push_marks = fast_cc_library_pure_query(cc, sym); }
+        const uint8_t marks = (uint8_t)(called * ((BUSTER_FVAL_MARK_NONNULL * ((uint32_t)((flags & BUSTER_FSYM_NONNULL) != 0) | named_format)) |
+                                                  (push_marks & BUSTER_FSYM_PUSH_CHECKED) |
+                                                  (BUSTER_FVAL_MARK_UNUSED_RESULT * (uint32_t)((flags & BUSTER_FSYM_UNUSED_RESULT) != 0)) |
+                                                  (BUSTER_FVAL_MARK_PURE * (uint32_t)((flags & BUSTER_FSYM_PURE) != 0))));
+        if (ex->vsp < 128u)
+        {
+            ex->vstack[ex->vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_GLOBAL, .sym_idx = osym, .imm = 0, .is_func_sym = 1u,
+                                               .marks = marks, .seq_ident = sym->ident_id };
+        }
+        pushed = true;
+    }
+    return pushed;
+}
+
+// #3577: whether the condition at tokens [START, END) of an if, a while, a do or a for is the full pipeline's
+// -Wparentheses-equality (check_common_parentheses_equality): it is one group (or groups in groups) whose outermost `(`
+// isn't a macro's (a macro's `(` has data 1, c_direct_lex.c's #define), around a comparison for equality whose left
+// operand may be a modifiable lvalue. Where the operand isn't plainly an rvalue (a literal, an enumerator, a call, a cast,
+// an operator's value, a const or array object), it may be one.
+static __attribute__((cold, noinline)) bool fast_cc_parentheses_equality(const FastCCState* cc, uint32_t start, uint32_t end)
+{
+    bool questioned = false;
+    if (end <= cc->tcount && end > start + 2u && cc->td[start] == 0 && fast_cc_group_end(cc, start) == end)
+    {
+        uint32_t s = start;
+        uint32_t e = end;
+        while (s + 2u < e && cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e && !fast_cc_is_type_start(cc, s + 1u))
+        {
+            s += 1u;
+            e -= 1u;
+        }
+        uint32_t precedence = 99u;
+        const uint32_t at = s < e ? fast_cc_loosest_operator(cc, s, e, &precedence) : UINT32_MAX;
+        if (s > start && at != UINT32_MAX && cc->tk[at] == FTOK_EQ)
+        {
+            // The left operand, but for its grouping parentheses.
+            uint32_t ls = s;
+            uint32_t le = at;
+            while (ls + 1u < le && cc->tk[ls] == FTOK_LPAREN && fast_cc_group_end(cc, ls) == le && !fast_cc_is_type_start(cc, ls + 1u))
+            {
+                ls += 1u;
+                le -= 1u;
+            }
+            uint32_t inner = 99u;
+            const uint32_t operated = ls < le ? fast_cc_loosest_operator(cc, ls, le, &inner) : UINT32_MAX;
+            const uint8_t first = ls < le ? cc->tk[ls] : FTOK_EOF;
+            const uint8_t last = ls < le ? cc->tk[le - 1u] : FTOK_EOF;
+            const uint32_t id = cc->td[ls];
+            const uint32_t si = first == FTOK_IDENT && le == ls + 1u && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+            const FastSym* sym = cc->syms + si;
+            const bool named_rvalue = si != 0 && (sym->kind == FSYM_ENUM_CONST || sym->kind == FSYM_FUNC ||
+                                                  ((sym->kind == FSYM_LOCAL || sym->kind == FSYM_GLOBAL) &&
+                                                   (ftype_is_array(sym->type) || ftype_is_const(sym->type))));
+            const bool literal = le == ls + 1u && (first == FTOK_INT_LIT || first == FTOK_INT_U32 || first == FTOK_INT_I64 ||
+                                                   first == FTOK_INT_U64 || first == FTOK_FLOAT_LIT || first == FTOK_FLOAT32 ||
+                                                   first == FTOK_FLOAT80 || first == FTOK_CHAR_LIT || first == FTOK_STR_LIT);
+            const bool prefixed = first == FTOK_PLUS || first == FTOK_MINUS || first == FTOK_BANG || first == FTOK_TILDE ||
+                                  first == FTOK_AMP || first == FTOK_INC || first == FTOK_DEC || first == FTOK_KW_SIZEOF ||
+                                  first == FTOK_KW_ALIGNOF || (first == FTOK_LPAREN && fast_cc_is_type_start(cc, ls + 1u));
+            const bool called = last == FTOK_RPAREN && first != FTOK_LPAREN;
+            const bool postfix_step = last == FTOK_INC || last == FTOK_DEC;
+            questioned = !(operated != UINT32_MAX || named_rvalue || literal || prefixed || called || postfix_step);
+        }
+    }
+    return questioned;
+}
+
+// The expression compiler's body, made twice (#3577): without the -Wunsequenced log (LOGGING false: fast_cc_expr, every
+// expression), and with it, for an expression compiled again without code (fast_cc_expr_logged).
+static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCState* cc, bool stop_at_comma, bool discard_result, bool is_branch,
+                                                                      bool branch_on_true, uint32_t branch_label, FastVal* out_val,
+                                                                      const bool logging)
 {
     // Rewrites change token contents in place. The buffers and their length stay fixed.
     const uint8_t* const kinds = cc->tk;
@@ -4845,10 +8409,25 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
     FastExprCtx ex;
     ex.cc = cc;
     ex.vsp = 0;
-    ex.arg_sp = 0;
     ex.gp_used = 0;
     ex.xmm_used = 0;
-    ex.eval_only = (uint8_t)(cc->dead != 0);
+    // #3577: an expression compiled again for its -Wunsequenced log (LOGGING, fast_cc_sequenced_again) makes no code and
+    // keeps the log; any other counts its modifications alone. A dead branch's makes no code either (#3592); neither is
+    // an unevaluated operand.
+    ex.eval_only = (uint8_t)((uint32_t)logging | (uint32_t)(cc->dead != 0));
+    ex.unevaluated = 0;
+    ex.seq_logging = (uint8_t)logging;
+    ex.seq_count = 0;
+    ex.seq_mod_count = 0;
+    ex.seq_start_pos = cc->pos;
+    ex.cmp_pos = UINT32_MAX;
+    if (logging)
+    {
+        ex.seq_hit = 0;
+        ex.seq_mods = 0;
+        ex.seq_regions = 0;
+        ex.seq_bloom = 0;
+    }
 
     FastExprOp ops[128];
     uint32_t osp = 0;
@@ -4871,33 +8450,69 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                     // an object and a function follow each other as the program has them, and the branch that told
                     // them apart was mispredicted 13 K times a compile of sqlite3.c (#2850). What stays is the first
                     // reference of an object or a function, which makes its ELF symbol.
-                    static const uint8_t value_kinds[8] = { [FSYM_ENUM_CONST] = FVAL_IMM, [FSYM_LOCAL] = FVAL_LOCAL, [FSYM_GLOBAL] = FVAL_GLOBAL, [FSYM_FUNC] = FVAL_GLOBAL };
-                    static const uint8_t value_lvalues[8] = { [FSYM_LOCAL] = 1u, [FSYM_GLOBAL] = 1u };
+                    // (The entry's first word but its type, by the kind: the value's kind, is_lvalue, is_func_sym.)
+                    static const uint64_t value_heads[8] = {
+                        [FSYM_ENUM_CONST] = BUSTER_FVAL_WORD_HEAD(0u, FVAL_IMM, 0u, 0u),
+                        [FSYM_LOCAL] = BUSTER_FVAL_WORD_HEAD(0u, FVAL_LOCAL, 1u, 0u),
+                        [FSYM_GLOBAL] = BUSTER_FVAL_WORD_HEAD(0u, FVAL_GLOBAL, 1u, 0u),
+                        [FSYM_FUNC] = BUSTER_FVAL_WORD_HEAD(0u, FVAL_GLOBAL, 0u, 1u),
+                    };
                     FastSym* sym = cc->syms + si;
+                    // #3577: a symbol whose use needs a closer look (BUSTER_FSYM_*: an unsupported type's, a deprecated one,
+                    // a format or nonnull function's, a register variable) takes a cold path of its own; the common use
+                    // pays this one test, as it paid the unsupported type's alone.
+                    // (One test for both, as main's one for the unsupported type and the kind.)
                     const uint32_t symbol_kind = sym->kind & 7u;
-                    if (__builtin_expect((sym->is_unsupported != 0) | (symbol_kind < FSYM_ENUM_CONST) | (symbol_kind > FSYM_FUNC), 0))
+                    if (__builtin_expect((uint32_t)(sym->use_flags != 0) | (uint32_t)(symbol_kind - (uint32_t)FSYM_ENUM_CONST > (uint32_t)(FSYM_FUNC - FSYM_ENUM_CONST)), 0))
                     {
-                        fast_cc_bail(cc, sym->is_unsupported != 0 ? "use of unsupported-type symbol" : "unexpected symbol kind in expr");
-                        break;
+                        if (sym->use_flags == 0)
+                        {
+                            fast_cc_bail(cc, "unexpected symbol kind in expr");
+                            break;
+                        }
+                        if (!fast_cc_push_flagged_symbol(cc, &ex, sym, si)) { break; }
+                        expect_val = false;
+                        continue;
                     }
-                    const uint32_t emitted = (uint32_t)(symbol_kind >= FSYM_GLOBAL) & (uint32_t)(ex.eval_only == 0);
+                    const uint32_t evaluated = (uint32_t)(ex.eval_only == 0);
+                    const uint32_t global = (uint32_t)(symbol_kind >= FSYM_GLOBAL);
+                    const uint32_t emitted = global & evaluated;
                     if (emitted) { fast_cc_reference(cc, sym); }
+                    else if ((global & (uint32_t)(ex.unevaluated == 0)) != 0) { fast_cc_reference_dead(sym); }
                     uint32_t osym = sym->obj_sym & (0u - emitted);
                     if (__builtin_expect((emitted != 0) & (osym == 0), 0))
                     {
                         osym = fast_cc_ensure_obj_sym(cc, si);
                     }
-                    if (ex.vsp < 128u)
+                    // #3577: the symbol's marks (an enumerator's nonliteral, a library function's purity, asked of the driver
+                    // at its first use: a call without an effect); an enumerator carries its enum (sec_off) in sym_idx, for
+                    // -Wimplicit-enum-enum-cast; a variable's use is logged for -Wunsequenced. Masks, as the kind above.
+                    uint8_t push_marks = sym->push_marks;
+                    if (__builtin_expect((push_marks & BUSTER_FSYM_PUSH_UNASKED) != 0, 0)) { push_marks = fast_cc_library_pure_query(cc, sym); }
+                    const uint32_t enumerator = (uint32_t)(symbol_kind == FSYM_ENUM_CONST);
+                    // (FSYM_LOCAL and FSYM_GLOBAL are adjacent: a variable.)
+                    const uint32_t variable = (uint32_t)(symbol_kind - (uint32_t)FSYM_LOCAL < 2u);
+                    const uint32_t pushed = (uint32_t)(ex.vsp < 128u);
+                    if (pushed != 0)
                     {
-                        ex.vstack[ex.vsp++] = (FastVal){
-                            .type = sym->type,
-                            .kind = value_kinds[symbol_kind],
-                            .imm = (sym->const_val & (0 - (int64_t)(symbol_kind == FSYM_ENUM_CONST))) |
-                                   (uint32_t)(sym->stack_off & (0 - (int32_t)(symbol_kind == FSYM_LOCAL))),
-                            .sym_idx = osym,
-                            .is_func_sym = (uint8_t)(symbol_kind == FSYM_FUNC),
-                            .is_lvalue = value_lvalues[symbol_kind],
+                        // The entry in four whole words (BUSTER_FVAL_WORD_*): written field by field, its zero bytes (reg,
+                        // op, lasting, seq_start) took one byte-masked 32-byte store, from which no later load of the
+                        // entry can take its bytes: fval_to_gp_full's waited for it to retire, 0.49 M cycles a compile
+                        // of sqlite3.c on the 9700X.
+                        const uint64_t words[4] = {
+                            (uint64_t)sym->type | value_heads[symbol_kind],
+                            (uint64_t)((sym->const_val & (0 - (int64_t)(symbol_kind == FSYM_ENUM_CONST))) |
+                                       (uint32_t)(sym->stack_off & (0 - (int32_t)(symbol_kind == FSYM_LOCAL)))),
+                            (uint64_t)(osym | (sym->sec_off & (UINT32_C(0) - enumerator))),
+                            BUSTER_FVAL_WORD_TAIL(push_marks, id),
                         };
+                        memcpy(ex.vstack + ex.vsp, words, sizeof(words));
+                        ex.vsp += 1u;
+                    }
+                    // The log's entry where it is kept (a compile again, #3577): the value's seq_start is its place + 1.
+                    if (logging)
+                    {
+                        fast_cc_seq_push(&ex, id, variable, pushed);
                     }
                     expect_val = false;
                     continue;
@@ -4956,57 +8571,75 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                     {
                         // Compound literal `(T){ e0, e1, ... }` handled iteratively via FEOP_COMPOUND_LIT!
                         if (ftype_is_unsupported(ct)) { fast_cc_bail(cc, "unsupported compound literal type"); break; }
+                        // #3577: an array of unknown size takes its elements' count (fast_cc_incomplete_array_count, into a copy
+                        // of the type: musl's `(long[]){s, ns}`); any other incomplete type leaves.
+                        FastType clt = ct;
+                        if (BUSTER_FAST_OBJECT_INCOMPLETE(cc, ct, 0u) != 0)
+                        {
+                            const uint32_t elems = ftype_is_array(ct) && cc->ctypes[ct & BUSTER_FTYPE_CIDX_MASK].count == UINT32_MAX ?
+                                                   fast_cc_incomplete_array_count(cc, cc->pos, cc->ctypes[ct & BUSTER_FTYPE_CIDX_MASK].inner) : UINT32_MAX;
+                            if (elems == UINT32_MAX) { fast_cc_bail(cc, "compound literal of an incomplete type"); break; }
+                            clt = fast_cc_completed_array(cc, ct, elems);
+                            if (cc->bailout) { break; }
+                        }
                         cc->pos += 1u; // '{'
-                        const uint32_t csz = ftype_size(cc, ct);
-                        const uint32_t cal = ftype_align(cc, ct);
-                        const int32_t slot = ex.eval_only > 0 ? 0 : fast_cc_alloc_tmp(cc, csz, cal < 8u ? 8u : cal);
+                        const uint32_t csz = ftype_size(cc, clt);
+                        const uint32_t cal = ftype_align(cc, clt);
+                        // #3577: a compound literal lives to the end of its block, not of its statement (`p = &(int){ x };`
+                        // reads it after): a local's slot (each one's for the whole function), above the temporaries the
+                        // expression holds.
+                        int32_t slot = 0;
                         if (ex.eval_only == 0)
                         {
-                            fval_spill_all(&ex, ex.vsp, ex.arg_sp);
+                            cc->cur_frame_size = cc->cur_tmp_off;
+                            slot = fast_cc_alloc_local(cc, csz, cal < 8u ? 8u : cal);
+                            fval_spill_all(&ex, ex.vsp);
                             x86_emit_memzero_inline(cc->obj, FREG_RBP, slot, csz);
                         }
                         if (fast_cc_peek(cc) == FTOK_RBRACE)
                         {
                             cc->pos += 1u;
-                            if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = ct, .kind = FVAL_LOCAL, .off = slot, .is_lvalue = 1u }; }
+                            if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = clt, .kind = FVAL_LOCAL, .off = slot, .is_lvalue = 1u }; }
                             expect_val = false;
                             continue;
                         }
                         if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                        ops[osp++] = (FastExprOp){ .op = FEOP_COMPOUND_LIT, .extra = 0u, .type = ct, .slot = slot };
+                        fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_COMPOUND_LIT, .extra = 0u, .type = clt, .slot = slot, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                         // Handle optional designator `.field =` or `[idx] =` right before first element!
-                        if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(ct))
+                        if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(clt))
                         {
                             cc->pos += 1u;
                             if (fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "compound lit .field"); break; }
-                            const FastComplexType* rec = cc->ctypes + (ct & BUSTER_FTYPE_CIDX_MASK);
-                            const FastMemberInfo* mi = fast_struct_find_member(cc, ct & BUSTER_FTYPE_CIDX_MASK, fast_cc_data(cc));
+                            const FastComplexType* rec = cc->ctypes + (clt & BUSTER_FTYPE_CIDX_MASK);
+                            const FastMemberInfo* mi = fast_struct_find_member(cc, clt & BUSTER_FTYPE_CIDX_MASK, fast_cc_data(cc));
                             if (mi == NULL) { fast_cc_bail(cc, "compound lit unknown field"); break; }
                             ops[osp - 1u].extra = (uint16_t)(mi - (cc->member_info + rec->start));
                             cc->pos += 1u;
-                            if (fast_cc_peek(cc) == FTOK_ASSIGN) { cc->pos += 1u; }
+                            // #3577: a designator of more than one member (`.a.b =`, `.a[0] =`) is refused.
+                            if (fast_cc_peek(cc) != FTOK_ASSIGN) { fast_cc_bail(cc, "compound literal designator"); break; }
+                            cc->pos += 1u;
                         }
                         continue;
                     }
                     if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                    ops[osp++] = (FastExprOp){ .op = FEOP_CAST, .type = ct };
+                    fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_CAST, .type = ct }); osp += 1u;
                     continue;
                 }
                 if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                ops[osp++] = (FastExprOp){ .op = FEOP_LPAREN };
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_LPAREN, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                 cc->pos += 1u;
                 continue;
             }
 
             // Prefix unary operators
-            if (k == FTOK_PLUS)  { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_UNARY_PLUS }; } cc->pos += 1u; continue; }
-            if (k == FTOK_MINUS) { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_UNARY_MINUS }; } cc->pos += 1u; continue; }
-            if (k == FTOK_TILDE) { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_UNARY_TILDE }; } cc->pos += 1u; continue; }
-            if (k == FTOK_BANG)  { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_UNARY_BANG }; } cc->pos += 1u; continue; }
-            if (k == FTOK_STAR)  { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_DEREF }; } cc->pos += 1u; continue; }
-            if (k == FTOK_AMP)   { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_ADDR }; } cc->pos += 1u; continue; }
-            if (k == FTOK_INC)   { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_PRE_INC }; } cc->pos += 1u; continue; }
-            if (k == FTOK_DEC)   { if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_PRE_DEC }; } cc->pos += 1u; continue; }
+            if (k == FTOK_PLUS)  { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_UNARY_PLUS }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_MINUS) { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_UNARY_MINUS }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_TILDE) { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_UNARY_TILDE }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_BANG)  { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_UNARY_BANG }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_STAR)  { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_DEREF }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_AMP)   { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_ADDR, .lbl0 = cc->pos }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_INC)   { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_PRE_INC }); osp += 1u; } cc->pos += 1u; continue; }
+            if (k == FTOK_DEC)   { if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_PRE_DEC }); osp += 1u; } cc->pos += 1u; continue; }
 
             // `sizeof` / `_Alignof`
             if (k == FTOK_KW_SIZEOF || k == FTOK_KW_ALIGNOF)
@@ -5020,14 +8653,30 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                     const FastType st = fast_cc_parse_typename(cc, &tok_ok);
                     if (!tok_ok || fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "bad sizeof(type)"); break; }
                     cc->pos += 1u;
+                    // #3577: an incomplete type's is the full pipeline's error.
+                    if (BUSTER_FAST_TYPE_INCOMPLETE(cc, st) != 0) { fast_cc_bail(cc, "sizeof an incomplete type"); break; }
                     const uint64_t val = is_al ? ftype_align(cc, st) : ftype_size(cc, st);
-                    if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_U64, .kind = FVAL_IMM, .imm = (int64_t)val }; }
+                    if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_U64, .kind = FVAL_IMM, .imm = (int64_t)val, .marks = BUSTER_FVAL_MARK_NONLITERAL }; }
                     expect_val = false;
                     continue;
                 }
                 if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                ops[osp++] = (FastExprOp){ .op = is_al ? FEOP_ALIGNOF_UNARY : FEOP_SIZEOF_UNARY };
+                // #3577: sizeof of a parameter declared an array is the full pipeline's -Wsizeof-array-argument; asked in a
+                // function that has one.
+                if (cc->cur_array_params != 0 && !is_al && fast_cc_sizeof_array_param(cc))
+                {
+                    fast_cc_bail(cc, "sizeof of an array parameter");
+                    break;
+                }
+                // #3577: an array decaying under a binary operator in sizeof's operand is -Wsizeof-array-decay.
+                if (!is_al && fast_cc_peek(cc) == FTOK_LPAREN && fast_cc_sizeof_decays(cc, cc->pos))
+                {
+                    fast_cc_bail(cc, "sizeof of an operator over an array");
+                    break;
+                }
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = is_al ? FEOP_ALIGNOF_UNARY : FEOP_SIZEOF_UNARY }); osp += 1u;
                 ex.eval_only += 1u;
+                ex.unevaluated += 1u;
                 continue;
             }
 
@@ -5043,12 +8692,21 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             // `_Generic(controlling_expr, T1: e1, default: ed)` (used by glibc 2.43 <string.h>!)
             if (k == FTOK_KW_GENERIC)
             {
+                // #3577: the full pipeline checks every association (their types, their expressions' diagnostics and
+                // its own -Wunreachable-code-generic-assoc), where this path reads the selected one alone: only a shape
+                // whose selected association carries all of that is taken (fast_cc_generic_shape_ok).
+                if (!fast_cc_generic_shape_ok(cc, cc->pos + 1u))
+                {
+                    fast_cc_bail(cc, "_Generic");
+                    break;
+                }
                 cc->pos += 1u;
                 if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "bad _Generic"); break; }
                 cc->pos += 1u;
                 if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                ops[osp++] = (FastExprOp){ .op = FEOP_GENERIC_CTRL };
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_GENERIC_CTRL, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                 ex.eval_only += 1u;
+                ex.unevaluated += 1u;
                 continue;
             }
 
@@ -5063,7 +8721,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                 const uint16_t vop = k == FTOK_KW_BUILTIN_VA_START ? FEOP_VA_START :
                                      k == FTOK_KW_BUILTIN_VA_ARG ? FEOP_VA_ARG :
                                      k == FTOK_KW_BUILTIN_VA_END ? FEOP_VA_END : FEOP_VA_COPY;
-                ops[osp++] = (FastExprOp){ .op = vop };
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = vop, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                 continue;
             }
 
@@ -5085,7 +8743,11 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             }
             if (k == FTOK_CHAR_LIT)
             {
-                if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = (int64_t)(int32_t)fast_cc_data(cc) }; }
+                if (ex.vsp < 128u)
+                {
+                    ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = (int64_t)(int32_t)fast_cc_data(cc),
+                                                     .marks = BUSTER_FVAL_MARK_NONLITERAL, .op = FTOK_CHAR_LIT };
+                }
                 cc->pos += 1u; expect_val = false; continue;
             }
             if (k == FTOK_FLOAT_LIT)
@@ -5139,6 +8801,8 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                         .sym_idx = cc->obj->sec_sym_rodata_str,
                         .imm = (int64_t)ro_off,
                         .is_lvalue = 1u,
+                        .op = (uint8_t)((uint32_t)FTOK_STR_LIT * (uint32_t)(k == FTOK_STR_LIT)),
+                        .lasting = (uint8_t)(BUSTER_FVAL_LASTING_STRING * (uint32_t)(k == FTOK_STR_LIT)),
                     };
                 }
                 expect_val = false;
@@ -5150,6 +8814,8 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             {
                 const FastExprOp cop = ops[--osp];
                 cc->pos += 1u;
+                if (cop.lbl0 == 0u || ex.vsp != cop.lbl0) { fast_cc_bail(cc, "call arg stack"); break; }
+                ex.call_open = cop.lbl2;
                 fast_expr_finish_call(&ex, cop.lbl0, 0u);
                 expect_val = false;
                 continue;
@@ -5191,13 +8857,10 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             if (!ftype_is_record(rec_t)) { fast_cc_bail(cc, "member access on non-record"); break; }
             const FastMemberInfo* mi = fast_struct_find_member(cc, rec_t & BUSTER_FTYPE_CIDX_MASK, fid);
             if (mi == NULL) { fast_cc_bail(cc, "unknown struct member"); break; }
-            if (ex.eval_only > 0)
-            {
-                *v = (FastVal){ .type = mi->type, .kind = FVAL_INDIRECT, .is_lvalue = 1u };
-                continue;
-            }
             if (is_arrow)
             {
+                // Without code (sizeof's operand, #3592's dead branch), `->` keeps its member's bit-field (whose address is
+                // an error) in a placeholder; `.` below makes no code, and keeps its object's kind too.
                 const uint32_t pr = fval_to_gp(&ex, v, true);
                 if (mi->bit_width != 0)
                 {
@@ -5212,6 +8875,8 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                 {
                     *v = (FastVal){ .type = mi->type, .kind = FVAL_INDIRECT, .reg = (uint8_t)pr, .off = (int32_t)mi->byte_offset, .is_lvalue = 1u };
                 }
+                // #3577: a misaligned member (FastMemberInfo's BUSTER_FMEMBER_UNALIGNED), whose address leaves.
+                if (mi->bit_signed > 1u) { v->lasting |= BUSTER_FVAL_LASTING_UNALIGNED; }
             }
             else
             {
@@ -5226,10 +8891,15 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                     v->bf_signed = mi->bit_signed;
                     v->is_lvalue = 1u;
                 }
+                // #3577: a member isn't its object by name, the variable -Wunsequenced follows (BUSTER_FSEQ_MODIFY).
+                v->seq_start = 0;
+                v->seq_ident = 0;
                 v->type = mi->type;
                 if (bkind == FVAL_GLOBAL) { v->imm += (int64_t)mi->byte_offset; }
                 else if (bkind == FVAL_SPILL_ADDR) { v->addr_disp += (int32_t)mi->byte_offset; }
                 else { v->off += (int32_t)mi->byte_offset; }
+                // #3577: a misaligned member, or a member of one (the object keeps its mark).
+                if (mi->bit_signed > 1u) { v->lasting |= BUSTER_FVAL_LASTING_UNALIGNED; }
             }
             continue;
         }
@@ -5239,8 +8909,11 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
         {
             if (ex.vsp < 1u) { fast_cc_bail(cc, "postfix inc/dec"); break; }
             cc->pos += 1u;
+            const uint32_t seq_result = BUSTER_FSEQ_RESULT(&ex.vstack[ex.vsp - 1u]);
             FastVal res = { 0 };
             fval_emit_incdec(&ex, &ex.vstack[ex.vsp - 1u], k == FTOK_INC, true, &res);
+            res.marks = BUSTER_FVAL_MARK_EFFECT;
+            res.seq_ident = seq_result;
             ex.vstack[ex.vsp - 1u] = res;
             continue;
         }
@@ -5249,7 +8922,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
         if (k == FTOK_LBRACKET)
         {
             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-            ops[osp++] = (FastExprOp){ .op = FEOP_SUBSCRIPT };
+            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_SUBSCRIPT, .lbl0 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -5259,7 +8932,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
         if (k == FTOK_LPAREN)
         {
             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-            ops[osp++] = (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.arg_sp };
+            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.vsp, .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -5274,18 +8947,37 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             }
             if (osp == 0 || ops[osp - 1u].op != FEOP_SUBSCRIPT) { break; }
             osp -= 1u;
+            const uint32_t lbracket = ops[osp].lbl0;
             cc->pos += 1u;
             if (ex.vsp < 2u) { fast_cc_bail(cc, "subscript stack"); break; }
-            FastVal idx_v = ex.vstack[--ex.vsp];
-            FastVal base_v = ex.vstack[--ex.vsp];
+            // The operands where they stand, above the stack's new top, as the binary operators' (#2850): a copy of a value
+            // just written a field at a time waits for its stores (0.3 M cycles a compile of sqlite3.c, #3577). The
+            // result goes where the base stood, once nothing reads either.
+            FastVal* idx_v = ex.vstack + (ex.vsp - 1u);
+            FastVal* base_v = ex.vstack + (ex.vsp - 2u);
+            ex.vsp -= 2u;
             // Support C commutative `i[a]`!
-            if (!ftype_is_ptr(ftype_decay(cc, base_v.type)) && ftype_is_ptr(ftype_decay(cc, idx_v.type)))
+            bool reversed = false;
+            if (!ftype_is_ptr(ftype_decay(cc, base_v->type)) && ftype_is_ptr(ftype_decay(cc, idx_v->type)))
             {
-                FastVal tmp = base_v; base_v = idx_v; idx_v = tmp;
+                FastVal* tmp = base_v; base_v = idx_v; idx_v = tmp;
+                reversed = true;
             }
-            const FastType bt = ftype_decay(cc, base_v.type);
+            const FastType bt = ftype_decay(cc, base_v->type);
             if (!ftype_is_ptr(bt)) { fast_cc_bail(cc, "subscript non-pointer"); break; }
             const FastType elem = ftype_deref(cc, bt);
+            // #3577: an integer index, and a complete element type, or the full pipeline's error; void's (GNU's), which the
+            // full pipeline stops on.
+            // (An integer scalar index and a scalar or pointer element, the common subscript, need no table: a test.)
+            const uint32_t void_elem = (uint32_t)((elem & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
+            const uint32_t plain_index = (uint32_t)((idx_v->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
+                                         (BUSTER_FAST_INTEGER_KINDS >> (idx_v->type & BUSTER_FTYPE_SCALAR_MASK));
+            if ((((elem >> 31) | void_elem | (plain_index ^ 1u)) & 1u) != 0 &&
+                (BUSTER_FAST_TYPE_INCOMPLETE(cc, elem) | void_elem | (uint32_t)(BUSTER_FAST_OPERAND_CLASS(cc, idx_v->type) != BUSTER_FOPERAND_INTEGER)) != 0)
+            {
+                fast_cc_bail(cc, "subscript the full pipeline refuses");
+                break;
+            }
             const uint32_t esz = ftype_size(cc, elem) != 0 ? ftype_size(cc, elem) : 1u;
             if (ex.eval_only > 0)
             {
@@ -5293,28 +8985,42 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                 continue;
             }
             // Zero-instruction constant-index folding for local/global arrays & pointer offsets!
-            if (idx_v.kind == FVAL_IMM)
+            if (idx_v->kind == FVAL_IMM)
             {
-                const int64_t boff = idx_v.imm * (int64_t)esz;
-                if (ftype_is_array(base_v.type) && base_v.kind == FVAL_LOCAL && boff >= INT32_MIN && boff <= INT32_MAX)
+                // #3577: a constant index out of a complete array's bounds (one past is its end, but as `&`'s whole
+                // operand) is the full pipeline's -Warray-bounds where the array is a named object's or a string
+                // literal's; `5[a]` and a member's array are quiet there (fast_cc_array_index_questioned).
+                if (ftype_is_array(base_v->type) && !reversed)
                 {
-                    ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_LOCAL, .off = base_v.off + (int32_t)boff, .is_lvalue = 1u };
+                    const FastComplexType* at = cc->ctypes + (base_v->type & BUSTER_FTYPE_CIDX_MASK);
+                    const uint64_t index = (uint64_t)idx_v->imm;
+                    if (at->complete != 0 && index >= (uint64_t)at->count &&
+                        fast_cc_array_index_questioned(cc, lbracket, index == (uint64_t)at->count && osp != 0 && ops[osp - 1u].op == FEOP_ADDR))
+                    {
+                        fast_cc_bail(cc, "an array index out of its bounds");
+                        break;
+                    }
+                }
+                const int64_t boff = idx_v->imm * (int64_t)esz;
+                if (ftype_is_array(base_v->type) && base_v->kind == FVAL_LOCAL && boff >= INT32_MIN && boff <= INT32_MAX)
+                {
+                    ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_LOCAL, .off = base_v->off + (int32_t)boff, .is_lvalue = 1u };
                     continue;
                 }
-                if (ftype_is_array(base_v.type) && base_v.kind == FVAL_GLOBAL)
+                if (ftype_is_array(base_v->type) && base_v->kind == FVAL_GLOBAL)
                 {
-                    ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_GLOBAL, .sym_idx = base_v.sym_idx, .imm = base_v.imm + boff, .is_lvalue = 1u };
+                    ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_GLOBAL, .sym_idx = base_v->sym_idx, .imm = base_v->imm + boff, .is_lvalue = 1u };
                     continue;
                 }
                 if (boff >= INT32_MIN && boff <= INT32_MAX)
                 {
-                    const uint32_t pr = fval_to_gp(&ex, &base_v, true);
+                    const uint32_t pr = fval_to_gp(&ex, base_v, true);
                     ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_INDIRECT, .reg = (uint8_t)pr, .off = (int32_t)boff, .is_lvalue = 1u };
                     continue;
                 }
             }
             FastVal ptr_v = { 0 };
-            fval_emit_binary(&ex, FTOK_PLUS, &base_v, &idx_v, &ptr_v);
+            fval_emit_binary(&ex, FTOK_PLUS, base_v, idx_v, &ptr_v);
             const uint32_t pr = fval_to_gp(&ex, &ptr_v, true);
             ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_INDIRECT, .reg = (uint8_t)pr, .off = 0, .is_lvalue = 1u };
             continue;
@@ -5328,11 +9034,12 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                 fast_expr_reduce_top(&ex, ops, &osp);
             }
             if (osp == 0 || ops[osp - 1u].op != FEOP_COMPOUND_LIT) { break; }
-            const FastExprOp cl = ops[--osp];
+            FastExprOp cl = ops[--osp];
             cc->pos += 1u;
             if (ex.vsp >= 1u)
             {
                 FastVal elem_v = ex.vstack[--ex.vsp];
+                if (!fast_cc_compound_element_quiet(cc, &cl, elem_v.type)) { fast_cc_bail(cc, "compound literal element the full pipeline questions"); break; }
                 if (ex.eval_only == 0)
                 {
                     if (ftype_is_scalar(cl.type))
@@ -5378,6 +9085,9 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             {
                 osp -= 1u;
                 cc->pos += 1u;
+                // A parenthesized value: no operator's precedence questions it any more (#3577). (Without a value, the
+                // stack's bottom slot takes the store harmlessly.)
+                ex.vstack[ex.vsp - (uint32_t)(ex.vsp != 0)].op = 0;
                 continue;
             }
             if (top == FEOP_GENERIC_SEL)
@@ -5389,23 +9099,29 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             {
                 const FastExprOp cop = ops[--osp];
                 cc->pos += 1u;
-                // Push final argument
-                if (ex.vsp < 2u || ex.arg_sp >= 128u) { fast_cc_bail(cc, "call arg stack"); break; }
-                ex.call_args[ex.arg_sp++] = ex.vstack[--ex.vsp];
-                const uint32_t argc = ex.arg_sp - cop.lbl0;
+                // The arguments, one value each, from the first's place up.
+                const uint32_t argc = (uint32_t)cop.extra + 1u;
+                if (cop.lbl0 == 0u || ex.vsp != cop.lbl0 + argc) { fast_cc_bail(cc, "call arg stack"); break; }
+                ex.call_open = cop.lbl2;
                 fast_expr_finish_call(&ex, cop.lbl0, argc);
                 continue;
             }
             if (top == FEOP_VA_END)
             {
                 osp -= 1u; cc->pos += 1u;
-                if (ex.vsp >= 1u) { fval_release(&ex, &ex.vstack[ex.vsp - 1u]); ex.vstack[ex.vsp - 1u] = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID }; }
+                if (ex.vsp < 1u || !fast_cc_is_va_list(cc, ex.vstack[ex.vsp - 1u].type)) { fast_cc_bail(cc, "va_end of a non-va_list"); break; }
+                if (ex.vsp >= 1u) { fval_release(&ex, &ex.vstack[ex.vsp - 1u]); ex.vstack[ex.vsp - 1u] = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID, .marks = BUSTER_FVAL_MARK_EFFECT }; }
                 continue;
             }
             if (top == FEOP_VA_COPY)
             {
                 osp -= 1u; cc->pos += 1u;
                 if (ex.vsp < 2u) { fast_cc_bail(cc, "va_copy args"); break; }
+                if (!fast_cc_is_va_list(cc, ex.vstack[ex.vsp - 1u].type) || !fast_cc_is_va_list(cc, ex.vstack[ex.vsp - 2u].type))
+                {
+                    fast_cc_bail(cc, "va_copy of a non-va_list");
+                    break;
+                }
                 FastVal src = ex.vstack[--ex.vsp];
                 FastVal dst = ex.vstack[--ex.vsp];
                 if (ex.eval_only == 0)
@@ -5416,7 +9132,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                     x86_emit_memcpy_inline(cc->obj, dr, 0, sr, 0, 24u, tr);
                     ex.gp_used &= (uint16_t)~((1u << dr) | (1u << sr) | (1u << tr));
                 }
-                ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
+                ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID, .marks = BUSTER_FVAL_MARK_EFFECT };
                 continue;
             }
             break;
@@ -5431,14 +9147,23 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             }
             if (osp == 0 || ops[osp - 1u].op != FEOP_TERNARY_Q) { break; }
             if (ex.vsp < 1u) { fast_cc_bail(cc, "ternary then missing"); break; }
-            const uint32_t constant = ops[osp - 1u].extra;
+            const uint32_t constant = ops[osp - 1u].constant;
             if (constant != BUSTER_FCONSTANT_NONE)
             {
-                // A live then arm's value stays on the stack, under the dead else arm's; a dead then arm's goes.
-                const FastType arm_t = ftype_decay(cc, ex.vstack[ex.vsp - 1u].type);
+                // A live then arm's value stays on the stack, under the dead else arm's; a dead then arm's goes. Its marks
+                // and constants are kept as below (#3577), for the completion's checks of both arms.
+                const FastVal then_v = ex.vstack[ex.vsp - 1u];
+                const FastType arm_t = ftype_decay(cc, then_v.type);
+                const FastArm then_arm = fast_cc_arm(cc, &then_v);
                 ex.vsp -= (uint32_t)(constant == BUSTER_FCONSTANT_FALSE);
                 ex.eval_only = (uint8_t)(ex.eval_only + (constant == BUSTER_FCONSTANT_TRUE) - (constant == BUSTER_FCONSTANT_FALSE));
-                ops[osp - 1u] = (FastExprOp){ .op = FEOP_TERNARY_C, .extra = (uint16_t)constant, .type = arm_t };
+                fast_expr_op_write(ops + osp - 1u, (FastExprOp){
+                    .op = FEOP_TERNARY_C, .extra = (uint16_t)(then_v.marks | ((uint32_t)then_arm.kind << 8) | ((uint32_t)then_arm.not_null_literal << 12)),
+                    .lbl0 = (uint32_t)(uint64_t)then_arm.value, .type = arm_t,
+                    .slot = ftype_is_record(arm_t) ? 0 : (int32_t)(uint32_t)((uint64_t)then_arm.value >> 32),
+                    .seq_lo = ops[osp - 1u].seq_lo, .seq_mid = ops[osp - 1u].seq_mid, .seq_mid2 = BUSTER_FSEQ_MARK_IF(&ex, logging),
+                    .constant = (uint8_t)constant,
+                });
                 cc->pos += 1u;
                 expect_val = true;
                 continue;
@@ -5478,9 +9203,15 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                 ex.gp_used = 0;
                 ex.xmm_used = 0;
             }
-            ops[osp - 1u] = (FastExprOp){
-                .op = FEOP_TERNARY_C, .lbl1 = then_tail_lbl, .lbl2 = end_lbl, .type = then_t, .slot = tern_slot
-            };
+            // The then arm's constants (fast_cc_arm), for the completion's: its value in lbl0 (low half) and in slot (high
+            // half) where no record needs that, its kind and null flag above its marks in extra.
+            const FastArm then_arm = fast_cc_arm(cc, &then_v);
+            fast_expr_op_write(ops + osp - 1u, (FastExprOp){
+                .op = FEOP_TERNARY_C, .extra = (uint16_t)(then_v.marks | ((uint32_t)then_arm.kind << 8) | ((uint32_t)then_arm.not_null_literal << 12)),
+                .lbl0 = (uint32_t)(uint64_t)then_arm.value, .lbl1 = then_tail_lbl, .lbl2 = end_lbl, .type = then_t,
+                .slot = ftype_is_record(then_t) ? tern_slot : (int32_t)(uint32_t)((uint64_t)then_arm.value >> 32),
+                .seq_lo = ops[osp - 1u].seq_lo, .seq_mid = ops[osp - 1u].seq_mid, .seq_mid2 = BUSTER_FSEQ_MARK_IF(&ex, logging),
+            });
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -5499,7 +9230,11 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             {
                 if (stop_at_comma) { break; }
                 // Top-level comma operator
-                if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA) }; }
+                if (osp < 128u)
+                {
+                    const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
+                    fast_expr_op_write(ops + osp, (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA), .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
+                }
                 cc->pos += 1u;
                 expect_val = true;
                 continue;
@@ -5507,11 +9242,12 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             const uint16_t top = ops[osp - 1u].op;
             if (top == FEOP_CALL)
             {
-                if (ex.vsp < 1u || ex.arg_sp >= 128u) { fast_cc_bail(cc, "call arg overflow"); break; }
-                // Spill argument if it holds a register so subsequent args can use all scratch regs!
+                if (ops[osp - 1u].lbl0 == 0u || ex.vsp != ops[osp - 1u].lbl0 + (uint32_t)ops[osp - 1u].extra + 1u) { fast_cc_bail(cc, "call arg overflow"); break; }
+                // Spill argument if it holds a register so subsequent args can use all scratch regs! It stays on the
+                // value stack, below the next one (fast_expr_finish_call).
                 fval_spill_one(&ex, &ex.vstack[ex.vsp - 1u]);
-                ex.call_args[ex.arg_sp++] = ex.vstack[--ex.vsp];
                 ops[osp - 1u].extra += 1u;
+                ops[osp - 1u].seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging);
                 cc->pos += 1u;
                 expect_val = true;
                 continue;
@@ -5522,9 +9258,16 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                 if (ex.vsp >= 1u)
                 {
                     FastVal elem_v = ex.vstack[--ex.vsp];
+                    if (!fast_cc_compound_element_quiet(cc, cl, elem_v.type)) { fast_cc_bail(cc, "compound literal element the full pipeline questions"); break; }
                     if (ex.eval_only == 0)
                     {
-                        if (ftype_is_array(cl->type))
+                        // #3577: a scalar's element before a trailing `,` (`(int){ 1, }`) too.
+                        if (ftype_is_scalar(cl->type))
+                        {
+                            FastVal dst = { .type = cl->type, .kind = FVAL_LOCAL, .off = cl->slot };
+                            fval_store(&ex, &dst, &elem_v, false, NULL);
+                        }
+                        else if (ftype_is_array(cl->type))
                         {
                             const FastType et = cc->ctypes[cl->type & BUSTER_FTYPE_CIDX_MASK].inner;
                             FastVal dst = { .type = et, .kind = FVAL_LOCAL, .off = cl->slot + (int32_t)(cl->extra * ftype_size(cc, et)) };
@@ -5546,6 +9289,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                     }
                     cl->extra += 1u;
                 }
+                cl->seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging);
                 cc->pos += 1u;
                 if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(cl->type))
                 {
@@ -5555,7 +9299,9 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                     if (mi == NULL) { fast_cc_bail(cc, "compound lit .field"); break; }
                     cl->extra = (uint16_t)(mi - (cc->member_info + rec->start));
                     cc->pos += 1u;
-                    if (fast_cc_peek(cc) == FTOK_ASSIGN) { cc->pos += 1u; }
+                    // #3577: a designator of more than one member (`.a.b =`, `.a[0] =`) is refused.
+                    if (fast_cc_peek(cc) != FTOK_ASSIGN) { fast_cc_bail(cc, "compound literal designator"); break; }
+                    cc->pos += 1u;
                 }
                 expect_val = true;
                 continue;
@@ -5566,6 +9312,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                 if (ex.vsp < 1u) { fast_cc_bail(cc, "_Generic ctrl missing"); break; }
                 const FastType ctrl_t = ftype_decay(cc, ex.vstack[--ex.vsp].type);
                 if (ex.eval_only > 0) { ex.eval_only -= 1u; }
+                if (ex.unevaluated > 0) { ex.unevaluated -= 1u; }
                 osp -= 1u;
                 cc->pos += 1u; // ','
                 uint32_t match_pos = UINT32_MAX;
@@ -5604,7 +9351,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                 }
                 const uint32_t win = match_pos != UINT32_MAX ? match_pos : def_pos;
                 if (win == UINT32_MAX || end_pos == UINT32_MAX) { fast_cc_bail(cc, "_Generic no match"); break; }
-                ops[osp++] = (FastExprOp){ .op = FEOP_GENERIC_SEL, .lbl0 = end_pos };
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_GENERIC_SEL, .lbl0 = end_pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
                 cc->pos = win;
                 expect_val = true;
                 continue;
@@ -5617,18 +9364,17 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             if (top == FEOP_VA_START)
             {
                 // __builtin_va_start(ap, last_param) -> initialize 24B va_list struct at `ap`, skip `last_param)`!
+                // #3577: in a variadic function, of a va_list and the last named parameter, or the full pipeline's
+                // error or warning (-Wvarargs).
                 osp -= 1u;
                 cc->pos += 1u; // ','
-                // Skip second argument up to ')'
-                uint32_t bd = 0;
-                while (cc->pos < token_count)
+                if (!cc->cur_variadic || fast_cc_peek(cc) != FTOK_IDENT || fast_cc_data(cc) != cc->cur_last_param ||
+                    fast_cc_peek_at(cc, 1u) != FTOK_RPAREN || ex.vsp < 1u || !fast_cc_is_va_list(cc, ex.vstack[ex.vsp - 1u].type))
                 {
-                    const uint8_t ak = fast_cc_peek(cc);
-                    if (bd == 0 && ak == FTOK_RPAREN) { cc->pos += 1u; break; }
-                    if (ak == FTOK_LPAREN) { bd += 1u; } else if (ak == FTOK_RPAREN && bd > 0) { bd -= 1u; }
-                    cc->pos += 1u;
+                    fast_cc_bail(cc, "va_start the full pipeline refuses");
+                    break;
                 }
-                if (ex.vsp < 1u) { fast_cc_bail(cc, "va_start ap"); break; }
+                cc->pos += 2u;
                 FastVal ap_v = ex.vstack[--ex.vsp];
                 if (ex.eval_only == 0)
                 {
@@ -5642,7 +9388,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                     x86_store(cc->obj, ap, 16, tmp, 8u);
                     ex.gp_used &= (uint16_t)~((1u << ap) | (1u << tmp));
                 }
-                ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
+                ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID, .marks = BUSTER_FVAL_MARK_EFFECT };
                 continue;
             }
             if (top == FEOP_VA_ARG)
@@ -5653,6 +9399,18 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                 const FastType arg_t = fast_cc_parse_typename(cc, &tok_ok);
                 if (!tok_ok || fast_cc_peek(cc) != FTOK_RPAREN || ex.vsp < 1u) { fast_cc_bail(cc, "va_arg type"); break; }
                 cc->pos += 1u; // ')'
+                // #3577: of a va_list, and a complete type that doesn't promote (char, short, float, _Bool are
+                // -Wvarargs'); anything else is the full pipeline's.
+                {
+                    const uint32_t sk = arg_t & BUSTER_FTYPE_SCALAR_MASK;
+                    const uint32_t scalar = (uint32_t)((arg_t & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
+                    const uint32_t promotes = scalar & ((uint32_t)(sk <= FTYPE_U16) | (uint32_t)(sk == FTYPE_F32));
+                    if (!fast_cc_is_va_list(cc, ex.vstack[ex.vsp - 1u].type) || (promotes | BUSTER_FAST_TYPE_INCOMPLETE(cc, arg_t)) != 0)
+                    {
+                        fast_cc_bail(cc, "va_arg the full pipeline refuses");
+                        break;
+                    }
+                }
                 FastVal ap_v = ex.vstack[--ex.vsp];
                 FastVal res = { 0 };
                 fval_emit_va_arg(&ex, &ap_v, arg_t, &res);
@@ -5668,7 +9426,11 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                 continue;
             }
             // Otherwise comma operator inside `(...)` or `[...]`
-            if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA) }; }
+            if (osp < 128u)
+            {
+                const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
+                fast_expr_op_write(ops + osp, (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA), .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
+            }
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -5696,19 +9458,22 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             if (osp >= 128u) { fast_cc_bail(cc, "logical nesting depth"); break; }
             FastVal lhs = ex.vstack[--ex.vsp];
             uint32_t sc_lbl = 0;
+            if (!BUSTER_FAST_CONDITION_QUIET(cc, &lhs)) { fast_cc_bail(cc, "logical operator's operand the full pipeline questions"); break; }
             // A constant left side that decides the value leaves the right side dead, checked without code (#3592).
             const uint32_t decided = (uint32_t)((ex.eval_only == 0) & (lhs.kind == FVAL_IMM) & ((lhs.imm != 0) == (k == FTOK_LOR)));
             ex.eval_only = (uint8_t)(ex.eval_only + decided);
             if (ex.eval_only == 0)
             {
                 // Spill everything below LHS so both branch paths have identical empty reg state!
-                fval_spill_all(&ex, ex.vsp, ex.arg_sp);
+                fval_spill_all(&ex, ex.vsp);
                 sc_lbl = fast_label_new(cc->obj);
                 fval_branch(&ex, &lhs, k == FTOK_LOR, sc_lbl);
                 ex.gp_used = 0;
                 ex.xmm_used = 0;
             }
-            ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .extra = (uint16_t)decided, .lbl0 = sc_lbl };
+            const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
+            fast_expr_op_write(ops + osp, (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .lbl0 = sc_lbl, .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging),
+                                       .constant = (uint8_t)decided }); osp += 1u;
         }
         else if (k == FTOK_QUESTION)
         {
@@ -5716,23 +9481,47 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
             if (osp >= 128u) { fast_cc_bail(cc, "ternary nesting depth"); break; }
             FastVal cond = ex.vstack[--ex.vsp];
             uint32_t else_lbl = 0;
+            if (!BUSTER_FAST_CONDITION_QUIET(cc, &cond)) { fast_cc_bail(cc, "condition the full pipeline refuses or questions"); break; }
             // A constant condition takes no branch, and its dead arm is checked without code (#3592): musl's isnan()
             // of a double has a long double arm, a call of __fpclassifyl.
             const uint32_t constant = (uint32_t)((ex.eval_only == 0) & (cond.kind == FVAL_IMM)) * (BUSTER_FCONSTANT_FALSE + (uint32_t)(cond.imm != 0));
             ex.eval_only = (uint8_t)(ex.eval_only + (constant == BUSTER_FCONSTANT_FALSE));
             if ((ex.eval_only == 0) & (constant == BUSTER_FCONSTANT_NONE))
             {
-                fval_spill_all(&ex, ex.vsp, ex.arg_sp);
+                fval_spill_all(&ex, ex.vsp);
                 else_lbl = fast_label_new(cc->obj);
                 fval_branch(&ex, &cond, false, else_lbl);
                 ex.gp_used = 0;
                 ex.xmm_used = 0;
             }
-            ops[osp++] = (FastExprOp){ .op = FEOP_TERNARY_Q, .extra = (uint16_t)constant, .lbl0 = else_lbl };
+            const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
+            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_TERNARY_Q, .lbl0 = else_lbl, .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging),
+                                       .constant = (uint8_t)constant }); osp += 1u;
         }
         else
         {
-            if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k) }; }
+            // #3577: a divisor (`/=`'s or `%=`'s whole right operand) that may load zero from a const object is the full
+            // pipeline's -Wdivision-by-zero where it is evaluated: refused. Looked at only where its first token may start
+            // one: a parenthesis, `*`, `&`, or an object that may fold to zero.
+            const uint32_t compound_divide = (uint32_t)(k == FTOK_DIV_ASSIGN) | (uint32_t)(k == FTOK_MOD_ASSIGN);
+            const uint32_t divide = (uint32_t)(k == FTOK_SLASH) | (uint32_t)(k == FTOK_PERCENT) | compound_divide;
+            if (divide != 0)
+            {
+                const uint32_t first_at = cc->pos + (uint32_t)(cc->pos + 1u < cc->tcount);
+                const uint8_t first = cc->tk[first_at];
+                const uint32_t first_id = cc->td[first_at];
+                const uint32_t first_known = (uint32_t)(first_id < cc->env_cap);
+                const uint32_t first_si = cc->sym_cur[first_id * first_known] * first_known;
+                const uint32_t divisor_start = (uint32_t)(first == FTOK_LPAREN) | (uint32_t)(first == FTOK_STAR) | (uint32_t)(first == FTOK_AMP) |
+                                               (uint32_t)(first == FTOK_KW_EXTENSION) |
+                                               ((uint32_t)(first == FTOK_IDENT) & (uint32_t)(cc->syms[first_si].pad_sym[1] == BUSTER_FFOLD_ZERO));
+                if (divisor_start != 0 && ex.eval_only == 0 && !cc->quiet && fast_cc_divisor_may_fold_zero(cc, cc->pos + 1u, compound_divide != 0))
+                {
+                    fast_cc_bail(cc, "a divisor that may fold to zero through a const object");
+                    break;
+                }
+            }
+            if (osp < 128u) { fast_expr_op_write(ops + osp, (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u; }
         }
         cc->pos += 1u;
         expect_val = true;
@@ -5755,16 +9544,67 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
         fast_cc_bail(cc, "expression did not produce single value");
         return;
     }
+    // The value stays where the reductions left it (#3596); nothing below changes the stack until the branch.
+    FastVal* const final_v = &ex.vstack[0];
+    // #3577: -Wunsequenced. Without the log: no variable modified, or one whose modification is the expression's last
+    // operator (its operands are evaluated before it stores; BUSTER_FSEQ_MODIFIED), is quiet, and any other modification
+    // looks further (fast_cc_sequenced_lazy). With it (a compile again): a variable modified and named or modified again
+    // where nothing sequences the two (seq_hit, set by the log, says where that may be).
+    if (!logging)
+    {
+        if (ex.seq_mod_count != 0 && ((uint32_t)(ex.seq_mod_count != 1u) | (uint32_t)(final_v->seq_ident != BUSTER_FSEQ_MODIFIED)) != 0 &&
+            !fast_cc_sequenced_lazy(cc, &ex, stop_at_comma))
+        {
+            return;
+        }
+    }
+    else if ((ex.seq_hit | ((uint32_t)(ex.seq_count >= 254u) & (uint32_t)(ex.seq_bloom != 0))) != 0 && !fast_cc_sequenced(&ex))
+    {
+        fast_cc_bail(cc, "modifications and uses of a variable the full pipeline's -Wunsequenced questions");
+        return;
+    }
     if (is_branch)
     {
+        // An assignment as a condition, outside parentheses, is -Wparentheses (#3577); a parenthesized comparison for
+        // equality, -Wparentheses-equality (fast_cc_parentheses_equality, looked at where the condition starts with `(`).
+        if (final_v->op == FTOK_ASSIGN) { fast_cc_bail(cc, "assignment as a condition"); return; }
+        if (cc->tk[ex.seq_start_pos] == FTOK_LPAREN && fast_cc_parentheses_equality(cc, ex.seq_start_pos, cc->pos))
+        {
+            fast_cc_bail(cc, "an equality comparison in extraneous parentheses as a condition");
+            return;
+        }
+        // The value leaves the stack before its branch, as #3596 has it, so no spill can write the stack's entry.
         ex.vsp = 0;
-        cc->branch_constant = (uint8_t)((uint32_t)(ex.vstack[0].kind == FVAL_IMM) * (BUSTER_FCONSTANT_FALSE + (uint32_t)(ex.vstack[0].imm != 0)));
-        fval_branch(&ex, &ex.vstack[0], branch_on_true, branch_label);
+        cc->branch_constant = (uint8_t)((uint32_t)(final_v->kind == FVAL_IMM) * (BUSTER_FCONSTANT_FALSE + (uint32_t)(final_v->imm != 0)));
+        fval_branch(&ex, final_v, branch_on_true, branch_label);
+    }
+    else if (discard_result && (final_v->marks & (BUSTER_FVAL_MARK_EFFECT | BUSTER_FVAL_MARK_UNUSED_RESULT)) != BUSTER_FVAL_MARK_EFFECT &&
+             BUSTER_FAST_DISCARD_QUIET(*final_v) == 0)
+    {
+        // A statement's value: one with no effect is -Wunused-value, a warn_unused_result call's -Wunused-result. A quiet
+        // one needs no release, as #3596 found: the context ends here.
+        fast_cc_bail(cc, "discarded value");
     }
     else if (out_val != NULL)
     {
-        *out_val = ex.vstack[0];
+        *out_val = *final_v;
     }
+}
+
+// Main iterative C17 expression compiler (#3577: without the -Wunsequenced log; fast_cc_expr_compile).
+// If `is_branch` is true, emits a direct branch to `branch_label` and releases the result.
+// If `discard_result` is true, the result is a statement's, which -Wunused-value checks.
+static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, bool discard_result,
+                         bool is_branch, bool branch_on_true, uint32_t branch_label, FastVal* out_val)
+{
+    fast_cc_expr_compile(cc, stop_at_comma, discard_result, is_branch, branch_on_true, branch_label, out_val, false);
+}
+
+// #3577: the expression at cc->pos compiled again without code for its -Wunsequenced log (fast_cc_sequenced_again); its
+// end bails where the full pipeline warns.
+static __attribute__((cold, noinline)) void fast_cc_expr_logged(FastCCState* cc, bool stop_at_comma)
+{
+    fast_cc_expr_compile(cc, stop_at_comma, false, false, false, 0u, NULL, true);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -5774,23 +9614,58 @@ static inline void fast_expr_ctx_reset(FastExprCtx* ex, FastCCState* cc)
 {
     ex->cc = cc;
     ex->vsp = 0;
-    ex->arg_sp = 0;
     ex->gp_used = 0;
     ex->xmm_used = 0;
     ex->eval_only = (uint8_t)(cc->dead != 0);
+    ex->unevaluated = 0;
+    ex->seq_logging = 0;
+    ex->seq_count = 0;
+    ex->seq_hit = 0;
+    ex->seq_mods = 0;
+    ex->seq_regions = 0;
+    ex->seq_bloom = 0;
+    ex->seq_mod_count = 0;
+    ex->seq_start_pos = cc->pos;
+    ex->cmp_pos = UINT32_MAX;
 }
 
 static void fast_cc_store_expr_to_val(FastCCState* cc, FastVal dst, bool stop_at_comma)
 {
     FastVal rhs = { 0 };
-    fast_cc_expr(cc, stop_at_comma, false, false, 0, &rhs);
+    fast_cc_expr(cc, stop_at_comma, false, false, false, 0, &rhs);
     if (cc->bailout) { return; }
+    cc->init_kind = rhs.kind;
+    cc->init_value = rhs.imm;
     FastExprCtx ex;
     fast_expr_ctx_reset(&ex, cc);
     if (fval_holds_gp(&rhs)) { ex.gp_used |= (uint16_t)(1u << rhs.reg); }
     if (fval_holds_xmm(&rhs)) { ex.xmm_used |= (uint8_t)(1u << rhs.reg); }
     fval_store(&ex, &dst, &rhs, false, NULL);
     fast_cc_reset_tmps(cc);
+}
+
+// #3577: a checked inline body's long double local (fast_cc_checked_long_double) is initialized as a scalar is, a
+// copy whose code is dropped; any other unsupported type leaves.
+static __attribute__((cold, noinline)) int32_t fast_cc_checked_long_double_local(FastCCState* cc, FastType t, uint32_t extra_align)
+{
+    int32_t off = 0;
+    if (!fast_cc_checked_long_double(cc, t, t))
+    {
+        fast_cc_bail(cc, "unsupported local var type");
+    }
+    else
+    {
+        off = fast_cc_alloc_local(cc, ftype_size(cc, t), extra_align > ftype_align(cc, t) ? extra_align : ftype_align(cc, t));
+        const bool br = fast_cc_peek(cc) == FTOK_LBRACE;
+        if (br) { cc->pos += 1u; }
+        fast_cc_store_expr_to_val(cc, (FastVal){ .type = t, .kind = FVAL_LOCAL, .off = off }, true);
+        if (br)
+        {
+            if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
+            if (fast_cc_peek(cc) == FTOK_RBRACE) { cc->pos += 1u; }
+        }
+    }
+    return off;
 }
 
 // Compile initializer for a local variable `var_type` (which may be an incomplete array `int a[] = {...}` or `char s[] = "..."`).
@@ -5804,10 +9679,12 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
         int32_t base_off;
         uint32_t idx;
         bool braced;
+        bool deep;          // the last designator reached into a member's member (#3577)
+        uint64_t touched;   // the positions (members, elements) under 64 initialized (#3577: fast_cc_init_overrides)
     };
 
     FastType root_t = *io_type;
-    if (ftype_is_unsupported(root_t)) { fast_cc_bail(cc, "unsupported local var type"); return 0; }
+    if (ftype_is_unsupported(root_t)) { return fast_cc_checked_long_double_local(cc, root_t, extra_align); }
     uint32_t al = ftype_align(cc, root_t);
     if (extra_align > al) { al = extra_align; }
 
@@ -5826,13 +9703,14 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
             if (fast_cc_peek(cc) == FTOK_RBRACE) { cc->pos += 1u; }
         }
-        FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
-        if (ar->count == UINT32_MAX)
+        if (cc->ctypes[root_t & BUSTER_FTYPE_CIDX_MASK].count == UINT32_MAX)
         {
-            ar->count = slen + 1u;
-            ar->size = slen + 1u;
-            ar->complete = 1u;
+            root_t = fast_cc_completed_array(cc, root_t, slen + 1u);
+            *io_type = root_t;
         }
+        const FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
+        // #3577: a string longer than its array (but for the null) is the full pipeline's -Wexcess-initializers.
+        if (slen > ar->size) { fast_cc_bail(cc, "a string initializer longer than its array"); return 0; }
         const int32_t off = fast_cc_alloc_local(cc, ar->size, al);
         const uint32_t ro_off = fast_obj_add_string_lit(cc->obj, sp, slen);
         const uint32_t cpy = (slen + 1u) < ar->size ? (slen + 1u) : ar->size;
@@ -5868,28 +9746,17 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
     }
 
     // If incomplete local array `T a[] = { e0, e1, ... }`, count top-level elements first so we know exact stack size!
+    // #3577: exactly, or leave (fast_cc_incomplete_array_count), and into a copy of the type (fast_cc_completed_array).
     if (is_arr && cc->ctypes[root_t & BUSTER_FTYPE_CIDX_MASK].count == UINT32_MAX)
     {
-        uint32_t scan = cc->pos + 1u;
-        uint32_t depth = 1u;
-        uint32_t elems = 0;
-        bool has_tok = false;
-        while (scan < cc->tcount && depth > 0)
+        const uint32_t elems = fast_cc_incomplete_array_count(cc, cc->pos, cc->ctypes[root_t & BUSTER_FTYPE_CIDX_MASK].inner);
+        if (elems == UINT32_MAX)
         {
-            const uint8_t sk = cc->tk[scan++];
-            if (sk == FTOK_LBRACE || sk == FTOK_LPAREN || sk == FTOK_LBRACKET) { depth += 1u; has_tok = true; }
-            else if (sk == FTOK_RBRACE || sk == FTOK_RPAREN || sk == FTOK_RBRACKET)
-            {
-                depth -= 1u;
-                if (depth == 0 && has_tok) { elems += 1u; }
-            }
-            else if (depth == 1u && sk == FTOK_COMMA) { elems += 1u; has_tok = false; }
-            else if (depth == 1u) { has_tok = true; }
+            fast_cc_bail(cc, "an incomplete array's initializer this path doesn't count");
+            return 0;
         }
-        FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
-        ar->count = elems;
-        ar->size = elems * ftype_size(cc, ar->inner);
-        ar->complete = 1u;
+        root_t = fast_cc_completed_array(cc, root_t, elems);
+        *io_type = root_t;
     }
 
     const uint32_t total_sz = ftype_size(cc, root_t);
@@ -5908,6 +9775,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
 
     LInitFrame st[32];
     uint32_t sp = 0;
+    uint64_t overridden = 0;
     cc->pos += 1u; // '{'
     st[sp++] = (LInitFrame){ .type = root_t, .base_off = root_off, .idx = 0, .braced = true };
 
@@ -5930,8 +9798,12 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             FastType cur_t = f->type;
             int32_t cur_off = f->base_off;
             const FastMemberInfo* cur_bf = NULL;
+            const uint32_t idx_before = f->idx;
+            uint32_t position = UINT32_MAX;
+            uint32_t components = 0;
             while (fast_cc_peek(cc) == FTOK_DOT || fast_cc_peek(cc) == FTOK_LBRACKET)
             {
+                components += 1u;
                 if (fast_cc_peek(cc) == FTOK_DOT)
                 {
                     cc->pos += 1u;
@@ -5939,7 +9811,11 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                     const FastComplexType* rec = cc->ctypes + (cur_t & BUSTER_FTYPE_CIDX_MASK);
                     const FastMemberInfo* mi = fast_struct_find_member(cc, cur_t & BUSTER_FTYPE_CIDX_MASK, fast_cc_data(cc));
                     if (mi == NULL) { fast_cc_bail(cc, "unknown local .designator"); break; }
-                    if (cur_t == f->type) { f->idx = (uint32_t)(mi - (cc->member_info + rec->start)) + 1u; }
+                    if (cur_t == f->type)
+                    {
+                        position = (uint32_t)(mi - (cc->member_info + rec->start));
+                        f->idx = position + 1u;
+                    }
                     cur_off += (int32_t)mi->byte_offset;
                     cur_t = mi->type;
                     cur_bf = mi->bit_width != 0 ? mi : NULL;
@@ -5952,14 +9828,28 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                     if (fast_cc_peek(cc) != FTOK_RBRACKET || didx < 0 || !ftype_is_array(cur_t)) { fast_cc_bail(cc, "local [designator]"); break; }
                     cc->pos += 1u;
                     const FastComplexType* ar = cc->ctypes + (cur_t & BUSTER_FTYPE_CIDX_MASK);
-                    if (cur_t == f->type) { f->idx = (uint32_t)didx + 1u; }
+                    if (cur_t == f->type)
+                    {
+                        position = (uint32_t)didx;
+                        f->idx = (uint32_t)didx + 1u;
+                    }
                     cur_off += (int32_t)((uint32_t)didx * ftype_size(cc, ar->inner));
                     cur_t = ar->inner;
                     cur_bf = NULL;
                 }
             }
-            if (fast_cc_peek(cc) == FTOK_ASSIGN) { cc->pos += 1u; }
+            // #3577: a designator without its `=` is GNU's, the full pipeline's -Wgnu-designator.
+            if (fast_cc_peek(cc) != FTOK_ASSIGN) { fast_cc_bail(cc, "a designator without its ="); break; }
+            cc->pos += 1u;
             if (cc->bailout) { break; }
+            // #3577: a target the frame initialized (-Winitializer-overrides); and the positional elements after a designator
+            // into a member's member continue there, which this path doesn't follow.
+            if (fast_cc_init_overrides(cc, f->type, f->base_off, idx_before, &f->touched, position, (int64_t)cur_off * 8 + (cur_bf != NULL ? cur_bf->bit_offset : 0)))
+            {
+                fast_cc_bail(cc, "designator overriding what the initializer initialized");
+                break;
+            }
+            f->deep = components >= 2u;
             if (ftype_is_scalar(cur_t) || (ftype_is_record(cur_t) && fast_cc_peek(cc) != FTOK_LBRACE))
             {
                 FastVal dst = { .type = cur_t, .kind = cur_bf != NULL ? FVAL_BITFIELD : FVAL_LOCAL, .bf_base = FVAL_LOCAL, .off = cur_off };
@@ -5974,6 +9864,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                 const char* sp_s = fast_cc_parse_string_lit(cc, &slen);
                 const uint32_t asz = ftype_size(cc, cur_t);
                 const uint32_t cpy = slen < asz ? slen : asz;
+                if (slen > asz) { fast_cc_bail(cc, "a string initializer longer than its array"); break; }
                 const uint32_t ro = fast_obj_add_string_lit(cc->obj, sp_s, slen);
                 x86_lea_sym(cc->obj, FREG_R10, cc->obj->sec_sym_rodata_str, (int64_t)ro);
                 x86_emit_memcpy_inline(cc->obj, FREG_RBP, cur_off, FREG_R10, 0, cpy, FREG_RAX);
@@ -5994,6 +9885,11 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
         }
 
         // Positional element
+        if (f->deep)
+        {
+            fast_cc_bail(cc, "positional element after a designator into a member's member");
+            break;
+        }
         FastType elem_t = FTYPE_VOID;
         int32_t elem_off = f->base_off;
         const FastMemberInfo* elem_bf = NULL;
@@ -6007,6 +9903,8 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             {
                 elem_t = ar->inner;
                 elem_off = f->base_off + (int32_t)(f->idx * ftype_size(cc, ar->inner));
+                overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                 f->idx += 1u;
             }
         }
@@ -6020,6 +9918,8 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                 elem_t = mi->type;
                 elem_off = f->base_off + (int32_t)mi->byte_offset;
                 elem_bf = mi->bit_width != 0 ? mi : NULL;
+                overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                 f->idx += 1u;
                 // Skip flattened anonymous-union siblings sharing the same byte_offset in a struct!
                 if (rec->kind == FCTYPE_STRUCT && mi->bit_width == 0)
@@ -6027,6 +9927,8 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                     while (f->idx < rec->count && cc->member_info[rec->start + f->idx].byte_offset == mi->byte_offset &&
                            cc->member_info[rec->start + f->idx].bit_width == 0)
                     {
+                        overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                        f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                         f->idx += 1u;
                     }
                 }
@@ -6048,6 +9950,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             const char* sp_s = fast_cc_parse_string_lit(cc, &slen);
             const uint32_t asz = ftype_size(cc, elem_t);
             const uint32_t cpy = slen < asz ? slen : asz;
+            if (slen > asz) { fast_cc_bail(cc, "a string initializer longer than its array"); break; }
             const uint32_t ro = fast_obj_add_string_lit(cc->obj, sp_s, slen);
             x86_lea_sym(cc->obj, FREG_R10, cc->obj->sec_sym_rodata_str, (int64_t)ro);
             x86_emit_memcpy_inline(cc->obj, FREG_RBP, elem_off, FREG_R10, 0, cpy, FREG_RAX);
@@ -6085,7 +9988,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             {
                 const uint32_t id = fast_cc_data(cc);
                 const uint32_t si = id < cc->env_cap ? cc->sym_cur[id] : 0u;
-                if (si != 0 && ftype_unqual(cc->syms[si].type) == ftype_unqual(elem_t)) { is_struct_copy = true; }
+                if (si != 0 && BUSTER_FTYPE_CODEGEN(ftype_unqual(cc->syms[si].type)) == BUSTER_FTYPE_CODEGEN(ftype_unqual(elem_t))) { is_struct_copy = true; }
             }
             if (is_struct_copy)
             {
@@ -6103,6 +10006,11 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             if (sp >= 32u) { fast_cc_bail(cc, "local init depth"); break; }
             st[sp++] = (LInitFrame){ .type = elem_t, .base_off = elem_off, .idx = 0, .braced = false };
         }
+    }
+    // #3577: a positional element over one a designator initialized (BUSTER_FAST_INIT_BIT).
+    if (overridden != 0)
+    {
+        fast_cc_bail(cc, "initializer overrides prior initialization");
     }
     return root_off;
 }
@@ -6133,9 +10041,77 @@ struct FastStmtFrame
     uint32_t lbl2;         // break_lbl (for / do-while)
     uint32_t scope_mark;   // undo_count mark for block / for
     uint32_t step_pos;     // token index of for-step expr (UINT32_MAX if none)
+    // #3577: what -Wreturn-type's reachability needs: whether an if's then arm ended reachable, a break or a continue
+    // left the loop or switch, and a loop's condition is a constant true (`for (;;)`, `while (1)`).
+    uint8_t then_live;
+    uint8_t broke;
+    uint8_t continued;
+    uint8_t infinite;
+    // #3577: -Wdangling-else: the then statement is an if with an else (BUSTER_FSTK_ENDS_IN_ELSE), and this if's own
+    // statement had a label, case or default before it, which passes nothing up.
+    uint8_t trailing_else;
+    uint8_t labeled;
 };
 
+// #3577: -Wdangling-else, as the full pipeline warns it: an if without an else whose then statement is, in no braces and
+// with no label, an if with an else (not a loop's or a switch's body, a do's or an else arm). An if with an else marks
+// its parent frame (SSTACK[SSP - 2], before its pop) where that is an if's then, and that if refuses where no else
+// follows.
+#define BUSTER_FSTK_ENDS_IN_ELSE(sstack, ssp) \
+    if ((ssp) >= 2u) \
+    { \
+        FastStmtFrame* const fstk_parent = (sstack) + ((ssp) - 2u); \
+        fstk_parent->trailing_else |= (uint8_t)(fstk_parent->kind == FSTK_IF_THEN); \
+    }
+
 #define BUSTER_FSWITCH_BUCKET_BITS 11u
+
+// Whether `__attribute__((fallthrough));`, its tokens ending before `after`, directly precedes a case or default label
+// of the switch it is in, as the full pipeline requires ("fallthrough annotation does not directly precede switch
+// label", #3577): the label next, or after the `}` of enclosing blocks that follow and out of if arms, but neither out
+// of a loop's body nor of the switch's own. Anything else (an else that follows, a label) is refused, the full
+// pipeline's or not.
+static bool fast_cc_fallthrough_placed(const FastCCState* cc, const FastStmtFrame* stack, uint32_t depth, uint32_t after)
+{
+    bool in_switch = false;
+    for (uint32_t s = 0; s < depth; s += 1)
+    {
+        in_switch = in_switch || stack[s].kind == FSTK_SWITCH;
+    }
+    uint32_t i = after;
+    uint32_t f = depth;
+    bool placed = false;
+    bool walking = in_switch;
+    while (walking && f > 0)
+    {
+        const FastStmtFrame* frame = stack + (f - 1u);
+        const bool label = i < cc->tcount && (cc->tk[i] == FTOK_KW_CASE || cc->tk[i] == FTOK_KW_DEFAULT);
+        const bool switch_body = frame->kind == FSTK_BLOCK && f >= 2u && stack[f - 2u].kind == FSTK_SWITCH;
+        if (frame->kind == FSTK_WHILE || frame->kind == FSTK_DO_WHILE || frame->kind == FSTK_FOR)
+        {
+            walking = false;
+        }
+        else if (label)
+        {
+            placed = true;
+            walking = false;
+        }
+        else if (frame->kind == FSTK_IF_THEN || frame->kind == FSTK_IF_ELSE)
+        {
+            f -= 1u;
+        }
+        else if (frame->kind == FSTK_BLOCK && !switch_body && i < cc->tcount && cc->tk[i] == FTOK_RBRACE)
+        {
+            i += 1u;
+            f -= 1u;
+        }
+        else
+        {
+            walking = false;
+        }
+    }
+    return placed;
+}
 
 // The statement frames a function body may nest (#3592): SQLite's shell.c's do_meta_command is an `else if` chain of 72
 // branches, a frame each.
@@ -6272,7 +10248,44 @@ struct FastSwitchCtx
     uint32_t case_count;
     uint32_t default_lbl;  // UINT32_MAX if no default case
     uint32_t break_lbl;
+    uint32_t enum_cidx;    // the controlling expression's enum (its type before promotion), else 0 (#3577: -Wswitch)
 };
+
+// #3577: whether a switch on an enum's value is one the full pipeline's -Wswitch is quiet on: every case value one of
+// the enum's (or "case value not in enumerated type"), and without a default every enumerator's value a case's (or
+// "enumeration value not handled in switch"). The enumerators are the definition's consecutive symbols (FastComplexType's
+// start and count); any other is refused.
+static __attribute__((cold, noinline)) bool fast_cc_switch_enum_quiet(const FastCCState* cc, const FastSwitchCtx* sw, const FastSwitchCase* cases)
+{
+    const FastComplexType* et = cc->ctypes + sw->enum_cidx;
+    bool quiet = et->complete != 0 && et->start != 0 && et->start + et->count <= cc->sym_count;
+    for (uint32_t e = 0; quiet && e < et->count; e += 1)
+    {
+        const FastSym* sym = cc->syms + et->start + e;
+        quiet = sym->kind == FSYM_ENUM_CONST && sym->sec_off == sw->enum_cidx;
+    }
+    // Each case value an enumerator's.
+    for (uint32_t c = 0; quiet && c < sw->case_count; c += 1)
+    {
+        bool found = false;
+        for (uint32_t e = 0; !found && e < et->count; e += 1)
+        {
+            found = cc->syms[et->start + e].const_val == cases[c].val;
+        }
+        quiet = found;
+    }
+    // Without a default, each enumerator's value a case's.
+    for (uint32_t e = 0; quiet && sw->default_lbl == UINT32_MAX && e < et->count; e += 1)
+    {
+        bool found = false;
+        for (uint32_t c = 0; !found && c < sw->case_count; c += 1)
+        {
+            found = cc->syms[et->start + e].const_val == cases[c].val;
+        }
+        quiet = found;
+    }
+    return quiet;
+}
 
 typedef struct FastUserLabel FastUserLabel;
 struct FastUserLabel
@@ -6410,7 +10423,258 @@ static __attribute__((noinline)) void fast_cc_emit_switch_dispatch(FastCCState* 
     x86_jmp_label(obj, def_lbl);
 }
 
-// Compile one complete function body starting at `cc->pos` == '{'!
+// ---------------------------------------------------------------------------------------------------------------------
+// Declarations the full pipeline would diagnose (#3577): what each kind of declaration checks of its attributes, its
+// redeclarations' types and linkage, before the direct path accepts it.
+
+typedef enum FastDeclEntity
+{
+    FDECL_FUNCTION = 0,   // a function's declaration
+    FDECL_DEFINITION,     // a function's definition
+    FDECL_OBJECT,         // a file-scope object, or a block's static one
+    FDECL_LOCAL,          // a block's automatic object
+    FDECL_TYPEDEF,
+} FastDeclEntity;
+
+// Whether the attributes a declaration's specifiers (spec) and declarator (decl) carry are ones it may have, as the
+// full pipeline sees them; *out_flags receives the symbol's use flags (BUSTER_FSYM_*) they ask for. A function's
+// attributes elsewhere, packed (a record definition's, which the record parser reads), weak on what has no external
+// linkage, and noreturn or nonnull on a definition (whose body the full pipeline checks against them) are its.
+static __attribute__((noinline)) bool fast_cc_decl_attributes_valid(const FastCCState* cc, const FastAttrInfo* spec, const FastAttrInfo* decl,
+                                                                    FastType type, bool is_func, FastDeclEntity entity, bool is_static,
+                                                                    uint8_t* out_flags)
+{
+    // Branch-free but where a format or nonnull list is checked: a header declares functions with attributes by the
+    // thousand.
+    const uint32_t function = (uint32_t)(entity == FDECL_FUNCTION) | (uint32_t)(entity == FDECL_DEFINITION);
+    const uint32_t object = (uint32_t)(entity == FDECL_OBJECT);
+    const uint32_t linked = (function | object) & (uint32_t)!is_static;
+    const uint32_t deprecated = (uint32_t)((spec->deprecated | decl->deprecated) != 0);
+    const uint32_t format = (uint32_t)((spec->format | decl->format) != 0);
+    const uint32_t definition = (uint32_t)(entity == FDECL_DEFINITION);
+    uint32_t valid = (uint32_t)(entity == FDECL_TYPEDEF) | (uint32_t)(function == (uint32_t)is_func);
+    valid &= function | (uint32_t)((spec->function_only | decl->function_only) == 0);
+    valid &= (uint32_t)((spec->packed | decl->packed) == 0);
+    valid &= linked | (uint32_t)((spec->weak | decl->weak | spec->visibility | decl->visibility) == 0);
+    valid &= (deprecated ^ 1u) | function | object;
+    valid &= (function ^ 1u) | (uint32_t)((spec->mode_size | decl->mode_size) == 0);
+    // #3577: and a declarator's mode this path can't give (fast_cc_mode_type) is a typedef's alone, whose uses are
+    // refused.
+    valid &= (uint32_t)(entity == FDECL_TYPEDEF) | (uint32_t)(decl->mode_size != BUSTER_FMODE_UNMODELED);
+    valid &= (definition ^ 1u) | (uint32_t)((spec->noreturn | decl->noreturn | spec->nonnull | decl->nonnull) == 0);
+    if ((valid & format) != 0)
+    {
+        // format(printf|scanf, INDEX, FIRST) on one list, naming a character pointer parameter, and FIRST the
+        // variadic arguments' position or 0.
+        const FastAttrInfo* f = spec->format != 0 ? spec : decl;
+        const FastComplexType* fn = cc->ctypes + (type & BUSTER_FTYPE_CIDX_MASK);
+        valid = (spec->format & decl->format) == 0 && !fn->is_oldstyle && f->format_index >= 1u && f->format_index <= fn->count;
+        if (valid != 0)
+        {
+            const FastType ft = ftype_unqual(cc->param_types[fn->start + f->format_index - 1u]);
+            valid = ftype_is_ptr(ft) && ftype_is_char_type(ftype_unqual(ftype_deref(cc, ft))) &&
+                    (f->format_first == 0 || (fn->is_variadic && f->format_first == fn->count + 1u));
+        }
+    }
+    // #3577: format_arg(INDEX) on a prototyped function, naming a pointer to a character type that it returns too (once
+    // on the two lists, or the same index on both).
+    const uint32_t format_arg = spec->format_arg != 0 ? spec->format_arg : decl->format_arg;
+    if (valid != 0 && format_arg != 0)
+    {
+        const FastComplexType* fn = cc->ctypes + (type & BUSTER_FTYPE_CIDX_MASK);
+        valid = function != 0 && !fn->is_oldstyle && format_arg <= fn->count &&
+                (spec->format_arg == 0 || decl->format_arg == 0 || spec->format_arg == decl->format_arg);
+        if (valid != 0)
+        {
+            const FastType pt = ftype_unqual(cc->param_types[fn->start + format_arg - 1u]);
+            const FastType rt = ftype_unqual(fn->inner);
+            valid = ftype_is_ptr(pt) && ftype_is_char_type(ftype_unqual(ftype_deref(cc, pt))) && ftype_is_ptr(rt) &&
+                    ftype_is_char_type(ftype_unqual(ftype_deref(cc, rt)));
+        }
+    }
+    const uint32_t nonnull_mask = spec->nonnull_mask | decl->nonnull_mask;
+    if (valid != 0 && nonnull_mask != 0)
+    {
+        // nonnull names pointer parameters of the function (every one's, with no list, of which there is one).
+        const FastComplexType* fn = cc->ctypes + (type & BUSTER_FTYPE_CIDX_MASK);
+        uint32_t pointers = 0;
+        for (uint32_t i = 0; i < fn->count && i < 32u; i += 1)
+        {
+            pointers |= ftype_is_ptr(ftype_unqual(cc->param_types[fn->start + i])) ? UINT32_C(1) << i : 0u;
+        }
+        valid = function != 0 && !fn->is_oldstyle && (nonnull_mask == UINT32_MAX ? pointers != 0 : (nonnull_mask & ~pointers) == 0);
+    }
+    *out_flags = (uint8_t)((BUSTER_FSYM_DEPRECATED * deprecated) | (BUSTER_FSYM_FORMAT * format) |
+                           (BUSTER_FSYM_PURE * (uint32_t)((spec->pure | decl->pure) != 0)) |
+                           (BUSTER_FSYM_NONNULL * (uint32_t)((spec->nonnull | decl->nonnull) != 0)) |
+                           (BUSTER_FSYM_UNUSED_RESULT * (uint32_t)((spec->unused_result | decl->unused_result) != 0)));
+    return valid != 0;
+}
+
+// Whether a specifier list with no declarator is quiet: a struct, union or enum's declaration or definition, with no
+// storage class, qualifier, function specifier or attribute ("declaration does not declare anything", "'static'
+// ignored on this declaration"). Branch-free: a file declares its tags by the hundred.
+static inline bool fast_cc_tag_declaration_quiet(const FastDeclSpecs* ds)
+{
+    const uint32_t noise = (uint32_t)(ds->is_typedef | ds->is_static | ds->is_extern | ds->is_inline | ds->is_const | ds->is_volatile |
+                                      ds->is_noreturn | ds->is_register | ds->attr.present) | ((uint32_t)ds->has_tag ^ 1u);
+    return noise == 0;
+}
+
+// Whether two declarations of one name have one type, as the full pipeline's redeclaration check asks: equal, or alike
+// part by part (a function's result and parameters, an array's element and count, a pointer's target), an incomplete
+// array completed by the other; anything else is its "conflicting types" or "redeclaration with a different type".
+// Parameters compare without their top-level qualifiers. A function without a prototype matches only one of none.
+// Whether a typedef's aligned attributes (0 for none) leave its type's own alignment (#3577): another one (Linux's
+// `__s128 __attribute__((aligned(16)))` is its own) is fast_cc_aligned_typedef's.
+static inline bool fast_cc_typedef_alignment_natural(const FastCCState* cc, uint32_t before, uint32_t after, FastType t)
+{
+    const uint32_t natural = ftype_align(cc, t);
+    return ((uint32_t)(before != 0 && before != natural) | (uint32_t)(after != 0 && after != natural)) == 0;
+}
+
+// #3577: the type of a typedef aligned other than its type (BEFORE and AFTER its aligned attributes, 0 for none). The
+// full pipeline keeps the alignment as the typedef's type's and its size as it was (glibc's <pthread.h> aligns
+// __pthread_unwind_buf_t to 16): a complete struct or union aligned above its own becomes a copy of the record with that
+// alignment, which objects, members and _Alignof then take (BUSTER_FAST_RECORD_OVERALIGNED refuses it by value, and
+// BUSTER_FAST_ELEMENT_MISALIGNED an array of it whose size isn't a multiple). Any other is refused where the typedef is
+// used: *FLAGS gets BUSTER_FSYM_ALIGNED.
+static __attribute__((cold, noinline)) FastType fast_cc_aligned_typedef(FastCCState* cc, uint32_t before, uint32_t after, FastType t, uint8_t* flags)
+{
+    const uint32_t want = after != 0 ? after : before;
+    const uint32_t cidx = t & BUSTER_FTYPE_CIDX_MASK;
+    const bool usable = ftype_is_record(t) && cc->ctypes[cidx].complete != 0 && (before == 0 || after == 0 || before == after) &&
+                        want > ftype_align(cc, t);
+    const uint32_t copy = usable ? fast_cc_alloc_ctype(cc, cc->ctypes[cidx].kind) : 0u;
+    FastType result = t;
+    if (copy != 0)
+    {
+        cc->ctypes[copy] = cc->ctypes[cidx];
+        cc->ctypes[copy].align = want;
+        cc->ctypes[copy].is_variadic = 1u;
+        result = ftype_from_index(cc, copy) | (t & (BUSTER_FTYPE_CONST | BUSTER_FTYPE_VOL));
+    }
+    else
+    {
+        *flags = BUSTER_FSYM_ALIGNED;
+    }
+    return result;
+}
+
+// Whether two types are one (#3577: a typedef's redefinition): redeclarable, and no array of unknown size made
+// complete by the other, through arrays and pointers.
+static __attribute__((noinline)) bool fast_cc_types_identical(const FastCCState* cc, FastType a, FastType b)
+{
+    bool same = a == b || fast_cc_types_redeclarable(cc, a, b);
+    FastType x = a;
+    FastType y = b;
+    for (uint32_t depth = 0; same && x != y && depth < 64u; depth += 1)
+    {
+        const bool arrays = ftype_is_array(x) && ftype_is_array(y);
+        const bool pointers = !arrays && ftype_is_ptr(x) && ftype_is_ptr(y);
+        if (arrays)
+        {
+            same = cc->ctypes[x & BUSTER_FTYPE_CIDX_MASK].count == cc->ctypes[y & BUSTER_FTYPE_CIDX_MASK].count;
+            x = cc->ctypes[x & BUSTER_FTYPE_CIDX_MASK].inner;
+            y = cc->ctypes[y & BUSTER_FTYPE_CIDX_MASK].inner;
+        }
+        else if (pointers)
+        {
+            x = ftype_deref(cc, x);
+            y = ftype_deref(cc, y);
+        }
+        else
+        {
+            break;
+        }
+    }
+    return same;
+}
+
+static __attribute__((noinline)) bool fast_cc_types_redeclarable(const FastCCState* cc, FastType a, FastType b)
+{
+    FastType left[64];
+    FastType right[64];
+    uint32_t count = 1;
+    left[0] = a;
+    right[0] = b;
+    uint32_t same = 1u;
+    // Branch-free but for a pair that differs: function pointers' conversions ask this by the hundred.
+    while (((uint32_t)(count != 0) & same) != 0)
+    {
+        count -= 1u;
+        const FastType x = left[count];
+        const FastType y = right[count];
+        // Both complex, alike but for the index (every table has an entry 0, which a scalar reads).
+        const uint32_t complex = UINT32_C(0) - (((uint32_t)x & (uint32_t)y) >> 31);
+        const FastComplexType* cx = cc->ctypes + (x & BUSTER_FTYPE_CIDX_MASK & complex);
+        const FastComplexType* cy = cc->ctypes + (y & BUSTER_FTYPE_CIDX_MASK & complex);
+        const uint32_t kind = cx->kind;
+        const uint32_t differ = (uint32_t)(x != y);
+        const uint32_t function = (uint32_t)(kind == FCTYPE_FUNC);
+        const uint32_t shaped = (complex & 1u) & (uint32_t)(((x ^ y) & ~BUSTER_FTYPE_CIDX_MASK) == 0) & (uint32_t)(kind == cy->kind) &
+                                (function | (uint32_t)(kind == FCTYPE_ARRAY) | (uint32_t)(kind == FCTYPE_PTR));
+        same = (differ ^ 1u) | shaped;
+        if ((differ & shaped) != 0)
+        {
+            if (function != 0)
+            {
+                // One without a prototype matches only one with no parameters (and no `...`); prototypes match parameter by
+                // parameter, which alike as one block (the common case) need no pair each.
+                const uint32_t none = (uint32_t)(cx->is_oldstyle != cy->is_oldstyle);
+                const FastComplexType* proto = cx->is_oldstyle != 0 ? cy : cx;
+                same = (none & (uint32_t)(proto->count == 0) & (uint32_t)(proto->is_variadic == 0)) |
+                       ((none ^ 1u) & (uint32_t)(cx->count == cy->count) & (uint32_t)(cx->is_variadic == cy->is_variadic));
+                same &= (uint32_t)(count + 1u + (none ^ 1u) * cx->count <= 64u);
+                const uint32_t compared = cx->count * same * (none ^ 1u);
+                const uint32_t each = (uint32_t)(memcmp(cc->param_types + cx->start, cc->param_types + cy->start, (size_t)compared * sizeof(FastType)) != 0);
+                left[count] = cx->inner;
+                right[count] = cy->inner;
+                count += same;
+                for (uint32_t i = 0; i < compared * each; i += 1)
+                {
+                    left[count] = BUSTER_FTYPE_UNQUAL(cc->param_types[cx->start + i]);
+                    right[count] = BUSTER_FTYPE_UNQUAL(cc->param_types[cy->start + i]);
+                    count += 1u;
+                }
+            }
+            else
+            {
+                // An array's count where both are known; a pointer's target.
+                same = ((uint32_t)(kind == FCTYPE_PTR) | (uint32_t)(cx->count == cy->count) | (uint32_t)(cx->complete == 0) | (uint32_t)(cy->complete == 0)) &
+                       (uint32_t)(count < 64u);
+                left[count] = cx->inner;
+                right[count] = cy->inner;
+                count += same;
+            }
+        }
+    }
+    return same != 0;
+}
+
+// Whether a file-scope function's second declaration (or its definition) may follow its first: one type, no mix of a
+// declaration without a prototype and one with parameters (-Wdeprecated-non-prototype), and no internal linkage after
+// external. `storage` is the new one's. (An inline definition's linkage the unit's end decides, #3595.)
+static __attribute__((noinline)) bool fast_cc_function_redeclarable(const FastCCState* cc, const FastSym* old, FastType type, uint8_t storage)
+{
+    const FastComplexType* of = cc->ctypes + (old->type & BUSTER_FTYPE_CIDX_MASK);
+    const FastComplexType* nf = cc->ctypes + (type & BUSTER_FTYPE_CIDX_MASK);
+    const uint32_t old_static = (uint32_t)(old->storage == 1u) | (uint32_t)(old->storage == 4u);
+    const uint32_t new_static = (uint32_t)(storage == 1u) | (uint32_t)(storage == 4u);
+    const uint32_t old_params = (uint32_t)(of->count != 0) | (uint32_t)of->is_variadic;
+    const uint32_t new_params = (uint32_t)(nf->count != 0) | (uint32_t)nf->is_variadic;
+    const uint32_t mixed = ((uint32_t)of->is_oldstyle & new_params) | ((uint32_t)nf->is_oldstyle & old_params);
+    // The common redeclaration, a prototype and its definition with the same parameters, compares as one block.
+    const uint32_t alike = (uint32_t)(of->inner == nf->inner) & (uint32_t)(of->count == nf->count) &
+                           (uint32_t)(of->is_variadic == nf->is_variadic) & (uint32_t)(of->is_oldstyle == nf->is_oldstyle);
+    bool same = alike != 0 && memcmp(cc->param_types + of->start, cc->param_types + nf->start, (size_t)of->count * sizeof(FastType)) == 0;
+    if (!same)
+    {
+        same = fast_cc_types_redeclarable(cc, old->type, type);
+    }
+    return (mixed | (new_static & (old_static ^ 1u))) == 0 && same;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // GNU's inline assembly of musl's two shapes (#3592)
 //
@@ -6490,7 +10754,7 @@ static uint8_t fast_cc_asm_operand(FastCCState* cc, bool output, FastAsmOperand*
         {
             cc->pos += 2u;
             FastVal value = { 0 };
-            fast_cc_expr(cc, false, false, false, 0, &value);
+            fast_cc_expr(cc, false, false, false, false, 0, &value);
             const bool fits = !cc->bailout && fast_cc_peek(cc) == FTOK_RPAREN && (ftype_is_int(value.type) || ftype_is_ptr(value.type)) &&
                               ftype_size(cc, value.type) <= 8u;
             if (fits)
@@ -6623,7 +10887,7 @@ static bool fast_cc_asm_atomic_operand(FastCCState* cc, bool output, FastAsmAtom
     {
         // An input's value, into a slot of its own.
         FastVal value = { 0 };
-        fast_cc_expr(cc, false, false, false, 0, &value);
+        fast_cc_expr(cc, false, false, false, false, 0, &value);
         ok = !cc->bailout && fast_cc_peek(cc) == FTOK_RPAREN && (ftype_is_int(value.type) || ftype_is_ptr(value.type));
         size = ok ? ftype_size(cc, value.type) : 0u;
         if (ok)
@@ -6902,6 +11166,384 @@ static void fast_cc_asm_statement(FastCCState* cc)
     }
 }
 
+// #3577: what fast_cc_switch_boolean finds a range of tokens to be: not boolean, boolean, or maybe.
+#define BUSTER_FBOOL_NO    0u
+#define BUSTER_FBOOL_YES   1u
+#define BUSTER_FBOOL_MAYBE 2u
+
+// #3577: a binary operator's precedence, loosest first, for fast_cc_switch_boolean (0: none). `+`, `-`, `*` and `&` are
+// binary only after an operand; `?` stands for its conditional.
+static const uint8_t fast_switch_binary_precedence[FTOK_KIND_COUNT] = {
+    [FTOK_COMMA] = 1u,
+    [FTOK_ASSIGN] = 2u,
+    [FTOK_ADD_ASSIGN] = 2u,
+    [FTOK_SUB_ASSIGN] = 2u,
+    [FTOK_MUL_ASSIGN] = 2u,
+    [FTOK_DIV_ASSIGN] = 2u,
+    [FTOK_MOD_ASSIGN] = 2u,
+    [FTOK_AND_ASSIGN] = 2u,
+    [FTOK_OR_ASSIGN] = 2u,
+    [FTOK_XOR_ASSIGN] = 2u,
+    [FTOK_SHL_ASSIGN] = 2u,
+    [FTOK_SHR_ASSIGN] = 2u,
+    [FTOK_QUESTION] = 3u,
+    [FTOK_LOR] = 4u,
+    [FTOK_LAND] = 5u,
+    [FTOK_PIPE] = 6u,
+    [FTOK_CARET] = 7u,
+    [FTOK_AMP] = 8u,
+    [FTOK_EQ] = 9u,
+    [FTOK_NE] = 9u,
+    [FTOK_LT] = 10u,
+    [FTOK_LE] = 10u,
+    [FTOK_GT] = 10u,
+    [FTOK_GE] = 10u,
+    [FTOK_LSHIFT] = 11u,
+    [FTOK_RSHIFT] = 11u,
+    [FTOK_PLUS] = 12u,
+    [FTOK_MINUS] = 12u,
+    [FTOK_STAR] = 13u,
+    [FTOK_SLASH] = 13u,
+    [FTOK_PERCENT] = 13u,
+};
+
+// #3577: the loosest binary or conditional operator of tokens [S, E) outside brackets (its precedence into
+// *OUT_PRECEDENCE, fast_switch_binary_precedence's), or UINT32_MAX: the last of a left-associative level, the first of a
+// right one. A conditional's middle, between `?` and its `:`, is a bracket of its own; a cast is a prefix.
+static uint32_t fast_cc_loosest_operator(const FastCCState* cc, uint32_t s, uint32_t e, uint32_t* out_precedence)
+{
+    uint32_t best = UINT32_MAX;
+    uint32_t best_precedence = 99u;
+    bool operand = false;
+    uint32_t p = s;
+    while (p < e)
+    {
+        const uint8_t t = cc->tk[p];
+        const uint32_t precedence = fast_switch_binary_precedence[t];
+        const bool ambiguous = t == FTOK_PLUS || t == FTOK_MINUS || t == FTOK_STAR || t == FTOK_AMP;
+        if (t == FTOK_LPAREN || t == FTOK_LBRACKET || t == FTOK_LBRACE)
+        {
+            // A cast is a prefix; a compound literal, a group, a call or a subscript is an operand.
+            const bool cast = t == FTOK_LPAREN && !operand && fast_cc_is_type_start(cc, p + 1u);
+            p = fast_cc_group_end(cc, p);
+            const bool compound = cast && p < e && cc->tk[p] == FTOK_LBRACE;
+            p = compound ? fast_cc_group_end(cc, p) : p;
+            operand = !cast || compound;
+        }
+        else if ((t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF) && p + 1u < e && cc->tk[p + 1u] == FTOK_LPAREN &&
+                 fast_cc_is_type_start(cc, p + 2u))
+        {
+            p = fast_cc_group_end(cc, p + 1u);
+            operand = true;
+        }
+        else if (precedence != 0 && (!ambiguous || operand))
+        {
+            const bool right = precedence == 2u || precedence == 3u;
+            if (precedence < best_precedence || (precedence == best_precedence && !right))
+            {
+                best = p;
+                best_precedence = precedence;
+            }
+            p += 1u;
+            if (t == FTOK_QUESTION)
+            {
+                // Past the middle to its `:` (nested conditionals' colons pair first).
+                uint32_t nested = 0;
+                while (p < e && (cc->tk[p] != FTOK_COLON || nested != 0))
+                {
+                    const uint8_t m = cc->tk[p];
+                    nested += (uint32_t)(m == FTOK_QUESTION);
+                    nested -= (uint32_t)(m == FTOK_COLON);
+                    p = (m == FTOK_LPAREN || m == FTOK_LBRACKET || m == FTOK_LBRACE) ? fast_cc_group_end(cc, p) : p + 1u;
+                }
+                p += 1u;
+            }
+            operand = false;
+        }
+        else if (t == FTOK_DOT || t == FTOK_ARROW)
+        {
+            p += 2u;
+            operand = true;
+        }
+        else if (t == FTOK_INC || t == FTOK_DEC)
+        {
+            p += 1u;
+        }
+        else
+        {
+            // A name, a literal, `__func__` (operands), or a prefix operator.
+            operand = t == FTOK_IDENT || t == FTOK_INT_LIT || t == FTOK_INT_U32 || t == FTOK_INT_I64 || t == FTOK_INT_U64 ||
+                      t == FTOK_FLOAT_LIT || t == FTOK_FLOAT32 || t == FTOK_FLOAT80 || t == FTOK_CHAR_LIT ||
+                      t == FTOK_STR_LIT || t == FTOK_KW_FUNC || t == FTOK_KW_GENERIC;
+            p += 1u;
+        }
+    }
+    *out_precedence = best_precedence;
+    return best;
+}
+
+// #3577: whether sizeof's parenthesized operand at LPAREN is the full pipeline's -Wsizeof-array-decay ("sizeof on pointer
+// operation will return size of 'int *' instead of 'int[3]'"), clang's warnOnSizeofOnArrayDecay: a binary operator whose
+// value has the type of an operand that is an array decaying, `+`'s either one, `-`'s left one, a comma's or an
+// assignment's right one (`sizeof(a + 0)`, `sizeof((0, a))`). An operand may be an array where it is one by name, a string
+// literal, or a postfix chain or `*` whose type its tokens don't say; an operator's value, a call, a cast and any other
+// unary operator's aren't.
+static __attribute__((cold, noinline)) bool fast_cc_sizeof_decays(const FastCCState* cc, uint32_t lparen)
+{
+    uint32_t s = lparen;
+    uint32_t e = fast_cc_group_end(cc, lparen);
+    while (s < e && cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e && !fast_cc_is_type_start(cc, s + 1u))
+    {
+        s += 1u;
+        e -= 1u;
+    }
+    uint32_t precedence = 0;
+    const uint32_t op = s < e ? fast_cc_loosest_operator(cc, s, e, &precedence) : UINT32_MAX;
+    const uint8_t k = op != UINT32_MAX ? cc->tk[op] : FTOK_EOF;
+    // Which sides count: bit 0 the left one, bit 1 the right one.
+    const uint32_t sides = k == FTOK_PLUS ? 3u : k == FTOK_MINUS ? 1u : (k == FTOK_COMMA || k == FTOK_ASSIGN) ? 2u : 0u;
+    bool decays = false;
+    for (uint32_t side = 0; side < 2u && !decays; side += 1u)
+    {
+        uint32_t a = side == 0 ? s : op + 1u;
+        uint32_t b = side == 0 ? op : e;
+        while (((sides >> side) & 1u) != 0 && a < b && cc->tk[a] == FTOK_LPAREN && fast_cc_group_end(cc, a) == b && !fast_cc_is_type_start(cc, a + 1u))
+        {
+            a += 1u;
+            b -= 1u;
+        }
+        uint32_t inner = 0;
+        const bool counted = ((sides >> side) & 1u) != 0 && a < b;
+        const bool operated = counted && fast_cc_loosest_operator(cc, a, b, &inner) != UINT32_MAX;
+        const uint8_t t = counted ? cc->tk[a] : FTOK_EOF;
+        const uint8_t last = counted ? cc->tk[b - 1u] : FTOK_EOF;
+        const bool unary = t == FTOK_MINUS || t == FTOK_PLUS || t == FTOK_BANG || t == FTOK_TILDE || t == FTOK_AMP || t == FTOK_INC ||
+                           t == FTOK_DEC || t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF || (t == FTOK_LPAREN && fast_cc_is_type_start(cc, a + 1u) &&
+                                                                                           fast_cc_group_end(cc, a) < b && cc->tk[fast_cc_group_end(cc, a)] != FTOK_LBRACE);
+        // A call: its `)` closes a group whose `(` follows a name, a `)` or a `]`.
+        uint32_t open = b - 1u;
+        if (counted && last == FTOK_RPAREN)
+        {
+            uint32_t depth = 0;
+            uint32_t q = b;
+            while (q > a)
+            {
+                q -= 1u;
+                const uint8_t u = cc->tk[q];
+                depth += (uint32_t)(u == FTOK_RPAREN) | (uint32_t)(u == FTOK_RBRACKET) | (uint32_t)(u == FTOK_RBRACE);
+                depth -= (uint32_t)(u == FTOK_LPAREN) | (uint32_t)(u == FTOK_LBRACKET) | (uint32_t)(u == FTOK_LBRACE);
+                if (depth == 0) { break; }
+            }
+            open = q;
+        }
+        const bool call = counted && last == FTOK_RPAREN && open > a &&
+                          (cc->tk[open - 1u] == FTOK_IDENT || cc->tk[open - 1u] == FTOK_RPAREN || cc->tk[open - 1u] == FTOK_RBRACKET);
+        const uint32_t id = t == FTOK_IDENT && b == a + 1u ? cc->td[a] : 0u;
+        const uint32_t si = id != 0 && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+        const bool literal = b == a + 1u && (t == FTOK_INT_LIT || t == FTOK_INT_U32 || t == FTOK_INT_I64 || t == FTOK_INT_U64 || t == FTOK_FLOAT_LIT ||
+                                              t == FTOK_FLOAT32 || t == FTOK_FLOAT80 || t == FTOK_CHAR_LIT);
+        const bool named = id != 0;
+        decays = counted && !operated && !unary && !call && !literal &&
+                 (t == FTOK_STR_LIT || (named && (si == 0 || ftype_is_array(cc->syms[si].type))) || !named);
+    }
+    return decays;
+}
+
+// #3577: whether a switch's controlling expression, tokens [START, END) of type TYPE (not _Bool), may have a boolean
+// value, the full pipeline's -Wswitch-bool (clang's Expr::isKnownToHaveBooleanValue): through parentheses, a comparison,
+// a logical operator or `!`; a `&`, `|`, `^` or conditional whose operands (arms) all are; a comma's right operand, an
+// assignment's right operand where its left one isn't _Bool, and unary `+`'s operand; a value of type _Bool. A cast or a
+// call is its type's. Each range is split at its loosest operator outside brackets, without recursion; a leaf whose type
+// its tokens don't say (a member, a subscript, a builtin's call) is maybe, and so is a range past the stack's bound. The
+// answer is the leaves' conjunction; the caller leaves on yes or maybe.
+static __attribute__((cold, noinline)) bool fast_cc_switch_boolean(const FastCCState* cc, uint32_t start, uint32_t end)
+{
+    uint32_t ranges[16][2];
+    uint8_t root[16];
+    uint32_t count = 1u;
+    ranges[0][0] = start;
+    ranges[0][1] = end;
+    root[0] = 1u;
+    uint32_t answer = BUSTER_FBOOL_YES;
+    while (count != 0 && answer != BUSTER_FBOOL_NO)
+    {
+        count -= 1u;
+        uint32_t s = ranges[count][0];
+        const uint32_t e = ranges[count][1];
+        const uint8_t is_root = root[count];
+        s += (uint32_t)(s < e && cc->tk[s] == FTOK_KW_EXTENSION);
+        uint32_t leaf = BUSTER_FBOOL_MAYBE;
+        bool split = false;
+        if (s >= e)
+        {
+            leaf = BUSTER_FBOOL_MAYBE;
+        }
+        else if (cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e && !fast_cc_is_type_start(cc, s + 1u))
+        {
+            // Parentheses around the whole range: its value, and its type where the range's was the expression's.
+            ranges[count][0] = s + 1u;
+            ranges[count][1] = e - 1u;
+            root[count] = is_root;
+            count += 1u;
+            split = true;
+        }
+        else
+        {
+            uint32_t best_precedence = 99u;
+            const uint32_t best = fast_cc_loosest_operator(cc, s, e, &best_precedence);
+            if (best != UINT32_MAX && count + 2u <= 16u)
+            {
+                const uint8_t op = cc->tk[best];
+                split = true;
+                if (op == FTOK_COMMA)
+                {
+                    ranges[count][0] = best + 1u;
+                    ranges[count][1] = e;
+                    root[count] = is_root;
+                    count += 1u;
+                }
+                else if (op == FTOK_QUESTION)
+                {
+                    // Both arms; GNU's `c ?: d` takes the condition for its first.
+                    uint32_t c = best + 1u;
+                    uint32_t nested = 0;
+                    while (c < e && (cc->tk[c] != FTOK_COLON || nested != 0))
+                    {
+                        const uint8_t m = cc->tk[c];
+                        nested += (uint32_t)(m == FTOK_QUESTION);
+                        nested -= (uint32_t)(m == FTOK_COLON);
+                        c = (m == FTOK_LPAREN || m == FTOK_LBRACKET || m == FTOK_LBRACE) ? fast_cc_group_end(cc, c) : c + 1u;
+                    }
+                    const bool omitted = c == best + 1u;
+                    ranges[count][0] = omitted ? s : best + 1u;
+                    ranges[count][1] = omitted ? best : c;
+                    root[count] = 0;
+                    ranges[count + 1u][0] = c + 1u;
+                    ranges[count + 1u][1] = e;
+                    root[count + 1u] = 0;
+                    count += 2u;
+                }
+                else if (best_precedence == 2u)
+                {
+                    // An assignment's type is its left operand's: a name's is known. `=` is then its right operand's value.
+                    const bool named = best == s + 1u && cc->tk[s] == FTOK_IDENT;
+                    const uint32_t id = named ? cc->td[s] : 0u;
+                    const uint32_t si = id != 0 && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+                    const bool typed = si != 0 && (cc->syms[si].kind == FSYM_LOCAL || cc->syms[si].kind == FSYM_GLOBAL);
+                    if (!typed)
+                    {
+                        split = false;
+                        leaf = BUSTER_FBOOL_MAYBE;
+                    }
+                    else if (ftype_is_bool(cc->syms[si].type))
+                    {
+                        split = false;
+                        leaf = BUSTER_FBOOL_YES;
+                    }
+                    else if (op == FTOK_ASSIGN)
+                    {
+                        ranges[count][0] = best + 1u;
+                        ranges[count][1] = e;
+                        root[count] = 0;
+                        count += 1u;
+                    }
+                    else
+                    {
+                        split = false;
+                        leaf = BUSTER_FBOOL_NO;
+                    }
+                }
+                else if (op == FTOK_PIPE || op == FTOK_CARET || op == FTOK_AMP)
+                {
+                    ranges[count][0] = s;
+                    ranges[count][1] = best;
+                    root[count] = 0;
+                    ranges[count + 1u][0] = best + 1u;
+                    ranges[count + 1u][1] = e;
+                    root[count + 1u] = 0;
+                    count += 2u;
+                }
+                else
+                {
+                    // A logical operator or a comparison is boolean; any other operator isn't.
+                    split = false;
+                    leaf = best_precedence >= 4u && best_precedence <= 10u && best_precedence != 6u && best_precedence != 7u &&
+                           best_precedence != 8u ? BUSTER_FBOOL_YES : BUSTER_FBOOL_NO;
+                }
+            }
+            else if (best != UINT32_MAX)
+            {
+                leaf = BUSTER_FBOOL_MAYBE;
+            }
+            else
+            {
+                // A unary operator, a cast, or a postfix chain from a name or a literal.
+                const uint8_t t = cc->tk[s];
+                const bool literal = t == FTOK_INT_LIT || t == FTOK_INT_U32 || t == FTOK_INT_I64 || t == FTOK_INT_U64 || t == FTOK_FLOAT_LIT ||
+                                     t == FTOK_FLOAT32 || t == FTOK_FLOAT80 || t == FTOK_CHAR_LIT || t == FTOK_STR_LIT;
+                const uint32_t id = t == FTOK_IDENT ? cc->td[s] : 0u;
+                const uint32_t si = id != 0 && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+                const FastSym* sym = si != 0 ? cc->syms + si : NULL;
+                if (t == FTOK_BANG)
+                {
+                    leaf = BUSTER_FBOOL_YES;
+                }
+                else if (t == FTOK_PLUS)
+                {
+                    ranges[count][0] = s + 1u;
+                    ranges[count][1] = e;
+                    root[count] = 0;
+                    count += 1u;
+                    split = true;
+                }
+                else if (t == FTOK_MINUS || t == FTOK_TILDE || t == FTOK_AMP || t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF || is_root != 0)
+                {
+                    // Not boolean, or the whole expression's type, which isn't _Bool.
+                    leaf = BUSTER_FBOOL_NO;
+                }
+                else if (literal && e == s + 1u)
+                {
+                    leaf = BUSTER_FBOOL_NO;
+                }
+                else if (t == FTOK_LPAREN && fast_cc_is_type_start(cc, s + 1u))
+                {
+                    // A cast: _Bool by its keyword or a typedef of it alone; any other type isn't.
+                    const uint32_t close = fast_cc_group_end(cc, s) - 1u;
+                    bool is_bool = false;
+                    bool known = true;
+                    for (uint32_t q = s + 1u; q < close; q += 1u)
+                    {
+                        const uint8_t c = cc->tk[q];
+                        const uint32_t tid = c == FTOK_IDENT ? cc->td[q] : 0u;
+                        const uint32_t tsi = tid != 0 && tid < cc->env_cap ? cc->sym_cur[tid] : 0u;
+                        is_bool = is_bool || c == FTOK_KW_BOOL || (tsi != 0 && cc->syms[tsi].kind == FSYM_TYPEDEF && ftype_is_bool(cc->syms[tsi].type));
+                        known = known && c != FTOK_KW_TYPEOF && (c != FTOK_IDENT || tsi != 0);
+                        is_bool = is_bool && c != FTOK_STAR && c != FTOK_LBRACKET && c != FTOK_LPAREN;
+                    }
+                    leaf = !known ? BUSTER_FBOOL_MAYBE : is_bool ? BUSTER_FBOOL_YES : BUSTER_FBOOL_NO;
+                }
+                else if (sym != NULL && e == s + 1u && sym->kind != FSYM_TYPEDEF)
+                {
+                    leaf = sym->kind != FSYM_FUNC && ftype_is_bool(sym->type) ? BUSTER_FBOOL_YES : BUSTER_FBOOL_NO;
+                }
+                else if (sym != NULL && sym->kind == FSYM_FUNC && ftype_is_func(sym->type) && e > s + 1u && cc->tk[s + 1u] == FTOK_LPAREN &&
+                         fast_cc_group_end(cc, s + 1u) == e)
+                {
+                    // A named function's call: its result's type.
+                    const FastComplexType* fn = cc->ctypes + (sym->type & BUSTER_FTYPE_CIDX_MASK);
+                    leaf = ftype_is_bool(ftype_unqual(fn->inner)) ? BUSTER_FBOOL_YES : BUSTER_FBOOL_NO;
+                }
+            }
+        }
+        if (!split)
+        {
+            answer = leaf == BUSTER_FBOOL_NO ? BUSTER_FBOOL_NO : (leaf == BUSTER_FBOOL_MAYBE ? BUSTER_FBOOL_MAYBE : answer);
+        }
+    }
+    return answer != BUSTER_FBOOL_NO;
+}
+
+// Compile one complete function body starting at `cc->pos` == '{'!
 static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym_idx, uint32_t param_names_start, uint16_t param_count)
 {
     FastObj* obj = cc->obj;
@@ -6910,7 +11552,9 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     if (!ftype_is_func(fn_t)) { fast_cc_bail(cc, "compile non-func"); return; }
     const FastComplexType* fn = cc->ctypes + (fn_t & BUSTER_FTYPE_CIDX_MASK);
     const FastType ret_t = ftype_unqual(fn->inner);
-    if (ftype_is_unsupported(ret_t)) { fast_cc_bail(cc, "unsupported return type"); return; }
+    // #3577: a checked inline body's long double (fast_cc_checked_long_double) is its return type, a parameter's or a
+    // local's, and takes the code of an 8-byte integer's, which is dropped.
+    if (ftype_is_unsupported(ret_t) && !fast_cc_checked_long_double(cc, ret_t, ret_t)) { fast_cc_bail(cc, "unsupported return type"); return; }
 
     // 1. AVX-512 body prescan: verify matching '}' and reject unsupported extensions BEFORE emitting any bytes!
     const FastBodyScan scan = fast_cc_prescan_body(cc, cc->pos);
@@ -6946,6 +11590,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     cc->cur_va_gp_init = 0;
     cc->cur_va_fp_init = 48u;
     cc->cur_va_overflow_off = 16;
+    cc->cur_last_param = param_count != 0 ? cc->param_names[param_names_start + param_count - 1u] & BUSTER_FPARAM_NAME_MASK : 0u;
+    cc->cur_variadic = cc->ctypes[fn_sym->type & BUSTER_FTYPE_CIDX_MASK].is_variadic;
 
     const uint32_t file_sym_count = cc->sym_count;
     const uint32_t func_scope_mark = fast_cc_scope_enter(cc);
@@ -6956,9 +11602,11 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     uint32_t fp_idx = 0;
     int32_t stk_off = 16; // first stack parameter at [rbp + 16]
 
-    // Hidden sret pointer for >16B struct return
-    if (ftype_is_record(ret_t) && cc->ctypes[ret_t & BUSTER_FTYPE_CIDX_MASK].abi_lo == FABI_MEM)
+    // Hidden sret pointer for >16B struct return (#3577: an aligned typedef's record is refused, BUSTER_FAST_RECORD_OVERALIGNED).
+    if (ftype_is_record(ret_t) &&
+        ((uint32_t)(cc->ctypes[ret_t & BUSTER_FTYPE_CIDX_MASK].abi_lo == FABI_MEM) | (uint32_t)BUSTER_FAST_RECORD_OVERALIGNED(cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK))) != 0)
     {
+        if (BUSTER_FAST_RECORD_OVERALIGNED(cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK))) { fast_cc_bail(cc, "an aligned typedef's record by value"); }
         cc->cur_sret_off = fast_cc_alloc_local(cc, 8u, 8u);
         x86_store(obj, FREG_RBP, cc->cur_sret_off, FREG_RDI, 8u);
         gp_idx = 1u;
@@ -6988,18 +11636,28 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         fast_label_bind(obj, lbl_skip_fp);
     }
 
-    // Home each parameter into `[rbp + off]` and bind in function scope
+    // Home each parameter into `[rbp + off]` and bind in function scope. The parameters share the body's outermost
+    // block's scope (#3577): bound one level deeper, a declaration there of a parameter's name is its redefinition, which
+    // the binding's same-scope check then finds.
     const uint32_t pcnt = fn->count;
+    cc->scope_depth += 1u;
+    cc->cur_array_params = 0;
     for (uint32_t i = 0; i < pcnt && !cc->bailout; i += 1)
     {
         const FastType pt = cc->param_types[fn->start + i];
-        if (ftype_is_unsupported(pt)) { fast_cc_bail(cc, "unsupported param type"); break; }
-        const uint32_t pname = i < param_count ? cc->param_names[param_names_start + i] : 0u;
+        if (ftype_is_unsupported(pt) && !fast_cc_checked_long_double(cc, pt, pt)) { fast_cc_bail(cc, "unsupported param type"); break; }
+        const uint32_t recorded = i < param_count ? cc->param_names[param_names_start + i] : 0u;
+        const uint32_t pname = recorded & BUSTER_FPARAM_NAME_MASK;
+        const uint8_t array_param = (uint8_t)(recorded >> 31);
+        cc->cur_array_params |= array_param;
+        // #3577: a definition's unnamed parameter is a C23 extension the full pipeline warns of.
+        if (pname == 0) { fast_cc_bail(cc, "unnamed parameter in a definition"); break; }
         int32_t slot = 0;
 
         if (ftype_is_record(pt))
         {
             const FastComplexType* rct = cc->ctypes + (pt & BUSTER_FTYPE_CIDX_MASK);
+            if (BUSTER_FAST_RECORD_OVERALIGNED(rct)) { fast_cc_bail(cc, "an aligned typedef's record by value"); }
             bool in_regs = false;
             if (rct->abi_lo != FABI_MEM)
             {
@@ -7051,12 +11709,14 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
 
         if (pname != 0)
         {
-            fast_cc_sym_bind(cc, pname, (FastSym){ .kind = FSYM_LOCAL, .type = pt, .stack_off = slot });
+            fast_cc_sym_bind(cc, pname, (FastSym){ .kind = FSYM_LOCAL, .type = pt, .stack_off = slot, .pad_sym = { array_param, 0u },
+                                                   .use_flags = (uint8_t)(BUSTER_FSYM_REGISTER * (uint32_t)((recorded & BUSTER_FPARAM_REGISTER) != 0)) });
         }
     }
     cc->cur_va_gp_init = gp_idx * 8u;
     cc->cur_va_fp_init = 48u + fp_idx * 16u;
     cc->cur_va_overflow_off = stk_off;
+    cc->scope_depth -= 1u;
 
     // 5. Iterative statement execution state machine!
     FastStmtFrame sstack[BUSTER_FSTMT_FRAMES];
@@ -7081,7 +11741,13 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     }
     FastUserLabel* ulabels = (FastUserLabel*)fast_arena_alloc(cc->scratch, 512u * sizeof(FastUserLabel), 8);
     uint32_t ulabel_count = 0;
-    bool saw_return_or_exit = false;
+    // #3577: whether the point compiled may be reached, as the full pipeline's -Wreturn-type sees it at the body's end:
+    // over-approximated (an if's condition may be false, a loop's but a constant true one's ends it, a label is a
+    // goto's target), so that an end this path calls unreachable is one the full pipeline does. A break or a continue
+    // marks the frame of its target (break_frame, cont_frame).
+    bool live = true;
+    uint8_t break_frame[64];
+    uint8_t cont_frame[64];
 
     if (sw_cases == NULL || ulabels == NULL)
     {
@@ -7123,16 +11789,29 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     top->dead = (uint8_t)((uint32_t)dead_else * BUSTER_FDEAD_ELSE);
                     top->lbl0 = end_lbl;
                     top->entered_body = 0;
+                    top->then_live = (uint8_t)live;
+                    live = true;
                     continue;
+                }
+                if (top->trailing_else != 0)
+                {
+                    fast_cc_bail(cc, "an else the full pipeline's -Wdangling-else questions");
+                    break;
                 }
                 fast_label_bind(obj, top->lbl0);
                 ssp -= 1u;
+                live = true;
                 continue;
             }
             if (top->kind == FSTK_IF_ELSE)
             {
                 cc->dead -= (uint32_t)(top->dead == BUSTER_FDEAD_ELSE);
                 fast_label_bind(obj, top->lbl0);
+                live = live || top->then_live != 0;
+                if (top->labeled == 0)
+                {
+                    BUSTER_FSTK_ENDS_IN_ELSE(sstack, ssp)
+                }
                 ssp -= 1u;
                 continue;
             }
@@ -7140,6 +11819,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             {
                 x86_jmp_label(obj, top->lbl0); // cond_lbl
                 fast_label_bind(obj, top->lbl1); // break_lbl
+                live = ((uint32_t)(top->infinite == 0) | (uint32_t)(top->broke != 0)) != 0;
                 break_sp -= 1u;
                 cont_sp -= 1u;
                 ssp -= 1u;
@@ -7154,12 +11834,18 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     break;
                 }
                 cc->pos += 2u;
-                fast_cc_expr(cc, false, true, true, top->lbl0, NULL); // jump back to body_lbl if true!
+                const uint32_t infinite = (uint32_t)(fast_cc_peek(cc) == FTOK_INT_LIT) & (uint32_t)(fast_cc_data(cc) != 0) &
+                                          (uint32_t)(fast_cc_peek_at(cc, 1u) == FTOK_RPAREN);
+                fast_cc_expr(cc, false, false, true, true, top->lbl0, NULL); // jump back to body_lbl if true!
                 fast_cc_reset_tmps(cc);
                 if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) in do-while"); break; }
                 cc->pos += 1u;
-                if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
+                // #3577: the statement ends with `;`, or the full pipeline's error.
+                if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; after a statement"); break; }
+                cc->pos += 1u;
                 fast_label_bind(obj, top->lbl2); // break_lbl
+                // Left by a break, or by the condition, reached from the body's end or a continue, unless a constant true.
+                live = ((uint32_t)(top->broke != 0) | (((uint32_t)live | (uint32_t)(top->continued != 0)) & (infinite ^ 1u))) != 0;
                 break_sp -= 1u;
                 cont_sp -= 1u;
                 ssp -= 1u;
@@ -7172,13 +11858,14 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 {
                     const uint32_t save_after = cc->pos;
                     cc->pos = top->step_pos;
-                    fast_cc_expr(cc, false, false, false, 0, NULL);
+                    fast_cc_expr(cc, false, true, false, false, 0, NULL);
                     fast_cc_reset_tmps(cc);
                     cc->pos = save_after;
                 }
                 x86_jmp_label(obj, top->lbl0); // cond_lbl
                 fast_label_bind(obj, top->lbl2); // break_lbl
                 fast_cc_scope_leave(cc, top->scope_mark);
+                live = ((uint32_t)(top->infinite == 0) | (uint32_t)(top->broke != 0)) != 0;
                 break_sp -= 1u;
                 cont_sp -= 1u;
                 ssp -= 1u;
@@ -7189,8 +11876,14 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 x86_jmp_label(obj, top->lbl1); // jump past dispatch to break_lbl!
                 fast_label_bind(obj, top->lbl0); // dispatch_lbl
                 const FastSwitchCtx* sw = sw_stack + top->sw_idx;
+                if (sw->enum_cidx != 0 && !cc->quiet && !fast_cc_switch_enum_quiet(cc, sw, sw_cases + sw->case_start))
+                {
+                    fast_cc_bail(cc, "switch on an enum the full pipeline's -Wswitch questions");
+                    break;
+                }
                 fast_cc_emit_switch_dispatch(cc, sw, sw_cases + sw->case_start);
                 fast_label_bind(obj, top->lbl1); // break_lbl
+                live = ((uint32_t)live | (uint32_t)(sw->default_lbl == UINT32_MAX) | (uint32_t)(top->broke != 0)) != 0;
                 // Pop this switch's hash chains. An enclosing switch can already have a case in the same bucket.
                 while (sw_case_used > sw->case_start)
                 {
@@ -7219,6 +11912,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         }
 
         // Consume any leading `case expr :`, `default :`, or `label :` prefixes!
+        const uint32_t prefix_start = cc->pos;
         while (!cc->bailout)
         {
             const uint8_t pk = cc->pos == first_pos ? first : fast_cc_peek(cc);
@@ -7256,6 +11950,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     cur_sw->case_count += 1u;
                 }
                 else { fast_cc_bail(cc, "too many switch cases"); break; }
+                live = true;
                 continue;
             }
             if (pk == FTOK_KW_DEFAULT)
@@ -7268,6 +11963,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 const uint32_t dlbl = fast_label_new(obj);
                 fast_label_bind(obj, dlbl);
                 sw_stack[sw_sp - 1u].default_lbl = dlbl;
+                live = true;
                 continue;
             }
             if (pk == FTOK_IDENT && fast_cc_peek_at(cc, 1u) == FTOK_COLON)
@@ -7278,12 +11974,30 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 const uint32_t ll = fast_cc_get_user_label(obj, ulabels, &ulabel_count, 512u, lid_name, true, &lok);
                 if (!lok) { fast_cc_bail(cc, "duplicate or overflow label"); break; }
                 fast_label_bind(obj, ll);
+                live = true;
                 continue;
             }
             if (pk == FTOK_KW_ATTRIBUTE)
             {
-                // GCC/C23 __attribute__((fallthrough));
-                fast_cc_parse_attributes(cc, NULL);
+                // GCC's `__attribute__((fallthrough));`, which must directly precede a case or default label
+                // (fast_cc_fallthrough_placed); any other statement attribute, or one elsewhere, is the full pipeline's
+                // (#3577).
+                bool fallthrough = fast_cc_peek_at(cc, 1u) == FTOK_LPAREN && fast_cc_peek_at(cc, 2u) == FTOK_LPAREN &&
+                                   fast_cc_peek_at(cc, 3u) == FTOK_IDENT && fast_cc_peek_at(cc, 4u) == FTOK_RPAREN &&
+                                   fast_cc_peek_at(cc, 5u) == FTOK_RPAREN && fast_cc_peek_at(cc, 6u) == FTOK_SEMI;
+                if (fallthrough)
+                {
+                    uint32_t flen = 0;
+                    const char* fs = fast_cc_ident_str(cc, cc->td[cc->pos + 3u], &flen);
+                    fallthrough = ((flen == 11u && memcmp(fs, "fallthrough", 11) == 0) || (flen == 15u && memcmp(fs, "__fallthrough__", 15) == 0)) &&
+                                  fast_cc_fallthrough_placed(cc, sstack, ssp, cc->pos + 7u);
+                }
+                if (!fallthrough)
+                {
+                    fast_cc_bail(cc, "statement attribute");
+                    break;
+                }
+                cc->pos += 7u;
                 continue;
             }
             break;
@@ -7314,15 +12028,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         // 3. `_Static_assert(...)` inside function
         if (k == FTOK_KW_STATIC_ASSERT)
         {
-            cc->pos += 1u;
-            if (fast_cc_peek(cc) == FTOK_LPAREN)
-            {
-                cc->pos += 1u;
-                if (fast_cc_const_int_expr(cc, true) == 0) { fast_cc_bail(cc, "_Static_assert failed"); break; }
-                while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_RPAREN) { cc->pos += 1u; }
-                if (fast_cc_peek(cc) == FTOK_RPAREN) { cc->pos += 1u; }
-                if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
-            }
+            fast_cc_static_assert(cc);
+            if (cc->bailout) { break; }
             continue;
         }
 
@@ -7330,14 +12037,18 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         if (k == FTOK_KW_IF)
         {
             if (ssp >= BUSTER_FSTMT_FRAMES) { fast_cc_bail(cc, "stmt nesting depth"); break; }
+            const uint8_t if_labeled = (uint8_t)(cc->pos != prefix_start);
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "expected ( after if"); break; }
             cc->pos += 1u;
             const uint32_t else_lbl = fast_label_new(obj);
-            fast_cc_expr(cc, false, true, false, else_lbl, NULL);
+            fast_cc_expr(cc, false, false, true, false, else_lbl, NULL);
             fast_cc_reset_tmps(cc);
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) after if cond"); break; }
             cc->pos += 1u;
+            // #3577: an empty statement on the condition's line is the full pipeline's -Wempty-body (`if (x);`); the
+            // tokens don't say their lines, nor where an empty macro stood, so any `;` here leaves.
+            if (fast_cc_peek(cc) == FTOK_SEMI) { fast_cc_bail(cc, "an if's empty statement"); break; }
             // A constant condition's dead branch is checked without code where it's simple enough (#3592): musl's
             // FORCE_EVAL of a double has a long double branch, a call of fp_force_evall.
             const uint32_t constant = cc->branch_constant * (uint32_t)(cc->dead == 0);
@@ -7348,7 +12059,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             }
             cc->dead += (uint32_t)dead_then;
             const uint8_t dead = (uint8_t)((uint32_t)dead_then * BUSTER_FDEAD_THEN + (uint32_t)(constant == BUSTER_FCONSTANT_TRUE) * BUSTER_FDEAD_TRUE);
-            sstack[ssp++] = (FastStmtFrame){ .kind = FSTK_IF_THEN, .dead = dead, .lbl0 = else_lbl };
+            sstack[ssp++] = (FastStmtFrame){ .kind = FSTK_IF_THEN, .dead = dead, .lbl0 = else_lbl, .labeled = if_labeled };
             continue;
         }
 
@@ -7359,16 +12070,19 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "expected ( after while"); break; }
             cc->pos += 1u;
+            const bool infinite = fast_cc_peek(cc) == FTOK_INT_LIT && fast_cc_data(cc) != 0 && fast_cc_peek_at(cc, 1u) == FTOK_RPAREN;
             const uint32_t cond_lbl = fast_label_new(obj);
             const uint32_t brk_lbl = fast_label_new(obj);
             fast_label_bind(obj, cond_lbl);
-            fast_cc_expr(cc, false, true, false, brk_lbl, NULL);
+            fast_cc_expr(cc, false, false, true, false, brk_lbl, NULL);
             fast_cc_reset_tmps(cc);
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) after while cond"); break; }
             cc->pos += 1u;
+            break_frame[break_sp] = (uint8_t)ssp;
+            cont_frame[cont_sp] = (uint8_t)ssp;
             break_stack[break_sp++] = brk_lbl;
             cont_stack[cont_sp++] = cond_lbl;
-            sstack[ssp++] = (FastStmtFrame){ .kind = FSTK_WHILE, .lbl0 = cond_lbl, .lbl1 = brk_lbl };
+            sstack[ssp++] = (FastStmtFrame){ .kind = FSTK_WHILE, .lbl0 = cond_lbl, .lbl1 = brk_lbl, .infinite = (uint8_t)infinite };
             continue;
         }
 
@@ -7381,6 +12095,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             const uint32_t cont_lbl = fast_label_new(obj);
             const uint32_t brk_lbl = fast_label_new(obj);
             fast_label_bind(obj, body_lbl);
+            break_frame[break_sp] = (uint8_t)ssp;
+            cont_frame[cont_sp] = (uint8_t)ssp;
             break_stack[break_sp++] = brk_lbl;
             cont_stack[cont_sp++] = cont_lbl;
             sstack[ssp++] = (FastStmtFrame){ .kind = FSTK_DO_WHILE, .lbl0 = body_lbl, .lbl1 = cont_lbl, .lbl2 = brk_lbl };
@@ -7404,25 +12120,49 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             {
                 FastDeclSpecs ds = { 0 };
                 const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
-                // A for's declaration is of automatic objects; clang takes static, extern and typedef there too (#3599).
-                if ((ds.written & ~(BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0)
+                // #3577: a for clause's declaration declares automatic objects alone (#3599: clang takes static, extern and
+                // typedef there too, and inline and _Noreturn belong to functions); and its attributes are a local's.
+                if (((uint32_t)((ds.written & ~(BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0) | (uint32_t)ds.attr.present) != 0)
                 {
                     fast_cc_bail(cc, "a for's declaration of a non-local");
+                    break;
                 }
+                // #3577: and the rules of a block's: a declaration declares something (fast_cc_tag_declaration_quiet);
+                // an object's type is supported and complete; a const local has a fold class, and is initialized.
+                if (fast_cc_peek(cc) == FTOK_SEMI && !fast_cc_tag_declaration_quiet(&ds)) { fast_cc_bail(cc, "declaration declares nothing"); break; }
                 while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_SEMI && !cc->bailout)
                 {
                     FastDeclaratorResult dr = { 0 };
                     if (!fast_cc_parse_declarator(cc, btype, false, &dr, false)) { break; }
                     if (dr.attr.asm_label != NULL) { fast_cc_bail(cc, "asm label in a for's declaration"); break; }
-                    const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_LOCAL, .type = dr.type }) : 0u;
+                    const uint32_t initialized = (uint32_t)(fast_cc_peek(cc) == FTOK_ASSIGN);
+                    const uint32_t incomplete = BUSTER_FAST_OBJECT_INCOMPLETE(cc, dr.type, initialized);
+                    if (((uint32_t)(dr.attr.present != 0) | (uint32_t)ftype_is_func(dr.type) | (uint32_t)ds.is_unsupported_type |
+                         (uint32_t)ftype_is_unsupported(dr.type) | incomplete) != 0)
+                    {
+                        fast_cc_bail(cc, incomplete != 0 ? "object of incomplete type" : "for clause's declarator");
+                        break;
+                    }
+                    const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){
+                        .kind = FSYM_LOCAL, .type = dr.type, .use_flags = (uint8_t)(ds.is_register * BUSTER_FSYM_REGISTER) }) : 0u;
                     int32_t loff = 0;
-                    if (fast_cc_peek(cc) == FTOK_ASSIGN)
+                    if (initialized != 0)
                     {
                         cc->pos += 1u;
+                        const uint32_t init_start = cc->pos;
+                        cc->init_kind = FVAL_VOID;
                         loff = fast_cc_init_local(cc, &dr.type, ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned);
+                        BUSTER_FAST_LOCAL_FOLD(cc, lsi, dr.type, init_start)
                     }
                     else
                     {
+                        uint32_t uninitialized_const = 0;
+                        BUSTER_FAST_UNINITIALIZED_CONST(cc, dr.type, uninitialized_const)
+                        if (uninitialized_const != 0)
+                        {
+                            fast_cc_bail(cc, "uninitialized const object or const member");
+                            break;
+                        }
                         loff = fast_cc_alloc_local(cc, ftype_size(cc, dr.type), ftype_align(cc, dr.type));
                     }
                     if (lsi != 0)
@@ -7432,22 +12172,28 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     }
                     if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
                 }
-                if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
+                // #3577: the statement ends with `;`, or the full pipeline's error.
+                if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; after a statement"); break; }
+                cc->pos += 1u;
             }
             else
             {
-                fast_cc_expr(cc, false, false, false, 0, NULL);
+                fast_cc_expr(cc, false, true, false, false, 0, NULL);
                 fast_cc_reset_tmps(cc);
-                if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
+                // #3577: the statement ends with `;`, or the full pipeline's error.
+                if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; after a statement"); break; }
+                cc->pos += 1u;
             }
             const uint32_t cond_lbl = fast_label_new(obj);
             const uint32_t cont_lbl = fast_label_new(obj);
             const uint32_t brk_lbl = fast_label_new(obj);
             fast_label_bind(obj, cond_lbl);
+            const bool infinite = fast_cc_peek(cc) == FTOK_SEMI ||
+                                  (fast_cc_peek(cc) == FTOK_INT_LIT && fast_cc_data(cc) != 0 && fast_cc_peek_at(cc, 1u) == FTOK_SEMI);
             // Cond clause
             if (fast_cc_peek(cc) != FTOK_SEMI)
             {
-                fast_cc_expr(cc, false, true, false, brk_lbl, NULL);
+                fast_cc_expr(cc, false, false, true, false, brk_lbl, NULL);
                 fast_cc_reset_tmps(cc);
             }
             if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; in for"); break; }
@@ -7468,11 +12214,13 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             }
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) in for"); break; }
             cc->pos += 1u;
+            break_frame[break_sp] = (uint8_t)ssp;
+            cont_frame[cont_sp] = (uint8_t)ssp;
             break_stack[break_sp++] = brk_lbl;
             cont_stack[cont_sp++] = cont_lbl;
             sstack[ssp++] = (FastStmtFrame){
                 .kind = FSTK_FOR, .lbl0 = cond_lbl, .lbl1 = cont_lbl, .lbl2 = brk_lbl,
-                .scope_mark = fscope, .step_pos = step_pos,
+                .scope_mark = fscope, .step_pos = step_pos, .infinite = (uint8_t)infinite,
             };
             continue;
         }
@@ -7484,9 +12232,19 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "expected ( after switch"); break; }
             cc->pos += 1u;
+            const uint32_t sv_start = cc->pos;
             FastVal sv = { 0 };
-            fast_cc_expr(cc, false, false, false, 0, &sv);
+            fast_cc_expr(cc, false, false, false, false, 0, &sv);
             if (cc->bailout) { break; }
+            // #3577: a controlling expression with a boolean value is the full pipeline's -Wswitch-bool.
+            if (ftype_is_bool(sv.type) || fast_cc_switch_boolean(cc, sv_start, cc->pos))
+            {
+                fast_cc_bail(cc, "a switch's boolean condition");
+                break;
+            }
+            // #3577: the controlling expression's enum, its type before promotion (the store below converts it).
+            const uint32_t sv_complex = BUSTER_FTYPE_COMPLEX_ALL(sv.type) & (UINT32_C(0) - (uint32_t)((sv.type & BUSTER_FTYPE_PTR_MASK) == 0));
+            const uint32_t sv_cidx = sv.type & BUSTER_FTYPE_CIDX_MASK & sv_complex;
             const FastType st = ftype_promote_int(cc, sv.type);
             const int32_t slot = fast_cc_alloc_local(cc, 8u, 8u);
             {
@@ -7498,6 +12256,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             fast_cc_reset_tmps(cc);
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) after switch"); break; }
             cc->pos += 1u;
+            // #3577: an empty statement is the full pipeline's -Wempty-body (`switch (x);`), as an if's is.
+            if (fast_cc_peek(cc) == FTOK_SEMI) { fast_cc_bail(cc, "a switch's empty statement"); break; }
             const uint32_t disp_lbl = fast_label_new(obj);
             const uint32_t brk_lbl = fast_label_new(obj);
             x86_jmp_label(obj, disp_lbl);
@@ -7505,7 +12265,9 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             sw_stack[swi] = (FastSwitchCtx){
                 .val_slot = slot, .val_type = st, .case_start = sw_case_used,
                 .case_count = 0, .default_lbl = UINT32_MAX, .break_lbl = brk_lbl,
+                .enum_cidx = sv_cidx & (UINT32_C(0) - (uint32_t)(cc->ctypes[sv_cidx].kind == FCTYPE_ENUM)),
             };
+            break_frame[break_sp] = (uint8_t)ssp;
             break_stack[break_sp++] = brk_lbl;
             sstack[ssp++] = (FastStmtFrame){ .kind = FSTK_SWITCH, .sw_idx = swi, .lbl0 = disp_lbl, .lbl1 = brk_lbl };
             continue;
@@ -7516,16 +12278,24 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         {
             if (break_sp == 0) { fast_cc_bail(cc, "break outside loop/switch"); break; }
             cc->pos += 1u;
-            if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
+            // #3577: the statement ends with `;`, or the full pipeline's error.
+            if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; after a statement"); break; }
+            cc->pos += 1u;
             x86_jmp_label(obj, break_stack[break_sp - 1u]);
+            sstack[break_frame[break_sp - 1u]].broke = 1u;
+            live = false;
             continue;
         }
         if (k == FTOK_KW_CONTINUE)
         {
             if (cont_sp == 0) { fast_cc_bail(cc, "continue outside loop"); break; }
             cc->pos += 1u;
-            if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
+            // #3577: the statement ends with `;`, or the full pipeline's error.
+            if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; after a statement"); break; }
+            cc->pos += 1u;
             x86_jmp_label(obj, cont_stack[cont_sp - 1u]);
+            sstack[cont_frame[cont_sp - 1u]].continued = 1u;
+            live = false;
             continue;
         }
         if (k == FTOK_KW_GOTO)
@@ -7534,24 +12304,35 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             if (fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "computed goto unsupported"); break; }
             const uint32_t lid = fast_cc_data(cc);
             cc->pos += 1u;
-            if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
+            // #3577: the statement ends with `;`, or the full pipeline's error.
+            if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; after a statement"); break; }
+            cc->pos += 1u;
             bool lok = true;
             const uint32_t ll = fast_cc_get_user_label(obj, ulabels, &ulabel_count, 512u, lid, false, &lok);
             if (!lok) { fast_cc_bail(cc, "label table full"); break; }
             x86_jmp_label(obj, ll);
+            live = false;
             continue;
         }
 
         // 10. `return [expr];`
         if (k == FTOK_KW_RETURN)
         {
-            saw_return_or_exit = true;
+            live = false;
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_SEMI)
             {
                 FastVal rv = { 0 };
-                fast_cc_expr(cc, false, false, false, 0, &rv);
+                const uint32_t rv_start = cc->pos;
+                fast_cc_expr(cc, false, false, false, false, 0, &rv);
                 if (cc->bailout) { break; }
+                // #3577: a stack array the return returns whole (`return a;`, a row `return a[i];`, a compound literal's)
+                // decays to its address, the full pipeline's -Wreturn-stack-address (a local's member array, past it).
+                if (ftype_is_array(rv.type) && rv.kind != FVAL_GLOBAL && (rv.kind == FVAL_LOCAL || fast_cc_stack_object_tokens(cc, rv_start, cc->pos)))
+                {
+                    fast_cc_bail(cc, "a stack array a return returns");
+                    break;
+                }
                 if (ftype_is_void(ret_t) && !ftype_is_void(rv.type))
                 {
                     fast_cc_bail(cc, "return value in void func");
@@ -7617,7 +12398,9 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 fast_cc_bail(cc, "bare return in non-void func");
                 break;
             }
-            if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
+            // #3577: the statement ends with `;`, or the full pipeline's error.
+            if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; after a statement"); break; }
+            cc->pos += 1u;
             x86_jmp_label(obj, cc->cur_ret_label);
             continue;
         }
@@ -7628,16 +12411,23 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             FastDeclSpecs ds = { 0 };
             const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
             if (cc->bailout) { break; }
-            if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; continue; }
+            if (fast_cc_peek(cc) == FTOK_SEMI)
+            {
+                if (!fast_cc_tag_declaration_quiet(&ds)) { fast_cc_bail(cc, "declaration declares nothing"); break; }
+                cc->pos += 1u;
+                continue;
+            }
             while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_SEMI && !cc->bailout)
             {
                 const uint32_t decl_start = cc->pos;
                 FastDeclaratorResult dr = { 0 };
                 if (!fast_cc_parse_declarator(cc, btype, false, &dr, false) || !fast_cc_declarator_named(cc, dr.name_id)) { break; }
                 const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
-                if ((ds.written & (BUSTER_FSPEC_INLINE | BUSTER_FSPEC_NORETURN)) != 0 && (ds.is_typedef != 0 || !ftype_is_func(dr.type)))
+                // #3577: inline and _Noreturn belong to file-scope functions, and a visibility on a typedef is the full
+                // pipeline's warning (#3595); the attributes must be the kind's.
+                if ((ds.is_inline | ds.is_noreturn) != 0)
                 {
-                    fast_cc_bail(cc, "inline or _Noreturn on an object");
+                    fast_cc_bail(cc, "block-scope inline or _Noreturn declaration");
                     break;
                 }
                 if (ds.is_typedef && (ds.attr.visibility_set || dr.attr.visibility_set))
@@ -7654,11 +12444,42 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     fast_cc_bail(cc, "asm label on a block's declaration");
                     break;
                 }
+                if ((ds.attr.present | dr.attr.present) != 0)
+                {
+                    uint8_t attr_flags = 0;
+                    const FastDeclEntity entity = ds.is_typedef ? FDECL_TYPEDEF : ds.is_static ? FDECL_OBJECT : FDECL_LOCAL;
+                    if (!fast_cc_decl_attributes_valid(cc, &ds.attr, &dr.attr, dr.type, ftype_is_func(dr.type), entity, ds.is_static != 0, &attr_flags) ||
+                        attr_flags != 0)
+                    {
+                        fast_cc_bail(cc, "attributes of a block-scope declaration");
+                        break;
+                    }
+                }
                 if (ds.is_typedef)
                 {
                     if (dr.name_id != 0)
                     {
-                        fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_TYPEDEF, .type = dr.type });
+                        // A typedef may name its type again in its scope (C11); anything else there is an error.
+                        const uint32_t prev = cc->sym_cur[dr.name_id];
+                        const bool again = prev != 0 && cc->syms[prev].kind == FSYM_TYPEDEF && cc->syms[prev].scope_depth == cc->scope_depth &&
+                                           fast_cc_types_identical(cc, cc->syms[prev].type, dr.type);
+                        // #3577: one with an alignment of its own (fast_cc_aligned_typedef).
+                        // (And one with a mode this path doesn't model, BUSTER_FMODE_UNMODELED.)
+                        uint8_t aligned = (uint8_t)(BUSTER_FSYM_ALIGNED * ((uint32_t)(ds.attr.mode_size == BUSTER_FMODE_UNMODELED) |
+                                                                           (uint32_t)(dr.attr.mode_size == BUSTER_FMODE_UNMODELED)));
+                        FastType typedef_type = dr.type;
+                        if (!fast_cc_typedef_alignment_natural(cc, ds.attr.aligned, dr.attr.aligned, dr.type))
+                        {
+                            typedef_type = fast_cc_aligned_typedef(cc, ds.attr.aligned, dr.attr.aligned, dr.type, &aligned);
+                        }
+                        if (!again)
+                        {
+                            fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_TYPEDEF, .type = typedef_type, .use_flags = aligned });
+                        }
+                        else
+                        {
+                            cc->syms[prev].use_flags |= aligned;
+                        }
                     }
                 }
                 else if (ftype_is_func(dr.type) || ds.is_extern)
@@ -7667,15 +12488,18 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     // declaration it sees, with that one's linkage and attributes (C11 6.2.2p4), so it binds no symbol
                     // of its own (#3595). One that sees none (the file declares it later or never: symbol 0, of no
                     // kind), or that a local of the name hides, or that brings attributes of its own, is left to the
-                    // full pipeline. (Its asm label left above.)
+                    // full pipeline. (Its asm label left above.) #3577: so is one whose type the full pipeline checks
+                    // against the file's and refuses.
                     if (ftype_is_func(dr.type))
                     {
-                        fast_cc_check_main(cc, dr.name_id, dr.type);
+                        fast_cc_check_main(cc, dr.name_id, dr.type, ds.is_inline);
                     }
                     const uint32_t seen = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                     const uint8_t kind = ftype_is_func(dr.type) ? (uint8_t)FSYM_FUNC : (uint8_t)FSYM_GLOBAL;
                     if (dr.name_id == 0 || cc->syms[seen].kind != kind || (kind == FSYM_GLOBAL && cc->syms[seen].storage == 1u) ||
-                        ds.is_static || ds.attr.visibility_set || dr.attr.visibility_set || ds.attr.weak || dr.attr.weak)
+                        ds.is_static || ds.attr.present || dr.attr.present ||
+                        (kind == FSYM_FUNC && !fast_cc_function_redeclarable(cc, cc->syms + seen, dr.type, 2u)) ||
+                        (kind == FSYM_GLOBAL && !fast_cc_types_redeclarable(cc, cc->syms[seen].type, dr.type)))
                     {
                         fast_cc_bail(cc, "a block's declaration of a function or extern object");
                         break;
@@ -7684,6 +12508,15 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 else if (ds.is_static)
                 {
                     // Local `static` variable: unique internal STB_LOCAL symbol in .rodata / .data / .data.rel.ro / .bss!
+                    // #3577: a modifiable one in an inline definition the unit's end decides (C99's plain one, GNU's extern
+                    // one, which the full pipeline may leave to another unit) is its -Wstatic-local-in-inline.
+                    if ((uint32_t)((cc->syms[cc->cur_func_sym].inline_rules & BUSTER_FINLINE_PENDING) != 0) & (uint32_t)!ftype_is_const(dr.type))
+                    {
+                        fast_cc_bail(cc, "a modifiable static local in an inline definition");
+                        break;
+                    }
+                    // #3577: an object of incomplete type is the full pipeline's error.
+                    if (BUSTER_FAST_OBJECT_INCOMPLETE(cc, dr.type, fast_cc_peek(cc) == FTOK_ASSIGN) != 0) { fast_cc_bail(cc, "object of incomplete type"); break; }
                     char sname[96];
                     uint32_t nlen = 0;
                     const char* raw_n = dr.name_id != 0 ? fast_cc_ident_str(cc, dr.name_id, &nlen) : "s";
@@ -7715,28 +12548,51 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     }
                     if (dr.name_id != 0)
                     {
+                        const uint8_t fold = sec == FSEC_RODATA || sec == FSEC_DATA_REL_RO ? fast_cc_static_fold_class(cc, dr.type, sec, sec_off) : 0u;
                         fast_cc_sym_bind(cc, dr.name_id, (FastSym){
                             .kind = FSYM_GLOBAL, .storage = 1u, .defined = 1u, .type = dr.type,
-                            .obj_sym = osym, .section = sec, .sec_off = sec_off,
+                            .obj_sym = osym, .section = sec, .sec_off = sec_off, .pad_sym = { 0u, fold },
                         });
                     }
                 }
                 else
                 {
                     // Automatic local variable on stack (bind BEFORE initializer so `T *p = malloc(sizeof(*p))` works!).
-                    // A local register variable keeps its register's name for the asm statements that read it.
-                    if (ds.is_unsupported_type || ftype_is_unsupported(dr.type)) { fast_cc_bail(cc, "unsupported local var type"); break; }
+                    // A local register variable keeps its register's name for the asm statements that read it. #3577: an
+                    // object of incomplete type is the full pipeline's error.
+                    const uint32_t initialized = (uint32_t)(fast_cc_peek(cc) == FTOK_ASSIGN);
+                    const uint32_t incomplete = BUSTER_FAST_OBJECT_INCOMPLETE(cc, dr.type, initialized);
+                    if (((uint32_t)ds.is_unsupported_type | (uint32_t)ftype_is_unsupported(dr.type) | incomplete) != 0 &&
+                        (incomplete != 0 || !fast_cc_checked_long_double(cc, dr.type, dr.type)))
+                    {
+                        fast_cc_bail(cc, incomplete != 0 ? "object of incomplete type" : "unsupported local var type");
+                        break;
+                    }
+                    // A register variable: a scalar's address is the full pipeline's error, which the use flag finds; an
+                    // array's or a record's use takes it.
+                    if (ds.is_register && !ftype_is_scalar(dr.type)) { fast_cc_bail(cc, "register aggregate"); break; }
                     const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){
-                        .kind = FSYM_LOCAL, .type = dr.type, .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
+                        .kind = FSYM_LOCAL, .type = dr.type, .use_flags = (uint8_t)(ds.is_register * BUSTER_FSYM_REGISTER),
+                        .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
                     }) : 0u;
                     int32_t loff = 0;
-                    if (fast_cc_peek(cc) == FTOK_ASSIGN)
+                    if (initialized != 0)
                     {
                         cc->pos += 1u;
+                        const uint32_t init_start = cc->pos;
+                        cc->init_kind = FVAL_VOID;
                         loff = fast_cc_init_local(cc, &dr.type, extra_al);
+                        BUSTER_FAST_LOCAL_FOLD(cc, lsi, dr.type, init_start)
                     }
                     else
                     {
+                        uint32_t uninitialized_const = 0;
+                        BUSTER_FAST_UNINITIALIZED_CONST(cc, dr.type, uninitialized_const)
+                        if (uninitialized_const != 0)
+                        {
+                            fast_cc_bail(cc, "uninitialized const object or const member");
+                            break;
+                        }
                         uint32_t al = ftype_align(cc, dr.type);
                         if (extra_al > al) { al = extra_al; }
                         loff = fast_cc_alloc_local(cc, ftype_size(cc, dr.type), al);
@@ -7749,9 +12605,12 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 }
                 if (fast_cc_peek(cc) == FTOK_COMMA) { fast_cc_declarator_comma(cc); }
                 else if (cc->pos == decl_start && !cc->bailout) { fast_cc_bail(cc, "local decl stalled"); break; }
+                else { break; }
             }
-            if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
-            else { fast_cc_bail(cc, "expected ; after local decl"); break; }
+            if (cc->bailout) { break; }
+            // #3577: the statement ends with `;`, or the full pipeline's error.
+            if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; after a statement"); break; }
+            cc->pos += 1u;
             continue;
         }
 
@@ -7773,10 +12632,11 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             cc->pos += 9u;
             continue;
         }
-        fast_cc_expr(cc, false, false, false, 0, NULL);
+        fast_cc_expr(cc, false, true, false, false, 0, NULL);
         fast_cc_reset_tmps(cc);
-        if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
-        else { fast_cc_bail(cc, "expected ; after expr stmt"); break; }
+        // #3577: the statement ends with `;`, or the full pipeline's error.
+        if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; after a statement"); break; }
+        cc->pos += 1u;
     }
 
     // 6. Verify all goto labels were defined and non-void functions return a value
@@ -7784,9 +12644,10 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     {
         if (!ulabels[i].defined) { fast_cc_bail(cc, "undefined goto label"); }
     }
-    if (!cc->bailout && !cc->quiet && !ftype_is_void(ret_t) && cc->cur_func_name_id != cc->id_main && !saw_return_or_exit)
+    // #3577: a non-void function's end that may be reached is the full pipeline's -Wreturn-type (main's returns 0).
+    if (!cc->bailout && !cc->quiet && !ftype_is_void(ret_t) && cc->cur_func_name_id != cc->id_main && live)
     {
-        fast_cc_bail(cc, "non-void function missing return");
+        fast_cc_bail(cc, "non-void function's end may be reached");
     }
 
     // 7. Implicit `return 0` in `main`, epilogue, frame patch, jump fixup, FDE, ELF symbol!
@@ -7835,6 +12696,70 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     fast_cc_scope_leave(cc, func_scope_mark);
     cc->sym_count = file_sym_count;
     cc->scratch->used = scratch_mark;
+}
+
+// #3577: whether the tokens of a body, [start, end), name a function or an object with internal linkage as the file sees
+// it where the body begins: an inline definition with external linkage that uses one is the full pipeline's
+// -Wstatic-in-inline (a static inline function aside, which it calls quietly). By the tokens: a parameter, a local or a
+// member of such a name refuses the definition too, and so does one the main file defines, which the full pipeline
+// shows nothing for.
+static __attribute__((cold, noinline)) bool fast_cc_body_names_internal(const FastCCState* cc, uint32_t start, uint32_t end)
+{
+    bool named = false;
+    for (uint32_t at = start; at < end && !named; at += 1u)
+    {
+        if (cc->tk[at] == FTOK_IDENT)
+        {
+            const uint32_t id = cc->td[at];
+            const FastSym* sym = cc->syms + (id < cc->env_cap ? cc->sym_cur[id] : 0u);
+            named = (sym->kind == FSYM_FUNC || sym->kind == FSYM_GLOBAL) && sym->storage == 1u;
+        }
+    }
+    return named;
+}
+
+// #3577: checks an inline function's body where it is defined, as the full pipeline does: in the scope there (a
+// declaration later in the unit isn't visible to it yet), and whether or not anything uses the function. The check
+// compiles the body, and then drops what the compile added: the object's code, data, relocations, unwind records and
+// symbols (the object's state, saved whole, and the symbols the compile gave their first object symbol), the function's
+// own symbol's definition, and the constants and static-local names it cached. Its symbol is left defined, not emitted
+// (2): where something references it, the ready queue compiles it again at the unit's end, as before. Uses in the body
+// count for the unit's end alone (fast_cc_reference).
+static __attribute__((noinline)) void fast_cc_check_body(FastCCState* cc, uint32_t sym_idx, uint32_t param_names_start, uint16_t param_count)
+{
+    FastObj* obj = cc->obj;
+    const FastObj saved = *obj;
+    const uint32_t own = cc->syms[sym_idx].obj_sym < obj->sym_count ? cc->syms[sym_idx].obj_sym : 0u;
+    const FastObjSym own_symbol = obj->syms[own];
+    const uint32_t cached[] = {
+        cc->ro_sign_f32_off,
+        cc->ro_sign_f64_off,
+        cc->ro_u64_to_f64_off,
+        cc->ro_f64_to_u64_off,
+        cc->ro_f32_to_u64_off,
+        cc->ro_one_f32_off,
+        cc->ro_one_f64_off,
+        cc->static_local_seq,
+    };
+    cc->checking = 1u;
+    cc->checked_obj_sym_count = 0;
+    fast_cc_compile_func(cc, sym_idx, param_names_start, param_count);
+    cc->checking = 0u;
+    *obj = saved;
+    obj->syms[own] = own_symbol;
+    for (uint32_t i = 0; i < cc->checked_obj_sym_count; i += 1u)
+    {
+        cc->syms[cc->checked_obj_syms[i]].obj_sym = 0;
+    }
+    cc->syms[sym_idx].defined = 2u;
+    cc->ro_sign_f32_off = cached[0];
+    cc->ro_sign_f64_off = cached[1];
+    cc->ro_u64_to_f64_off = cached[2];
+    cc->ro_f64_to_u64_off = cached[3];
+    cc->ro_f32_to_u64_off = cached[4];
+    cc->ro_one_f32_off = cached[5];
+    cc->ro_one_f64_off = cached[6];
+    cc->static_local_seq = cached[7];
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -8025,15 +12950,8 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         if (k == FTOK_SEMI || k == FTOK_KW_EXTENSION) { cc->pos += 1u; continue; }
         if (k == FTOK_KW_STATIC_ASSERT)
         {
-            cc->pos += 1u;
-            if (fast_cc_peek(cc) == FTOK_LPAREN)
-            {
-                cc->pos += 1u;
-                if (fast_cc_const_int_expr(cc, true) == 0) { fast_cc_bail(cc, "_Static_assert failed"); break; }
-                while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_RPAREN) { cc->pos += 1u; }
-                if (fast_cc_peek(cc) == FTOK_RPAREN) { cc->pos += 1u; }
-                if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
-            }
+            fast_cc_static_assert(cc);
+            if (cc->bailout) { break; }
             continue;
         }
         if (k == FTOK_KW_ASM) { fast_cc_bail(cc, "file-scope asm"); break; }
@@ -8042,26 +12960,63 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
         if ((ds.written & (BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0) { fast_cc_bail(cc, "register or auto at file scope"); }
         if (cc->bailout) { break; }
-        if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; continue; }
+        if (fast_cc_peek(cc) == FTOK_SEMI)
+        {
+            // #3577: a list that declares nothing but a tag, quietly (fast_cc_tag_declaration_quiet).
+            if (!fast_cc_tag_declaration_quiet(&ds)) { fast_cc_bail(cc, "declaration declares nothing"); break; }
+            cc->pos += 1u;
+            continue;
+        }
+        // File-scope register, and _Noreturn or inline on what isn't a function (checked per declarator below).
+        if (ds.is_register) { fast_cc_bail(cc, "file-scope register"); break; }
 
         bool first = true;
+        bool ended_by_body = false;
         while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_SEMI && !cc->bailout)
         {
             FastDeclaratorResult dr = { 0 };
+            const uint32_t ctypes_before = cc->ctype_count;
             if (!fast_cc_parse_declarator(cc, btype, false, &dr, first) || !fast_cc_declarator_named(cc, dr.name_id)) { break; }
-            if ((ds.written & (BUSTER_FSPEC_INLINE | BUSTER_FSPEC_NORETURN)) != 0 && (ds.is_typedef != 0 || !ftype_is_func(dr.type)))
+            const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
+            const bool is_func = ftype_is_func(dr.type);
+            const bool is_def = first && is_func && fast_cc_peek(cc) == FTOK_LBRACE;
+            const FastDeclJoin join = fast_cc_decl_join(&ds, &dr, is_func, is_def);
+            const FastAttrInfo* alias = dr.attr.alias_name != NULL ? &dr.attr : ds.attr.alias_name != NULL ? &ds.attr : NULL;
+            // #3577: inline and _Noreturn belong to functions, and a _Noreturn body is the full pipeline's to check
+            // (-Winvalid-noreturn); the attributes, where there are any, must be the declared kind's.
+            if (((uint32_t)(ds.is_inline | ds.is_noreturn) &
+                 ((uint32_t)!is_func | (uint32_t)ds.is_typedef | ((uint32_t)is_def & (uint32_t)ds.is_noreturn))) != 0)
             {
-                fast_cc_bail(cc, "inline or _Noreturn on an object");
+                fast_cc_bail(cc, "inline or _Noreturn where the full pipeline checks it");
                 break;
             }
-            const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
-            const bool body = first && ftype_is_func(dr.type) && fast_cc_peek(cc) == FTOK_LBRACE;
-            const FastDeclJoin join = fast_cc_decl_join(&ds, &dr, ftype_is_func(dr.type), body);
-            const FastAttrInfo* alias = dr.attr.alias_name != NULL ? &dr.attr : ds.attr.alias_name != NULL ? &ds.attr : NULL;
+            uint8_t attr_flags = 0;
+            if ((ds.attr.present | dr.attr.present) != 0)
+            {
+                const FastDeclEntity entity = ds.is_typedef ? FDECL_TYPEDEF : is_def ? FDECL_DEFINITION : is_func ? FDECL_FUNCTION : FDECL_OBJECT;
+                if (!fast_cc_decl_attributes_valid(cc, &ds.attr, &dr.attr, dr.type, is_func, entity, ds.is_static != 0, &attr_flags))
+                {
+                    fast_cc_bail(cc, "attributes of a file-scope declaration");
+                    break;
+                }
+            }
+            // (BUSTER_FSYM_UNSUPPORTED is bit 0, is_unsupported_type 0 or 1.)
+            // #3577: printf, fprintf, sprintf and snprintf are the library's builtins, whose formats the full pipeline
+            // checks as an attribute's.
+            const uint8_t use_flags = (uint8_t)(ds.is_unsupported_type | attr_flags |
+                                                (BUSTER_FSYM_FORMAT * (uint32_t)(cc->pp->idents.entries[dr.name_id].pp_kw == FPP_KW_FORMAT_FUNCTION)));
+            // A function's nonnull parameters go in its type (fast_cc_nonnull_arguments_clean), which must be this
+            // declarator's own, not a typedef's that other functions share.
+            const uint32_t nonnull_mask = ds.attr.nonnull_mask | dr.attr.nonnull_mask;
+            if (nonnull_mask != 0)
+            {
+                if ((dr.type & BUSTER_FTYPE_CIDX_MASK) < ctypes_before) { fast_cc_bail(cc, "nonnull on a typedef's function type"); break; }
+                cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].tag_ident = nonnull_mask;
+            }
 
             if (!ds.is_typedef)
             {
-                fast_cc_check_main(cc, dr.name_id, dr.type);
+                fast_cc_check_main(cc, dr.name_id, dr.type, ds.is_inline);
             }
             if (alias != NULL && (ds.is_static || ds.is_inline || join.label != NULL))
             {
@@ -8069,7 +13024,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 break;
             }
             // Function definition!
-            if (body)
+            if (is_def)
             {
                 const uint8_t stor = ds.is_static ? (ds.is_inline ? 4u : 1u) :
                                      (ds.is_inline && !ds.is_extern) ? 3u : 0u;
@@ -8079,16 +13034,29 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 if (si != 0 && cc->syms[si].kind == FSYM_FUNC)
                 {
                     // A pending inline definition allows a later one only as GNU's idiom: its extern inline one,
-                    // then the external definition, not inline (#3595).
+                    // then the external definition, not inline (#3595). (The extern inline body was checked where it
+                    // was defined, which leaves its symbol defined, not emitted: 2, #3577.)
                     const uint8_t pending = cc->syms[si].inline_rules & BUSTER_FINLINE_PENDING;
-                    if (cc->syms[si].defined != 0 || cc->syms[si].is_alias != 0 || (pending != 0 && (pending != BUSTER_FINLINE_GNU_PENDING || ds.is_inline)))
+                    const bool gnu_idiom = pending == BUSTER_FINLINE_GNU_PENDING && !ds.is_inline;
+                    if (cc->syms[si].defined == 1u || cc->syms[si].is_alias != 0 || ((uint32_t)(cc->syms[si].defined | pending) != 0 && !gnu_idiom))
                     {
                         fast_cc_bail(cc, "redefinition of function");
                         break;
                     }
+                    if (!fast_cc_function_redeclarable(cc, cc->syms + si, dr.type, stor))
+                    {
+                        fast_cc_bail(cc, "conflicting function redeclaration");
+                        break;
+                    }
+                    if (dr.attr.asm_label != NULL && cc->syms[si].obj_sym != 0)
+                    {
+                        fast_cc_bail(cc, "asm label after the symbol's use");
+                        break;
+                    }
+                    cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].tag_ident |= cc->ctypes[cc->syms[si].type & BUSTER_FTYPE_CIDX_MASK].tag_ident;
                     cc->syms[si].type = dr.type;
                     if (stor == 1u || stor == 4u) { cc->syms[si].storage = stor; }
-                    if (ds.is_unsupported_type) { cc->syms[si].is_unsupported = 1u; }
+                    cc->syms[si].use_flags |= use_flags;
                     fast_cc_join_declaration(cc, si, &join, false);
                     if (cc->bailout) { break; }
                 }
@@ -8097,15 +13065,18 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     si = fast_cc_sym_bind(cc, dr.name_id, (FastSym){
                         .kind = FSYM_FUNC, .storage = stor, .is_weak = join.weak, .visibility = join.visibility,
                         .visibility_set = join.visibility_set, .inline_rules = join.inline_rules,
-                        .is_unsupported = ds.is_unsupported_type, .type = dr.type,
+                        .use_flags = use_flags, .type = dr.type,
                         .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
                     });
+                    if (cc->bailout) { break; }
                 }
 
                 // An inline definition with external linkage is C99's or GNU's (#3595): GNU's extern inline one and
                 // C99's plain one wait for the unit's end, which decides whether either is emitted; GNU's plain one and
                 // C99's extern one are external definitions, emitted here. With internal linkage (static, or a static
-                // declaration before it), an inline body waits for its first reference.
+                // declaration before it), an inline body waits for its first reference, so that unused helpers emit
+                // nothing. #3577: a body that waits is checked here (fast_cc_check_body), in the scope it has here,
+                // whether it is emitted or not.
                 const uint8_t storage = cc->syms[si].storage;
                 const bool internal = storage == 1u || storage == 4u;
                 const bool gnu = (cc->syms[si].inline_rules & BUSTER_FINLINE_GNU) != 0;
@@ -8113,6 +13084,17 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                                        gnu && ds.is_extern ? (uint8_t)BUSTER_FINLINE_GNU_PENDING :
                                        !gnu && !ds.is_extern ? (uint8_t)BUSTER_FINLINE_C99_PENDING : 0u;
                 cc->syms[si].inline_rules |= decide;
+                // #3577: an inline definition with external linkage that names a static function or object is the full
+                // pipeline's -Wstatic-in-inline (fast_cc_body_names_internal).
+                if (ds.is_inline && !internal)
+                {
+                    const FastBodyScan named = fast_cc_prescan_body(cc, cc->pos);
+                    if (named.end_pos == UINT32_MAX || fast_cc_body_names_internal(cc, cc->pos, named.end_pos))
+                    {
+                        fast_cc_bail(cc, "an inline definition with external linkage that names a static declaration");
+                        break;
+                    }
+                }
                 if ((ds.is_inline && internal) || decide != 0)
                 {
                     const FastBodyScan bscan = fast_cc_prescan_body(cc, cc->pos);
@@ -8124,10 +13106,23 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                             .param_names_start = dr.param_names_start, .param_count = dr.param_count, .declared = declared,
                             .previous_task = cc->syms[si].deferred_task,
                         };
-                        if (cc->syms[si].referenced && decide == 0) { fast_cc_ready_task(cc, deferred_count); }
+                        if (cc->syms[si].referenced == 1u && decide == 0) { fast_cc_ready_task(cc, deferred_count); }
                         cc->syms[si].deferred_task = (uint16_t)(++deferred_count);
                     }
                     else { fast_cc_bail(cc, "too many inline functions"); break; }
+                    // #3577: checked here, in its own scope, whether used or not.
+                    // (A long double return type is checked there, fast_cc_checked_long_double; the symbol keeps its flag, and
+                    // a use of it leaves.)
+                    if ((use_flags & BUSTER_FSYM_UNSUPPORTED) != 0 &&
+                        BUSTER_FTYPE_UNQUAL(cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].inner) != BUSTER_FTYPE_LONG_DOUBLE)
+                    {
+                        fast_cc_bail(cc, "unsupported type in an inline definition");
+                        break;
+                    }
+                    // (Its __PRETTY_FUNCTION__ reads the definition's tokens, as the compile does.)
+                    cc->cur_func_decl_pos = tu_loop_pos;
+                    cc->cur_func_declared = declared;
+                    fast_cc_check_body(cc, si, dr.param_names_start, dr.param_count);
                     cc->pos = bscan.end_pos + 1u;
                 }
                 else
@@ -8137,6 +13132,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     cc->cur_func_declared = declared;
                     fast_cc_compile_func(cc, si, dr.param_names_start, dr.param_count);
                 }
+                ended_by_body = true;
                 break; // function definition ends without ';'
             }
             first = false;
@@ -8151,19 +13147,59 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             {
                 if (dr.name_id != 0)
                 {
-                    fast_cc_sym_bind(cc, dr.name_id, (FastSym){
-                        .kind = FSYM_TYPEDEF, .type = dr.type, .is_unsupported = ds.is_unsupported_type,
-                    });
+                    // A typedef may name its type again (C11); another type, or another kind of symbol, is an error.
+                    // #3577: an alignment of its own, other than its type's, is this path's to refuse where the typedef
+                    // is used (it keeps none for a typedef): glibc's <pthread.h> declares one nothing uses.
+                    const uint32_t prev = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
+                    const bool again = prev != 0 && cc->syms[prev].kind == FSYM_TYPEDEF && cc->syms[prev].scope_depth == 0 &&
+                                       fast_cc_types_identical(cc, cc->syms[prev].type, dr.type);
+                    // (And one with a mode this path doesn't model, BUSTER_FMODE_UNMODELED.)
+                    uint8_t aligned = (uint8_t)(BUSTER_FSYM_ALIGNED * ((uint32_t)(ds.attr.mode_size == BUSTER_FMODE_UNMODELED) |
+                                                                       (uint32_t)(dr.attr.mode_size == BUSTER_FMODE_UNMODELED)));
+                    FastType typedef_type = dr.type;
+                    if (!fast_cc_typedef_alignment_natural(cc, ds.attr.aligned, dr.attr.aligned, dr.type))
+                    {
+                        typedef_type = fast_cc_aligned_typedef(cc, ds.attr.aligned, dr.attr.aligned, dr.type, &aligned);
+                    }
+                    if (!again)
+                    {
+                        fast_cc_sym_bind(cc, dr.name_id, (FastSym){
+                            .kind = FSYM_TYPEDEF, .type = typedef_type, .use_flags = (uint8_t)(use_flags | aligned),
+                        });
+                    }
+                    else
+                    {
+                        cc->syms[prev].use_flags |= aligned;
+                    }
                 }
             }
             // Function prototype
-            else if (ftype_is_func(dr.type))
+            else if (is_func)
             {
                 if (dr.name_id != 0)
                 {
                     const uint32_t existing = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                     if (existing != 0 && cc->syms[existing].kind == FSYM_FUNC)
                     {
+                        const uint8_t stor = ds.is_static ? 1u : (ds.is_inline && !ds.is_extern) ? 3u : 2u;
+                        if (!fast_cc_function_redeclarable(cc, cc->syms + existing, dr.type, stor))
+                        {
+                            fast_cc_bail(cc, "conflicting function redeclaration");
+                            break;
+                        }
+                        // #3577: an attribute after the definition is ignored with a warning (-Wignored-attributes), and an
+                        // asm label after the symbol's use or definition is the full pipeline's.
+                        if (((ds.attr.present | dr.attr.present) != 0 && cc->syms[existing].defined != 0) ||
+                            (dr.attr.asm_label != NULL && (cc->syms[existing].defined != 0 || cc->syms[existing].obj_sym != 0)))
+                        {
+                            fast_cc_bail(cc, "attribute or label after the definition");
+                            break;
+                        }
+                        // The declarations' nonnull parameters together, in both types (either may stay the symbol's).
+                        const uint32_t merged = cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].tag_ident |
+                                                cc->ctypes[cc->syms[existing].type & BUSTER_FTYPE_CIDX_MASK].tag_ident;
+                        cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].tag_ident = merged;
+                        cc->ctypes[cc->syms[existing].type & BUSTER_FTYPE_CIDX_MASK].tag_ident = merged;
                         // Keep definition/obj_sym if already defined, update prototype info if more specific!
                         const FastComplexType* old_fn = cc->ctypes + (cc->syms[existing].type & BUSTER_FTYPE_CIDX_MASK);
                         if (old_fn->is_oldstyle && !cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].is_oldstyle)
@@ -8173,7 +13209,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         // An alias of a function a header declared: not of one defined, static or with an inline
                         // definition pending, which are clang's errors. An alias is a definition, so another alias, and
                         // an attribute on a later declaration (the full pipeline's warning), leave too: any declaration
-                        // after an alias does.
+                        // after an alias does (#3592).
                         const FastSym* declared = cc->syms + existing;
                         if (declared->is_alias != 0 ||
                             (alias != NULL && (declared->defined != 0 || declared->storage == 1u || declared->storage == 4u ||
@@ -8182,7 +13218,11 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                             fast_cc_bail(cc, "a declaration of an alias, or an alias of a defined or static function");
                             break;
                         }
+                        // #3577: a later declaration's weak makes the symbol weak (the unit's end refuses one with
+                        // internal linkage); its visibility and label join as #3595's.
                         fast_cc_join_declaration(cc, existing, &join, alias != NULL);
+                        if (cc->bailout) { break; }
+                        cc->syms[existing].use_flags |= use_flags;
                         if (alias != NULL)
                         {
                             fast_cc_alias_add(cc, existing, alias);
@@ -8194,7 +13234,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         const uint32_t si = fast_cc_sym_bind(cc, dr.name_id, (FastSym){
                             .kind = FSYM_FUNC, .storage = stor, .is_weak = join.weak, .visibility = join.visibility,
                             .visibility_set = join.visibility_set, .inline_rules = join.inline_rules,
-                            .is_unsupported = ds.is_unsupported_type, .type = dr.type,
+                            .use_flags = use_flags, .type = dr.type,
                             .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
                         });
                         if (alias != NULL && si != 0)
@@ -8220,6 +13260,20 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 uint32_t si = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                 if (si != 0 && cc->syms[si].kind == FSYM_GLOBAL)
                 {
+                    // One type (an incomplete array completed), and no external linkage after internal or the reverse; no
+                    // attribute after the definition, and no asm label after the symbol's use or definition.
+                    const bool old_static = cc->syms[si].storage == 1u;
+                    if (!fast_cc_types_redeclarable(cc, cc->syms[si].type, dr.type) || (stor == 1u && !old_static) || (stor == 0u && old_static))
+                    {
+                        fast_cc_bail(cc, "conflicting object redeclaration");
+                        break;
+                    }
+                    if (((ds.attr.present | dr.attr.present) != 0 && cc->syms[si].defined != 0) ||
+                        (dr.attr.asm_label != NULL && (cc->syms[si].defined != 0 || cc->syms[si].obj_sym != 0)))
+                    {
+                        fast_cc_bail(cc, "attribute or label after the definition");
+                        break;
+                    }
                     // Update incomplete array type or storage if redeclared!
                     if (ftype_is_array(cc->syms[si].type) && !cc->ctypes[cc->syms[si].type & BUSTER_FTYPE_CIDX_MASK].complete &&
                         ftype_is_array(dr.type) && cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].complete)
@@ -8227,6 +13281,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         cc->syms[si].type = dr.type;
                     }
                     if (stor == 1u) { cc->syms[si].storage = 1u; }
+                    cc->syms[si].use_flags |= use_flags;
                     fast_cc_join_declaration(cc, si, &join, alias != NULL);
                     if (cc->bailout) { break; }
                 }
@@ -8236,9 +13291,10 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         .kind = FSYM_GLOBAL, .storage = stor, .is_weak = join.weak, .visibility = join.visibility,
                         .visibility_set = join.visibility_set,
                         .is_const_var = (ds.is_const || ftype_is_const(dr.type)) ? 1u : 0u,
-                        .is_unsupported = ds.is_unsupported_type, .type = dr.type,
+                        .use_flags = use_flags, .type = dr.type,
                         .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
                     });
+                    if (cc->bailout) { break; }
                 }
 
                 if (has_init)
@@ -8248,6 +13304,8 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         fast_cc_bail(cc, "redefinition of global variable");
                         break;
                     }
+                    // #3577: an extern object's initializer is the full pipeline's -Wextern-initializer.
+                    if (ds.is_extern) { fast_cc_bail(cc, "an extern object's initializer"); break; }
                     if (ds.is_unsupported_type || ftype_is_unsupported(dr.type)) { fast_cc_bail(cc, "unsupported global init type"); break; }
                     cc->pos += 1u; // '='
                     const bool is_ro = ftype_is_object_const(cc, dr.type);
@@ -8255,6 +13313,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     const uint32_t sec_off = fast_cc_init_static(cc, &dr.type, sec, extra_al);
                     cc->syms[si].type = dr.type;
                     cc->syms[si].defined = 1u;
+                    if (sec != FSEC_DATA) { cc->syms[si].pad_sym[1] = fast_cc_static_fold_class(cc, dr.type, sec, sec_off); }
                     cc->syms[si].is_tentative = 0u;
                     cc->syms[si].section = sec;
                     cc->syms[si].sec_off = sec_off;
@@ -8280,7 +13339,10 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             if (fast_cc_peek(cc) == FTOK_COMMA) { fast_cc_declarator_comma(cc); }
             else { break; }
         }
+        if (cc->bailout) { break; }
+        // #3577: a declaration ends with `;`, a function definition with its body.
         if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
+        else if (!ended_by_body) { fast_cc_bail(cc, "expected ; after top-level declaration"); break; }
         if (cc->pos == tu_loop_pos && !cc->bailout) { fast_cc_bail(cc, "top-level decl stalled"); break; }
     }
 
@@ -8289,6 +13351,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
 
     // Visit newly reachable bodies in the same order as a forward scan: a reference to an earlier
     // definition waits until the scan wraps. This preserves .text, symbol and relocation order.
+    // #3577: each body was checked where it was defined (fast_cc_check_body); these compiles emit the ones referenced.
     uint32_t cursor = 0;
     while (cc->ready_groups != 0 && !cc->bailout)
     {
@@ -8307,9 +13370,9 @@ static bool fast_cc_compile_unit(FastCCState* cc)
 
         const FastBodyTask* task = deferred + index;
         const FastSym* sym = cc->syms + task->sym_idx;
-        if (!sym->defined)
+        if (sym->defined != 1u)
         {
-            if (sym->is_unsupported) { fast_cc_bail(cc, "called unsupported static inline"); break; }
+            if ((sym->use_flags & BUSTER_FSYM_UNSUPPORTED) != 0) { fast_cc_bail(cc, "called unsupported static inline"); break; }
             cc->pos = task->body_start;
             cc->cur_func_decl_pos = task->decl_start;
             cc->cur_func_declared = task->declared;
@@ -8318,12 +13381,21 @@ static bool fast_cc_compile_unit(FastCCState* cc)
     }
 
     // Finalize all tentative file-scope definitions into `.bss`!
+    // #3577: and the unit's end the full pipeline checks: a static function used but never defined
+    // (-Wundefined-internal), a tentative array definition never sized (-Wtentative-definition-array), a tentative
+    // definition of a struct or union never completed (its error). Branch-free for the symbols that are none of these.
+    uint32_t unit_end_bad = 0;
     for (uint32_t i = 1u; i < cc->sym_count && !cc->bailout; i += 1)
     {
         FastSym* s = cc->syms + i;
+        unit_end_bad |= (uint32_t)(s->kind == FSYM_FUNC) & ((uint32_t)(s->storage == 1u) | (uint32_t)(s->storage == 4u)) &
+                        (uint32_t)(s->referenced != 0) & (uint32_t)(s->defined == 0);
+        // A weak declaration of a name with internal linkage is the full pipeline's error.
+        unit_end_bad |= (uint32_t)(s->is_weak != 0) & ((uint32_t)(s->storage == 1u) | (uint32_t)(s->storage == 4u));
         if (s->kind == FSYM_GLOBAL && s->is_tentative != 0 && s->defined == 0)
         {
-            if (s->is_unsupported) { fast_cc_bail(cc, "tentative unsupported global"); break; }
+            if ((s->use_flags & BUSTER_FSYM_UNSUPPORTED) != 0) { fast_cc_bail(cc, "tentative unsupported global"); break; }
+            if (BUSTER_FAST_OBJECT_INCOMPLETE(cc, s->type, 0u) != 0) { fast_cc_bail(cc, "tentative definition of an incomplete type"); break; }
             const uint32_t sz = ftype_size(cc, s->type);
             const uint32_t al = ftype_align(cc, s->type);
             const uint32_t boff = fast_obj_alloc_section(obj, FSEC_BSS, sz, al, NULL);
@@ -8339,6 +13411,10 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 obj->syms[osym].defined = 1u;
             }
         }
+    }
+    if (unit_end_bad != 0)
+    {
+        fast_cc_bail(cc, "static function used but never defined");
     }
 
     fast_cc_alias_define(cc);

@@ -10,6 +10,9 @@
 #include "buster/compiler/c_direct.h"
 #include "buster/compiler/c_direct_cc.c"
 
+#include <dirent.h>
+#include <errno.h>
+#include <sys/resource.h>
 #include <limits.h>
 #include <sys/wait.h>
 #include <pthread.h>
@@ -166,6 +169,10 @@ int c_direct_try_compile(const CDirectRequest* request)
     {
         pp->unsigned_char = request->unsigned_char;
         fast_pp_set_language(pp, request->c23, request->strict_iso, request->no_gnu_keywords, request->trigraphs, request->raw_strings);
+        pp->feature_query = request->feature_query;
+        pp->feature_context = request->feature_context;
+        // __BASE_FILE__ is the main file's in a forced include too.
+        pp->base_file = request->input_path;
         for (uint32_t i = 0; i < request->directory_count; i += 1)
         {
             fast_pp_add_dir(pp, request->directories[i], request->directory_system != NULL && request->directory_system[i] != 0);
@@ -178,9 +185,12 @@ int c_direct_try_compile(const CDirectRequest* request)
         request->mark_stage(request->clock_context, request->stage_setup);
     }
 
-    // 1. Predefines
+    // 1. Predefines (their __STDC macros are builtins, #3577; a macro's text stays readable to the end), then
+    // __FLT_EVAL_METHOD__, the full pipeline's builtin after either: a --predefines file doesn't define it (clang's -dM
+    // leaves it out), where `#ifdef __FLT_EVAL_METHOD__` took the other branch and its #undef was quiet (#3577).
     if (ok)
     {
+        pp->in_predefines = true;
         if (request->predefines_path != NULL)
         {
             // A system header's, as the full pipeline reads it (pp_run_prelude_macros).
@@ -189,16 +199,21 @@ int c_direct_try_compile(const CDirectRequest* request)
         else if (request->predefines_text != NULL && request->predefines_length > 0)
         {
             ok = fast_pp_run_buffer(pp, "<predefines>", request->predefines_text, request->predefines_length);
-            if (ok)
+        }
+        char* eval_buf = ok ? (char*)fast_arena_alloc(&arena, 64u, 16) : NULL;
+        if (eval_buf != NULL)
+        {
+            const int elen = snprintf(eval_buf, 64u, "#define __FLT_EVAL_METHOD__ %u\n", request->flt_eval_method);
+            if (elen > 0)
             {
-                char eval_buf[64];
-                const int elen = snprintf(eval_buf, sizeof(eval_buf), "#define __FLT_EVAL_METHOD__ %u\n", request->flt_eval_method);
-                if (elen > 0)
-                {
-                    ok = fast_pp_run_buffer(pp, "<predefines>", eval_buf, (uint64_t)elen);
-                }
+                ok = fast_pp_run_buffer(pp, "<predefines>", eval_buf, (uint64_t)elen);
             }
         }
+        else
+        {
+            ok = false;
+        }
+        pp->in_predefines = false;
     }
 
     // 2. Command-line -D / -U macros
@@ -294,6 +309,21 @@ int c_direct_try_compile(const CDirectRequest* request)
         }
     }
 
+    // The rule that refused, for a caller that asks (#3577): the first bail's reason, the compiler's or else the
+    // preprocessor's; a step that failed without one (a file that can't be read) is the setup's or the input's.
+    if (status == 1 && request->out_bail_reason != NULL)
+    {
+        const char* reason = "setup or input";
+        if (cc != NULL && cc->bailout && cc->bailout_reason != NULL)
+        {
+            reason = cc->bailout_reason;
+        }
+        else if (pp != NULL && pp->bailout && pp->bailout_reason != NULL)
+        {
+            reason = pp->bailout_reason;
+        }
+        *request->out_bail_reason = reason;
+    }
     // Always release on bailout (caller will run full pipeline) or when caller requests cleanup
     if (status != 0 || request->release)
     {
@@ -315,7 +345,7 @@ struct CDirectExpectedSymbol
 {
     const char* name;
     const void* bytes; // data to compare, or NULL for functions in increasing text-offset order
-    uint32_t size;
+    uint32_t size;     // with no bytes, UINT32_MAX for a symbol the object must not have
 };
 
 static bool c_direct_test_symbols(const uint8_t* file, size_t size, const Elf64_Shdr* tables, uint32_t sections,
@@ -329,13 +359,14 @@ static bool c_direct_test_symbols(const uint8_t* file, size_t size, const Elf64_
     for (const CDirectExpectedSymbol* want = expected; ok && want->name != NULL; want += 1)
     {
         const size_t name_size = strlen(want->name) + 1u;
-        bool found = false;
+        const bool absent = want->bytes == NULL && want->size == UINT32_MAX;
+        bool found = absent;
         for (size_t i = 0; i < symtab->sh_size / sizeof(*syms); i += 1)
         {
             const Elf64_Sym sym = syms[i];
             if (sym.st_name > names->sh_size || name_size > names->sh_size - sym.st_name ||
                 memcmp(file + names->sh_offset + sym.st_name, want->name, name_size) != 0) { continue; }
-            if (sym.st_shndx == SHN_UNDEF || sym.st_shndx >= sections) { break; }
+            if (absent || sym.st_shndx == SHN_UNDEF || sym.st_shndx >= sections) { found = false; break; }
             const Elf64_Shdr* sec = tables + sym.st_shndx;
             if (sec->sh_offset > size || sec->sh_size > size - sec->sh_offset ||
                 sym.st_value > sec->sh_size || sym.st_size > sec->sh_size - sym.st_value) { break; }
@@ -364,6 +395,7 @@ struct CDirectTestMode
     bool no_gnu_keywords;
     bool trigraphs;
     uint8_t raw_strings;
+    const char* predefines_path; // a predefines file (--predefines) instead of the minimal text
 };
 
 static bool c_direct_test_compile_source_with(const char* source, const char* obj_path, int expected_status, const char* const* directories,
@@ -422,9 +454,10 @@ static bool c_direct_test_compile_source_with(const char* source, const char* ob
     const CDirectRequest req = {
         .input_path = src_path,
         .output_path = obj_path,
-        .predefines_text = minimal_predefs,
-        .predefines_length = (uint32_t)(sizeof(minimal_predefs) - 1u),
+        .predefines_text = mode.predefines_path == NULL ? minimal_predefs : NULL,
+        .predefines_length = mode.predefines_path == NULL ? (uint32_t)(sizeof(minimal_predefs) - 1u) : 0u,
         .flt_eval_method = 0,
+        .predefines_path = mode.predefines_path,
         .directories = directories,
         .directory_system = system_directories,
         .directory_count = directory_count <= 8u ? directory_count : 0u,
@@ -626,14 +659,12 @@ static const CDirectLexCase c_direct_lex_cases[] = {
     { "s[1]='a';", 7, { FTOK_IDENT, FTOK_LBRACKET, BUSTER_DIRECT_TEST_NUMBER, FTOK_RBRACKET, FTOK_ASSIGN, FTOK_CHAR_LIT, FTOK_SEMI } },
     { "u8\"x\"", 1, { FTOK_STR_LIT } },
     { "L'x'", 1, { FTOK_CHAR_LIT } },
-    { "u'x'", 1, { FTOK_CHAR_LIT } },
     { "\"caf\xc3\xa9\"", 1, { FTOK_STR_LIT } },
     { "a /* caf\xc3\xa9 */ b", 2, { FTOK_IDENT, FTOK_IDENT } },
     { "x = 1 \\\n + 2;", 6, { FTOK_IDENT, FTOK_ASSIGN, BUSTER_DIRECT_TEST_NUMBER, FTOK_PLUS, BUSTER_DIRECT_TEST_NUMBER, FTOK_SEMI } },
     { "a@b", 3, { FTOK_IDENT, FTOK_PP_OTHER, FTOK_IDENT } },
     { "a<\xbd" "b", 4, { FTOK_IDENT, FTOK_LT, FTOK_PP_OTHER, FTOK_IDENT } },
     { "a+\xab-\xad", 5, { FTOK_IDENT, FTOK_PLUS, FTOK_PP_OTHER, FTOK_MINUS, FTOK_PP_OTHER } },
-    { "1..2", 1, { BUSTER_DIRECT_TEST_NUMBER } },
     { "1.e2", 1, { BUSTER_DIRECT_TEST_NUMBER } },
     { "a.b.c", 5, { FTOK_IDENT, FTOK_DOT, FTOK_IDENT, FTOK_DOT, FTOK_IDENT } },
     { "a<<<=b", 4, { FTOK_IDENT, FTOK_LSHIFT, FTOK_LE, FTOK_IDENT } },
@@ -1461,10 +1492,11 @@ static bool c_direct_test_lexer(void)
         }
     }
     // What the direct path leaves to the full compiler must be left at every offset too: an identifier a backslash and
-    // a newline splice, and a digit separator.
+    // a newline splice, a digit separator, and (#3577) a char16_t constant, whose type isn't int, and a number the full
+    // pipeline refuses (`1..2`: an invalid suffix).
     for (uint32_t shift = 0; ok && shift < 131u; shift += 1)
     {
-        static const char* const refused[] = { "ab\\\ncd", "1'000" };
+        static const char* const refused[] = { "ab\\\ncd", "1'000", "u'x'", "1..2" };
         for (uint32_t r = 0; ok && r < sizeof(refused) / sizeof(refused[0]); r += 1)
         {
             uint32_t count = 0;
@@ -2120,24 +2152,28 @@ static bool c_direct_test_kept_files(void)
     return ok;
 }
 
+// #3577: no initializer here overrides another or changes its value (the full pipeline's warnings). Each inline function
+// is checked where it is defined, `unused` and `here` too, and only the ones a compiled function references are emitted,
+// at the unit's end, in the order they become reachable.
 static bool c_direct_test_tables_and_inline_bodies(const char* obj_path)
 {
     static const char source[] =
         "unsigned char bytes[] = {0,1,22,33,44,55,66,77,88,99,100,111,122,133,144,155,"
-        "0x1ff,030,8+2,[23]=7,[2]=99};\n"
+        "0xff,030,8+2,[23]=7};\n"
         "unsigned short rows[2][17] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,"
-        "17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,65537};\n"
+        "17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,1};\n"
         "unsigned int decimals[] = {0,1,22,333,4444,55555,666666,7777777,88888888,"
-        "9,10,11,12,13,14,15,123456789,2.5,3+4};\n"
+        "9,10,11,12,13,14,15,123456789,(unsigned)2.5,3+4};\n"
         "unsigned long wide[] = {0xffffffffU,1,2,3,4,5,6,7,8,9,10,11,12,13,14,2147483648U,-2};\n"
         "static inline int a(int), b(int), c(int), d(int);\n"
         "static inline int a(int n){return n ? d(n-1) : 1;}\n"
         "static inline int b(int n){return n ? a(n-1)+c(n-1) : 2;}\n"
         "static inline int c(int n){return a(n); }\n"
         "static inline int d(int n){return b(n); }\n"
-        "static inline int unused(void){return undeclared;}\n"
+        "static inline int unused(void){return 3;}\n"
+        "static inline int here(void){return 4;}\n"
         "int (*hook)(int)=b; int entry(int n){return hook(n); }\n";
-    static const uint8_t bytes[24] = {0,1,99,33,44,55,66,77,88,99,100,111,122,133,144,155,255,24,10,[23]=7};
+    static const uint8_t bytes[24] = {0,1,22,33,44,55,66,77,88,99,100,111,122,133,144,155,255,24,10,[23]=7};
     static const uint16_t rows[34] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,1};
     static const uint32_t decimals[] = {0,1,22,333,4444,55555,666666,7777777,88888888,9,10,11,12,13,14,15,123456789,2,7};
     static const uint64_t wide[] = {UINT32_MAX,1,2,3,4,5,6,7,8,9,10,11,12,13,14,UINT32_C(2147483648),UINT64_MAX-1u};
@@ -2151,6 +2187,8 @@ static bool c_direct_test_tables_and_inline_bodies(const char* obj_path)
         { "c", NULL, 0 },
         { "a", NULL, 0 },
         { "d", NULL, 0 },
+        { "unused", NULL, UINT32_MAX },
+        { "here", NULL, UINT32_MAX },
         { NULL, NULL, 0 },
     };
     return c_direct_test_compile_source_with(source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, expected, NULL, 0, (CDirectTestMode){ 0 });
@@ -2552,7 +2590,8 @@ static bool c_direct_test_raw_strings(const char* obj_path)
         { "#pragma message(\"/* look\")\nint x = 1;\n", 1, 1, NULL },
         { "#pragma foo \"/*\"\nint y = 2;\n/* */ int z = 3;\n", 1, 0, "y z" },
         { "#pragma foo '/*'\nint y = 2;\n", 0, 0, "y" },
-        { "#line 5 \"a/*b.c\"\nint y = 2;\nint z = 3;\n", 0, 0, "y z" },
+        // (#3577: a #line's file name, which __FILE__ would take, leaves the direct path.)
+        { "#line 5 \"a/*b.c\"\nint y = 2;\nint z = 3;\n", 0, 1, NULL },
         { "#pragma foo don't\nint y = 2;\n", 0, 1, NULL },
         { "#if 1\nint y = 2;\n#endif // it's\nint z = 3;\n", 0, 0, "y z" },
         { "#pragma foo R\"(x)\"\nint y = 2;\n", 1, 1, NULL },
@@ -2723,6 +2762,39 @@ static const void* c_direct_test_code(const char* path, const char* name, void**
     return result;
 }
 #endif
+
+typedef long (*CDirectTestPointers3)(void*, void*, void*);
+
+// Parenthesized pointer parameters (#3577), run: `int (*p)` a pointer and `int (*q)[3]` a pointer to three ints, where
+// main's direct path made them an int and an int * (sizeof(p) 4, sizeof(*q) 4, q + 1 four bytes on, and q[1][2] its
+// error); and a pointer to a two-dimensional array.
+static bool c_direct_test_pointer_parameters(const char* obj_path)
+{
+    static const char source[] =
+        "long t_sizes(int (*p), int (*q)[3], char (*r)[2][5]) { return (long)(sizeof(p) * 10000 + sizeof(*q) * 100 + sizeof(*r)); }\n"
+        "long t_step(int (*q)[3]) { return (long)((char*)(q + 1) - (char*)q); }\n"
+        "long t_read(int (*q)[3]) { return q[1][2]; }\n";
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+#if !__has_feature(memory_sanitizer)
+    void* mappings[3] = { NULL, NULL, NULL };
+    size_t mapped[3] = { 0, 0, 0 };
+    const CDirectTestPointers3 sizes = (CDirectTestPointers3)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_sizes", mappings + 0, mapped + 0) : NULL);
+    const CDirectTestAsmPointer step = (CDirectTestAsmPointer)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_step", mappings + 1, mapped + 1) : NULL);
+    const CDirectTestAsmPointer read = (CDirectTestAsmPointer)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_read", mappings + 2, mapped + 2) : NULL);
+    int rows[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };
+    ok = ok && sizes != NULL && step != NULL && read != NULL;
+    ok = ok && sizes(NULL, NULL, NULL) == 81210L && step(rows) == 12L && read(rows) == 6L;
+    for (uint32_t i = 0; i < 3u; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+    return ok;
+}
 
 // musl's shapes, run: syscall with no argument (getpid, whose number is an int), with two (munmap of a page and
 // clock_gettime, given a pointer), and with six of which three are local register variables (mmap of the page), and
@@ -3165,7 +3237,8 @@ static bool c_direct_test_pretty_function(const char* obj_path)
         "void p12(fn_t g, int x[const 3], int y[static restrict 2], char z[][2][3]) { names[12] = __PRETTY_FUNCTION__; }\n"
         "static int p13(int x __attribute__((unused)), unsigned char c, long int l, int long m, unsigned u, signed s, short int si,\n"
         "               long long int lli, unsigned long long ull) { names[13] = __PRETTY_FUNCTION__; return 0; }\n"
-        "void p14(void (*)(void), int (*)(), char (*)[]) { names[14] = __PRETTY_FUNCTION__; }\n"
+        // (#3577: named, as the full pipeline wants a definition's parameters before C23; the names aren't printed.)
+        "void p14(void (*f)(void), int (*g)(), char (*h)[]) { names[14] = __PRETTY_FUNCTION__; }\n"
         "void p15(va_list ap) { names[15] = __PRETTY_FUNCTION__; }\n"
         "void p16(__builtin_va_list ap) { names[16] = __PRETTY_FUNCTION__; }\n"
         "void p17(va_list *ap) { names[17] = __PRETTY_FUNCTION__; }\n"
@@ -3808,7 +3881,7 @@ static bool c_direct_test_dead_arms(const char* obj_path)
         "int t_if(int a) { if (sizeof(a) == 4) { a += 1; } else { a += 2; } return a; }\n"
         "int t_if0(int a) { if (sizeof(a) == 8) { a += 1; } else { a += 2; } return a; }\n"
         "int t_chain(int a) { if (sizeof(a) == 2) { a = 1; } else if (sizeof(a) == 4) { a = 2; } else { a = 3; } return a; }\n"
-        "int t_dangle(int a) { if (0) if (a) a = 5; else a = 6; return a; }\n"
+        "int t_dangle(int a) { if (0) { if (a) a = 5; else a = 6; } return a; }\n"
         "int t_inner(int a) { if (1) { a += 10; } else { if (a) { a = 2; } else { a = 3; } } return a; }\n"
         "int t_void(int *p) { 1 ? (void)(*p = 1) : (void)(*p = 2); 0 ? (void)(*p += 5) : (void)(*p += 7); return *p; }\n"
         "int t_logic(int *p) { return (0 && (*p = 5)) * 10 + (1 || (*p = 6)) + (0 && *p || 1) * 100; }\n"
@@ -3875,7 +3948,7 @@ static bool c_direct_test_dead_arms(const char* obj_path)
         { "void never(int);\nint f(int a) { if (0) { switch (a) { case 1: never(a); } } return a; }\n", 1u },
         { "void never(int);\nint f(int a) { if (1) { a += 1; } else { do never(a); while (a); } return a; }\n", 1u },
         { "void never(int);\nint f(int a) { if (a) { never(a); } return a; }\n", 1u },
-        { "void never(int);\nint f(int a) { if (0) if (a) never(a); else return 1; return a; }\n", 1u },
+        { "void never(int);\nint f(int a) { if (0) { if (a) never(a); else return 1; } return a; }\n", 1u },
         { "void never(int);\nint f(int a) { if (0) { if (a) { never(a); } } else { a += 1; } return a; }\n", 0u },
         { "void never(int);\nint f(int a) { if (1) { a += 1; } else { a += 2; } never(a); return a; }\n", 1u },
         { "void never(int);\nint f(int a) { if (0) { a += 1; } never(a); return a; }\n", 1u },
@@ -3944,6 +4017,70 @@ static bool c_direct_test_dead_arms(const char* obj_path)
             fprintf(stderr, "test-direct: a dead side the direct path took: %s", leaves[i]);
         }
     }
+    return ok;
+}
+
+// #3577: what the full pipeline's raw lexer still reports in a skipped group (#3655): a UCN that starts a token, a basic,
+// control or surrogate character's, leaves the direct path wherever its backslash falls in the skip's blocks (a pad of
+// blanks puts it at every offset of the first two, and so the letter after a block's last byte), also after a line splice
+// between the backslash and its letter, and after a literal that closes before it. A backslash before another that starts
+// none, and UCNs in literals and comments, compile. In C23 a quote after a number's character is a digit separator, which
+// opens no literal: where it would hide an event, the unit leaves. An asm label with a '.' leaves (the full pipeline
+// refuses one that names a block-scope static's symbol, `f.n`).
+static bool c_direct_test_skipped_ucns(const char* obj_path)
+{
+    bool ok = true;
+    for (uint32_t pad = 0; ok && pad < 140u; pad += 1)
+    {
+        char source[512];
+        snprintf(source, sizeof(source), "#if 0\n%*s\\u0041\n#endif\nint f(void) { return 0; }\n", (int)pad, "");
+        ok = c_direct_test_compile_source(source, obj_path, 1, NULL, NULL);
+        snprintf(source, sizeof(source), "#if 0\n%*s\\\\\nN{LATIN CAPITAL LETTER A}\n#endif\nint f(void) { return 0; }\n", (int)pad, "");
+        ok = ok && c_direct_test_compile_source(source, obj_path, 1, NULL, NULL);
+        snprintf(source, sizeof(source), "#if 0\n%*s\\\\n \\\nu0041 \"\\u0041\" '\\U00000041' /* \\u0041 */ // \\N{NULL}\n#endif\nint f(void) { return 0; }\n",
+                 (int)pad, "");
+        ok = ok && c_direct_test_compile_source(source, obj_path, 0, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: a skipped group's UCN after %u blanks\n", pad);
+        }
+    }
+    static const char* const leaves[] = {
+        "#if 1\nint f(void) { return 0; }\n#else\n#error \\U00000001\n#endif\n",
+        "#if 0\n\\uD800\n#endif\nint f(void) { return 0; }\n",
+        "#if 0\n\"x\" '\\'' \\u0041\n#endif\nint f(void) { return 0; }\n",
+        "#if 0\n\\\\  \r\nu0041\n#endif\nint f(void) { return 0; }\n",
+        "#if 0\n#if 1\n#define F \\u0045\n#endif\n#endif\nint f(void) { return 0; }\n",
+        // Lines this path passes unread, or reads into tokens nothing uses: an #elif's operands after a taken group, a
+        // pragma nothing acts on, a definition, an unused argument; all the full pipeline's lexer reads.
+        "#if 1\nint x;\n#elif 1 \\u0041\n#endif\nint f(void) { return 0; }\n",
+        "#pragma foo \\u0041\nint f(void) { return 0; }\n",
+        "#define F \\\\\nu0041\nint f(void) { return 0; }\n",
+        "#define G(x) 1\nint y = G(\\N{LATIN CAPITAL LETTER A});\nint f(void) { return 0; }\n",
+        "extern int fn __asm__(\"f.n\");\nint f(void) { static int n = 5; return n++ + fn; }\n",
+        "int f(void) { static int n = 5; return n++; }\nint fn __asm__(\"f.\" \"n\") = 9;\n",
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: compiled where the full pipeline reports or refuses: %s", leaves[i]);
+        }
+    }
+    // C23's digit separator before a UCN, and before a comment that holds the group's end; a prefix's quote before a
+    // comment's start leaves too. Without C23 each quote opens a literal, as the full pipeline reads it.
+    const CDirectTestMode c23 = { .c23 = true };
+    static const char separated_ucn[] = "#if 0\nint x = 1'000; \\u0041\n#endif\nint f(void) { return 0; }\n";
+    static const char separated_comment[] = "#if 0\nint x = 1'000; /*\n#else\nint y;\n#endif\n*/\n#endif\nint f(void) { return 0; }\n";
+    static const char separated_point[] = "#if 0\nint x = 1.'5; \\u0041\n#endif\nint f(void) { return 0; }\n";
+    static const char separated_sign[] = "#if 0\nint x = 0x1p-'5; \\u0041\n#endif\nint f(void) { return 0; }\n";
+    static const char prefixed[] = "#if 0\nint x = L'a'; /* */\n#endif\nint f(void) { return 0; }\n";
+    static const char quoted[] = "#if 0\nint x = c - '0' + 'a'; /* */\n#endif\nint f(void) { return 0; }\n";
+    ok = ok && c_direct_test_compile_mode(separated_ucn, obj_path, 1, NULL, NULL, c23) && c_direct_test_compile_mode(separated_comment, obj_path, 1, NULL, NULL, c23) &&
+         c_direct_test_compile_mode(separated_point, obj_path, 1, NULL, NULL, c23) && c_direct_test_compile_mode(separated_sign, obj_path, 1, NULL, NULL, c23) &&
+         c_direct_test_compile_mode(prefixed, obj_path, 1, NULL, NULL, c23) && c_direct_test_compile_mode(quoted, obj_path, 0, NULL, NULL, c23) &&
+         c_direct_test_compile_source(prefixed, obj_path, 0, NULL, NULL) && c_direct_test_compile_source(separated_ucn, obj_path, 0, NULL, NULL);
     return ok;
 }
 
@@ -4050,7 +4187,6 @@ static bool c_direct_test_dependencies(const char* obj_path)
           "#include <h.h>\n"
           "#define SECOND\n"
           "#include <h.h>\n"
-          "#pragma GCC system_header\n"
           "#include <m.h>\n"
           "int x;\n" },
         { "dir.c", "#if __has_include(<sub>)\n#endif\nint x;\n" },
@@ -4144,6 +4280,9 @@ static bool c_direct_test_dependencies(const char* obj_path)
         "# 7 \"other.c\" 3\nint x;\n",
         "#line 7 \"other.c\"\nint x;\n",
     };
+    // Without the records, the first compiles here; the others leave all the same (#3577): this path doesn't expand a
+    // __has_include operand's macro, whose answer may be the full pipeline's other, nor follow a file name __FILE__ takes.
+    static const int without_records[] = { 0, 1, 1, 1 };
     request.input_path = dir_path;
     request.include_count = 0;
     for (uint32_t i = 0; ok && i < sizeof(leaving) / sizeof(leaving[0]); i += 1)
@@ -4155,7 +4294,7 @@ static bool c_direct_test_dependencies(const char* obj_path)
         request.dependencies = c_direct_test_dependency_records;
         ok = ok && c_direct_try_compile(&request) == 1 && !test.called && access(obj_path, F_OK) != 0;
         request.dependencies = NULL;
-        ok = ok && c_direct_try_compile(&request) == 0;
+        ok = ok && c_direct_try_compile(&request) == without_records[i];
         unlink(obj_path);
         if (!ok)
         {
@@ -4186,7 +4325,10 @@ static bool c_direct_test_dependencies(const char* obj_path)
         };
         test = (CDirectTestDependencies){ .directory = directory, .expected = alone, .expected_count = 3, .accept = true };
         request.dependencies = c_direct_test_dependency_records;
+        // #elifdef and #elifndef are C23's: before it, the full pipeline's warning (#3577) leaves the direct path.
+        request.c23 = i >= 5u;
         ok = ok && c_direct_try_compile(&request) == 0 && test.called && test.matched;
+        request.c23 = false;
         unlink(obj_path);
         if (!ok)
         {
@@ -4247,10 +4389,413 @@ static bool c_direct_test_dependencies(const char* obj_path)
     return ok;
 }
 
-int run_c_direct_tests(int argc, char** argv)
+// ---------------------------------------------------------------------------------------------------------------------
+// The differential (#3577): `test-direct --differential [--jobs N] [--direct-floor N] DIRECTORY...`. Every C file under
+// the directories is compiled with -c by this executable twice, each time a child of its own: by default, where the
+// direct path compiles what it can and leaves the rest to the full pipeline, and with --no-direct, the full pipeline
+// alone. The two must exit alike and print the same bytes, standard output and errors together. The direct path
+// compiled a file itself where its run exited 0 without a line in the log BUSTER_TEST_DIRECT_BAILS names; fewer such
+// files than --direct-floor fail the run, as a direct path that took none would leave nothing compared.
+
+#define BUSTER_C_DIRECT_DIFFERENTIAL_CAPTURE_BYTES (UINT64_C(64) << 20)
+#define BUSTER_C_DIRECT_DIFFERENTIAL_REPORTS 20u
+
+// Appends ITEM, which the list then owns, to a list of strings; frees it and returns false where memory runs out.
+static bool c_direct_differential_push(char*** items, uint32_t* count, uint32_t* capacity, char* item)
 {
-    (void)argc;
-    (void)argv;
+    bool ok = item != NULL;
+    if (ok && *count == *capacity)
+    {
+        const uint32_t grown = *capacity == 0 ? 256u : *capacity * 2u;
+        char** bigger = realloc(*items, (size_t)grown * sizeof(char*));
+        ok = bigger != NULL;
+        if (ok)
+        {
+            *items = bigger;
+            *capacity = grown;
+        }
+    }
+    if (ok)
+    {
+        (*items)[*count] = item;
+        *count += 1u;
+    }
+    else
+    {
+        free(item);
+    }
+    return ok;
+}
+
+static int c_direct_differential_order(const void* left, const void* right)
+{
+    return strcmp(*(const char* const*)left, *(const char* const*)right);
+}
+
+// Appends the regular files named *.c under ROOT, at every depth, to FILES: a stack of directories walks the tree (the
+// call graph allows no recursion), and a link is followed to neither a file nor a directory. False where a directory
+// can't be read or memory runs out.
+static bool c_direct_differential_collect(const char* root, char*** files, uint32_t* file_count, uint32_t* file_capacity)
+{
+    char** stack = NULL;
+    uint32_t depth = 0;
+    uint32_t stack_capacity = 0;
+    bool ok = c_direct_differential_push(&stack, &depth, &stack_capacity, strdup(root));
+    while (ok && depth > 0)
+    {
+        depth -= 1u;
+        char* directory = stack[depth];
+        DIR* handle = opendir(directory);
+        ok = handle != NULL;
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: %s: %s\n", directory, strerror(errno));
+        }
+        for (struct dirent* entry = ok ? readdir(handle) : NULL; ok && entry != NULL; entry = readdir(handle))
+        {
+            const char* name = entry->d_name;
+            const size_t name_length = strlen(name);
+            const size_t directory_length = strlen(directory);
+            if (name[0] != '.')
+            {
+                char* path = malloc(directory_length + name_length + 2u);
+                ok = path != NULL;
+                struct stat stats = { 0 };
+                if (ok)
+                {
+                    memcpy(path, directory, directory_length);
+                    path[directory_length] = '/';
+                    memcpy(path + directory_length + 1u, name, name_length + 1u);
+                    ok = lstat(path, &stats) == 0;
+                }
+                if (ok && S_ISDIR(stats.st_mode))
+                {
+                    ok = c_direct_differential_push(&stack, &depth, &stack_capacity, path);
+                }
+                else if (ok && S_ISREG(stats.st_mode) && name_length > 2u && strcmp(name + name_length - 2u, ".c") == 0)
+                {
+                    ok = c_direct_differential_push(files, file_count, file_capacity, path);
+                }
+                else
+                {
+                    free(path);
+                }
+            }
+        }
+        if (handle != NULL)
+        {
+            closedir(handle);
+        }
+        free(directory);
+    }
+    while (depth > 0)
+    {
+        depth -= 1u;
+        free(stack[depth]);
+    }
+    free(stack);
+    return ok;
+}
+
+// The work directory's three files of run RUN (file RUN / 2's, by default where RUN is even, with --no-direct where it
+// is odd): its standard output and errors, its object, its bail log.
+static void c_direct_differential_names(const char* work, uint32_t run, char* capture, char* object, char* bails, size_t capacity)
+{
+    snprintf(capture, capacity, "%s/%u.txt", work, run);
+    snprintf(object, capacity, "%s/%u.o", work, run);
+    snprintf(bails, capacity, "%s/%u.bails", work, run);
+}
+
+// Starts SELF on FILE with -c (with --no-direct where FULL), its standard input /dev/null, its standard output and
+// errors into CAPTURE, its object into OBJECT, without core files and killed past two minutes of CPU time. The
+// environment is the comparison's own: no BUSTER_NO_DIRECT and no SOURCE_DATE_EPOCH, either of which turns the direct
+// path off, and BUSTER_TEST_DIRECT_BAILS naming BAILS for the default run alone. Its pid, or -1.
+static pid_t c_direct_differential_start(const char* self, const char* file, bool full, const char* capture, const char* object, const char* bails)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        const int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        const int output = open(capture, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        const struct rlimit cpu = { .rlim_cur = 120, .rlim_max = 125 };
+        const struct rlimit core = { 0 };
+        const bool named = full ? unsetenv("BUSTER_TEST_DIRECT_BAILS") == 0 : setenv("BUSTER_TEST_DIRECT_BAILS", bails, 1) == 0;
+        const bool ready = named && unsetenv("BUSTER_NO_DIRECT") == 0 && unsetenv("SOURCE_DATE_EPOCH") == 0 && input >= 0 && output >= 0 &&
+                           setrlimit(RLIMIT_CPU, &cpu) == 0 && setrlimit(RLIMIT_CORE, &core) == 0 &&
+                           dup2(input, 0) == 0 && dup2(output, 1) == 1 && dup2(output, 2) == 2;
+        if (ready)
+        {
+            char* direct_arguments[] = { (char*)self, (char*)"-c", (char*)file, (char*)"-o", (char*)object, NULL };
+            char* full_arguments[] = { (char*)self, (char*)"--no-direct", (char*)"-c", (char*)file, (char*)"-o", (char*)object, NULL };
+            execv(self, full ? full_arguments : direct_arguments);
+        }
+        _exit(127);
+    }
+    return child;
+}
+
+// The file at PATH in memory the caller frees (*length its bytes), an empty one where there is none; null where it
+// can't be read whole.
+static char* c_direct_differential_read(const char* path, uint64_t* length)
+{
+    *length = 0;
+    char* bytes = NULL;
+    const int descriptor = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat stats = { 0 };
+    if (descriptor < 0)
+    {
+        bytes = errno == ENOENT ? calloc(1, 1) : NULL;
+    }
+    else if (fstat(descriptor, &stats) == 0 && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= BUSTER_C_DIRECT_DIFFERENTIAL_CAPTURE_BYTES)
+    {
+        bytes = calloc((uint64_t)stats.st_size + 1u, 1);
+        bool reading = bytes != NULL;
+        while (reading && *length < (uint64_t)stats.st_size)
+        {
+            const ssize_t got = read(descriptor, bytes + *length, (uint64_t)stats.st_size - *length);
+            reading = got > 0 || (got < 0 && errno == EINTR);
+            *length += got > 0 ? (uint64_t)got : 0u;
+        }
+        if (bytes != NULL && *length != (uint64_t)stats.st_size)
+        {
+            free(bytes);
+            bytes = NULL;
+        }
+    }
+    if (descriptor >= 0)
+    {
+        close(descriptor);
+    }
+    return bytes;
+}
+
+static void c_direct_differential_print_status(const char* who, int status)
+{
+    if (WIFEXITED(status))
+    {
+        fprintf(stderr, "%s exited %d", who, WEXITSTATUS(status));
+    }
+    else if (WIFSIGNALED(status))
+    {
+        fprintf(stderr, "%s was killed by signal %d", who, WTERMSIG(status));
+    }
+    else
+    {
+        fprintf(stderr, "%s ended with wait status %d", who, status);
+    }
+}
+
+// Compares file FILE's two runs (statuses STATUSES[0], by default, and STATUSES[1], with --no-direct) and removes their
+// files: whether they exited alike and printed the same bytes. *DIRECT: whether the direct path compiled the file itself.
+// The first BUSTER_C_DIRECT_DIFFERENTIAL_REPORTS differences, counted in *REPORTED, print each run's first line that
+// differs.
+static bool c_direct_differential_compare(const char* work, uint32_t file, const char* path, const int* statuses, bool* direct, uint32_t* reported)
+{
+    char capture[2][512];
+    char object[2][512];
+    char bails[2][512];
+    uint64_t length[2] = { 0, 0 };
+    uint64_t bail_length = 0;
+    c_direct_differential_names(work, 2u * file, capture[0], object[0], bails[0], sizeof(capture[0]));
+    c_direct_differential_names(work, 2u * file + 1u, capture[1], object[1], bails[1], sizeof(capture[1]));
+    char* direct_output = c_direct_differential_read(capture[0], &length[0]);
+    char* full_output = c_direct_differential_read(capture[1], &length[1]);
+    char* bail_log = c_direct_differential_read(bails[0], &bail_length);
+    const bool read = direct_output != NULL && full_output != NULL && bail_log != NULL;
+    const bool same = read && statuses[0] == statuses[1] && length[0] == length[1] && memcmp(direct_output, full_output, length[0]) == 0;
+    *direct = read && WIFEXITED(statuses[0]) && WEXITSTATUS(statuses[0]) == 0 && bail_length == 0;
+    if (!same && *reported < BUSTER_C_DIRECT_DIFFERENTIAL_REPORTS)
+    {
+        fprintf(stderr, "test-direct: DIFF %s: ", path);
+        c_direct_differential_print_status("by default it", statuses[0]);
+        c_direct_differential_print_status(", with --no-direct it", statuses[1]);
+        fprintf(stderr, "%s\n", read ? "" : "; a run's output couldn't be read");
+        if (read)
+        {
+            // Each run's line where the outputs part.
+            uint64_t common = 0;
+            while (common < length[0] && common < length[1] && direct_output[common] == full_output[common])
+            {
+                common += 1u;
+            }
+            while (common > 0 && direct_output[common - 1u] != '\n')
+            {
+                common -= 1u;
+            }
+            const char* const outputs[2] = { direct_output, full_output };
+            const char* const labels[2] = { "    default", "--no-direct" };
+            for (uint32_t side = 0; side < 2u; side += 1u)
+            {
+                uint64_t end = common;
+                while (end < length[side] && end - common < 200u && outputs[side][end] != '\n')
+                {
+                    end += 1u;
+                }
+                fprintf(stderr, "    %s| %.*s%s\n", labels[side], (int)(end - common), outputs[side] + common, end < length[side] ? "" : " <end of output>");
+            }
+        }
+        *reported += 1u;
+    }
+    free(direct_output);
+    free(full_output);
+    free(bail_log);
+    for (uint32_t side = 0; side < 2u; side += 1u)
+    {
+        unlink(capture[side]);
+        unlink(object[side]);
+        unlink(bails[side]);
+    }
+    return same;
+}
+
+static int c_direct_differential(int argc, char** argv)
+{
+    uint32_t jobs = 0;
+    uint32_t direct_floor = 0;
+    uint32_t roots = 0;
+    char** files = NULL;
+    uint32_t file_count = 0;
+    uint32_t file_capacity = 0;
+    bool ok = true;
+    for (int i = 0; ok && i < argc; i += 1)
+    {
+        const bool valued = i + 1 < argc;
+        if (valued && strcmp(argv[i], "--jobs") == 0)
+        {
+            jobs = (uint32_t)strtoul(argv[i + 1], NULL, 10);
+            i += 1;
+        }
+        else if (valued && strcmp(argv[i], "--direct-floor") == 0)
+        {
+            direct_floor = (uint32_t)strtoul(argv[i + 1], NULL, 10);
+            i += 1;
+        }
+        else if (argv[i][0] == '-')
+        {
+            fprintf(stderr, "test-direct: --differential takes --jobs N, --direct-floor N and directories, not %s\n", argv[i]);
+            ok = false;
+        }
+        else
+        {
+            ok = c_direct_differential_collect(argv[i], &files, &file_count, &file_capacity);
+            roots += 1u;
+        }
+    }
+    if (ok && (roots == 0 || file_count == 0))
+    {
+        fprintf(stderr, "test-direct: --differential found no C file to compare\n");
+        ok = false;
+    }
+    if (jobs == 0)
+    {
+        const char* cores = getenv("CORES");
+        const long online = sysconf(_SC_NPROCESSORS_ONLN);
+        jobs = cores != NULL && cores[0] != 0 ? (uint32_t)strtoul(cores, NULL, 10) : (uint32_t)(online > 0 ? online : 1);
+        jobs = jobs == 0 ? 1u : jobs;
+    }
+    char self[4096];
+    const ssize_t self_length = readlink("/proc/self/exe", self, sizeof(self) - 1u);
+    ok = ok && self_length > 0 && (size_t)self_length < sizeof(self) - 1u;
+    self[self_length > 0 && (size_t)self_length < sizeof(self) ? self_length : 0] = 0;
+    const char* temporary = getenv("TMPDIR");
+    char work[512];
+    snprintf(work, sizeof(work), "%s/buster-direct-differential.XXXXXX", temporary != NULL && temporary[0] != 0 ? temporary : "/tmp");
+    const bool made = ok && mkdtemp(work) != NULL;
+    ok = made;
+    if (file_count > 1u)
+    {
+        qsort(files, file_count, sizeof(char*), c_direct_differential_order);
+    }
+
+    // Each file's two runs as children, JOBS at a time; run R is file R / 2's.
+    const uint32_t run_count = 2u * file_count;
+    pid_t* children = calloc(jobs, sizeof(pid_t));
+    uint32_t* child_run = calloc(jobs, sizeof(uint32_t));
+    int* statuses = calloc(run_count + 1u, sizeof(int));
+    uint8_t* ended = calloc(file_count + 1u, 1);
+    ok = ok && children != NULL && child_run != NULL && statuses != NULL && ended != NULL;
+    uint32_t next = 0;
+    uint32_t running = 0;
+    uint32_t differ = 0;
+    uint32_t direct = 0;
+    uint32_t reported = 0;
+    while ((ok && next < run_count) || running > 0)
+    {
+        for (uint32_t slot = 0; ok && slot < jobs && next < run_count; slot += 1u)
+        {
+            if (children[slot] == 0)
+            {
+                char capture[512];
+                char object[512];
+                char bails[512];
+                c_direct_differential_names(work, next, capture, object, bails, sizeof(capture));
+                const pid_t child = c_direct_differential_start(self, files[next / 2u], (next & 1u) != 0, capture, object, bails);
+                ok = child > 0;
+                children[slot] = child > 0 ? child : 0;
+                child_run[slot] = next;
+                running += (uint32_t)(child > 0);
+                next += 1u;
+            }
+        }
+        int status = 0;
+        const pid_t child = running > 0 ? waitpid(-1, &status, 0) : 0;
+        for (uint32_t slot = 0; child > 0 && slot < jobs; slot += 1u)
+        {
+            if (children[slot] == child)
+            {
+                const uint32_t run = child_run[slot];
+                const uint32_t file = run / 2u;
+                children[slot] = 0;
+                running -= 1u;
+                statuses[run] = status;
+                ended[file] += 1u;
+                if (ended[file] == 2u)
+                {
+                    bool compiled = false;
+                    differ += (uint32_t)!c_direct_differential_compare(work, file, files[file], statuses + 2u * file, &compiled, &reported);
+                    direct += (uint32_t)compiled;
+                }
+            }
+        }
+        if (child < 0 && errno != EINTR)
+        {
+            fprintf(stderr, "test-direct: waitpid: %s\n", strerror(errno));
+            ok = false;
+            running = 0;
+        }
+    }
+    if (made)
+    {
+        rmdir(work);
+    }
+    const bool floor_met = direct >= direct_floor;
+    if (ok && differ > 0)
+    {
+        printf("test-direct: %u of %u C files differ by default from --no-direct (FAILED)\n", differ, file_count);
+    }
+    else if (ok)
+    {
+        printf("test-direct: %u C files: by default each exits and prints as with --no-direct; the direct path compiled %u of them itself\n",
+               file_count, direct);
+    }
+    if (ok && !floor_met)
+    {
+        printf("test-direct: the direct path compiled %u of the files, fewer than --direct-floor %u (FAILED)\n", direct, direct_floor);
+    }
+    for (uint32_t i = 0; i < file_count; i += 1u)
+    {
+        free(files[i]);
+    }
+    free(files);
+    free(children);
+    free(child_run);
+    free(statuses);
+    free(ended);
+    return ok && differ == 0 && floor_met ? 0 : 1;
+}
+
+static int c_direct_unit_tests(void)
+{
     char obj_path[256];
     snprintf(obj_path, sizeof(obj_path), "/tmp/buster_direct_test_%d.o", (int)getpid());
     uint32_t passed = 0;
@@ -4314,6 +4859,185 @@ int run_c_direct_tests(int argc, char** argv)
         "    r += (x == y);\n"
         "    return r + (int)bf->f;\n"
         "}\n",
+
+        // 6. -Wunsequenced quiet (#3577): a modification that is the expression's last operator; each modified name once
+        // among the tokens; and, compiled again for the log, `&&` sequencing a reuse, a string literal's array, and more
+        // than four modifications.
+        "int sequenced_next(int v);\n"
+        "int sequenced(int x, int* p, int c, int a, int b, int d, int e) {\n"
+        "    x = x + 1;\n"
+        "    x += x;\n"
+        "    *p++ = c;\n"
+        "    a = b++;\n"
+        "    if ((c = sequenced_next(c)) == 0 && c == sequenced_next(x)) { return 1; }\n"
+        "    if ((d = (int)sizeof(\"a string literal\")) == 17 && d) { return d; }\n"
+        "    a = b = c = d = e = x;\n"
+        "    return a + b + *p;\n"
+        "}\n",
+
+        // 7. -Wdangling-else quiet (#3577): the inner if-else in braces, an outer else, as a do's, a for's, a while's or a
+        // switch's body or with a label, and in an else arm.
+        "int dangling(int a, int b, int n) {\n"
+        "    if (a) { if (b) n += 1; else n -= 1; }\n"
+        "    if (a) if (b) n += 2; else n -= 2; else n = 0;\n"
+        "    if (a) do if (b) n += 3; else n -= 3; while (n < 0);\n"
+        "    if (a) for (int i = 0; i < 2; i++) if (b) n += i; else n -= i;\n"
+        "    if (a) while (n > 9) if (b) n -= 2; else n -= 1;\n"
+        "    if (a) switch (n) case 1: if (b) n++; else n--;\n"
+        "    if (a) next: if (b) n += 6; else n -= 6;\n"
+        "    if (a) n += 4; else if (b) n += 5; else n -= 5;\n"
+        "    return n;\n"
+        "}\n",
+        // 8. Comparisons -Wtautological-compare and -Wstring-compare leave alone (#3577): two places alike but not one path
+        // (another pointer's member, a union's other member, a sum), a float with itself, a string literal inside sizeof,
+        // a pointer sum against another pointer.
+        "struct S { int a; };\nunion U { int i; int j; };\n"
+        "int compared(struct S* p, struct S* q, union U u, int x, double d, const char* cp, int* ip, int* end, unsigned n) {\n"
+        "    int r = (p->a == q->a) + (u.i == u.j) + (x == x + 1) + (x + 1 == x) + (d == d);\n"
+        "    r += (int)sizeof(x == x) + (int)sizeof(\"a\" == cp) + (ip + n < end) + (p->a < q->a);\n"
+        "    return r + (cp != 0);\n"
+        "}\n",
+        // 9. Switches the full pipeline's -Wswitch-bool leaves alone (#3577): a member, a mask, `|` with an int, an
+        // assignment of a call, a conditional of ints, arithmetic over a comparison, a comparison in a call's argument, a
+        // cast of one to int.
+        "struct T { int op; unsigned char *blob; };\nint g(int);\n"
+        "int switched(struct T* t, int n, int c, _Bool b, int i) {\n"
+        "    switch (t->op) { case 1: n += 1; }\n"
+        "    switch (t->blob[i] & 0x0f) { case 2: n += 2; }\n"
+        "    switch (b | n) { case 3: n += 3; }\n"
+        "    switch (c = g(n)) { case 4: n += 4; }\n"
+        "    switch (c ? n : 0) { case 5: n += 5; }\n"
+        "    switch (128 * (c == '$') + n) { case 6: n += 6; }\n"
+        "    switch (g(n == 1)) { case 7: n += 7; }\n"
+        "    switch ((int)(n == 1)) { case 8: n += 8; }\n"
+        "    return n;\n"
+        "}\n",
+        // 10. A pointer to void under `&` and in sizeof, which the full pipeline's -Wvoid-ptr-dereference leaves alone.
+        "void* addressed(void* p) { return &*p; }\nunsigned long measured(void* p) { return sizeof(*p); }\n",
+        // 11. Conditionals of pointers the full pipeline's -Wpointer-type-mismatch leaves alone: one to void, one more
+        // qualified, a null pointer constant.
+        "const int* chosen(int c, int* p, const int* q, void* v) { return c ? p : (c > 1 ? q : (c > 2 ? (const int*)v : (void*)0)); }\n",
+        // 12. Packed records the full pipeline's -Waddress-of-packed-member leaves alone: a char member's address, an array
+        // member's decay and its element's address, an aligned packed record's aligned member, a read of a misaligned one.
+        "struct __attribute__((packed)) P { char c; int i; int arr[2]; };\n"
+        "struct __attribute__((packed, aligned(4))) A { int i; int j; };\n"
+        "int packed(struct P* p, struct A* a) { char* c = &p->c; int* e = p->arr; int* f = &p->arr[1]; int* j = &a->j; return *c + *e + *f + *j + p->i; }\n",
+        // 13. Packed records' layouts as clang's (#3577), which main's direct path laid out otherwise: an aligned(4)
+        // before the braces, and a record defined inside a packed one, which isn't packed itself (a static assertion
+        // that fails leaves the direct path, and fails this case).
+        "struct __attribute__((packed, aligned(4))) Q { char c; int j; };\n"
+        "struct R { char c; int j; } __attribute__((packed, aligned(4)));\n"
+        "struct __attribute__((packed)) P { char c; struct In { char a; int x; } sub; struct { short s; } anon; };\n"
+        "struct X { char c; struct In i; };\n"
+        "struct __attribute__((packed)) A { char c; struct { int x; }; };\n"
+        "_Static_assert(sizeof(struct Q) == 8 && _Alignof(struct Q) == 4 && sizeof(struct R) == 8 && _Alignof(struct R) == 4, \"aligned\");\n"
+        "_Static_assert(sizeof(struct In) == 8 && _Alignof(struct In) == 4 && sizeof(struct X) == 12 && sizeof(struct P) == 11, \"nested\");\n"
+        "_Static_assert(sizeof(struct A) == 5 && __builtin_offsetof(struct A, x) == 1, \"anonymous\");\n"
+        "int laid(struct P* p, struct X* x) { return p->sub.x + p->anon.s + x->i.x; }\n",
+        // 14. Constant indices the full pipeline's -Warray-bounds leaves alone: the end's address, `5[a]`, a member's
+        // array (a trailing one or not), a string's terminator, a dead branch's and sizeof's.
+        "struct S { int arr[2]; int n; int d[1]; };\nint a[3];\n"
+        "int bounded(struct S* s) { int* e = &a[3]; return *e + 2[a] + s->arr[5] + s->d[4] + \"abc\"[3] + (0 ? a[7] : 1) + (int)sizeof(a[9]); }\n",
+        // 15. Returns the full pipeline's -Wreturn-stack-address leaves alone: an address a call, `*`, a subscript, a
+        // comparison or an assignment takes; a static's, a pointer member's array, a parameter array, a pointer's member.
+        "struct T { int b[2]; int n; };\nint* g(int*);\nint* p;\n"
+        "int* r1(void) { int x = 0; return g(&x); }\nint r2(void) { int x = 1; return *&x; }\n"
+        "int r3(int* q) { int a[2] = { 0, 1 }; return q[&a[1] - a]; }\nint r4(int* q) { int x = 0; return q == &x; }\n"
+        "int* r5(void) { int x = 0; return p = &x; }\nint* r6(void) { static int s[2]; return s; }\n"
+        "int* r7(struct T* t) { return t->b; }\nint* r8(int a[2]) { return a; }\nint* r9(struct T* t) { return &t->n; }\n",
+        // 16. Library calls the full pipeline leaves alone: memcpy's and memset's object sizes, another pointer's, `&p`'s
+        // pointer, a multiple, a pointer to void; abs of a short and an int, labs of a long long, fabs of a float.
+        "void* memcpy(void*, const void*, unsigned long);\nvoid* memset(void*, int, unsigned long);\n"
+        "int abs(int);\nlong labs(long);\ndouble fabs(double);\nstruct S { int a, b; };\n"
+        "long sized(int* p, int* q, char* r, void* v, void* w, int n, short h, long long ll, float fl) {\n"
+        "    struct S s; int a[4]; memset(&s, 0, sizeof(s)); memset(a, 0, sizeof(a)); memcpy(p, q, sizeof(*p));\n"
+        "    memcpy(p, q, sizeof(r)); memcpy(&p, &q, sizeof(p)); memcpy(p, q, n * sizeof(p)); memcpy(v, w, sizeof(v));\n"
+        "    return abs(h) + abs(n) + labs(ll) + (long)fabs(fl) + s.a + a[0];\n"
+        "}\n",
+        // 17. Sizeofs the full pipeline's -Wsizeof-array-decay leaves alone: of a conditional of arrays, an int sum, a
+        // comparison with an array, a comma's array on the left.
+        "int sized2(int c, int n, int* p) { int a[3] = { 0 }, b[3] = { 0 }; return (int)sizeof(c ? a : b) + (int)sizeof(n + 1) + (int)sizeof(a == p) + (int)sizeof((a, 0)); }\n",
+        // 18. Casts the full pipeline's -Wpointer-to-int-cast family leaves alone: a pointer to a long and a _Bool, a long
+        // and a constant to a pointer.
+        "long casted(void* p, long l) { return (long)p + (_Bool)p + (long)(int*)l + (long)(int*)12; }\n",
+        // 18b. Attributes the full pipeline takes quietly where musl's headers put them: returns_twice on setjmp,
+        // format_arg on gettext (a string parameter and value, any character type), may_alias on a typedef, a struct,
+        // an object and a function.
+        "int setjmp_like(void*) __attribute__((__returns_twice__));\nchar* gettext_like(const char*) __attribute__((__format_arg__(1)));\n"
+        "unsigned char* bytes_like(char*) __attribute__((format_arg(1)));\ntypedef unsigned long __attribute__((__may_alias__)) Word;\n"
+        "struct __attribute__((may_alias)) Alias { int a; };\nint aliased __attribute__((may_alias));\n"
+        "Word attributed(const char* s) { return (Word)gettext_like(s) + (Word)bytes_like(0) + (Word)aliased; }\n",
+        // 19. Copies the full pipeline's -Wfortify-source leaves alone: into what is left of an array past a constant (its
+        // address in a register, spilled for the call), an object's own size, a pointer's, a variable size, a const
+        // object's (no constant to it), a string that fits, a member array within its record, and a dead branch's.
+        "void* memcpy(void*, const void*, unsigned long);\nvoid* memset(void*, int, unsigned long);\n"
+        "char* strcpy(char*, const char*);\nstruct R { char c[4]; int x; };\nchar g[8];\n"
+        "int copied(char* p, const char* s, unsigned long n) {\n"
+        "    char b[4]; int x; struct R r; const unsigned long k = 8;\n"
+        "    memcpy(b + 2, s, 2); memcpy(&x, s, sizeof x); memset(&r, 0, sizeof r); memcpy(p, s, 8); memcpy(b, s, n);\n"
+        "    memcpy(b, s, k); strcpy(b, \"abc\"); memcpy(r.c, s, 8); memcpy(g + 6, s, 2); if (0) { memcpy(b, s, 8); }\n"
+        "    return b[0] + x + r.x;\n"
+        "}\n",
+        // 20. What the bit-field, string initializer and -Wparentheses-equality checks leave alone: bit-fields as wide as
+        // their types, a string that fills its array but for the null, a macro's grouped comparison, a constant's on the
+        // left, a parenthesized `!=`, `!` of one.
+        "struct W { _Bool b : 1; int a : 32; };\nchar fit[3] = \"abc\";\n#define IS1(v) ((v) == 1)\n#define ALWAYS(X) (X)\n"
+        "int conditions(struct W* w, int x) {\n"
+        "    if (IS1(x)) { return 1; } if (ALWAYS(x == 2)) { return 2; } if ((3 == x)) { return 3; } if ((x != 4)) { return 4; }\n"
+        "    if (!(x == 5)) { return 5; } return w->a + w->b + fit[0];\n"
+        "}\n",
+        // 21. Formats the full pipeline's -Wformat family leaves alone: each class's conversion of its own arguments
+        // (char, short and _Bool to %d, long to %ld, long long to %lld, an unsigned long to %zu, an enum to %u, strings
+        // and arrays of the three char types, pointers, float and double, `*` widths of an int and a char), `%%`,
+        // `%m`, a joined and a parenthesized literal, and a non-literal format with arguments; fprintf's, sprintf's and
+        // snprintf's.
+        "int printf(const char*, ...);\nint fprintf(void*, const char*, ...);\nint sprintf(char*, const char*, ...);\n"
+        "int snprintf(char*, unsigned long, const char*, ...);\nenum Pf { PF0 };\n"
+        "int formatted(void* o, char c, short h, _Bool b, int i, long l, long long ll, unsigned long z, enum Pf e, const char* s,\n"
+        "              unsigned char* us, signed char* ss, void* p, float f, double d, const char* fmt) {\n"
+        "    char a[16];\n"
+        "    int n = printf(\"%d %hd %hhd %d %ld %lld %zu %u %s %s %s %s %p %p %f %g %e %*d %.*s %% %m\\n\",\n"
+        "                   c, h, c, b, l, ll, z, e, s, us, ss, a, p, a, f, d, d, i, i, c, s);\n"
+        "    n += fprintf(o, \"%-5d \" \"%+.2f\\n\", i, d) + sprintf(a, (\"%lx\"), z) + snprintf(a, sizeof a, \"%lu\", z);\n"
+        "    return n + printf(fmt, i);\n"
+        "}\n",
+        // 22. Pointers to long and to long long, each converted to its own kind (a const one's, a void pointer's).
+        "long long gll;\nlong* glp;\nlong long* gllp = &gll;\n"
+        "long kinds(long* p, long long* q, void* v) {\n"
+        "    long* a = p; long long* b = q; const long* c = p; const long long* d = &gll; long* e = v; glp = p;\n"
+        "    return *a + *b + *c + *d + *e + *gllp;\n"
+        "}\n",
+        // 23. musl's long double helpers, checked where defined and never emitted: <math.h>'s __islessl (a call of
+        // __fpclassifyl, dead arms of float and double, a void cast, a comparison of two), libm.h's fp_barrierl and
+        // fp_force_evall, a typedef's, a const local's and a long double parameter's call.
+        "int __fpclassifyl(long double);\nunsigned __fb(float);\nunsigned long long __db(double);\nvoid takes(long double);\n"
+        "#define ISNAN(x) (sizeof(x) == sizeof(float) ? (__fb(x) & 0x7fffffff) > 0x7f800000 : \\\n"
+        "    sizeof(x) == sizeof(double) ? (__db(x) & -1ULL >> 1) > 0x7ffULL << 52 : __fpclassifyl(x) == 0)\n"
+        "static inline int __islessl(long double __x, long double __y)\n"
+        "{ return !(ISNAN((__x)) ? ((void)(__y), 1) : ISNAN((__y))) && __x < __y; }\n"
+        "static inline long double fp_barrierl(long double x) { volatile long double y = x; return y; }\n"
+        "static inline void fp_force_evall(long double x) { volatile long double y; y = x; }\n"
+        "typedef long double ld;\nstatic inline ld kept(ld a, ld b) { const ld c = a; takes(b); if (a != b) { return c; } return b; }\n"
+        "int helpers(int x) { return x + 1; }\n",
+        // 24. Mode attributes, on a declarator (glibc's register_t, a member's, a local's) and among the specifiers: an
+        // 8-byte mode is long, a 1-byte one a signed char's size, as the asserted sizes and pointers say; and glibc's
+        // __cfloat128, whose mode this path doesn't model, unused.
+        "typedef int register_t __attribute__ ((__mode__ (__word__)));\ntypedef unsigned int __attribute__((mode(DI))) udi;\n"
+        "typedef _Complex float __cfloat128 __attribute__ ((__mode__ (__TC__)));\n"
+        "struct M { int a __attribute__((mode(QI))); int b __attribute__((mode(DI))); };\n"
+        "_Static_assert(sizeof(register_t) == 8 && sizeof(udi) == 8 && sizeof(struct M) == 16, \"mode sizes\");\n"
+        "long moded(register_t r, udi u, struct M* m) { long* p = &r; unsigned long* q = &u; short h __attribute__((mode(HI))) = 7;\n"
+        "    _Static_assert(sizeof(h) == 2, \"HI\"); return *p + (long)*q + m->a + m->b + h; }\n",
+        // 25. Arrays of unknown size completed by their initializers, each a copy of a typedef's (the asserted sizes):
+        // locals, a string's, file-scope objects, and compound literals (musl's `(long[]){s, ns}`).
+        "typedef int arr_t[];\ntypedef char str_t[];\narr_t ga = { 1, 2, 3 };\narr_t gb = { 4 };\n"
+        "_Static_assert(sizeof(ga) == 12 && sizeof(gb) == 4, \"file scope\");\nlong take(const long* p, char* const* v);\n"
+        "long sized(long s, long ns, char* cmd) {\n"
+        "    arr_t a = { 1, 2, 3 }; arr_t b = { 1 }; str_t c = \"abcd\"; str_t d = \"ab\"; int e[] = { 5, 6, };\n"
+        "    _Static_assert(sizeof(a) == 12 && sizeof(b) == 4 && sizeof(c) == 5 && sizeof(d) == 3 && sizeof(e) == 8, \"locals\");\n"
+        "    return take((long[]){ s, ns }, (char*[]){ \"sh\", \"-c\", cmd, 0 }) + a[2] + b[0] + c[3] + d[1] + e[1] +\n"
+        "           (long)sizeof((long[]){ 1, 2 });\n"
+        "}\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4332,6 +5056,8 @@ int run_c_direct_tests(int argc, char** argv)
     }
 
     // Soundness bailout cases: MUST return 1 and write NOTHING!
+    // A case's tail that puts its tokens before a file's last 80 bytes, which fast_lex_one lexes, not a window.
+#define BUSTER_DIRECT_TEST_TAIL "/* A window lexes the tokens before this comment: more than eighty bytes of the file follow them. */\n"
     static const char* const bail_cases[] = {
         "#pragma push_macro(\"X\")\nint f(void) { return 0; }\n",
         "#error forced error\n",
@@ -4341,6 +5067,265 @@ int run_c_direct_tests(int argc, char** argv)
         "static inline int bridge(void) { return leaf(); }\n"
         "int root(void) { return bridge(); }\n",
         "const void* wide_str(void) { return L\"hello\"; }\n",
+        // #3577: what the full pipeline diagnoses or compiles otherwise. An initializer over another, and a constant
+        // whose value a conversion changes.
+        "const unsigned short table[] = { [2] = 77, 0, [0] = 300, 101, 102 };\n",
+        "const unsigned short table[] = { 12345678 };\n",
+        // An inline body nothing uses is checked; a body is checked in its own scope, before a later declaration.
+        "static inline int unused(void) { return undeclared_xyz; }\nint f(void) { return 0; }\n",
+        "static inline int early(void) { return later; }\nint later;\nint g(void) { return early(); }\n",
+        // Compound literals: an element past the type, one over another, one an aggregate member takes by brace elision,
+        // and a designator of more than one member.
+        "int f(void) { return (int){ 1, 2 }; }\n",
+        "struct P { int y, z; };\nint f(void) { return (struct P){ .z = 1, .z = 2 }.z; }\n",
+        "struct S { int x, y; };\nstruct P { struct S s; int z; };\nint f(int a) { return (struct P){ a, a, a }.z; }\n",
+        "struct S { int x, y; };\nstruct P { struct S s; int z; };\nint f(void) { return (struct P){ .s.x = 1 }.z; }\n",
+        // An object of incomplete type, and a for clause's const object left uninitialized.
+        "int f(void) { struct T t; return 0; }\n",
+        "int f(int n) { for (const int k; n; n--) { } return n; }\n",
+        // -Wunsequenced: a modification and a use the log finds unsequenced, compiled again for it; and an expression
+        // compiled again that declares a type, which its first compile declared already.
+        "int f(int i, int* a) { a[i] = i++; return i; }\n",
+        "int f(int x) { return x++ + x; }\n",
+        "int f(int x) { if ((x = 1) && x == (int)sizeof(struct S { int a; })) { return 1; } return 0; }\n",
+        // A pragma the full pipeline acts on or reports: in the main file, once and GCC system_header are its warnings.
+        "#pragma once\nint f(void) { return 0; }\n",
+        "#pragma GCC system_header\nint f(void) { return 0; }\n",
+        "#pragma unroll\nint f(void) { return 0; }\n",
+        // __VA_OPT__ in a macro that isn't variadic: the full pipeline's warning, object-like or function-like.
+        "#define X __VA_OPT__(1)\nint f(void) { return 0; }\n",
+        "#define F(a) __VA_OPT__(a)\nint f(void) { return 0; }\n",
+        // -Wdangling-else: an else an inner if takes, in an outer if without one (directly, or through a loop's body).
+        "int f(int a, int b) { if (a) if (b) return 1; else return 2; return 0; }\n",
+        "int f(int a, int b, int c) { if (a) if (b) if (c) return 1; else return 2; return 0; }\n",
+        // -Wtautological-compare: one path on both sides (in parentheses too), two arrays, a pointer sum and its pointer;
+        // and -Wstring-compare, through parentheses and casts; in a dead branch as well.
+        "int f(int x) { return x == x; }\n",
+        "int f(int x) { return (x) != x; }\n",
+        "struct S { int a; struct S* next; };\nint f(struct S* p) { return p->next->a < p->next->a; }\n",
+        "int g[4];\nint f(int i) { return g[i] >= g[i]; }\n",
+        "int a[4], b[4];\nint f(void) { return a == b; }\n",
+        "int f(int* p, unsigned n) { return p + n < p; }\n",
+        "int f(const char* p) { return \"a\" == p; }\n",
+        "int f(const char* p) { return p < ((const char*)\"z\"); }\n",
+        "int f(int x) { if (0) { return x == x; } return 0; }\n",
+        // -Wundefined-internal of a static function a dead branch alone calls (#3592's without code): a use all the same.
+        "static int sf(void);\nint f(void) { return 0 ? sf() : 1; }\n",
+        "static int sf(void);\nint f(void) { if (0) { (void)sf(); } return 1; }\n",
+        // A floating constant an integer type can't hold, whose conversion is undefined, in the fold as in the program.
+        "int f(void) { return (int)1e20; }\n",
+        "unsigned f(void) { return (unsigned)-1.5; }\n",
+        // -Wextern-initializer: an extern object's initializer at file scope, the first declarator's or a later one's.
+        "extern int x = 1;\nint f(void) { return x; }\n",
+        "extern int x, y = 2;\nint f(void) { return x + y; }\n",
+        // An enumerator past INT64_MAX, written or implicit: the full pipeline's unsigned 64-bit enum (main's direct path
+        // took 0xFFFFFFFFFFFFFFFFull for an int -1), or its -Wenum-too-large beside a negative value.
+        "enum E { X = 0xFFFFFFFFFFFFFFFFull };\nint f(void) { return X > 0; }\n",
+        "enum E { X = 0x8000000000000000ull, Y = -1 };\nint f(void) { return 0; }\n",
+        "enum E { X = 0x7FFFFFFFFFFFFFFF, Y };\nint f(void) { return 0; }\n",
+        // -Wswitch-bool: a _Bool, a comparison in parentheses, `^` of two _Bools, a conditional of comparisons, an
+        // assignment's right operand, unary `+` of a _Bool, a dead switch's.
+        "int f(_Bool b) { switch (b) { case 0: return 1; } return 0; }\n",
+        "int f(int x) { switch ((x == 1)) { case 1: return 1; } return 0; }\n",
+        "int f(_Bool a, _Bool b) { switch (a ^ b) { case 1: return 1; } return 0; }\n",
+        "int f(int c, int x, int y) { switch (c ? x == 1 : y < 2) { case 1: return 1; } return 0; }\n",
+        "int f(int x, int y) { switch (y = !x) { case 1: return 1; } return 0; }\n",
+        "int f(_Bool b) { switch (+b) { case 1: return 1; } return 0; }\n",
+        "int f(int x) { if (0) { switch (x < 1) { case 1: return 1; } } return 0; }\n",
+        // -Wvoid-ptr-dereference: `*` of a pointer to void, a qualified one, in a dead branch; and a subscript of one, on
+        // which the full pipeline stops.
+        "void f(void* p) { (void)*p; }\n",
+        "void f(const volatile void* p) { (void)*p; }\n",
+        "void f(void* p) { if (0) { (void)*p; } }\n",
+        "void f(void* p) { (void)p[0]; }\n",
+        // -Wpointer-type-mismatch: a conditional of pointers to incompatible types, char's and unsigned char's, two
+        // functions', in a constant conditional.
+        "void* f(int c, int* p, long* q) { return c ? p : q; }\n",
+        "void* f(int c, char* p, unsigned char* q) { return c ? p : q; }\n",
+        "int g(int);\nlong h(long);\nvoid f(int c) { (void)(c ? g : h); }\n",
+        "void* f(int* p, long* q) { return 1 ? p : q; }\n",
+        // -Waddress-of-packed-member: the address of a packed record's int, of a member of its member, of a local's,
+        // inside sizeof, of a member packed itself, of an int at an aligned packed record's odd offset.
+        "struct __attribute__((packed)) P { char c; int i; };\nint* f(struct P* p) { return &p->i; }\n",
+        "struct In { int x; };\nstruct __attribute__((packed)) P { char c; struct In sub; };\nint* f(struct P* p) { return &p->sub.x; }\n",
+        "struct __attribute__((packed)) P { char c; int i; };\nint f(void) { struct P s = { 0, 1 }; int* q = &s.i; return *q; }\n",
+        "struct __attribute__((packed)) P { char c; int i; };\nunsigned long f(struct P* p) { return sizeof(&p->i); }\n",
+        "struct Q { char c; int i __attribute__((packed)); };\nint* f(struct Q* q) { return &q->i; }\n",
+        "struct __attribute__((packed, aligned(4))) Q { char c; int j; };\nint* f(struct Q* q) { return &q->j; }\n",
+        // -Warray-bounds: a constant index past a named array's end (its end too, but under `&`), before its start, past
+        // a row's or a string literal's, in parentheses.
+        "int a[3];\nint f(void) { return a[3]; }\n",
+        "int a[3];\nint* f(void) { return &a[4]; }\n",
+        "int f(void) { int a[3] = { 0 }; return a[-1]; }\n",
+        "int b[2][3];\nint f(void) { return b[1][5]; }\n",
+        "int b[2][3];\nint* f(void) { return b[2]; }\n",
+        "int f(void) { return \"abc\"[5]; }\n",
+        "int a[3];\nint f(void) { return (a)[5]; }\n",
+        // -Wreturn-stack-address: a local's, a parameter's and a member's address, through a cast, arithmetic, sizeof and
+        // a conditional's arm (a dead one too), an element at a variable index, a local array, a row, a compound literal.
+        "int* f(void) { int x = 0; return &x; }\n",
+        "long f(int y) { return -(long)&y & 4095; }\n",
+        "struct S { int a; };\nint* f(struct S s) { return &s.a; }\n",
+        "unsigned long f(void) { int x = 0; return sizeof(&x) + (unsigned long)x; }\n",
+        "int* f(void) { int x = 0; return 0 ? &x : 0; }\n",
+        "int* f(int i) { int a[4] = { 0 }; return &a[i]; }\n",
+        "char* f(void) { char s[] = \"abc\"; return s; }\n",
+        "int* f(int i) { int a[2][3] = { { 0 } }; return a[i]; }\n",
+        "int* f(void) { return (int[2]){ 1, 2 }; }\n",
+        // -Wsizeof-pointer-memaccess: memcpy's size the pointer its destination or source is, memset's, a member's, in a
+        // dead branch; -Wabsolute-value: abs of a long, an unsigned, a _Bool, a double, fabs of an int.
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(int* p, int* q) { memcpy(p, q, sizeof(p)); }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(int* p, int* q) { memcpy(p, q, (sizeof q)); }\n",
+        "void* memset(void*, int, unsigned long);\nvoid f(int* p) { memset(p, 0, sizeof(p)); }\n",
+        "struct S { char* buf; };\nvoid* memcpy(void*, const void*, unsigned long);\nvoid f(struct S* s, const char* c) { memcpy(s->buf, c, sizeof(s->buf)); }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(int* p, int* q) { if (0) { memcpy(p, q, sizeof(p)); } }\n",
+        "int abs(int);\nlong f(long x) { return abs(x); }\n",
+        "int abs(int);\nint f(unsigned x) { return abs(x); }\n",
+        "int abs(int);\nint f(_Bool b) { return abs(b); }\n",
+        "int abs(int);\nint f(double d) { return abs(d); }\n",
+        "double fabs(double);\ndouble f(int x) { return fabs(x); }\n",
+        // -Wempty-body: an if's empty statement on its condition's line, and a switch's.
+        "int f(int x) { if (x); return x; }\n",
+        "int f(int x) { switch (x); return x; }\n",
+        // -Wsizeof-array-decay: sizeof of an array under + and a comma.
+        "int f(void) { int a[3] = { 0 }; return (int)sizeof(a + 0); }\n",
+        "int f(void) { int a[3] = { 0 }; return (int)sizeof((0, a)); }\n",
+        // -Wpointer-to-int-cast and its family: a pointer to an int, a char and an enum, an int and a char to a pointer,
+        // in sizeof too.
+        "int f(void* p) { return (int)p; }\n",
+        "char f(char* p) { return (char)p; }\n",
+        "enum E { A };\nenum E f(void* p) { return (enum E)p; }\n",
+        "int* f(int x) { return (int*)x; }\n",
+        "void* f(char c) { return (void*)c; }\n",
+        "unsigned long f(void* p) { return sizeof((int)p); }\n",
+        // -Wgnu-designator: an array designator without its `=`.
+        "int a[3] = { [1] 2 };\nint f(void) { return a[1]; }\n",
+        "int f(void) { int a[3] = { [1] 2 }; return a[1]; }\n",
+        // format_arg naming a parameter that isn't a string, past the parameters, on a function that doesn't return a
+        // string or has no prototype; returns_twice on an object; may_alias with an argument (errors and
+        // -Wignored-attributes).
+        "char* f(int x) __attribute__((format_arg(1)));\n",
+        "char* f(const char* s) __attribute__((format_arg(2)));\n",
+        "int f(const char* s) __attribute__((format_arg(1)));\n",
+        "char* f() __attribute__((format_arg(1)));\n",
+        "int v __attribute__((returns_twice));\n",
+        "int x __attribute__((may_alias(1)));\n",
+        // -Wfortify-source: memcpy past a local array, a global's sum with a constant, a member array past its record, a
+        // scalar's address, a sum spilled for the call; strcpy of a literal, strncpy's size, bcopy's destination, an
+        // unused inline body's.
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(const char* s) { char b[4]; memcpy(b, s, 8); (void)b; }\n",
+        "void* memset(void*, int, unsigned long);\nchar g[8];\nvoid f(void) { memset(g + 6, 0, 3); }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nstruct P { int x; char buf[4]; };\n"
+        "void f(const char* s) { struct P p; memcpy(p.buf, s, 5); (void)p; }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(const char* s) { int x; memcpy(&x, s, 8); (void)x; }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nvoid f(const char* s) { char b[4]; memcpy(b + 1 + 1, s, 3); (void)b; }\n",
+        "char* strcpy(char*, const char*);\nvoid f(void) { char b[4]; strcpy(b, \"hello\"); (void)b; }\n",
+        "char* strncpy(char*, const char*, unsigned long);\nvoid f(const char* s) { char b[4]; strncpy(b, s, 8); (void)b; }\n",
+        "void bcopy(const void*, void*, unsigned long);\nvoid f(const char* s) { char b[4]; bcopy(s, b, 8); (void)b; }\n",
+        "void* memcpy(void*, const void*, unsigned long);\nstatic inline void f(const char* s) { char b[4]; memcpy(b, s, 8); (void)b; }\n"
+        "int main(void) { return 0; }\n",
+        // A bit-field wider than its type, an int's or a _Bool's; a string longer than its array, at file scope, in a
+        // block and as a member's; an inline main (errors and -Wexcess-initializers).
+        "struct S { int a : 33; };\nint f(struct S* s) { return s->a; }\n",
+        "struct S { _Bool b : 2; };\nint f(struct S* s) { return s->b; }\n",
+        "char s[2] = \"abc\";\n",
+        "int f(void) { char s[2] = \"abc\"; return s[0]; }\n",
+        "struct T { char s[2]; int n; };\nstruct T t = { \"abc\", 1 };\n",
+        "inline int main(void) { return 0; }\n",
+        // -Wparentheses-equality: an if's and a while's condition a parenthesized comparison for equality, a member's
+        // and a dereference's.
+        "int f(int x) { if ((x == 1)) { return 1; } return 0; }\n",
+        "int f(int x) { while ((x == 1)) { x += 1; } return x; }\n",
+        "struct S { int a; };\nint f(struct S* s, int* p) { if ((s->a == 1)) { return 1; } return *p; }\n",
+        "int f(int* p) { do { p += 1; } while (((*p == 1))); return 0; }\n",
+        // A punctuator after an empty macro's name (an object's, a function's): the window wrote no punctuator's data,
+        // so it kept the name's id, a macro's `(` to -Wparentheses-equality and a difference between two paths to the
+        // self-comparisons'. A window lexes these: a comment of more than 80 bytes follows them.
+        "#define EMPTY\nint f(int x, int y) { if (EMPTY (x == y)) { return 1; } return 0; }\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define E(v)\nint f(int x, int y) { while (E(1) (x == y)) { x += 1; } return x; }\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define EMPTY\nstruct S { int a; };\nint f(struct S s) { return s EMPTY .a == s.a; }\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define EMPTY\nint f(int* p) { return p EMPTY [0] == p[0]; }\n" BUSTER_DIRECT_TEST_TAIL,
+        // -Wsizeof-pointer-memaccess compares the destination and sizeof's operand without their parentheses: one a
+        // macro's (data 1), or inside the operand only.
+        "void *memset(void *, int, unsigned long);\nstruct S { char *buf; };\n#define FIELD(p) ((p)->buf)\n"
+        "void f(struct S *s) { memset((s)->buf, 0, sizeof(FIELD(s))); }\n" BUSTER_DIRECT_TEST_TAIL,
+        "void *memset(void *, int, unsigned long);\nstruct S { char *buf; };\n#define ALWAYS(X) (X)\n"
+        "void f(struct S *s) { memset(ALWAYS(s)->buf, 0, sizeof((s)->buf)); }\n" BUSTER_DIRECT_TEST_TAIL,
+        "void *memset(void *, int, unsigned long);\nstruct S { char *buf; };\n"
+        "void f(struct S *s) { memset(s->buf, 0, sizeof((s)->buf)); }\n" BUSTER_DIRECT_TEST_TAIL,
+        // -Wformat and its family: printf's int conversion of a long, a string of an int (in a dead branch and in
+        // sizeof too, as the full pipeline checks every call's), one conversion short and one over, an invalid
+        // specifier, a non-literal format without arguments (-Wformat-security); fprintf's and snprintf's formats,
+        // `%ld` of a long long, `%c` of a _Bool, a `*` width of a long.
+        "int printf(const char*, ...);\nint f(long l) { return printf(\"%d\\n\", l); }\n",
+        "int printf(const char*, ...);\nint f(void) { if (0) { return printf(\"%s\", 1); } return 0; }\n",
+        "int printf(const char*, ...);\nunsigned long f(void) { return sizeof(printf(\"%s\", 1)); }\n",
+        "int printf(const char*, ...);\nint f(int i) { return printf(\"%d %d\\n\", i); }\n",
+        "int printf(const char*, ...);\nint f(int i) { return printf(\"x\\n\", i); }\n",
+        "int printf(const char*, ...);\nint f(int i) { return printf(\"%y\\n\", i); }\n",
+        "int printf(const char*, ...);\nint f(const char* s) { return printf(s); }\n",
+        "int fprintf(void*, const char*, ...);\nint f(void* o, char* s) { return fprintf(o, \"%d\\n\", s); }\n",
+        "int snprintf(char*, unsigned long, const char*, ...);\nint f(char* b, long long ll) { return snprintf(b, 8, \"%ld\", ll); }\n",
+        "int printf(const char*, ...);\nint f(_Bool b) { return printf(\"%c\", b); }\n",
+        "int printf(const char*, ...);\nint f(long w, int i) { return printf(\"%*d\", w, i); }\n",
+        // A `long *` and a `long long *` (-Wincompatible-pointer-types, an error): an initializer, an assignment, an
+        // argument, a return, a pointer to one, an unsigned one's, a file-scope address and an array's decay.
+        "void f(long* p) { long long* q = p; (void)q; }\n",
+        "void f(long long* p) { long* q; q = p; (void)q; }\n",
+        "void g(long long*);\nvoid f(long* p) { g(p); }\n",
+        "long* f(long long* p) { return p; }\n",
+        "void f(long** p) { long long** q = p; (void)q; }\n",
+        "void f(unsigned long* p) { unsigned long long* q = p; (void)q; }\n",
+        "long long x;\nlong* p = &x;\n",
+        "long long a[2];\nlong* p = a;\n",
+        // A long double in a checked inline body is taken only as a copy, a void cast, a comparison of two and a long
+        // double parameter's argument: its arithmetic, a conversion to double, a comparison with an int and a call with a
+        // double parameter leave, and so do a _Complex double's body, an emitted body (a call of fp_barrierl) and a
+        // function with external linkage.
+        "static inline long double f(long double x) { return x + x; }\nint g(void) { return 0; }\n",
+        "static inline double f(long double x) { return x; }\nint g(void) { return 0; }\n",
+        "static inline int f(long double x) { return x < 1; }\nint g(void) { return 0; }\n",
+        "void h(double);\nstatic inline void f(long double x) { h(x); }\nint g(void) { return 0; }\n",
+        "static inline void f(_Complex double x) { volatile _Complex double y; y = x; }\nint g(void) { return 0; }\n",
+        "static inline long double fp_barrierl(long double x) { volatile long double y = x; return y; }\n"
+        "double g(double d) { return (double)fp_barrierl(d); }\n",
+        "static inline void fp_force_evall(long double x) { volatile long double y; y = x; }\nvoid g(double d) { fp_force_evall(d); }\n",
+        "long double fp(long double x) { volatile long double y = x; return y; }\n",
+        // A mode this path doesn't model (TI, TF) on a declarator, a used typedef's, a member's; a declarator's mode on a
+        // pointer; register_t's pointer as a long long's.
+        "typedef int ti __attribute__((mode(TI)));\nint f(void) { return sizeof(ti); }\n",
+        "struct S { int a __attribute__((mode(TI))); };\nint f(void) { return sizeof(struct S); }\n",
+        "long long x __attribute__((mode(TI)));\n",
+        "typedef float __attribute__((mode(TF))) tf;\nint f(void) { return sizeof(tf); }\n",
+        "struct S { int __attribute__((mode(TI))) a; int b; };\nint f(void) { return sizeof(struct S); }\n",
+        "int* p __attribute__((mode(DI)));\n",
+        "typedef int register_t __attribute__ ((__mode__ (__word__)));\nregister_t r;\nlong long* q = &r;\n",
+        // Unused, and still the full pipeline's error: a floating mode on an int, a mode on a pointer's declarator, an
+        // unknown mode.
+        "typedef int sf __attribute__((mode(SF)));\nint f(void) { return 0; }\n",
+        "typedef int* ip __attribute__((mode(DI)));\nint f(void) { return 0; }\n",
+        "typedef int oi __attribute__((mode(OI)));\nint f(void) { return 0; }\n",
+        // An array of unknown size whose initializer has a designator or elides an aggregate element's braces (main's
+        // direct path counted its commas): locals and compound literals.
+        "int f(void) { int a[] = { [5] = 1 }; return sizeof(a); }\n",
+        "int f(void) { int a[] = { 1, 2, [7] = 3 }; return sizeof(a); }\n",
+        "struct P { int x, y; };\nint f(void) { struct P a[] = { 1, 2, 3, 4 }; return sizeof(a); }\n",
+        "int f(void) { int a[][2] = { 1, 2, 3, 4, 5 }; return sizeof(a); }\n",
+        "int f(void) { return sizeof((int[]){ [3] = 1 }); }\n",
+        // An attribute after a bit-field's width (main's direct path took it for another member's start).
+        "struct S { int a : 3 __attribute__((packed)); int b; };\nint f(void) { return sizeof(struct S); }\n",
+        "struct S { unsigned a : 3 __attribute__((mode(DI))); int b; };\nint f(void) { return sizeof(struct S); }\n",
+        "struct S { int a : 3, b : 4 __attribute__((aligned(8))); };\nint f(void) { return sizeof(struct S); }\n",
+        // `#define NAME digits` lines, which a fast path reads (#3596): a redefinition with other text, by such a line and
+        // by another form, either way round; the predefines' __STDC__ (one such line) undefined and defined again; a
+        // builtin's name.
+        "#define X 1\n#define X 2\nint f(void) { return X; }\n",
+        "#define X 1\n#define X (1)\nint f(void) { return X; }\n",
+        "#define X (1)\n#define X 1\nint f(void) { return X; }\n",
+        "#undef __STDC__\nint f(void) { return 0; }\n",
+        "#define __STDC__ 1\nint f(void) { return 0; }\n",
+        "#define __LINE__ 1\nint f(void) { return 0; }\n",
+        "#define defined 1\nint f(void) { return 0; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
@@ -4355,14 +5340,14 @@ int run_c_direct_tests(int argc, char** argv)
         }
     }
 
-    // The first block extends an incomplete array, the second overwrites it after a designator.
-    // The general evaluator handles the intervening expression and the final designator.
+    // The block after a designator extends an incomplete array; the general evaluator handles the expression after it
+    // and the final designator. (#3577: a second block over the first, `[0] = 300, 101, ...`, is the full pipeline's
+    // -Winitializer-overrides, and 12345678 for 24910 its -Wconstant-conversion: bailout cases above.)
     static const char table_source[] =
         "const unsigned short table[] = { [2] = 77, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,"
-        " 9+7, [0] = 300, 101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,"
-        " [20] = 12345678 };";
+        " 9+7, [22] = 24910 };";
     static const uint16_t expected_table[] = {
-        300, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 14, 15, 16, 24910
+        0, 0, 77, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0, 0, 24910
     };
     if (c_direct_test_compile_source_with(table_source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_table, sizeof(expected_table), (CDirectTestMode){ 0 }))
     {
@@ -4395,6 +5380,53 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL hexadecimal initializers and decimal macro definitions\n");
+        failed += 1u;
+    }
+
+    // #3577: a `#define NAME digits` line keeps the text a redefinition compares: the same definition again, by such a
+    // line and by the directive reader (two blanks), and a name defined again after its #undef.
+    static const char same_source[] = "#define X 1\n#define X 1\n#define X  1\n#define Y 2\n#undef Y\n#define Y 3\nconst int v[] = { X, Y };\n";
+    static const int32_t expected_same[] = { 1, 3 };
+    if (c_direct_test_compile_source_with(same_source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_same, sizeof(expected_same), (CDirectTestMode){ 0 }))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL a decimal macro defined again\n");
+        failed += 1u;
+    }
+
+    // #3577: with a predefines file (--predefines), which doesn't define it, __FLT_EVAL_METHOD__ is still the full
+    // pipeline's builtin: defined, of the request's value, and neither undefined nor defined again quietly.
+    char predefs_path[128];
+    snprintf(predefs_path, sizeof(predefs_path), "/tmp/buster_direct_predefs_%d.h", (int)getpid());
+    FILE* predefs_file = fopen(predefs_path, "wb");
+    bool predefs_ok = predefs_file != NULL;
+    if (predefs_ok)
+    {
+        static const char predefs[] = "#define __x86_64__ 1\n#define __LP64__ 1\n#define __STDC__ 1\n#define __STDC_VERSION__ 201710L\n";
+        predefs_ok = fwrite(predefs, 1, sizeof(predefs) - 1u, predefs_file) == sizeof(predefs) - 1u;
+        predefs_ok = fclose(predefs_file) == 0 && predefs_ok;
+    }
+    const CDirectTestMode file_mode = { .predefines_path = predefs_path };
+    static const int32_t expected_eval[] = { 1, 0 };
+    predefs_ok = predefs_ok &&
+                 c_direct_test_compile_source_with("#ifdef __FLT_EVAL_METHOD__\nconst int v[] = { 1, __FLT_EVAL_METHOD__ };\n#else\n"
+                                                   "const int v[] = { 2, 2 };\n#endif\n" BUSTER_DIRECT_TEST_TAIL,
+                                                   obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_eval, sizeof(expected_eval), file_mode);
+    predefs_ok = predefs_ok && c_direct_test_compile_mode("#undef __FLT_EVAL_METHOD__\nint f(void) { return 0; }\n" BUSTER_DIRECT_TEST_TAIL,
+                                                          obj_path, 1, NULL, NULL, file_mode);
+    predefs_ok = predefs_ok && c_direct_test_compile_mode("#define __FLT_EVAL_METHOD__ 0\nint f(void) { return 0; }\n" BUSTER_DIRECT_TEST_TAIL,
+                                                          obj_path, 1, NULL, NULL, file_mode);
+    unlink(predefs_path);
+    if (predefs_ok)
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL __FLT_EVAL_METHOD__ with a predefines file\n");
         failed += 1u;
     }
 
@@ -4518,6 +5550,16 @@ int run_c_direct_tests(int argc, char** argv)
         failed += 1u;
     }
 
+    if (c_direct_test_pointer_parameters(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL parenthesized pointer parameters\n");
+        failed += 1u;
+    }
+
     if (c_direct_test_asm(obj_path))
     {
         passed += 1u;
@@ -4618,6 +5660,16 @@ int run_c_direct_tests(int argc, char** argv)
         failed += 1u;
     }
 
+    if (c_direct_test_skipped_ucns(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL skipped groups' UCNs, digit separators and dotted asm labels\n");
+        failed += 1u;
+    }
+
     if (c_direct_test_ident_growth())
     {
         passed += 1u;
@@ -4670,4 +5722,18 @@ int run_c_direct_tests(int argc, char** argv)
 
     printf("test-direct: %u passed, %u failed\n", passed, failed);
     return failed == 0 ? 0 : 1;
+}
+
+int run_c_direct_tests(int argc, char** argv)
+{
+    int result = 0;
+    if (argc >= 1 && strcmp(argv[0], "--differential") == 0)
+    {
+        result = c_direct_differential(argc - 1, argv + 1);
+    }
+    else
+    {
+        result = c_direct_unit_tests();
+    }
+    return result;
 }

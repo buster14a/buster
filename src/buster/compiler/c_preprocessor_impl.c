@@ -13955,6 +13955,13 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_build_predefines(const PPOptions* options, Are
     return ok;
 }
 
+// The builtin __FLT_EVAL_METHOD__'s value with --predefines, whose file doesn't define it (clang's -dM leaves it out), as
+// pp_run_prelude_macros takes it: the direct path defines it from this (#3577).
+BUSTER_PREPROCESSOR_ENTRY uint32_t pp_predefines_eval_method(const PPOptions* options)
+{
+    return predefines_eval_method(&options->predefines);
+}
+
 // A file that isn't on disk (the predefines, the command line, the forced includes' lines), at a name in angle brackets,
 // and what it is for line markers: clang's predefines are a system header, and the rest of its <built-in> buffer, the
 // command line's and the forced includes', isn't. Returns its PPFile.

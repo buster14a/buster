@@ -56,9 +56,11 @@ then a summary line, and exits with status 1 on a cycle not in
 can't read. An entry names a component's functions, each as many times as
 the component has a function of that name; add one only for the
 style's "trivial statically bounded recursion", with a comment saying what
-bounds its depth. The list has three entries, the preprocessor fuzz generator's
+bounds its depth. The list has four entries: the preprocessor fuzz generator's
 recursions (conditionals in groups, expressions, invocations in arguments),
-each bounded by its depth argument. The 9700X job runs
+each bounded by its depth argument, and the direct path's expression compiled
+once more for its `-Wunsequenced` log (#3577), whose second compile never
+compiles again. The 9700X job runs
 `test-call-graph` and the check after the build; the check, which captures the
 units' IR at once, takes about 2 s.
 

@@ -113,6 +113,7 @@ The original section titles are retained in their owning guides.
 
 - [C driver build-system integration](../cc-driver.md).
 - [The assembly sink (#1362)](driver.md#the-assembly-sink-1362).
+- [The direct path's diagnostics and `test-direct --differential` (#3577)](driver.md#the-direct-paths-diagnostics-3577).
 - [Early hosted feedback and reproductions (#1427)](ci.md#early-hosted-feedback-and-reproductions-1427).
 - [The merge queue](ci.md#the-merge-queue).
 - [Sharing the 9700X](ci.md#sharing-the-9700x).
