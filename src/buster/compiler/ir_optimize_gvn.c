@@ -1463,6 +1463,236 @@ static IrError ir_gvn_solve(IrGvnWork* work, IrGvnOptions options)
     return IR_OK;
 }
 
+// GVN keeps reachable blocks in their original order and substitutes congruent values. Number retained rows once, compress their seven
+// columns in order and rebuild shared extra slices in the same order as the general rewrite.
+static IrError ir_gvn_compact(IrGvnWork* work, Arena* output)
+{
+    const IrFunction* f = work->ir.function;
+    const IrCfg* cfg = &work->ir.cfg;
+    IrSizes sizes = ir_optimize_metadata_sizes(f);
+    const bool pruning = work->ir.dominators.reachable_count != f->block_count;
+    sizes.block_count = work->ir.dominators.reachable_count;
+    uint32_t* blocks = work->order;
+    uint32_t kept_blocks = 0;
+    for (uint32_t block = 0; block < f->block_count; block += 1)
+    {
+        if (pruning && work->ir.dominators.rpo_index[block] == BUSTER_DOMINATOR_NONE)
+        {
+            blocks[block] = BUSTER_IR_NONE;
+            const uint32_t begin = f->block_offsets[block];
+            memset(work->alias + begin, 0xff, (uint64_t)(f->block_offsets[(uint64_t)block + 1] - begin) * sizeof(uint32_t));
+        }
+        else
+        {
+            blocks[block] = kept_blocks++;
+        }
+    }
+    uint32_t* places = work->classes;
+    uint32_t* operands = work->next_classes;
+    uint32_t* special_rows = work->temporary_order;
+    uint32_t special_count = 0;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint64_t first = 0; first < f->instruction_count; first += 16)
+    {
+        const uint32_t left = f->instruction_count - (uint32_t)first;
+        const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, left < 16 ? left : 16);
+        const __m512i ids = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first));
+        const __m512i aliases = _mm512_maskz_loadu_epi32(active, work->alias + first);
+        const __mmask16 kept = _mm512_mask_cmpeq_epi32_mask(active, aliases, ids);
+        const __m512i numbered = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)sizes.instruction_count));
+        _mm512_mask_storeu_epi32(places + first, active, _mm512_mask_expand_epi32(_mm512_set1_epi32(-1), kept, numbered));
+        sizes.instruction_count += (uint32_t)__builtin_popcount(kept);
+        const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
+        const __m512i kind = ir_lookup_bytes(ir_optimize_rewrite_kinds, op);
+        const __mmask16 special = kept & (_mm512_test_epi32_mask(kind, kind) | _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_BR)) |
+                                          _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_SCATTER)) | _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_INTRINSIC)));
+        _mm512_mask_compressstoreu_epi32(special_rows + special_count, special, ids);
+        special_count += (uint32_t)__builtin_popcount(special);
+    }
+    for (uint32_t k = 0; k < special_count; k += 1)
+    {
+        const uint32_t i = special_rows[k];
+        const uint32_t kind = ir_optimize_rewrite_kinds[f->op[i]];
+        if (kind == 1)
+        {
+            uint32_t count = f->b[i];
+            if (pruning)
+            {
+                count = 0;
+                for (uint32_t j = 0; j < f->b[i]; j += 1)
+                {
+                    count += blocks[f->extra[f->a[i] + (uint64_t)j * 2]] != BUSTER_IR_NONE;
+                }
+            }
+            sizes.extra_count += (uint64_t)2 * count;
+        }
+        else if (kind == 2)
+        {
+            sizes.call_count += 1;
+            sizes.extra_count += f->calls[f->b[i]].argument_count;
+        }
+        else if (kind == 4)
+        {
+            const uint32_t block = cfg->instruction_blocks[i];
+            if (cfg->successor_offsets[block + 1] - cfg->successor_offsets[block] != 1)
+            {
+                sizes.extra_count += 1 + (uint64_t)2 * f->c[i];
+            }
+        }
+        else if (kind == 5 && f->b[i] != BUSTER_IR_NONE)
+        {
+            sizes.extra_count += f->c[i];
+        }
+        else
+        {
+            sizes.extra_count += ir_extra_value_count(f, i);
+        }
+    }
+    IrFunction result = { 0 };
+    const IrError error = ir_create(output, &sizes, &result);
+    if (error != IR_OK)
+    {
+        return error;
+    }
+    if (!ir_debug_create(output, &result, f->debug))
+    {
+        return IR_ERROR_MEMORY;
+    }
+    ir_optimize_copy_metadata(f, &result);
+    for (uint32_t k = 0; k < f->label_count; k += 1)
+    {
+        result.labels[k] = f->labels[k] == BUSTER_IR_NONE ? BUSTER_IR_NONE : blocks[f->labels[k]];
+    }
+    for (uint32_t b = 0; b < f->block_count; b += 1)
+    {
+        if (blocks[b] != BUSTER_IR_NONE)
+        {
+            result.block_offsets[blocks[b] + 1] = places[f->block_offsets[b + 1] - 1] + 1;
+        }
+    }
+    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    {
+        operands[i] = work->alias[i] == BUSTER_IR_NONE ? BUSTER_IR_NONE : places[ir_gvn_resolve(work->alias, i)];
+    }
+    // AVX-512 gathers sign-extend the index. Center the base of a table wider than INT32_MAX.
+    const uint32_t center = f->instruction_count > INT32_MAX ? UINT32_C(1) << 31 : 0;
+    uint32_t out = 0;
+    for (uint64_t first = 0; first < f->instruction_count; first += 16)
+    {
+        const uint32_t left = f->instruction_count - (uint32_t)first;
+        const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, left < 16 ? left : 16);
+        const __m512i ids = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first));
+        const __mmask16 kept = _mm512_mask_cmpeq_epi32_mask(active, _mm512_maskz_loadu_epi32(active, work->alias + first), ids);
+        if (kept == 0)
+        {
+            continue;
+        }
+        const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
+        _mm_mask_compressstoreu_epi8(result.op + out, kept, op);
+        _mm_mask_compressstoreu_epi8(result.type + out, kept, _mm_maskz_loadu_epi8(active, f->type + first));
+        _mm_mask_compressstoreu_epi8(result.flags + out, kept, _mm_maskz_loadu_epi8(active, f->flags + first));
+        _mm_mask_compressstoreu_epi8(result.alignment_log2 + out, kept, _mm_maskz_loadu_epi8(active, f->alignment_log2 + first));
+        const __m512i fixed = ir_lookup_bytes(ir_operand_table, op);
+        const __m512i optional = ir_lookup_bytes(ir_optional_table, op);
+        const uint32_t* inputs[] = { f->a, f->b, f->c };
+        uint32_t* outputs[] = { result.a, result.b, result.c };
+        for (uint32_t col = 0; col < 3; col += 1)
+        {
+            const __m512i bits = _mm512_set1_epi32(1 << col);
+            const __m512i values = _mm512_maskz_loadu_epi32(active, inputs[col] + first);
+            const __mmask16 use = kept & (_mm512_test_epi32_mask(fixed, bits) | (_mm512_test_epi32_mask(optional, bits) &
+                                          _mm512_cmpneq_epi32_mask(values, _mm512_set1_epi32(-1))));
+            const __m512i rewritten = _mm512_mask_i32gather_epi32(values, use, _mm512_sub_epi32(values, _mm512_set1_epi32((int)center)), operands + center, 4);
+            _mm512_mask_compressstoreu_epi32(outputs[col] + out, kept, rewritten);
+        }
+        out += (uint32_t)__builtin_popcount(kept);
+    }
+    uint32_t extra = 0;
+    uint32_t calls = 0;
+    for (uint32_t k = 0; k < special_count; k += 1)
+    {
+        const uint32_t i = special_rows[k];
+        const uint32_t to = places[i];
+        const uint32_t kind = ir_optimize_rewrite_kinds[f->op[i]];
+        const uint32_t block = cfg->instruction_blocks[i];
+        const uint32_t first_edge = cfg->successor_offsets[block];
+        if (f->op[i] == IR_BR || ((kind == 3 || kind == 4) && cfg->successor_offsets[block + 1] - first_edge == 1))
+        {
+            result.op[to] = IR_BR;
+            result.flags[to] = 0;
+            result.a[to] = blocks[cfg->successors[first_edge]];
+            result.b[to] = BUSTER_IR_NONE;
+            result.c[to] = BUSTER_IR_NONE;
+        }
+        else if (kind == 1)
+        {
+            result.a[to] = extra;
+            result.b[to] = 0;
+            for (uint32_t j = 0; j < f->b[i]; j += 1)
+            {
+                const uint32_t* pair = f->extra + f->a[i] + (uint64_t)j * 2;
+                if (blocks[pair[0]] != BUSTER_IR_NONE)
+                {
+                    result.extra[extra++] = blocks[pair[0]];
+                    result.extra[extra++] = operands[pair[1]];
+                    result.b[to] += 1;
+                }
+            }
+        }
+        else if (kind == 2)
+        {
+            const IrCall* call = f->calls + f->b[i];
+            result.b[to] = calls;
+            result.calls[calls] = *call;
+            result.calls[calls++].argument_first = extra;
+            for (uint32_t j = 0; j < call->argument_count; j += 1)
+            {
+                result.extra[extra++] = operands[f->extra[call->argument_first + j]];
+            }
+        }
+        else if (kind == 3)
+        {
+            result.b[to] = blocks[f->b[i]];
+            result.c[to] = blocks[f->c[i]];
+        }
+        else if (kind == 4)
+        {
+            const uint32_t* entries = f->extra + f->b[i];
+            result.b[to] = extra;
+            result.extra[extra++] = blocks[entries[0]];
+            for (uint32_t j = 0; j < f->c[i]; j += 1)
+            {
+                result.extra[extra++] = entries[1 + (uint64_t)j * 2];
+                result.extra[extra++] = blocks[entries[2 + (uint64_t)j * 2]];
+            }
+        }
+        else if (kind == 5 && f->b[i] != BUSTER_IR_NONE)
+        {
+            result.b[to] = extra;
+            if (f->c[i] != 0)
+            {
+                memcpy(result.extra + extra, f->extra + f->b[i], (uint64_t)f->c[i] * sizeof(uint32_t));
+                extra += f->c[i];
+            }
+        }
+        else
+        {
+            const uint32_t count = ir_extra_value_count(f, i);
+            if (count != 0)
+            {
+                result.c[to] = ir_intrinsic_ternary_c(f->c[i], extra);
+                for (uint32_t j = 0; j < count; j += 1)
+                {
+                    result.extra[extra++] = operands[ir_extra_value(f, i, j)];
+                }
+            }
+        }
+    }
+    ir_debug_remap(f, &result, places, NULL, blocks);
+    work->statistics.function = result;
+    return IR_OK;
+}
+
 static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* function, Arena* output, Arena* scratch, IrGvnOptions options, IrGvnResult* result)
 {
     const uint64_t output_mark = output->length;
@@ -1532,9 +1762,13 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
     {
         check.error = ir_gvn_debug_view(&work, scratch, &view);
     }
-    if (rewritten && check.error == IR_OK)
+    work.ir.function = rewritten && function->debug != NULL ? &view : function;
+    if (rewritten && check.error == IR_OK && !options.scalar && options.apply_only)
     {
-        work.ir.function = function->debug != NULL ? &view : function;
+        check.error = ir_gvn_compact(&work, output);
+    }
+    else if (rewritten && check.error == IR_OK)
+    {
         for (uint32_t block = 0; block < function->block_count; block += 1)
         {
             work.ir.blocks[block] = work.ir.dominators.rpo_index[block] != BUSTER_DOMINATOR_NONE;

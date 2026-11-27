@@ -154,10 +154,11 @@ static void ir_gvn_test_debug_bindings(IrOptimizeTest* test, const IrFunction* s
     {
         f.debug->origins[i] = i;
     }
-    for (uint32_t path = 0; created && path < 2; path += 1)
+    for (uint32_t path = 0; created && path < 3; path += 1)
     {
         IrGvnOptions options = ir_gvn_options();
-        options.scalar = path != 0;
+        options.scalar = path == 1;
+        options.apply_only = path == 2;
         IrGvnResult a = { 0 };
         IrGvnResult b = { 0 };
         const IrCheck ac = ir_optimize_gvn(&f, output, scratch, options, &a);
@@ -702,6 +703,34 @@ static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vecto
     }
 }
 
+// Exercise both rewrites on side tables whose entries can be shared even though each output row
+// needs its own operand slice. Include indirect labels, dead blocks and a switch with repeated targets.
+static void ir_gvn_test_structured_rewrite(IrOptimizeTest* test, Arena* input, Arena* general, Arena* compact, Arena* scratch)
+{
+    for (uint32_t kind = 0; kind < 6; kind += 1)
+    {
+        IrFunction f = { 0 };
+        const bool created = kind < 2 ? ir_optimize_test_switch(input, &f, kind != 0) :
+                             kind == 2 ? ir_optimize_test_aggregate_call(input, &f) : ir_optimize_test_labels(input, &f, kind - 3);
+        ir_optimize_test_expect(test, created, "GVN structured operand fixture allocation");
+        if (created)
+        {
+            IrGvnOptions options = ir_gvn_options();
+            IrGvnResult a = { 0 };
+            IrGvnResult b = { 0 };
+            const IrCheck ac = ir_optimize_gvn(&f, general, scratch, options, &a);
+            options.apply_only = true;
+            const IrCheck bc = ir_optimize_gvn(&f, compact, scratch, options, &b);
+            ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && ir_optimize_test_equal(&a.function, &b.function) &&
+                                    ir_verify(&b.function, scratch, NULL).error == IR_OK,
+                                    "GVN retains exact operands, labels and ABI metadata through row compaction");
+        }
+        arena_pop_to(input, 0);
+        arena_pop_to(general, 0);
+        arena_pop_to(compact, 0);
+    }
+}
+
 static void ir_gvn_test_ir(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(16ull << 20);
@@ -712,6 +741,7 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
     ir_optimize_test_expect(test, ready, "GVN fixture arenas");
     if (ready)
     {
+        ir_gvn_test_structured_rewrite(test, &input, &vector, &scalar, &scratch);
         for (uint32_t kind = 0; kind < 3; kind += 1)
         {
             IrFunction f = { 0 };

@@ -151,9 +151,14 @@ The scalar walk hashes available expressions by their canonical operand IDs and
 undoes insertions when it leaves the scope. The full-refinement oracle checks the
 partition solver's cyclic phi results and its class count.
 
-The shared IR rewrite remaps operands and side-table references with the GVN
-forwarding map. Debug bindings additionally follow the representative of their
-original anchor. Verification rebuilds the output graph and checks its rows and
+Tier 1 compacts the seven instruction columns in batches of sixteen. A mask
+selects surviving instructions in reachable blocks. The forwarding map gives
+each operand its new position. Calls, joins and instructions with extra operands
+rebuild their side-table slices in instruction order. A join drops incoming
+edges from unreachable predecessors. Debug bindings follow the representative
+of their original anchor. The general IR rewrite and the compact rewrite share
+metadata sizing and copying. The fixtures compare their executable IR and
+debug assignments. Verification rebuilds the output graph and checks its rows and
 joins. If its block numbers and successor lists match the input graph, the input's
 dominator intervals also apply to the output. Every output operand is checked
 against its new instruction positions.
