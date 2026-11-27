@@ -125,6 +125,8 @@ struct IrGvnWork
     bool vectors_only;
     uint32_t staged;
     uint32_t* staged_targets;
+    uint32_t* tags;
+    uint32_t* owners;
     uint32_t current_block;
     uint32_t position;
     bool copies;
@@ -706,7 +708,6 @@ static bool ir_gvn_wait_for(IrGvnWork* work, uint32_t value, uint32_t user)
 static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_t budget, uint32_t* count, bool can_wait)
 {
     const IrFunction* f = work->ir.function;
-    bool ok = true;
     const uint32_t mask = ir_value_mask3(f, i);
     const IrGvnPayload payload = ir_gvn_payload(work, i);
     const uint64_t a = (mask & 1) != 0 ? work->classes[work->alias[f->a[i]]] : 0;
@@ -770,29 +771,58 @@ static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_
     {
         hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge], edge - work->ir.cfg.predecessor_offsets[block]));
     }
-    const uint32_t bucket = (hash ^ (hash >> 32)) & (buckets - 1);
-    uint32_t match = work->temporary_order[bucket];
+    // An empty tag terminates the group search. For a matching fingerprint compare the entire key,
+    // including the extra phi or vector-constant words. Charge full groups against the collision budget too.
+    const uint32_t width = buckets < 8 ? buckets : 8;
+    const uint32_t tag = (uint32_t)(hash >> 32) | 1;
+    uint32_t group = ((uint32_t)hash ^ (uint32_t)(hash >> 32)) & (buckets - width);
+    const __mmask8 valid = (__mmask8)((1u << width) - 1);
+    uint32_t slot = 0;
+    uint32_t match = BUSTER_IR_NONE;
     bool equal = false;
-    while (match != BUSTER_IR_NONE && !equal && work->statistics.partition_probes < budget)
+    for (;;)
     {
+        const __m256i tags = _mm256_maskz_loadu_epi32(valid, work->tags + group);
+        __mmask8 matches = _mm256_cmpeq_epi32_mask(tags, _mm256_set1_epi32((int)tag));
+        while (matches != 0 && !equal)
+        {
+            if (work->statistics.partition_probes == budget)
+            {
+                return false;
+            }
+            work->statistics.partition_probes += 1;
+            const uint32_t lane = (uint32_t)__builtin_ctz(matches);
+            matches &= matches - 1;
+            match = work->owners[group + lane];
+            const uint64_t* entry = work->fields + (uint64_t)match * BUSTER_IR_GVN_ENTRY_WORDS;
+            equal = _mm256_cmpeq_epi64_mask(_mm256_loadu_si256((const __m256i*)entry), _mm256_loadu_si256((const __m256i*)key)) == 0xf;
+            // Equal keys make both vector constants: compare their whole payloads.
+            equal = equal && (!vector || memcmp(words, f->vector_constants[f->a[match]].words, sizeof(IrSimdValue)) == 0);
+            // Equal keys put both phis in one block: compare their inputs in that block's predecessor order.
+            for (uint32_t edge = first_edge; equal && edge < end_edge; edge += 1)
+            {
+                const uint32_t predecessor = work->ir.cfg.predecessors[edge];
+                equal = ir_gvn_phi_class(work, i, predecessor, edge - first_edge) == ir_gvn_phi_class(work, match, predecessor, edge - first_edge);
+            }
+        }
+        if (equal)
+        {
+            break;
+        }
+        const __mmask8 empty = valid & _mm256_cmpeq_epi32_mask(tags, _mm256_setzero_si256());
+        if (empty != 0)
+        {
+            slot = group + (uint32_t)__builtin_ctz(empty);
+            break;
+        }
+        if (work->statistics.partition_probes == budget)
+        {
+            return false;
+        }
         work->statistics.partition_probes += 1;
-        const uint64_t* entry = work->fields + (uint64_t)match * BUSTER_IR_GVN_ENTRY_WORDS;
-        equal = work->hashes[match] == hash && _mm256_cmpeq_epi64_mask(_mm256_loadu_si256((const __m256i*)entry), _mm256_loadu_si256((const __m256i*)key)) == 0xf;
-        // Equal keys make both vector constants: compare their whole payloads.
-        equal = equal && (!vector || memcmp(words, f->vector_constants[f->a[match]].words, sizeof(IrSimdValue)) == 0);
-        // Equal keys put both phis in one block: compare their inputs in that block's predecessor order.
-        for (uint32_t edge = first_edge; equal && edge < end_edge; edge += 1)
-        {
-            const uint32_t predecessor = work->ir.cfg.predecessors[edge];
-            equal = ir_gvn_phi_class(work, i, predecessor, edge - first_edge) == ir_gvn_phi_class(work, match, predecessor, edge - first_edge);
-        }
-        if (!equal)
-        {
-            match = work->order[match];
-        }
+        group = (group + width) & (buckets - 1);
     }
-    ok = equal || match == BUSTER_IR_NONE;
-    if (ok && equal)
+    if (equal)
     {
         work->classes[i] = work->classes[match];
         if (work->fused && (!work->vectors_only || f->type[i] >= IR_V4I32) && (!work->pressure || ir_gvn_free[f->op[i]] == 0))
@@ -812,7 +842,7 @@ static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_
             }
         }
     }
-    else if (ok)
+    else
     {
         *count += 1;
         work->classes[i] = *count;
@@ -820,12 +850,11 @@ static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_
         {
             work->next_classes[i] = i;
         }
-        work->hashes[i] = hash;
-        work->order[i] = work->temporary_order[bucket];
-        work->temporary_order[bucket] = i;
+        work->owners[slot] = i;
+        work->tags[slot] = tag;
         memcpy(work->fields + (uint64_t)i * BUSTER_IR_GVN_ENTRY_WORDS, key, sizeof(key));
     }
-    return ok;
+    return true;
 }
 
 // Each wait edge is consumed once. A waiting instruction becomes ready after its last unnumbered input.
@@ -896,23 +925,27 @@ static bool ir_gvn_acyclic(IrGvnWork* work, uint32_t* count)
     const uint32_t n = f->instruction_count;
     const Dominators* dominators = &work->ir.dominators;
     uint32_t buckets = 1;
-    while (buckets <= n / 2)
+    while (buckets <= n && buckets < (UINT32_C(1) << 31))
     {
         buckets *= 2;
     }
+    const uint64_t mark = work->ir.scratch->length;
     if (n != 0)
     {
-        memset(work->temporary_order, 0xff, (uint64_t)buckets * sizeof(uint32_t));
-    }
-    const uint64_t mark = work->ir.scratch->length;
-    if (n != 0 && !work->ordered)
-    {
         uint64_t* spare = work->fields + (uint64_t)n * BUSTER_IR_GVN_ENTRY_WORDS;
-        work->waiters = (IrGvnWait**)spare;
-        memset(work->waiters, 0, (uint64_t)n * sizeof(*work->waiters));
-        work->wait_free = (IrGvnWait*)(work->waiters + n);
-        const uint64_t spare_bytes = (uint64_t)n * (BUSTER_IR_GVN_FIELDS - BUSTER_IR_GVN_ENTRY_WORDS) * sizeof(*spare);
-        work->wait_left = (spare_bytes - (uint64_t)n * sizeof(*work->waiters)) / sizeof(*work->wait_free);
+        // Tags and owners consume at most two spare words per instruction. Unordered input uses the
+        // remaining space for wait heads and edges until the acyclic partition is done.
+        work->tags = (uint32_t*)spare;
+        work->owners = work->tags + buckets;
+        memset(work->tags, 0, (uint64_t)buckets * sizeof(*work->tags));
+        if (!work->ordered)
+        {
+            work->waiters = (IrGvnWait**)(spare + buckets);
+            memset(work->waiters, 0, (uint64_t)n * sizeof(*work->waiters));
+            work->wait_free = (IrGvnWait*)(work->waiters + n);
+            const uint64_t spare_bytes = ((uint64_t)n * (BUSTER_IR_GVN_FIELDS - BUSTER_IR_GVN_ENTRY_WORDS) - buckets) * sizeof(*spare);
+            work->wait_left = (spare_bytes - (uint64_t)n * sizeof(*work->waiters)) / sizeof(*work->wait_free);
+        }
     }
     const uint64_t budget = work->statistics.partition_probes + (uint64_t)n * work->probes;
     bool ok = true;
@@ -926,7 +959,7 @@ static bool ir_gvn_acyclic(IrGvnWork* work, uint32_t* count)
             work->members[dominators->preorder[block]] = block;
         }
         traversal = work->members;
-        work->staged_targets = n == 0 ? NULL : (uint32_t*)(work->fields + (uint64_t)n * BUSTER_IR_GVN_ENTRY_WORDS);
+        work->staged_targets = work->temporary_order;
     }
     for (uint32_t position = 0; ok && position < dominators->reachable_count; position += 1)
     {

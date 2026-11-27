@@ -59,13 +59,12 @@ The pass builds complete use lists only when it finds an undef. Impure and undef
 instructions are unique leaves and never wait.
 
 Numbering one value is a dependent chain: its key needs its operands' classes,
-which the instructions just before it usually publish. So this numbering is
-scalar, one hash, a chain walk and at most one four-word key comparison per
-instruction. The refinement rounds keep the eight-lane key hashing. A
-representative's key (payload, meta word and operand classes) occupies four of
-the eight field words of its own index; the existing hash, link and bucket
-columns hold the rest, so the table needs no scratch of its own. Unresolved operand lists use the four spare field columns, with extra scratch
-chunks for dense forward references. The pass releases those chunks before
+which the instructions just before it usually publish. The dependency walk hashes each ready instruction and searches up to eight adjacent fingerprints
+at once. Every matching fingerprint receives the full four-word key comparison and, for phis and
+vector constants, an exact comparison of the remaining operands. An empty lane terminates the search.
+The refinement rounds keep their eight-lane key hashing. Tags and row indices share the four spare
+field words with unresolved operand lists. Dense forward references can use extra scratch chunks.
+The pass releases those chunks before
 refinement. Singleton classes in large refinement rounds are already final,
 so their members leave the worklist while their classes remain available as operands. Its probes share
 the grouping's budget, `IrGvnOptions.probes` key comparisons per instruction
