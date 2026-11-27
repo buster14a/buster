@@ -1131,9 +1131,10 @@ static const uint8_t* fast_skip_line_comment(const uint8_t* p, const uint8_t* en
     return p;
 }
 
-// Identifier character lookup table (1 for [A-Za-z0-9_$], 2 for [A-Za-z_$], 4 for [0-9], 8 for horizontal ws)
+// Identifier character lookup table (1 for [A-Za-z0-9_$], 2 for [A-Za-z_$], 4 for [0-9], 8 for horizontal ws, 16 for the
+// '/' that may start a comment before a skipped directive's name)
 static const uint8_t fast_char_class[256] = {
-    ['\t'] = 8, ['\v'] = 8, ['\f'] = 8, ['\r'] = 8, [' '] = 8,
+    ['\t'] = 8, ['\v'] = 8, ['\f'] = 8, ['\r'] = 8, [' '] = 8, ['/'] = 16,
     ['0'] = 5, ['1'] = 5, ['2'] = 5, ['3'] = 5, ['4'] = 5, ['5'] = 5, ['6'] = 5, ['7'] = 5, ['8'] = 5, ['9'] = 5,
     ['A'] = 3, ['B'] = 3, ['C'] = 3, ['D'] = 3, ['E'] = 3, ['F'] = 3, ['G'] = 3, ['H'] = 3, ['I'] = 3, ['J'] = 3,
     ['K'] = 3, ['L'] = 3, ['M'] = 3, ['N'] = 3, ['O'] = 3, ['P'] = 3, ['Q'] = 3, ['R'] = 3, ['S'] = 3, ['T'] = 3,
@@ -2256,6 +2257,64 @@ static uint32_t fast_conditional_keyword(const uint8_t* name, uint32_t length)
     return kw;
 }
 
+// The conditional (FPP_KW_*, 0 for none) that a skipped directive's name spells as the full pipeline reads it, from `p`
+// at or before the name: past the blanks, line splices and block comments before it (#3577: `#/**/else`, `#\` + newline
+// + `endif`), and the splices in it (`#el\` + newline + `se`). *leave is set where a backslash in the name starts no
+// splice (a UCN's) or a comment doesn't end.
+static uint32_t fast_skipped_directive_keyword(const uint8_t* p, const uint8_t* end, bool* leave)
+{
+    const uint8_t* at = p;
+    bool left = false;
+    bool before = true;
+    while (before && !left && at < end)
+    {
+        const uint8_t* const joined = fast_skip_splices(at, end);
+        if (joined != at)
+        {
+            at = joined;
+        }
+        else if ((fast_char_class[*at] & 8u) != 0)
+        {
+            at += 1;
+        }
+        else if (*at == '/' && at + 1 < end && at[1] == '*')
+        {
+            uint32_t comment_lines = 0;
+            const uint8_t* const after = fast_skip_block_comment(at + 2, end, &comment_lines);
+            left = after == NULL;
+            at = after == NULL ? end : after;
+        }
+        else
+        {
+            before = false;
+        }
+    }
+    uint8_t spelled[8] = { 0 };
+    uint32_t length = 0;
+    bool more = true;
+    while (more && !left && at < end)
+    {
+        if ((fast_char_class[*at] & 1u) != 0)
+        {
+            spelled[length & 7u] = *at;
+            length += 1;
+            at += 1;
+        }
+        else if (*at == '\\')
+        {
+            const uint8_t* const joined = fast_skip_splices(at, end);
+            left = joined == at;
+            at = joined;
+        }
+        else
+        {
+            more = false;
+        }
+    }
+    *leave = left;
+    return left ? 0u : fast_conditional_keyword(spelled, length);
+}
+
 // A backslash at `at` right after a skipped directive's name, or after its '#' and blanks (#3577): where it starts a
 // line splice, the name goes on past it. Where the name the full pipeline reads then is another conditional than the one
 // the skip read (`#el\` + newline + `se` is an #else, `#endif\` + newline + `x` no directive), or a backslash in the
@@ -2275,42 +2334,25 @@ static __attribute__((noinline, cold)) void fast_check_spliced_directive(FastPP*
     }
     if (after_hash > base && after_hash[-1] == '#')
     {
-        const uint32_t read = fast_conditional_keyword(name, (uint32_t)(at - name));
-        const uint8_t* p = name;
         bool leave = false;
-        bool before = true;
-        while (before && !leave && p < end)
-        {
-            const uint8_t* const joined = fast_skip_splices(p, end);
-            before = joined != p || (fast_char_class[*p] & 8u) != 0;
-            p = joined != p ? joined : p + (before ? 1 : 0);
-        }
-        uint8_t spelled[8] = { 0 };
-        uint32_t length = 0;
-        bool more = true;
-        while (more && !leave && p < end)
-        {
-            if ((fast_char_class[*p] & 1u) != 0)
-            {
-                spelled[length & 7u] = *p;
-                length += 1;
-                p += 1;
-            }
-            else if (*p == '\\')
-            {
-                const uint8_t* const joined = fast_skip_splices(p, end);
-                leave = joined == p;
-                p = joined;
-            }
-            else
-            {
-                more = false;
-            }
-        }
-        if (leave || fast_conditional_keyword(spelled, length) != read)
+        const uint32_t spelled = fast_skipped_directive_keyword(name, end, &leave);
+        if (leave || spelled != fast_conditional_keyword(name, (uint32_t)(at - name)))
         {
             fast_pp_bail(pp, "directive name across a line splice in a skipped group");
         }
+    }
+}
+
+// A block comment at `p`, right after a skipped directive's '#' and its blanks (#3577): the full pipeline reads the
+// directive's name after it (`#/**/else` is an #else). Where that is a conditional's, or the comment doesn't end, the
+// unit leaves the direct path; another directive's name is no conditional, as the skip read it.
+static __attribute__((noinline, cold)) void fast_check_commented_directive(FastPP* pp, const uint8_t* p, const uint8_t* end)
+{
+    bool leave = false;
+    const uint32_t spelled = fast_skipped_directive_keyword(p, end, &leave);
+    if (leave || spelled != 0)
+    {
+        fast_pp_bail(pp, "directive name after a comment in a skipped group");
     }
 }
 
@@ -2842,9 +2884,15 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
             if (!decided && directive)
             {
                 next = fast_skip_hspace(at + 1, end);
-                if (next < end && (fast_char_class[*next] & 2u) != 0)
+                // A name's first character, or a '/' that may start a comment before it (#3577), which the name test
+                // takes too: no name is scanned there, and the comment is checked for the conditional after it.
+                if (next < end && (fast_char_class[*next] & 18u) != 0)
                 {
                     const uint32_t len = fast_scan_ident_len(next, end);
+                    if (__builtin_expect(len == 0, 0))
+                    {
+                        fast_check_commented_directive(pp, next, end);
+                    }
                     uint8_t kw = 0;
                     if (len == 2u && next[0] == 'i' && next[1] == 'f') { kw = FPP_KW_IF; }
                     else if (len == 5u && memcmp(next, "ifdef", 5) == 0) { kw = FPP_KW_IFDEF; }

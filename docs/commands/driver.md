@@ -436,8 +436,10 @@ the name it makes is another conditional (`#el\` then `se`, `#\` then `endif`),
 and so does a UCN's backslash there. The blocks with no event take an inner
 loop of their own, so that the decisions' code and calls don't take its
 registers: sqlite3.c's skips went from 8.16 M instructions to 7.44 M on the
-9700X with the splices read. A comment between a skipped directive's `#` and
-its name (`#/**/else`) is still read as no directive, a gap left.
+9700X with the splices read. A block comment between a skipped directive's `#`
+and its name leaves where a conditional's name follows it (`#/**/else`): `/`
+has a character class of its own, so the name test that each skipped
+directive makes already takes it, and the comment is read in a cold helper.
 
 `./build/compiler test-direct --differential [--jobs N] [--direct-floor N]
 DIRECTORY...` compiles every C file under the directories with this
