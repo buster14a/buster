@@ -4129,9 +4129,9 @@ static bool c_direct_test_skipped_splices(const char* obj_path)
             }
         }
     }
-    // A splice after a skipped directive's name, or between its '#' and its name: where the name goes on past it into
-    // another conditional's, or a UCN's backslash follows the name, the unit leaves; where it stays the same directive,
-    // or none, it compiles.
+    // A splice after a skipped directive's name, or between its '#' and its name, and a comment between them: where the
+    // name goes on past it into another conditional's, or a UCN's backslash follows the name, or a conditional's name
+    // follows the comment, the unit leaves; where it stays the same directive, or none, it compiles.
     static const struct
     {
         const char* source;
@@ -4151,6 +4151,13 @@ static bool c_direct_test_skipped_splices(const char* obj_path)
         { "#if 0\n#define A \\\n  #endif\n#endif\nint f(void) { return 0; }\n", 0 },
         { "#if 0\n#define S(x) \\\n#x\n#endif\nint f(void) { return 0; }\n", 0 },
         { "#if 0\n  #endif\nint f(void) { return 0; }\n", 0 },
+        { "#if 0\n#/**/else\nint q;\n#endif\nint f(void) { return 0; }\n", 1 },
+        { "#if 0\n# /* c */ endif\nint q = 1;\nint f(void) { return q; }\n", 1 },
+        { "#if 0\n#/* c\n */elif 1\nint q = 1;\n#endif\nint f(void) { return q; }\n", 1 },
+        { "#if 0\n#\\\n/**/endif\nint q = 1;\nint f(void) { return q; }\n", 1 },
+        { "#if 0\n#/**/define X\n#else\nint q = 1;\n#endif\nint f(void) { return q; }\n", 0 },
+        { "#if 0\n# // c\n#else\nint q = 1;\n#endif\nint f(void) { return q; }\n", 0 },
+        { "#if 0\n#/* c */\n#/x\n#else\nint q = 1;\n#endif\nint f(void) { return q; }\n", 0 },
     };
     for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(names) / sizeof(names[0])); i += 1)
     {
