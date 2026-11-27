@@ -292,6 +292,17 @@ from 113.2 s to 66.8 s, and CI's command on the subset's 220 programs from
 127.8 s to 57.3 s, as its fake stacks for each step's address-taken locals went
 too.
 
+Static locals, copied aggregate parameters and variadic anchor areas allocate
+byte-definedness maps only when the run enables `check_undefined`, as dynamic
+stack and native heap allocations already do. Without that check, their memory
+registrations carry a null map, so stores and representation copies maintain
+only the payload. Unwritten local storage is still zero-initialized, every
+object retains its exact registered extent and permissions, and memory checking
+remains independent.
+The option is fixed for the run; a later run with checking enabled creates fresh
+empty maps. IR instruction-definedness and simultaneous phi snapshots keep their
+existing representation.
+
 Callable program mappings share one symbol namespace: IDs zero and UINT32_MAX
 are reserved, and function, data and native IDs must be distinct. Different IDs
 may intentionally refer to the same address.
@@ -324,7 +335,7 @@ prototype, which passes its arguments as a variadic call does).
 supported data fixups, resolves global names across units and preserves local
 symbol identity. Unsupported data forms are reported rather than guessed.
 
-Heap definedness uses a byte map per allocation. Native free/realloc maintain it;
+With undefined-byte checking enabled, heap definedness uses a byte map per allocation. Native free/realloc maintain it;
 execution teardown releases those maps while preserving any unfreed program
 allocation, whose ownership remains with the caller. Memory bindings remain
 caller-owned. The generated-program comparison disables undefined-byte checks
@@ -340,7 +351,7 @@ may overlap as `memmove`'s, and leaves both bytes and metadata unchanged when ei
 fails its bound or permission check. Typed object locals (`local_classes ==
 VOID`, nonzero `local_sizes`, address-taken and with a validated alignment) own
 separate frame storage. Their registered extents exclude alignment padding,
-and their defined-byte maps start empty. Scalar views use the same object
+and their defined-byte maps start empty when checking is enabled. Scalar views use the same object
 width rules as Tier 0. A callee's objects are reclaimed on return; failed frame
 entry rolls back both the arena and memory registry without removing caller
 objects. Dynamic-stack restore cannot discard the static objects preceding it.

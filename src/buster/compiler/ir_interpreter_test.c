@@ -1205,6 +1205,222 @@ static void ir_interpreter_test_generated(IrInterpreterTestTally* tally, uint64_
 #include "buster/compiler/ir_interpreter_abi_test.c"
 #include "buster/compiler/ir_interpreter_simd_test.c"
 
+// Inspect live frame registrations, including a variadic overflow anchor past named stack arguments. Disabling
+// undefined-byte checks must remove their maps while preserving zero payloads, bounds, permissions and rollback.
+static void ir_interpreter_test_frame_maps(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    const InterpreterValue arguments[] = {
+        { .low = 11 },
+        { .low = 22 },
+        { .low = 33 },
+        { .low = 44 },
+        { .low = 55 },
+        { .low = 66 },
+        { .low = 77 },
+        { .low = 88 },
+    };
+    const uint16_t types[] = {
+        IR_I64,
+        IR_I64,
+        IR_I64,
+        IR_I64,
+        IR_I64,
+        IR_I64,
+        IR_I64,
+        IR_I64,
+    };
+    const uint8_t registers[] = {
+        BUSTER_ABI_RDI,
+        BUSTER_ABI_RSI,
+        BUSTER_ABI_RDX,
+        BUSTER_ABI_RCX,
+        BUSTER_ABI_R8,
+        BUSTER_ABI_R9,
+    };
+    IrPassed places[BUSTER_ARRAY_LENGTH(arguments)] = { 0 };
+    for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(arguments); p += 1)
+    {
+        places[p].location = p < BUSTER_ARRAY_LENGTH(registers) ? ir_interpreter_abi_registers(registers[p], BUSTER_ABI_REGISTER_NONE) : ir_interpreter_abi_stack((p - BUSTER_ARRAY_LENGTH(registers)) * 8);
+    }
+    const IrInterpreterIncoming incoming = {
+        .values = arguments,
+        .types = types,
+        .places = places,
+        .count = BUSTER_ARRAY_LENGTH(arguments),
+        .stack_bytes = 16,
+        .stack_alignment_log2 = 4,
+    };
+    for (uint32_t kind = 0; kind < 3; kind += 1)
+    {
+        const uint64_t mark = memory->length;
+        const bool variadic = kind != 0;
+        IrFunction function = { 0 };
+        IrInterpreterAbiBuilder builder;
+        const IrSizes sizes = {
+            .slot_count = kind == 2 ? 0 : 2,
+            .parameter_count = variadic ? 7 : 0,
+        };
+        const bool created = ir_interpreter_abi_create(memory, &function, sizes, IR_VOID, &builder);
+        ir_interpreter_test_expect(tally, created, "frame byte-map fixture allocation");
+        if (created)
+        {
+            function.variadic = variadic;
+            if (variadic)
+            {
+                function.incoming = (AbiCall){
+                    .stack_bytes = 8,
+                    .stack_alignment_log2 = 4,
+                    .integer_registers = 6,
+                };
+            }
+            for (uint32_t p = 0; p < function.parameter_count; p += 1)
+            {
+                function.parameter_types[p] = IR_I64;
+            }
+            if (function.slot_count != 0)
+            {
+                function.slots[0] = ir_interpreter_abi_slot(variadic ? BUSTER_ABI_SAVE_AREA_BYTES : 64, variadic ? BUSTER_IR_SLOT_REGISTER_SAVE_AREA : 0);
+                function.slots[1] = ir_interpreter_abi_slot(variadic ? 0 : 16, variadic ? BUSTER_IR_SLOT_OVERFLOW_AREA : 0);
+            }
+            ir_interpreter_abi_emit(&builder, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_interpreter_abi_finish(&builder);
+            const IrInterpreterFunction code = {
+                .symbol = 71,
+                .function = &function,
+            };
+            const IrInterpreterProgram program = {
+                .functions = &code,
+                .function_count = 1,
+            };
+            uint64_t footprints[2] = { 0 };
+            for (uint32_t checked = 0; checked < 2; checked += 1)
+            {
+                uint8_t global[8] = { 0 };
+                InterpreterMemory memories[3];
+                InterpreterRuntime runtime = {
+                    .memories = memories,
+                    .memory_capacity = BUSTER_ARRAY_LENGTH(memories),
+                    .check_memory = true,
+                    .check_undefined = checked != 0,
+                };
+                const bool added = interpreter_memory_add(&runtime, global, sizeof(global), 0, false, 0);
+                ir_interpreter_test_expect(tally, added, "frame byte-map read-only binding");
+                InterpreterOptions options = interpreter_default_options();
+                options.check_undefined = checked != 0;
+                IrInterpreterLayout layout = { 0 };
+                for (uint32_t repeat = 0; repeat < 2; repeat += 1)
+                {
+                    const uint64_t frame_mark = execution->length;
+                    IrInterpreterFrame frame;
+                    const InterpreterStatus status = ir_interpreter_frame(&frame, &program, 0, arguments, function.parameter_count, variadic ? &incoming : 0, 0, 1, &options, 0, 0, &runtime, &layout, execution);
+                    ir_interpreter_test_expect(tally, status == INTERPRETER_OK && runtime.memory_count == 1 + function.slot_count, "frame keeps every local registration with optional byte maps");
+                    if (status == INTERPRETER_OK)
+                    {
+                        footprints[checked] = execution->length - frame_mark;
+                        ir_interpreter_test_expect(tally, frame.defined != 0, "instruction definedness remains separate from memory-byte maps");
+                        for (uint32_t s = 0; s < function.slot_count; s += 1)
+                        {
+                            ir_interpreter_test_expect(tally, (memories[s + 1].defined != 0) == (checked != 0), "only checked frame memory has a byte map");
+                        }
+                        if (function.slot_count != 0)
+                        {
+                            const uint64_t probe = frame.slots[0] + (variadic ? BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET : 0);
+                            const InterpreterStatus unread = checked != 0 ? INTERPRETER_UNDEFINED : INTERPRETER_OK;
+                            ir_interpreter_test_expect(tally, interpreter_memory_access(&runtime, probe, 8, false) == unread, "an unwritten frame range is undefined only when checked");
+                            ir_interpreter_test_expect(tally, interpreter_load_value(probe, 8, false).low == 0, "reused frame payload starts zero without a byte map");
+                            ir_interpreter_test_expect(tally, interpreter_memory_access(&runtime, probe, 4, true) == INTERPRETER_OK, "a partial frame store retains permission checks");
+                            interpreter_store_value(probe, (InterpreterValue){ .low = 0x12345678 }, 4, false);
+                            ir_interpreter_test_expect(tally, interpreter_memory_access(&runtime, probe, 4, false) == INTERPRETER_OK && interpreter_memory_access(&runtime, probe, 8, false) == unread, "a partial store defines exactly its bytes");
+                            const uint64_t last = frame.slots[1] + memories[2].size;
+                            ir_interpreter_test_expect(tally, interpreter_memory_access(&runtime, last, 1, true) == INTERPRETER_MEMORY, "frame bounds remain checked without byte maps");
+                            if (variadic)
+                            {
+                                ir_interpreter_test_expect(tally, memories[2].size == 8 && interpreter_load_value(frame.slots[1], 8, false).low == 88, "variadic overflow excludes named bytes and keeps its unnamed argument");
+                                ir_interpreter_test_expect(tally, interpreter_memory_access(&runtime, frame.slots[1], 8, false) == INTERPRETER_OK, "variadic argument bytes are defined when checked");
+                            }
+                        }
+                        ir_interpreter_test_expect(tally, interpreter_memory_access(&runtime, (uintptr_t)global, 1, true) == INTERPRETER_MEMORY, "read-only bindings stay read-only without byte maps");
+                    }
+                    interpreter_memory_remove_owner(&runtime, 1);
+                    arena_pop_to(execution, frame_mark);
+                    ir_interpreter_test_expect(tally, runtime.memory_count == 1 && memories[0].bytes == global, "frame return keeps the caller's registration");
+                }
+                if (function.slot_count != 0)
+                {
+                    const uint64_t frame_mark = execution->length;
+                    runtime.memory_capacity = 2;
+                    IrInterpreterFrame frame;
+                    const InterpreterStatus status = ir_interpreter_frame(&frame, &program, 0, arguments, function.parameter_count, variadic ? &incoming : 0, 0, 1, &options, 0, 0, &runtime, &layout, execution);
+                    ir_interpreter_test_expect(tally, status == INTERPRETER_RESOURCE && execution->length == frame_mark && runtime.memory_count == 1 && memories[0].bytes == global, "partial frame registration failure rolls back with either byte-map policy");
+                }
+            }
+            ir_interpreter_test_expect(tally, footprints[0] < footprints[1], "unchecked static and fallback anchor storage omits byte-map allocation");
+        }
+        arena_pop_to(memory, mark);
+    }
+}
+
+// By-value copies keep object bytes and their checked padding, while an unchecked call needs no destination map.
+static void ir_interpreter_test_argument_maps(IrInterpreterTestTally* tally, Arena* execution)
+{
+    uint8_t source[16];
+    uint8_t source_defined[16] = { 0 };
+    memset(source, 0x5a, sizeof(source));
+    memset(source_defined, 1, 8);
+    IrPassed place = {
+        .location = { .kind = BUSTER_ABI_LOCATION_STACK },
+        .size = sizeof(source),
+    };
+    IrAbiCall records = { .call = { .stack_alignment_log2 = 4 } };
+    uint8_t parameter_type = IR_PTR;
+    const IrFunction caller = {
+        .abi_calls = &records,
+        .passed = &place,
+    };
+    const IrFunction callee = {
+        .parameter_types = &parameter_type,
+        .parameter_count = 1,
+        .parameter_passed = 1,
+        .passed = &place,
+        .result_type = IR_VOID,
+    };
+    const IrCall call = {
+        .argument_count = 1,
+        .parameter_count = 1,
+        .result_type = IR_VOID,
+        .abi = 1,
+    };
+    const InterpreterValue argument = { .low = (uintptr_t)source };
+    const uint16_t type = IR_PTR;
+    for (uint32_t checked = 0; checked < 2; checked += 1)
+    {
+        const uint64_t mark = execution->length;
+        InterpreterMemory memories[2];
+        InterpreterRuntime runtime = {
+            .memories = memories,
+            .memory_capacity = BUSTER_ARRAY_LENGTH(memories),
+            .check_memory = true,
+            .check_undefined = checked != 0,
+        };
+        const bool added = interpreter_memory_add(&runtime, source, sizeof(source), source_defined, false, 0);
+        ir_interpreter_test_expect(tally, added, "aggregate byte-map source registration");
+        InterpreterValue parameter = { 0 };
+        IrInterpreterIncoming incoming = { 0 };
+        const InterpreterStatus status = ir_interpreter_arguments(&caller, call, 0, &callee, &argument, &type, 0, 1, &runtime, execution, &parameter, &incoming);
+        ir_interpreter_test_expect(tally, status == INTERPRETER_OK && runtime.memory_count == 2, "aggregate parameter copy keeps its own registration");
+        if (status == INTERPRETER_OK)
+        {
+            ir_interpreter_test_expect(tally, (memories[1].defined != 0) == (checked != 0), "only checked aggregate copies have byte maps");
+            ir_interpreter_test_expect(tally, parameter.low != (uintptr_t)source && (parameter.low & 63) == 0 && memcmp((const void*)(uintptr_t)parameter.low, source, sizeof(source)) == 0, "optional aggregate maps preserve aligned by-value payloads");
+            ir_interpreter_test_expect(tally, interpreter_memory_access(&runtime, parameter.low, 8, false) == INTERPRETER_OK && interpreter_memory_access(&runtime, parameter.low + 8, 8, false) == (checked != 0 ? INTERPRETER_UNDEFINED : INTERPRETER_OK), "aggregate copies preserve checked padding definedness");
+            ir_interpreter_test_expect(tally, interpreter_memory_access(&runtime, parameter.low + sizeof(source), 1, false) == INTERPRETER_MEMORY, "aggregate bounds remain checked without byte maps");
+        }
+        interpreter_memory_remove_owner(&runtime, 1);
+        arena_pop_to(execution, mark);
+        ir_interpreter_test_expect(tally, runtime.memory_count == 1 && memories[0].bytes == source, "aggregate cleanup keeps caller-owned bytes and map");
+    }
+}
+
 static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** argv)
 {
     uint64_t seed = 0x123456789abcdefull;
@@ -1257,6 +1473,8 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
             ir_interpreter_test_eightbytes(&tally, &memory, &execution);
             ir_interpreter_test_native_records(&tally, &memory, &execution);
             ir_interpreter_test_memory(&tally, &memory, &execution);
+            ir_interpreter_test_frame_maps(&tally, &memory, &execution);
+            ir_interpreter_test_argument_maps(&tally, &execution);
             ir_interpreter_test_atomic_rmw(&tally, &memory, &execution);
             ir_interpreter_test_mappings(&tally, &memory, &execution);
             ir_interpreter_test_symbols(&tally, &memory, &execution);
