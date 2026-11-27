@@ -850,7 +850,7 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
             .table_count = table_count,
         };
         IrVerifiedRevision revision = { 0 };
-        const CheckTier1Outcome outcome = check_tier1_passes(lane, &input, target, scalar, certify, NULL, &lane->steps[2], output, analyses, &revision, &summary.passes);
+        const CheckTier1Outcome outcome = check_tier1_passes(lane, &input, target, certify, NULL, &lane->steps[2], output, analyses, &revision, &summary.passes);
         built = outcome.stage == CHECK_TIER1_COMPILED;
         // The converted tables' values, from steps[6], which is emptied below, into the summary's arena.
         int32_t** values = built && summary.passes.tables_converted != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, int32_t*, table_count) : NULL;

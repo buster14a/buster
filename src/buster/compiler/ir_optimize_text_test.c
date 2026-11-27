@@ -144,7 +144,7 @@ static bool ir_optimize_text_parse(String8 text, Arena* output, Arena* scratch, 
 // The pass by the requested twin. `change` counts the pass's own transformations, as its result reports them, so a
 // fixture that stops exercising its pass fails instead of passing on an unchanged function. `validated` gives LICM and
 // GVN their verified input's preparation (#2719, IrOptimizeWork.validated), which Tier 1 runs them with.
-static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, const IrFunction* input, Arena* output, Arena* scratch, bool scalar, bool validated, IrFunction* function,
+static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, const IrFunction* input, Arena* output, Arena* scratch, bool validated, IrFunction* function,
                                           uint64_t* change)
 {
     IrCheck check;
@@ -153,7 +153,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
     if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
     {
         IrGvnOptions options = ir_gvn_options();
-        options.scalar = scalar;
         options.pressure = fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE;
         options.validated = validated;
         IrGvnResult pass = { 0 };
@@ -291,7 +290,7 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
             free(after_printed);
             IrFunction vector = { 0 };
             uint64_t vector_change = 0;
-            const IrCheck vector_check = ir_optimize_text_transform(fixture, &before, output, scratch, false, false, &vector, &vector_change);
+            const IrCheck vector_check = ir_optimize_text_transform(fixture, &before, output, scratch, false, &vector, &vector_change);
             ir_optimize_text_expect(test, vector_check.error == IR_OK, fixture->name, "the vector twin transforms the before text");
             ir_optimize_text_expect(test, vector_check.error != IR_OK || vector_change != 0, fixture->name,
                                     "the pass reports no transformation, so the fixture no longer exercises it");
@@ -325,21 +324,6 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
                 }
             }
             arena_pop_to(twin, twin_mark);
-            if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
-            {
-                // GVN's scalar twin is the available-expression oracle: it may find fewer congruences than the vector
-                // partition refinement, and always finds no more of them. The other passes have one path (#2924).
-                IrFunction scalar = { 0 };
-                uint64_t scalar_change = 0;
-                const IrCheck scalar_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, false, &scalar, &scalar_change);
-                ir_optimize_text_expect(test, scalar_check.error == IR_OK, fixture->name, "the scalar twin transforms the before text");
-                ir_optimize_text_expect(test, scalar_check.error != IR_OK || scalar_change <= vector_change, fixture->name,
-                                        "the scalar GVN oracle removes more than the vector partition does");
-                if (scalar_check.error == IR_OK && !ir_optimize_test_equal(&vector, &scalar))
-                {
-                    ir_optimize_text_execute(test, fixture->name, &before, &scalar, scratch, fixture->effects);
-                }
-            }
             if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE || fixture->pass == IR_OPTIMIZE_TEXT_LICM ||
                 fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE)
             {
@@ -347,7 +331,7 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
                 const uint64_t validated_mark = twin->length;
                 IrFunction validated = { 0 };
                 uint64_t validated_change = 0;
-                const IrCheck validated_check = ir_optimize_text_transform(fixture, &before, twin, scratch, false, true, &validated, &validated_change);
+                const IrCheck validated_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, &validated, &validated_change);
                 ir_optimize_text_expect(test, validated_check.error == IR_OK && validated_change == vector_change && ir_optimize_test_equal(&vector, &validated), fixture->name,
                                         "the pass on a verified input's preparation gives another function");
                 arena_pop_to(twin, validated_mark);
@@ -446,7 +430,7 @@ static __attribute__((unused)) int ir_optimize_text_print_fixtures(void)
         ok = ok && ir_optimize_text_parse(text, &output, &scratch, &before);
         IrFunction result = { 0 };
         uint64_t change = 0;
-        ok = ok && ir_optimize_text_transform(fixture, &before, &output, &scratch, false, false, &result, &change).error == IR_OK;
+        ok = ok && ir_optimize_text_transform(fixture, &before, &output, &scratch, false, &result, &change).error == IR_OK;
         size_t length = 0;
         char* printed = ok ? ir_optimize_text_print(&result, &scratch, &length) : 0;
         ok = ok && printed != 0;

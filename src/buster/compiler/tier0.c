@@ -11503,98 +11503,103 @@ static uint32_t tier0_x87_transfer_slot(const X86Instruction* record, const Tier
 // Labels, calls, control flow and unrecognized memory classes discard the unfinished lifetimes. Deep functions keep
 // their established emission: their byte depths name a moving window rather than a physical memory-class slot.
 //
-static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, Tier0Code* code, const uint8_t* accesses, Arena* scratch)
+static __attribute__((noinline)) void tier0_x87_transfers(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, Tier0Code* code, const uint8_t* accesses, Arena* scratch)
 {
-    if (function->x87 && entries->deep == 0)
+    const uint64_t mark = scratch->length;
+    const uint32_t count = code->count;
+    const uint32_t entry_count = function->count;
+    const uint32_t depths = frame->memory_depths > BUSTER_TIER0_INTEGER_DEPTHS ? frame->memory_depths : BUSTER_TIER0_INTEGER_DEPTHS;
+    X86Instruction* const records = code->records;
+    const uint32_t* const positions = entries->positions;
+    // Tokens and slots share the all-ones sentinel. Annotations and the count+1 boundaries start clear.
+    const uint64_t words = (uint64_t)count + depths;
+    uint32_t* tokens = arena_push(scratch, words * sizeof(*tokens) + (uint64_t)count * 2 + 1, _Alignof(uint32_t));
+    if (tokens != NULL)
     {
-        const uint64_t mark = scratch->length;
-        const uint32_t count = code->count;
-        const uint32_t entry_count = function->count;
-        const uint32_t depths = frame->memory_depths > BUSTER_TIER0_INTEGER_DEPTHS ? frame->memory_depths : BUSTER_TIER0_INTEGER_DEPTHS;
-        X86Instruction* const records = code->records;
-        const uint32_t* const positions = entries->positions;
-        uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);
-        uint32_t* slots = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, depths);
-        uint8_t* uses = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count);
-        uint8_t* eligible = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count);
-        uint8_t* boundaries = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
-        const bool ready = tokens != 0 && slots != 0 && uses != 0 && eligible != 0 && boundaries != 0;
-        if (ready)
+        uint32_t* const slots = tokens + count;
+        uint8_t* const annotations = (uint8_t*)(tokens + words);
+        uint8_t* const boundaries = annotations + count;
+        bool has_store = false;
+        memset(tokens, 0xff, words * sizeof(*tokens));
+        // The upper bits of a store annotation count reloads, saturating at two. Its low bits are
+        // the published store/reload tags, so no separate per-record use column is needed.
+        enum { read_once = 4, read_twice = 8 };
+        memset(annotations, 0, (uint64_t)count * 2 + 1);
+        boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
+        boundaries[count] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
+        for (uint32_t i = 0; i < entry_count; i += 1)
         {
-            memset(tokens, 0xff, (uint64_t)count * sizeof(uint32_t));
-            memset(slots, 0xff, (uint64_t)depths * sizeof(uint32_t));
-            memset(uses, 0, count);
-            memset(eligible, 0, count);
-            memset(boundaries, 0, (uint64_t)count + 1);
-            boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
-            boundaries[count] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
-            for (uint32_t i = 0; i < entry_count; i += 1)
+            const uint32_t first = positions[i];
+            const uint32_t end = positions[i + 1];
+            const uint32_t kind = entries->key_kinds[i];
+            const uint32_t class = entries->key_classes[i];
+            const uint32_t depth = entries->depths[i];
+            const bool label = entries->labels != 0 && tier0_label(entries->labels, i);
+            const bool cut = kind == BUSTER_TYPED_CALL || kind >= BUSTER_TYPED_BRANCH_FALSE || class >= BUSTER_TYPED_CLASS_I128 || (accesses != NULL && accesses[i] != 0);
+            boundaries[first] |= BUSTER_X87_TRANSFER_BOUNDARY | (label || cut ? BUSTER_X87_TRANSFER_CUT : 0);
+            boundaries[end] |= BUSTER_X87_TRANSFER_BOUNDARY | (cut ? BUSTER_X87_TRANSFER_CUT : 0);
+            if (label || cut)
             {
-                const uint32_t first = positions[i];
-                const uint32_t end = positions[i + 1];
-                const uint32_t kind = entries->key_kinds[i];
-                const uint32_t class = entries->key_classes[i];
-                const uint32_t depth = entries->depths[i];
-                const bool label = entries->labels != 0 && tier0_label(entries->labels, i);
-                const bool cut = kind == BUSTER_TYPED_CALL || kind >= BUSTER_TYPED_BRANCH_FALSE || class >= BUSTER_TYPED_CLASS_I128 || (accesses != NULL && accesses[i] != 0);
-                boundaries[first] |= BUSTER_X87_TRANSFER_BOUNDARY | (label || cut ? BUSTER_X87_TRANSFER_CUT : 0);
-                boundaries[end] |= BUSTER_X87_TRANSFER_BOUNDARY | (cut ? BUSTER_X87_TRANSFER_CUT : 0);
-                if (label || cut)
+                memset(slots, 0xff, (uint64_t)depths * sizeof(uint32_t));
+            }
+            const bool from_x87 = kind == BUSTER_TYPED_CONVERT && entries->variants[i] == BUSTER_TYPED_CLASS_F80;
+            const bool x87 = class == BUSTER_TYPED_CLASS_F80 || from_x87;
+            if (!cut && x87 && entries->absorbed[i] == 0)
+            {
+                const bool binary = (kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_DIV) || (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE);
+                const bool unary = kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_SET_LOCAL ||
+                                   kind == BUSTER_TYPED_DISCARD || (from_x87 && class != BUSTER_TYPED_CLASS_F80);
+                const uint32_t consumed = binary ? 2 : unary ? 1 : 0;
+                uint32_t previous[2] = { BUSTER_X87_TRANSFER_NONE, BUSTER_X87_TRANSFER_NONE };
+                for (uint32_t k = 0; k < consumed; k += 1)
                 {
-                    memset(slots, 0xff, (uint64_t)depths * sizeof(uint32_t));
+                    previous[k] = depth > k && depth - 1 - k < depths ? slots[depth - 1 - k] : BUSTER_X87_TRANSFER_NONE;
                 }
-                const bool from_x87 = kind == BUSTER_TYPED_CONVERT && entries->variants[i] == BUSTER_TYPED_CLASS_F80;
-                const bool x87 = class == BUSTER_TYPED_CLASS_F80 || from_x87;
-                if (!cut && x87 && entries->absorbed[i] == 0)
+                if (kind == BUSTER_TYPED_CONST && depth < depths)
                 {
-                    const bool binary = (kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_DIV) || (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE);
-                    const bool unary = kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_SET_LOCAL ||
-                                       kind == BUSTER_TYPED_DISCARD || (from_x87 && class != BUSTER_TYPED_CLASS_F80);
-                    const uint32_t consumed = binary ? 2 : unary ? 1 : 0;
-                    uint32_t previous[2] = { BUSTER_X87_TRANSFER_NONE, BUSTER_X87_TRANSFER_NONE };
-                    for (uint32_t k = 0; k < consumed; k += 1)
+                    slots[depth] = BUSTER_X87_TRANSFER_NONE;
+                }
+                for (uint32_t r = first; r < end; r += 1)
+                {
+                    const uint32_t form = records[r].form;
+                    const uint32_t slot = form == X86_FORM_FLD_M80 || form == X86_FORM_FSTP_M80 ? tier0_x87_transfer_slot(&records[r], frame) : BUSTER_X87_TRANSFER_NONE;
+                    if (slot != BUSTER_X87_TRANSFER_NONE && form == X86_FORM_FLD_M80)
                     {
-                        previous[k] = depth > k && depth - 1 - k < depths ? slots[depth - 1 - k] : BUSTER_X87_TRANSFER_NONE;
-                    }
-                    if (kind == BUSTER_TYPED_CONST && depth < depths)
-                    {
-                        slots[depth] = BUSTER_X87_TRANSFER_NONE;
-                    }
-                    for (uint32_t r = first; r < end; r += 1)
-                    {
-                        const uint32_t form = records[r].form;
-                        const uint32_t slot = form == X86_FORM_FLD_M80 || form == X86_FORM_FSTP_M80 ? tier0_x87_transfer_slot(&records[r], frame) : BUSTER_X87_TRANSFER_NONE;
-                        if (slot != BUSTER_X87_TRANSFER_NONE && form == X86_FORM_FLD_M80)
-                        {
-                            const uint32_t token = slots[slot];
-                            if (token != BUSTER_X87_TRANSFER_NONE)
-                            {
-                                tokens[r] = token;
-                                uses[token] += uses[token] < 2;
-                            }
-                        }
-                        else if (slot != BUSTER_X87_TRANSFER_NONE)
-                        {
-                            tokens[r] = r;
-                            slots[slot] = r;
-                        }
-                    }
-                    for (uint32_t k = 0; k < consumed; k += 1)
-                    {
-                        const uint32_t token = previous[k];
+                        const uint32_t token = slots[slot];
                         if (token != BUSTER_X87_TRANSFER_NONE)
                         {
-                            eligible[token] = uses[token] == 1;
-                            const uint32_t slot = depth - 1 - k;
-                            slots[slot] = slots[slot] == token ? BUSTER_X87_TRANSFER_NONE : slots[slot];
+                            tokens[r] = token;
+                            annotations[r] = BUSTER_X87_TRANSFER_RELOAD;
+                            annotations[token] += (annotations[token] & read_twice) == 0 ? read_once : 0;
                         }
+                    }
+                    else if (slot != BUSTER_X87_TRANSFER_NONE)
+                    {
+                        tokens[r] = r;
+                        slots[slot] = r;
+                    }
+                }
+                for (uint32_t k = 0; k < consumed; k += 1)
+                {
+                    const uint32_t token = previous[k];
+                    if (token != BUSTER_X87_TRANSFER_NONE)
+                    {
+                        const uint8_t reads = annotations[token] & (read_once | read_twice);
+                        const bool single = reads == read_once;
+                        annotations[token] = reads | (single ? BUSTER_X87_TRANSFER_STORE : 0);
+                        has_store |= single;
+                        const uint32_t slot = depth - 1 - k;
+                        slots[slot] = slots[slot] == token ? BUSTER_X87_TRANSFER_NONE : slots[slot];
                     }
                 }
             }
-            (void)x87_transfer_records(records, count, tokens, eligible, boundaries, true);
         }
-        arena_pop_to(scratch, mark);
+        if (has_store)
+        {
+            (void)x87_transfer_records(records, count, tokens, annotations, boundaries);
+        }
     }
+    arena_pop_to(scratch, mark);
 }
 
 // Follow a constant through straight-line leaves to the instruction that consumes its stack slot.
@@ -11913,7 +11918,7 @@ static inline __attribute__((always_inline)) void tier0_job_finish(Tier0Job* job
         {
             error = !tier0_apply_segments(code->records, entries->positions, function->count, job->segments, frame) && error == TIER0_OK ? TIER0_ERROR_UNSUPPORTED : error;
         }
-        if (error == TIER0_OK)
+        if (error == TIER0_OK && function->x87 && entries->deep == 0)
         {
             tier0_x87_transfers(function, entries, frame, code, job->segments, scratch);
         }

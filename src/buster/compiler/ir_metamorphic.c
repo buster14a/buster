@@ -677,7 +677,7 @@ static IrMetaFailure ir_meta_observation(const IrMetaObservation* actual, uint64
     return failure;
 }
 
-static IrMetaFailure ir_meta_optimize(const IrFunction* function, uint32_t pass, bool scalar, Arena* output, Arena* scratch, IrFunction* result)
+static IrMetaFailure ir_meta_optimize(const IrFunction* function, uint32_t pass, Arena* output, Arena* scratch, IrFunction* result)
 {
     const uint64_t mark = output->length;
     IrCheck check = { .error = IR_ERROR_LIMIT };
@@ -704,7 +704,6 @@ static IrMetaFailure ir_meta_optimize(const IrFunction* function, uint32_t pass,
     else if (pass == 5)
     {
         IrGvnOptions options = ir_gvn_options();
-        options.scalar = scalar;
         IrGvnResult optimized = { 0 };
         check = ir_optimize_gvn(function, output, scratch, options, &optimized);
         if (check.error == IR_OK)
@@ -863,7 +862,7 @@ static IrMetaFailure ir_meta_campaign(const IrMetaOptions* options, IrMetaTally*
                     record.input = 0;
                     record.expected = ir_meta_model(&record.test, 0);
                     record.actual = (IrMetaObservation){ 0 };
-                    failure = ir_meta_optimize(changed + scalar_path, pass, scalar_path != 0, &optimized, &scratch, &candidate);
+                    failure = ir_meta_optimize(changed + scalar_path, pass, &optimized, &scratch, &candidate);
                     tally->checks += 1;
                     // Explicit fault injection exercises the failure/artifact protocol. It is recorded in replay
                     // metadata and never enabled by the default campaign or interpreted as an organic compiler bug.

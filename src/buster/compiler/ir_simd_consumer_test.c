@@ -155,7 +155,7 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 // GVN and LICM now model masks (#1450).
                 IrGvnResult gvn = { .function.instruction_count = 123 };
                 IrGvnOptions gvn_options = ir_gvn_options();
-                gvn_options.scalar = scalar != 0;
+                gvn_options.complete = scalar != 0;
                 checked = ir_optimize_gvn(&function, output, scratch, gvn_options, &gvn);
                 ir_test_expect(tally, checked.error == IR_OK && gvn.function.instruction_count == function.instruction_count && scratch->length == 0, "GVN preserves mask loads and stores");
                 arena_pop_to(output, 0);
@@ -373,7 +373,7 @@ static int run_ir_simd_tests(int argc, char** argv)
             arena_pop_to(&output, 0);
             IrGvnResult gvn = { .function.instruction_count = 123 };
             IrGvnOptions gvn_options = ir_gvn_options();
-            gvn_options.scalar = scalar != 0;
+            gvn_options.complete = scalar != 0;
             checked = ir_optimize_gvn(&function, &output, &scratch, gvn_options, &gvn);
             ir_test_expect(&tally, checked.error == IR_OK && gvn.function.instruction_count == 2 && gvn.function.vector_constant_count == 1 && scratch.length == 0,
                            "GVN takes SIMD and preserves a vector constant's payload");

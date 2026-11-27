@@ -87,6 +87,8 @@ struct IrOptimizeWork
     // Set before ir_optimize_prepare by a pass that reads no use list (#2719: LICM's pressure policy in a function
     // without an undef, whose taint is all it reads them for): the preparation builds none, and `uses` stays empty.
     bool without_uses;
+    // A pass using its own worklist and row rewrite needs just the graph and dominators.
+    bool analysis_only;
     uint8_t* states;
     IrConstant* values;
     // Allocated lazily by the first SIMD transfer; scalar functions keep their two-word lattice and no wide map.
@@ -1472,7 +1474,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
     {
         check.error = ir_uses_validated(function, scratch, output, &work->uses);
     }
-    if (check.error == IR_OK)
+    if (check.error == IR_OK && !work->analysis_only)
     {
         bool ok = true;
         work->states = ir_allocate(scratch, function->instruction_count, sizeof(uint8_t), &ok);
@@ -1643,31 +1645,111 @@ static IrError ir_optimize_merges(IrOptimizeWork* work, const uint32_t* threads,
     return error;
 }
 
+static IrSizes ir_optimize_metadata_sizes(const IrFunction* f)
+{
+    IrSizes sizes = {
+        .constant_count = f->constant_count,
+        .vector_constant_count = f->vector_constant_count,
+        .row_count = f->row_count,
+        .asm_body_count = f->asm_body_count,
+        .slot_count = f->slot_count,
+        .address_count = f->address_count,
+        .call_type_count = f->call_type_count,
+        .parameter_count = f->parameter_count,
+        .label_count = f->label_count,
+        .abi_call_count = f->abi_call_count,
+        .passed_count = f->passed_count,
+    };
+    return sizes;
+}
+
+static void ir_optimize_copy_metadata(const IrFunction* f, IrFunction* target)
+{
+    target->result_type = f->result_type;
+    target->symbol_count = f->symbol_count;
+    if (f->constant_count != 0)
+    {
+        memcpy(target->constants, f->constants, (uint64_t)f->constant_count * sizeof(IrConstant));
+    }
+    // A vector constant's payload (#141), which its IR_VCONST indexes as before.
+    if (f->vector_constant_count != 0)
+    {
+        memcpy(target->vector_constants, f->vector_constants, (uint64_t)f->vector_constant_count * sizeof(IrSimdValue));
+    }
+    // The machine rows (#141), which the row calls index as before.
+    if (f->row_count != 0)
+    {
+        memcpy(target->rows, f->rows, (uint64_t)f->row_count * sizeof(Tier0Operation));
+    }
+    // The asm bodies (#1839), which the body calls index as before.
+    if (f->asm_body_count != 0)
+    {
+        memcpy(target->asm_bodies, f->asm_bodies, (uint64_t)f->asm_body_count * sizeof(IrAsmBody));
+    }
+    if (f->slot_count != 0)
+    {
+        memcpy(target->slots, f->slots, (uint64_t)f->slot_count * sizeof(IrSlot));
+    }
+    if (f->address_count != 0)
+    {
+        memcpy(target->addresses, f->addresses, (uint64_t)f->address_count * sizeof(IrAddress));
+    }
+    if (f->call_type_count != 0)
+    {
+        memcpy(target->call_types, f->call_types, f->call_type_count);
+    }
+    if (f->parameter_count != 0)
+    {
+        memcpy(target->parameter_types, f->parameter_types, f->parameter_count);
+    }
+    if (f->abi_call_count != 0)
+    {
+        memcpy(target->abi_calls, f->abi_calls, (uint64_t)f->abi_call_count * sizeof(IrAbiCall));
+    }
+    if (f->passed_count != 0)
+    {
+        memcpy(target->passed, f->passed, (uint64_t)f->passed_count * sizeof(IrPassed));
+    }
+    target->parameter_passed = f->parameter_passed;
+    target->result_size = f->result_size;
+    target->result_abi = f->result_abi;
+    target->variadic = f->variadic;
+    target->incoming = f->incoming;
+}
+
 static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* scratch, IrOptimizeOptions options, IrFunction* result)
 {
     const IrFunction* f = work->function;
     bool ok = true;
-    uint32_t* direct = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
+    const bool cleanup_cfg = (options.passes & BUSTER_IR_OPTIMIZE_CFG) != 0;
+    uint32_t* direct = cleanup_cfg ? ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok) : NULL;
     uint32_t* threads = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
     uint32_t* blocks = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
     uint32_t* values = ir_allocate(scratch, f->instruction_count, sizeof(uint32_t), &ok);
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
     for (uint32_t block = 0; ok && block < f->block_count; block += 1)
     {
-        direct[block] = block;
         blocks[block] = BUSTER_IR_NONE;
-        uint32_t live = 0;
-        for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+        if (cleanup_cfg)
         {
-            live += work->live[i] != 0 && ir_optimize_forwarded(work, i) == i;
+            direct[block] = block;
+            uint32_t live = 0;
+            for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+            {
+                live += work->live[i] != 0 && ir_optimize_forwarded(work, i) == i;
+            }
+            const uint32_t target = ir_optimize_single_successor(work, block);
+            if (block != 0 && work->blocks[block] != 0 && live == 1 && target != BUSTER_IR_NONE && f->op[f->block_offsets[target]] != IR_PHI)
+            {
+                direct[block] = target;
+            }
         }
-        const uint32_t target = ir_optimize_single_successor(work, block);
-        if ((options.passes & BUSTER_IR_OPTIMIZE_CFG) != 0 && block != 0 && work->blocks[block] != 0 && live == 1 && target != BUSTER_IR_NONE && f->op[f->block_offsets[target]] != IR_PHI)
+        else
         {
-            direct[block] = target;
+            threads[block] = block;
         }
     }
-    if (ok && !ir_optimize_thread_targets(scratch, direct, f->block_count, threads))
+    if (ok && cleanup_cfg && !ir_optimize_thread_targets(scratch, direct, f->block_count, threads))
     {
         error = IR_ERROR_MEMORY;
     }
@@ -1692,19 +1774,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         order = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
         error = ok ? ir_optimize_layout_order(work, threads, scratch, order, &order_count) : IR_ERROR_MEMORY;
     }
-    IrSizes sizes = {
-        .constant_count = f->constant_count,
-        .vector_constant_count = f->vector_constant_count,
-        .row_count = f->row_count,
-        .asm_body_count = f->asm_body_count,
-        .slot_count = f->slot_count,
-        .address_count = f->address_count,
-        .call_type_count = f->call_type_count,
-        .parameter_count = f->parameter_count,
-        .label_count = f->label_count,
-        .abi_call_count = f->abi_call_count,
-        .passed_count = f->passed_count,
-    };
+    IrSizes sizes = ir_optimize_metadata_sizes(f);
     for (uint32_t i = 0; error == IR_OK && i < f->instruction_count; i += 1)
     {
         values[i] = BUSTER_IR_NONE;
@@ -1720,7 +1790,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
             // A folded phi becomes a constant after every surviving phi. Ordinary instruction order is unchanged.
             for (uint32_t phase = 0; phase < 2; phase += 1)
             {
-                for (uint32_t i = f->block_offsets[block]; i < end; i += 1)
+                for (uint32_t i = f->block_offsets[block]; i < end && (phase != 0 || f->op[i] == IR_PHI); i += 1)
                 {
                     const bool phi = f->op[i] == IR_PHI && work->states[i] != IROPT_CONSTANT;
                     if (work->live[i] != 0 && phi == (phase == 0) && ir_optimize_forwarded(work, i) == i)
@@ -1788,63 +1858,12 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     }
     if (error == IR_OK)
     {
-        candidate.result_type = f->result_type;
-        candidate.symbol_count = f->symbol_count;
-        if (f->constant_count != 0)
-        {
-            memcpy(candidate.constants, f->constants, (uint64_t)f->constant_count * sizeof(IrConstant));
-        }
-        // A vector constant's payload (#141), which its IR_VCONST indexes as before.
-        if (f->vector_constant_count != 0)
-        {
-            memcpy(candidate.vector_constants, f->vector_constants, (uint64_t)f->vector_constant_count * sizeof(IrSimdValue));
-        }
-        // The machine rows (#141), which the row calls index as before.
-        if (f->row_count != 0)
-        {
-            memcpy(candidate.rows, f->rows, (uint64_t)f->row_count * sizeof(Tier0Operation));
-        }
-        // The asm bodies (#1839), which the body calls index as before.
-        if (f->asm_body_count != 0)
-        {
-            memcpy(candidate.asm_bodies, f->asm_bodies, (uint64_t)f->asm_body_count * sizeof(IrAsmBody));
-        }
-        if (f->slot_count != 0)
-        {
-            memcpy(candidate.slots, f->slots, (uint64_t)f->slot_count * sizeof(IrSlot));
-        }
-        if (f->address_count != 0)
-        {
-            memcpy(candidate.addresses, f->addresses, (uint64_t)f->address_count * sizeof(IrAddress));
-        }
-        if (f->call_type_count != 0)
-        {
-            memcpy(candidate.call_types, f->call_types, f->call_type_count);
-        }
-        if (f->parameter_count != 0)
-        {
-            memcpy(candidate.parameter_types, f->parameter_types, f->parameter_count);
-        }
-        // The ABI records and the incoming frame as they were (each call keeps its index), and each label at its block
-        // as threaded: a label whose block is dead has none, and no surviving br_indirect may list or reach it.
-        if (f->abi_call_count != 0)
-        {
-            memcpy(candidate.abi_calls, f->abi_calls, (uint64_t)f->abi_call_count * sizeof(IrAbiCall));
-        }
-        if (f->passed_count != 0)
-        {
-            memcpy(candidate.passed, f->passed, (uint64_t)f->passed_count * sizeof(IrPassed));
-        }
+        ir_optimize_copy_metadata(f, &candidate);
         for (uint32_t label = 0; label < f->label_count; label += 1)
         {
             const uint32_t block = f->labels[label];
             candidate.labels[label] = block == BUSTER_IR_NONE || work->blocks[block] == 0 ? BUSTER_IR_NONE : blocks[threads[block]];
         }
-        candidate.parameter_passed = f->parameter_passed;
-        candidate.result_size = f->result_size;
-        candidate.result_abi = f->result_abi;
-        candidate.variadic = f->variadic;
-        candidate.incoming = f->incoming;
         uint32_t extra = 0;
         uint32_t constants = f->constant_count;
         uint32_t vector_constants = f->vector_constant_count;
@@ -1859,9 +1878,11 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
             }
             for (uint32_t block = blocks[head] != BUSTER_IR_NONE && heads[head] == head ? head : BUSTER_IR_NONE; block != BUSTER_IR_NONE; block = next[block])
             {
+                const uint32_t target = ir_optimize_single_successor(work, block);
+                const uint32_t end = f->block_offsets[(uint64_t)block + 1];
                 for (uint32_t phase = 0; phase < 2; phase += 1)
                 {
-                    for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+                    for (uint32_t i = f->block_offsets[block]; i < end && (phase != 0 || f->op[i] == IR_PHI); i += 1)
                     {
                         const bool phi = f->op[i] == IR_PHI && work->states[i] != IROPT_CONSTANT;
                         if (values[i] != BUSTER_IR_NONE && phi == (phase == 0))
@@ -1875,7 +1896,6 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                             candidate.a[out] = f->a[i];
                             candidate.b[out] = f->b[i];
                             candidate.c[out] = f->c[i];
-                            const uint32_t target = ir_optimize_single_successor(work, block);
                             if (work->states[i] == IROPT_CONSTANT && op != IR_CONST && op != IR_VCONST)
                             {
                                 // A known floating value does not discharge its environment effects. Keep its original

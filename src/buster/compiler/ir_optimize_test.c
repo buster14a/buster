@@ -37,6 +37,7 @@ struct IrOptimizeTest
     // The verified optimizer's results by ir_optimize_test_compare, in order, by its scalar passes, the ones #2924 kept:
     // frozen while the vector passes were still beside them, with the default seed.
     uint64_t optimize_digest;
+    uint64_t gvn_digest;
 };
 
 #define BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS UINT64_C(0xcbf29ce484222325)
@@ -47,6 +48,7 @@ struct IrOptimizeTest
 #define BUSTER_IR_OPTIMIZE_TEST_SEED UINT64_C(139)
 #define BUSTER_IR_OPTIMIZE_TEST_MEMORY_DIGEST UINT64_C(0x5d860cd5f67a13ce)
 #define BUSTER_IR_OPTIMIZE_TEST_LICM_DIGEST UINT64_C(0xfb593fcec3c4c344)
+#define BUSTER_IR_OPTIMIZE_TEST_GVN_DIGEST UINT64_C(0x1a6c715c7d33b026)
 #define BUSTER_IR_OPTIMIZE_TEST_OPTIMIZE_DIGEST UINT64_C(0x292b130a5600b0e5)
 
 static void ir_optimize_test_expect(IrOptimizeTest* test, bool condition, const char* description)

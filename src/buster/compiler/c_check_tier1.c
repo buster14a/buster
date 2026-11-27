@@ -468,7 +468,7 @@ static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunct
 // `revision`. A function's own pipeline runs them (check_tier1_compile) and so does a candidate's summary, once for the
 // unit (c_check_tier1_inline.c's check_tier1_inline_build), whose callers copy its result and whose own code goes on
 // from it. The outcome is the first failing pass's, as check_tier1_step classifies it.
-static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTier1PassesInput* input, const X86Target* target, bool scalar, bool certify, const CheckTier1Fault* fault,
+static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTier1PassesInput* input, const X86Target* target, bool certify, const CheckTier1Fault* fault,
                                             Arena* promotion, Arena* output, Arena* analyses, IrVerifiedRevision* revision, CheckTier1Passes* passes)
 {
     *passes = (CheckTier1Passes){ 0 };
@@ -491,8 +491,9 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (vectors && !input->numbered)
     {
         IrGvnOptions options = ir_gvn_options();
-        options.scalar = scalar;
+        options.apply_only = true;
         options.vectors = true;
+        options.validated = input->verified;
         if (!check_tier1_lane_reserve(lane, 0))
         {
             outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, NULL);
@@ -715,7 +716,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         else
         {
             IrGvnOptions options = ir_gvn_options();
-            options.scalar = scalar;
+            options.apply_only = true;
             options.pressure = true;
             options.validated = true;
             IrGvnResult numbered_ssa = { 0 };
@@ -1102,7 +1103,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED && gvn)
     {
         IrGvnOptions options = ir_gvn_options();
-        options.scalar = scalar;
+        options.apply_only = true;
+        options.validated = lowered_verified;
         const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[7], scratch, options, &gvn_result);
         outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
@@ -1126,7 +1128,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .tables = tables,
             .table_count = table_count,
         };
-        outcome = check_tier1_passes(lane, &input, target, scalar, certify, fault, &lane->steps[1], &lane->steps[2], &lane->steps[3], &revision, &passes);
+        outcome = check_tier1_passes(lane, &input, target, certify, fault, &lane->steps[1], &lane->steps[2], &lane->steps[3], &revision, &passes);
         stage = outcome.stage;
         inlined_calls = passes.unexpanded ? 0 : inlined_calls;
     }
