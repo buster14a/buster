@@ -841,7 +841,7 @@ static void ir_licm_test_widths(IrOptimizeTest* test)
 
 // A permute of two tables (#1840), whose third operand is in the extra array: an invariant one twice in a loop, which GVN
 // gives one value, and LICM then hoists with the sum of the two, beside a loop-carried one that stays; each result the
-// interpreter's, after each of GVN's two paths.
+// interpreter's, after acyclic numbering and complete refinement.
 static void ir_licm_test_permute2(IrOptimizeTest* test)
 {
     static const char text[] = "function (i32) -> m16 {\n"
@@ -881,7 +881,7 @@ static void ir_licm_test_permute2(IrOptimizeTest* test)
     {
         Arena* output = path != 0 ? &scalar : &vector;
         IrGvnOptions numbering = ir_gvn_options();
-        numbering.scalar = path != 0;
+        numbering.complete = path != 0;
         IrGvnResult numbered = { 0 };
         const IrCheck gvn = ir_optimize_gvn(&f, output, &scratch, numbering, &numbered);
         ir_optimize_test_expect(test, gvn.error == IR_OK && numbered.removed == 1, "GVN gives the two equal permute2s one value");
@@ -901,7 +901,7 @@ static void ir_licm_test_permute2(IrOptimizeTest* test)
         }
     }
     ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
-                            ir_optimize_test_equal(&results[0].function, &results[1].function), "GVN's two paths, each followed by LICM, treat permute2 alike");
+                            ir_optimize_test_equal(&results[0].function, &results[1].function), "Acyclic and complete GVN followed by LICM agree on permute2");
     // Without GVN the two equal permute2s remain separate values, so the vector policy moves both and their sum.
     if (fixture)
     {

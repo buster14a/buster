@@ -87,6 +87,8 @@ struct IrOptimizeWork
     // Set before ir_optimize_prepare by a pass that reads no use list (#2719: LICM's pressure policy in a function
     // without an undef, whose taint is all it reads them for): the preparation builds none, and `uses` stays empty.
     bool without_uses;
+    // A pass using its own worklist and row rewrite needs just the graph and dominators.
+    bool analysis_only;
     uint8_t* states;
     IrConstant* values;
     // Allocated lazily by the first SIMD transfer; scalar functions keep their two-word lattice and no wide map.
@@ -1472,7 +1474,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
     {
         check.error = ir_uses_validated(function, scratch, output, &work->uses);
     }
-    if (check.error == IR_OK)
+    if (check.error == IR_OK && !work->analysis_only)
     {
         bool ok = true;
         work->states = ir_allocate(scratch, function->instruction_count, sizeof(uint8_t), &ok);

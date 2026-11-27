@@ -161,7 +161,7 @@ static bool ir_meta_resource_contracts(IrMetaTally* tally, const IrFunction* fun
                           "complete-verifier exhaustion retains its own category") && valid;
     arenas[1].capacity = 16;
     arenas[3].capacity = sizeof(storage[3]);
-    const IrMetaFailure optimized = ir_meta_optimize(function, 4, false, arenas + 1, arenas + 3, &unpublished);
+    const IrMetaFailure optimized = ir_meta_optimize(function, 4, arenas + 1, arenas + 3, &unpublished);
     valid = ir_meta_expect(tally, optimized == IR_META_RESOURCE && memcmp(&unpublished, &unchanged, sizeof(unpublished)) == 0 &&
                           arenas[1].length == 16 && arenas[3].length == 16,
                           "optimizer output exhaustion is inconclusive resource failure, never a correctness difference") && valid;

@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Whole public-stage costs for GVN, LICM and SROA. Include after their tests and ir_optimize_benchmark.c. GVN alone keeps
-// a scalar twin (#2924, #3433), timed and checked beside its vector path; LICM and SROA have one path, path 1, timed once.
-// Frozen synthetic fixtures are built and checked before timing. These are pass costs, not emitted-code gains.
+// Whole public-stage costs for GVN, LICM and SROA. Each frozen fixture is checked before timing.
 
 typedef struct IrPassBenchmarkResult IrPassBenchmarkResult;
 struct IrPassBenchmarkResult
@@ -13,14 +11,13 @@ struct IrPassBenchmarkResult
     uint32_t changed;
 };
 
-static bool ir_pass_benchmark_once(const IrFunction* input, Arena* output, Arena* scratch, uint32_t pass, bool scalar, IrPassBenchmarkResult* result)
+static bool ir_pass_benchmark_once(const IrFunction* input, Arena* output, Arena* scratch, uint32_t pass, IrPassBenchmarkResult* result)
 {
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     IrPassBenchmarkResult candidate = { 0 };
     if (pass == 0)
     {
         IrGvnOptions options = ir_gvn_options();
-        options.scalar = scalar;
         IrGvnResult run = { 0 };
         check = ir_optimize_gvn(input, output, scratch, options, &run);
         candidate.function = run.function;
@@ -53,21 +50,14 @@ static bool ir_pass_benchmark_once(const IrFunction* input, Arena* output, Arena
     return valid;
 }
 
-// Whether `path` (0 GVN's scalar twin, 1 the vector or only path) runs for `pass` under --only.
-static bool ir_pass_benchmark_path(uint32_t pass, int only, uint32_t path)
-{
-    const bool runs = pass == 0 ? only < 0 || only == (int)path : path == 1;
-    return runs;
-}
-
-static __attribute__((noinline)) bool ir_pass_benchmark_repeat(const IrFunction* input, Arena* output, Arena* scratch, uint32_t pass, bool scalar, uint32_t repeats)
+static __attribute__((noinline)) bool ir_pass_benchmark_repeat(const IrFunction* input, Arena* output, Arena* scratch, uint32_t pass, uint32_t repeats)
 {
     const uint64_t mark = output->length;
     bool valid = true;
     for (uint32_t repetition = 0; valid && repetition < repeats; repetition += 1)
     {
         IrPassBenchmarkResult result = { 0 };
-        valid = ir_pass_benchmark_once(input, output, scratch, pass, scalar, &result);
+        valid = ir_pass_benchmark_once(input, output, scratch, pass, &result);
         if (valid)
         {
             ir_optimize_benchmark_sink += result.function.instruction_count + result.changed;
@@ -129,36 +119,28 @@ static bool ir_pass_benchmark_fixture(Arena* arena, IrFunction* f, IrOptimizeTes
 
 static bool ir_pass_benchmark_check(const IrFunction* input, const IrPassBenchmarkResult* reference, uint32_t pass, uint32_t shape, uint32_t fields, Arena* output, Arena* scratch)
 {
-    // GVN's scalar twin may remove fewer values than the partition, never more; the other passes have path 1 alone.
-    bool valid = pass != 0 || reference[1].changed >= reference[0].changed;
-    const uint32_t first = pass == 0 ? 0 : 1;
+    bool valid = true;
     for (uint32_t trial = 0; valid && trial < 9; trial += 1)
     {
         const uint64_t parameter = trial == 8 ? UINT64_MAX : trial;
         if (pass == 2 && shape == 2)
         {
-            for (uint32_t path = first; valid && path < 2; path += 1)
+            const uint64_t mark = output->length;
+            IrFunction promoted = { 0 };
+            const IrCheck check = ssa_ir_promote(&reference->function, output, scratch, &promoted);
+            valid = check.error == IR_OK;
+            if (valid)
             {
-                const uint64_t mark = output->length;
-                IrFunction promoted = { 0 };
-                const IrCheck check = ssa_ir_promote(&reference[path].function, output, scratch, &promoted);
-                valid = check.error == IR_OK;
-                if (valid)
-                {
-                    const IrOptimizeExecution result = ir_optimize_test_execute(&promoted, scratch, parameter, 0);
-                    valid = result.status == 1 && result.value == parameter * fields;
-                }
-                arena_pop_to(output, mark);
+                const IrOptimizeExecution result = ir_optimize_test_execute(&promoted, scratch, parameter, 0);
+                valid = result.status == 1 && result.value == parameter * fields;
             }
+            arena_pop_to(output, mark);
         }
         else
         {
             const IrOptimizeExecution before = ir_optimize_test_execute(input, scratch, parameter, 0);
-            for (uint32_t path = first; valid && path < 2; path += 1)
-            {
-                const IrOptimizeExecution after = ir_optimize_test_execute(&reference[path].function, scratch, parameter, 0);
-                valid = before.status != 4 && before.status == after.status && before.value == after.value && (pass == 2 || before.effects == after.effects);
-            }
+            const IrOptimizeExecution after = ir_optimize_test_execute(&reference->function, scratch, parameter, 0);
+            valid = before.status != 4 && before.status == after.status && before.value == after.value && (pass == 2 || before.effects == after.effects);
         }
     }
     return valid;
@@ -169,9 +151,7 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
     uint32_t length = 4096;
     uint32_t fields = 64;
     uint32_t samples = BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES;
-    uint32_t after_scalar = 0;
     int selected = -1;
-    int only = -1;
     bool valid = true;
     for (int i = 1; valid && i < argc; i += 1)
     {
@@ -187,16 +167,6 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
         {
             valid = ir_optimize_benchmark_number(argv[++i], BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES, &samples) && samples != 0;
         }
-        else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
-        {
-            valid = ir_optimize_benchmark_number(argv[++i], 1000, &after_scalar);
-        }
-        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
-        {
-            i += 1;
-            only = strcmp(argv[i], "scalar") == 0 ? 0 : strcmp(argv[i], "vector") == 0 ? 1 : -1;
-            valid = only >= 0;
-        }
         else if (strcmp(argv[i], "--pass") == 0 && i + 1 < argc)
         {
             i += 1;
@@ -208,110 +178,73 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
             valid = false;
         }
     }
-    // Conditioning is GVN's scalar work before its vector samples: a conditioned run times GVN alone.
-    valid = valid && (after_scalar == 0 || selected <= 0);
     Arena input_arena = arena_reserve(128ull << 20);
-    Arena outputs[2] = { arena_reserve(128ull << 20), arena_reserve(128ull << 20) };
+    Arena output = arena_reserve(128ull << 20);
     Arena promoted = arena_reserve(128ull << 20);
     Arena scratch = arena_reserve(512ull << 20);
-    valid = valid && input_arena.base != 0 && outputs[0].base != 0 && outputs[1].base != 0 && promoted.base != 0 && scratch.base != 0;
+    valid = valid && input_arena.base != 0 && output.base != 0 && promoted.base != 0 && scratch.base != 0;
     const char* names[] = { "gvn", "licm", "sroa" };
     const char* shapes[][3] = { { "small-dag", "large-dag", "cyclic-phi" }, { "no-loop", "nested-loops", "invariant-chain" }, { "two-fields", "conditional-stores", "field-array" } };
     for (uint32_t pass = 0; valid && pass < 3; pass += 1)
     {
-        const bool chosen = after_scalar != 0 ? pass == 0 : selected < 0 || selected == (int)pass;
+        const bool chosen = selected < 0 || selected == (int)pass;
         for (uint32_t shape = 0; valid && chosen && shape < 3; shape += 1)
         {
             IrFunction input = { 0 };
             IrOptimizeTest generator = { .random = 139 + pass * 3 + shape };
             valid = ir_pass_benchmark_fixture(&input_arena, &input, &generator, pass, shape, length, fields);
-            IrPassBenchmarkResult reference[2] = { 0 };
-            for (uint32_t path = pass == 0 ? 0 : 1; valid && path < 2; path += 1)
+            IrPassBenchmarkResult reference = { 0 };
+            valid = valid && ir_pass_benchmark_once(&input, &output, &scratch, pass, &reference);
+            valid = valid && ir_pass_benchmark_check(&input, &reference, pass, shape, fields, &promoted, &scratch);
+            if (valid)
             {
-                valid = ir_pass_benchmark_once(&input, &outputs[path], &scratch, pass, path == 0, &reference[path]);
+                printf("ir-pass %s %s input=%u output=%u changed=%u output-bytes=%" PRIu64 " analysis-bytes=%" PRIu64 "\n", names[pass], shapes[pass][shape], input.instruction_count, reference.function.instruction_count, reference.changed, reference.function.arena_bytes, reference.analysis_bytes);
             }
-            valid = valid && ir_pass_benchmark_check(&input, reference, pass, shape, fields, &promoted, &scratch);
-            if (valid && pass != 0)
+            arena_pop_to(&output, 0);
+            uint32_t repetitions = 1;
+            uint64_t elapsed = 0;
+            while (valid && elapsed < BUSTER_IR_OPTIMIZE_BENCHMARK_MIN_NS && repetitions < (1u << 20))
             {
-                printf("ir-pass %s %s input=%u output=%u changed=%u output-bytes=%" PRIu64 " analysis-bytes=%" PRIu64 "\n", names[pass], shapes[pass][shape], input.instruction_count, reference[1].function.instruction_count, reference[1].changed, reference[1].function.arena_bytes, reference[1].analysis_bytes);
-            }
-            else if (valid)
-            {
-                printf("ir-pass %s %s input=%u scalar-output=%u vector-output=%u scalar-changed=%u vector-changed=%u scalar-output-bytes=%" PRIu64 " vector-output-bytes=%" PRIu64 " scalar-analysis-bytes=%" PRIu64 " vector-analysis-bytes=%" PRIu64 "\n", names[pass], shapes[pass][shape], input.instruction_count, reference[0].function.instruction_count, reference[1].function.instruction_count, reference[0].changed, reference[1].changed, reference[0].function.arena_bytes, reference[1].function.arena_bytes, reference[0].analysis_bytes, reference[1].analysis_bytes);
-            }
-            arena_pop_to(&outputs[0], 0);
-            arena_pop_to(&outputs[1], 0);
-            uint32_t repetitions[2] = { 1, 1 };
-            double times[2][BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES] = { 0 };
-            double ticks[2][BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES] = { 0 };
-            for (uint32_t path = 0; valid && path < 2; path += 1)
-            {
-                if (ir_pass_benchmark_path(pass, only, path))
+                const uint64_t start = ir_optimize_benchmark_time();
+                valid = ir_pass_benchmark_repeat(&input, &output, &scratch, pass, repetitions);
+                elapsed = ir_optimize_benchmark_time() - start;
+                if (elapsed < BUSTER_IR_OPTIMIZE_BENCHMARK_MIN_NS)
                 {
-                    uint64_t elapsed = 0;
-                    while (valid && elapsed < BUSTER_IR_OPTIMIZE_BENCHMARK_MIN_NS && repetitions[path] < (1u << 20))
-                    {
-                        const uint64_t start = ir_optimize_benchmark_time();
-                        valid = ir_pass_benchmark_repeat(&input, &outputs[path], &scratch, pass, path == 0, repetitions[path]);
-                        elapsed = ir_optimize_benchmark_time() - start;
-                        if (elapsed < BUSTER_IR_OPTIMIZE_BENCHMARK_MIN_NS)
-                        {
-                            repetitions[path] *= 2;
-                        }
-                    }
+                    repetitions *= 2;
                 }
             }
+            double times[BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES] = { 0 };
+            double ticks[BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES] = { 0 };
             for (uint32_t sample = 0; valid && sample < samples; sample += 1)
             {
-                for (uint32_t order = 0; valid && order < 2; order += 1)
-                {
-                    const uint32_t path = (order + sample) & 1;
-                    if (ir_pass_benchmark_path(pass, only, path))
-                    {
-                        if (pass == 0 && path == 1 && after_scalar != 0)
-                        {
-                            const uint64_t until = ir_optimize_benchmark_time() + (uint64_t)after_scalar * 1000000;
-                            while (valid && ir_optimize_benchmark_time() < until)
-                            {
-                                valid = ir_pass_benchmark_repeat(&input, &outputs[0], &scratch, pass, true, 1);
-                            }
-                        }
-                        const uint64_t start = ir_optimize_benchmark_time();
-                        const uint64_t start_ticks = ir_optimize_benchmark_ticks();
-                        valid = ir_pass_benchmark_repeat(&input, &outputs[path], &scratch, pass, path == 0, repetitions[path]);
-                        const uint64_t elapsed_ticks = ir_optimize_benchmark_ticks() - start_ticks;
-                        const uint64_t elapsed = ir_optimize_benchmark_time() - start;
-                        times[path][sample] = (double)elapsed / repetitions[path];
-                        ticks[path][sample] = (double)elapsed_ticks / repetitions[path];
-                    }
-                }
+                const uint64_t start = ir_optimize_benchmark_time();
+                const uint64_t start_ticks = ir_optimize_benchmark_ticks();
+                valid = ir_pass_benchmark_repeat(&input, &output, &scratch, pass, repetitions);
+                ticks[sample] = (double)(ir_optimize_benchmark_ticks() - start_ticks) / repetitions;
+                times[sample] = (double)(ir_optimize_benchmark_time() - start) / repetitions;
             }
-            for (uint32_t path = 0; valid && path < 2; path += 1)
+            if (valid)
             {
-                if (ir_pass_benchmark_path(pass, only, path))
+                double minimum = times[0];
+                double maximum = minimum;
+                for (uint32_t sample = 1; sample < samples; sample += 1)
                 {
-                    double minimum = times[path][0];
-                    double maximum = minimum;
-                    for (uint32_t sample = 1; sample < samples; sample += 1)
-                    {
-                        minimum = times[path][sample] < minimum ? times[path][sample] : minimum;
-                        maximum = times[path][sample] > maximum ? times[path][sample] : maximum;
-                    }
-                    const double median = ir_optimize_benchmark_median(times[path], samples);
-                    printf("ir-pass %s %s %s samples=%u repeats=%u ns=%.2f min=%.2f max=%.2f tsc-ticks=%.2f instructions-per-second=%.2f\n", names[pass], shapes[pass][shape], pass != 0 ? "one" : path == 0 ? "scalar" : "vector", samples, repetitions[path], median, minimum, maximum, ir_optimize_benchmark_median(ticks[path], samples), median == 0 ? 0 : (double)input.instruction_count * 1000000000.0 / median);
+                    minimum = times[sample] < minimum ? times[sample] : minimum;
+                    maximum = times[sample] > maximum ? times[sample] : maximum;
                 }
+                const double median = ir_optimize_benchmark_median(times, samples);
+                printf("ir-pass %s %s one samples=%u repeats=%u ns=%.2f min=%.2f max=%.2f tsc-ticks=%.2f instructions-per-second=%.2f\n", names[pass], shapes[pass][shape], samples, repetitions, median, minimum, maximum, ir_optimize_benchmark_median(ticks, samples), median == 0 ? 0 : (double)input.instruction_count * 1000000000.0 / median);
             }
             arena_pop_to(&input_arena, 0);
         }
     }
     if (!valid)
     {
-        fprintf(stderr, "benchmark-ir-optimize-passes failed; usage: [--pass all|gvn|licm|sroa] [--instructions N] [--fields 1..4096] [--samples 1..21] [--only scalar|vector] [--after-scalar MS, GVN alone]\n");
+        fprintf(stderr, "benchmark-ir-optimize-passes failed; usage: [--pass all|gvn|licm|sroa] [--instructions N] [--fields 1..4096] [--samples 1..21]\n");
     }
     arena_release(&scratch);
     arena_release(&promoted);
-    arena_release(&outputs[1]);
-    arena_release(&outputs[0]);
+    arena_release(&output);
     arena_release(&input_arena);
     const int result = valid ? 0 : 1;
     return result;

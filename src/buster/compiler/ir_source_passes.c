@@ -2,8 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #139's acceptance on real C (test-ir-source --passes): every function -c compiles of a set of files, prepared and
-// lowered as test-ir-source does them (ir_source_prepare), through each of #139's passes by both of its versions, whose
-// results must agree: exactly, or for value numbering semantically, as the issue sets it. Include after
+// lowered as test-ir-source does them (ir_source_prepare), through each of #139's passes and their checks below. Include after
 // ir_source_benchmark.c, with the passes, ir_lower_test.c's and ir_optimize_test.c's comparisons.
 //
 //   build/compiler test-ir-source --passes [preprocessor options] file...
@@ -11,9 +10,7 @@
 // For each function, its lowered form L (both lowerings must agree, as test-ir-source requires) and L promoted, P:
 // - SROA on L with Tier 1's options (#1282's simd and flagged), one path since #2924: a split function must promote.
 // - #866's solver on L: the acyclic numbering against its complete-refinement oracle (IrGvnOptions.complete), which must
-//   give the same function, and against the scalar available-expression twin, which must accept the function and remove
-//   no more instructions than the partition (it doesn't see cyclic congruences): the semantic comparison, as the solver's
-//   guide has it. The numbering's result must promote.
+//   give the same function. The numbered result must promote.
 // - The optimizer on P with SCCP alone, dead-code removal alone, CFG cleanup alone and with its merges, the three, the
 //   three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), value numbering with memory alone
 //   (#2718) and Tier 1's set with it (one path since #2924): the optimizer verifies its result.
@@ -115,9 +112,8 @@ struct IrSourcePassTotals
     uint64_t refused[IR_SOURCE_PASS_COUNT];
     uint64_t failed[IR_SOURCE_PASS_COUNT];
     // Per pass, its total effect: SROA's split slots, GVN's removed instructions (the partition's), the optimizer rows'
-    // removed instructions, LICM's moved values and the inliner's inlined calls; and the scalar GVN twin's removals.
+    // removed instructions, LICM's moved values and the inliner's inlined calls.
     uint64_t effect[IR_SOURCE_PASS_COUNT];
-    uint64_t gvn_scalar_removed;
 };
 
 // Whether two functions are the same column for column, with every side table: the lowering's comparison and the
@@ -171,28 +167,18 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         arena_pop_to(output, output_mark);
         arena_pop_to(promotion, promotion_mark);
     }
-    // #866's solver, before promotion: the acyclic numbering, its exact oracle and the scalar semantic twin.
+    // #866's solver, before promotion: acyclic numbering checked against complete refinement.
     {
         IrGvnOptions options = ir_gvn_options();
         IrGvnResult vector = { 0 };
         IrGvnResult complete = { 0 };
-        IrGvnResult scalar = { 0 };
         const IrCheck vector_check = ir_optimize_gvn(lowered, output, scratch, options, &vector);
         options.complete = true;
         const IrCheck complete_check = ir_optimize_gvn(lowered, twin, scratch, options, &complete);
         const bool exact = vector_check.error == IR_OK && complete_check.error == IR_OK && ir_source_passes_equal(&vector.function, &complete.function);
-        arena_pop_to(twin, twin_mark);
-        options.complete = false;
-        options.scalar = true;
-        const IrCheck scalar_check = ir_optimize_gvn(lowered, twin, scratch, options, &scalar);
-        const bool semantic = exact && scalar_check.error == IR_OK && scalar.removed <= vector.removed;
         IrFunction numbered = { 0 };
-        const bool promotes = !semantic || ssa_ir_promote(&vector.function, promotion, scratch, &numbered).error == IR_OK;
-        // The complete oracle must refuse what the numbering refuses, and take what it takes: where they differ, its
-        // check stands for the twin's, so that the record fails.
-        const IrCheck oracle = complete_check.error == vector_check.error ? scalar_check : complete_check;
-        ir_source_passes_record(totals, IR_SOURCE_PASS_GVN, file, name, vector_check, oracle, semantic, promotes, vector.removed != 0, vector.removed);
-        totals->gvn_scalar_removed += vector_check.error == IR_OK && scalar_check.error == IR_OK ? scalar.removed : 0;
+        const bool promotes = !exact || ssa_ir_promote(&vector.function, promotion, scratch, &numbered).error == IR_OK;
+        ir_source_passes_record(totals, IR_SOURCE_PASS_GVN, file, name, vector_check, complete_check, exact, promotes, vector.removed != 0, vector.removed);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
         arena_pop_to(promotion, promotion_mark);
@@ -568,7 +554,6 @@ static int run_ir_source_passes_tests(int count, char** arguments)
                    totals.ran[pass], totals.changed[pass], totals.refused[pass], totals.failed[pass], totals.effect[pass]);
             failed += totals.failed[pass];
         }
-        printf("ir-source-passes: gvn-scalar removed=%" PRIu64 " (the partition's: %" PRIu64 ")\n", totals.gvn_scalar_removed, totals.effect[IR_SOURCE_PASS_GVN]);
     }
     else
     {
@@ -588,13 +573,10 @@ static int run_ir_source_passes_tests(int count, char** arguments)
     return passed ? 0 : 1;
 }
 
-// #139's compile time per pass for both versions (benchmark-ir-source --passes): the files' functions prepared as
+// #139's compile time per pass (benchmark-ir-source --passes): the files' functions prepared as
 // test-ir-source --passes prepares them, each lowered (L) and promoted (P) once outside the time, and each caller's
-// inlining unit built once; then each pass by its vector and its scalar version over the whole corpus (by its one version,
-// where #2924 left one: the inliner, the unroller, the loop vectorizer, LICM and value numbering with memory alone; and
-// #2719's pressure policies once each, as Tier 1 runs them: `hoist` with its screen, both with a verified input's
-// preparation), in
-// BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of the pair runs first, after a warm-up of each. The passes
+// inlining unit built once. Each public pass runs once per function after warm-up. The pressure policies use
+// Tier 1's verified input preparation and hoisting screen. The passes
 // take the inputs --tier1's pipeline gives them: SROA (Tier 1's options), #866's solver and the inliner the lowered form,
 // the optimizer's rows and LICM the promoted one (the driver's optimizer and LICM take it after the wide integers' halves,
 // truth simplification, threading and if-conversion, which leave most functions as they are). Each run includes what
@@ -632,7 +614,7 @@ struct IrSourcePassCorpus
 
 // One run of `pass` by one version over the corpus; the output put back after each function. Returns its reading, with
 // the functions it refused (the preparation keeps only the inliner units that the inliner takes).
-static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar, const IrSourcePassCorpus* corpus, Arena* output, Arena* scratch, Tier0BenchmarkCounters counters)
+static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, const IrSourcePassCorpus* corpus, Arena* output, Arena* scratch, Tier0BenchmarkCounters counters)
 {
     uint32_t failures = 0;
     const uint64_t mark = output->length;
@@ -652,7 +634,6 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
         else if (pass == IR_SOURCE_PASS_GVN)
         {
             IrGvnOptions options = ir_gvn_options();
-            options.scalar = scalar;
             IrGvnResult result = { 0 };
             check = ir_optimize_gvn(&corpus->lowered[f], output, scratch, options, &result);
         }
@@ -921,34 +902,23 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             {
                 continue;
             }
-            double values[2][3][BUSTER_TIER0_BENCHMARK_PASSES];
-            memset(values, 0, sizeof(values));
-            // GVN alone keeps its scalar twin (#2924, #3433), timed beside its vector path; every other pass has one path,
-            // timed once, and #2719's pressure policies are timed once too, as Tier 1 runs them.
-            const uint32_t versions = pass == IR_SOURCE_PASS_GVN ? 2 : 1;
-            for (uint32_t version = 0; version < versions; version += 1)
-            {
-                failed += ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters).failures;
-            }
+            double values[3][BUSTER_TIER0_BENCHMARK_PASSES] = { 0 };
+            failed += ir_source_passes_run((IrSourcePass)pass, &corpus, &output, &scratch, counters).failures;
             for (uint32_t round = 0; round < BUSTER_TIER0_BENCHMARK_PASSES && failed == 0; round += 1)
             {
-                for (uint32_t turn = 0; turn < versions; turn += 1)
-                {
-                    const uint32_t version = (round & 1) != 0 && versions == 2 ? 1 - turn : turn;
-                    const Tier0BenchmarkReading taken = ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters);
-                    failed += taken.failures;
-                    values[version][0][round] = (double)taken.nanoseconds;
-                    values[version][1][round] = (double)taken.cycles;
-                    values[version][2][round] = (double)taken.instructions;
-                }
+                const Tier0BenchmarkReading taken = ir_source_passes_run((IrSourcePass)pass, &corpus, &output, &scratch, counters);
+                failed += taken.failures;
+                values[0][round] = (double)taken.nanoseconds;
+                values[1][round] = (double)taken.cycles;
+                values[2][round] = (double)taken.instructions;
             }
-            for (uint32_t version = 0; version < versions && failed == 0; version += 1)
+            if (failed == 0)
             {
-                const double ns = tier0_benchmark_median(values[version][0]);
-                const double cycles = tier0_benchmark_median(values[version][1]);
-                const double instructions = tier0_benchmark_median(values[version][2]);
+                const double ns = tier0_benchmark_median(values[0]);
+                const double cycles = tier0_benchmark_median(values[1]);
+                const double instructions = tier0_benchmark_median(values[2]);
                 const double r = (double)corpus.instructions;
-                printf("%-12s %-7s %12.3f %12.3f %12.3f %12.3f %8.2f\n", ir_source_pass_names[pass], versions == 1 ? "one" : version == 0 ? "vector" : "scalar", ns / 1e6, ns / r, cycles / r, instructions / r,
+                printf("%-12s %-7s %12.3f %12.3f %12.3f %12.3f %8.2f\n", ir_source_pass_names[pass], "one", ns / 1e6, ns / r, cycles / r, instructions / r,
                        cycles != 0 ? instructions / cycles : 0.0);
             }
         }

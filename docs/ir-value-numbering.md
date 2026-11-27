@@ -14,7 +14,7 @@ congruence analysis, so only vector- and mask-typed values are substituted.
 Scalar congruence may still prove their vector users congruent. Tier 1 enables
 this restricted form by default in functions with vector or mask values;
 `--tier1-gvn` and `+gvn` continue to select the unrestricted solver. The filter
-has a 16-value SIMD path and an exact scalar twin. `test-ir-gvn` checks that
+filters 16 values at a time. `test-ir-gvn` checks that
 vector duplicates merge while their duplicate scalar instructions remain.
 The vector path computes the coarsest congruence partition: two values are
 congruent when their opcode, type, flags and semantic metadata match and their
@@ -25,8 +25,7 @@ dependences are numbered once each in dependency order ("Acyclic numbering"
 below). The values that reach a cycle start from opcode, type, flags and
 metadata classes and are repeatedly partitioned by the classes of their
 operands. An old class is part of the next key, so refinement only splits.
-Refinement ends when no class splits. After `sweep_limit` rounds (64 by default), scalar hashing and comparison sorting
-complete the same fixed point; a limit never authorizes an unfinished
+Refinement ends when no class splits. After `sweep_limit` rounds (64 by default), comparison sorting completes the same fixed point; a limit never authorizes an unfinished
 optimistic substitution. `IrGvnOptions.complete` refines every instruction in
 those rounds instead, as the pass did before the acyclic numbering: it is that
 numbering's exact oracle.
@@ -119,8 +118,7 @@ would be needed, it abandons the partial grouping and runs the original stable
 comparison sort on the same keys. The sort initializes its own index order and
 overwrites every tentative class. This bounds hostile collisions by a linear
 probe prefix plus the original `O(n log n)` key-comparison bound. The budget is
-a worst-case work guard, not a measured performance crossover. Explicit scalar
-completion bypasses hashing and takes that sorted oracle directly.
+a worst-case work guard, not a measured performance crossover. After the sweep limit, the solver hashes the keys in SIMD batches and groups by sorting.
 
 Neither grouping path changes the old class column before the new partition
 is complete. Numbering classes in first-occurrence order instead of sorted-key
@@ -129,8 +127,7 @@ phi relations and parent-class splits remain the same. By induction the entire
 refinement sequence is unchanged up to renaming, including cyclic recurrences
 and the number of rounds. The subsequent dominance walk chooses representatives
 by instruction traversal and class equality, not by the numeric class order.
-Neither the grouping nor the acyclic numbering dispatches anything to the weaker
-available-expression oracle: both compute the same congruence classes.
+Complete refinement checks the class count and partition.
 
 `IrGvnResult.acyclic` counts the instructions the acyclic numbering classed and
 `rounds` the refinement rounds of the rest, their static round included (zero
@@ -146,10 +143,6 @@ subtree ends. A later instruction in the interval can reuse the representative.
 After the interval ends, the next occurrence starts a new interval. Equal
 expressions in sibling blocks therefore stay separate. Under the pressure policy,
 a truth value's interval ends with its defining block.
-
-The scalar walk hashes available expressions by their canonical operand IDs and
-undoes insertions when it leaves the scope. The full-refinement oracle checks the
-partition solver's cyclic phi results and its class count.
 
 Tier 1 compacts the seven instruction columns in batches of sixteen. A mask
 selects surviving instructions in reachable blocks. The forwarding map gives
@@ -194,7 +187,9 @@ are not part of this implementation.
 `test-ir-gvn [--seed N]` is `run_ir_gvn_tests(argc, argv)`, with the command in
 `argv[0]`. Include its file after `ir_optimize_gvn.c` and
 `ir_optimize_test.c`. Tests compare the independent bounded interpreter on
-the input, partition output and scalar available-expression output. They
+the input and rewritten output. The default seed also checks the frozen digest of
+the rewritten fixture corpus. Separate fixtures compare exact cyclic removal
+counts and guarded key hashes captured before removing the walk. The tests
 cover cyclic congruences and deliberate recurrence splits, reordered phi
 inputs, sibling dominance, undef taint, repeated faulting operations,
 effects, unreachable copy cycles, random DAGs with planted duplicates,
@@ -247,12 +242,10 @@ acyclic work was eliminated; the acyclic numbering ("The acyclic numbering on
 the 9700X" below) does both on these inputs. Neither claims that the default C
 compilation path gets faster. Use `benchmark-ir-optimize-passes --pass gvn --instructions 4096
 --samples 21` for the existing whole-public-stage fixture, including preparation
-and rewriting, and `benchmark-ir-source --only gvn` (or `gvn-scalar`) for
-source-derived IR. `benchmark-ir-source` runs both GVN paths once on every
-function it prepared, requires both to accept it, and reports their removed
-instructions, refinement rounds, key comparisons and collision-budget
-completions before timing them in the same 21-pass medians as lowering and
-promotion.
+and rewriting. Use `benchmark-ir-source --only gvn` for source-derived IR.
+It reports removals, refinement rounds, key comparisons and collision-budget
+completions before timing GVN over the prepared corpus. The earlier
+measurements below include the retired walk as a control.
 
 On the 9700X, built with `BUSTER_DEBUG_INFO=0` and Clang 23.1.1, pinned to CPU
 2 under the shared lock, the synthetic fixture's 21-sample medians over three

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Original GVN fixtures. Include after ir_optimize_gvn.c and ir_optimize_test.c. The independent bounded fixture
-// interpreter reads opcodes directly; neither it nor the scalar available-expression oracle uses congruence classes.
+// interpreter reads opcodes directly. Frozen rewrites and full refinement check the class solver.
 
 static void ir_gvn_test_guards(IrOptimizeTest* test)
 {
@@ -21,7 +21,20 @@ static void ir_gvn_test_guards(IrOptimizeTest* test)
     uint32_t aliases[33] = { 0 };
     uint32_t order[33] = { 0 };
     uint32_t members[33] = { 0 };
-    uint64_t expected[33] = { 0 };
+    // Hashes of 33 parameter keys captured before retiring the available-expression walk.
+    static const uint64_t expected[33] = {
+        UINT64_C(0xa0b54f0eae72a95b), UINT64_C(0x429e2ecbee38426f), UINT64_C(0xe4870e892dfddb83),
+        UINT64_C(0x866fee466dc37497), UINT64_C(0x43a5ac6c3dfadbe3), UINT64_C(0xca41adc0ed4ea6bf),
+        UINT64_C(0x87776be6bd860e0b), UINT64_C(0x0e136d3b6cd9d8e7), UINT64_C(0xe69609c9cd830e6b),
+        UINT64_C(0x887ee9870d48a77f), UINT64_C(0xf3ce0c732c2aa423), UINT64_C(0x95b6ec306bf03d37),
+        UINT64_C(0x52ecaa563c27a483), UINT64_C(0x1022687c0c5f0bcf), UINT64_C(0xcd5826a1dc96731b),
+        UINT64_C(0x1d5a6b256b06a187), UINT64_C(0xbf434ae2aacc3a9b), UINT64_C(0xce5fa4422c590c8f),
+        UINT64_C(0x03150a5d2a576cc3), UINT64_C(0x123163bcabe43eb7), UINT64_C(0x6233a8403a546d23),
+        UINT64_C(0xe8cfa994e9a837ff), UINT64_C(0x1338e15cfba6d82b), UINT64_C(0x2ca1690f69336a27),
+        UINT64_C(0x72577f400ba3d88b), UINT64_C(0xa70ce55b09a238bf), UINT64_C(0x125c084728843563),
+        UINT64_C(0x217861a6aa110757), UINT64_C(0x717aa62a388135c3), UINT64_C(0x9be3ddf24a7fd5ef),
+        UINT64_C(0xebe62275d8f0045b), UINT64_C(0x3be866f9676032c7), UINT64_C(0xddd146b6a725cbdb),
+    };
     uint64_t fields[33 * BUSTER_IR_GVN_FIELDS] = { 0 };
     for (uint32_t count = 0; ready && count <= 33; count += 1)
     {
@@ -57,10 +70,8 @@ static void ir_gvn_test_guards(IrOptimizeTest* test)
             classes[i] = i + 1;
             members[i] = i;
         }
-        ir_gvn_keys(&work, count, false, true);
-        memcpy(expected, work.hashes, count * sizeof(uint64_t));
-        ir_gvn_keys(&work, count, false, false);
-        ir_optimize_test_expect(test, memcmp(expected, work.hashes, count * sizeof(uint64_t)) == 0, "GVN exact scalar/vector hashes at every guarded tail");
+        ir_gvn_keys(&work, count, false);
+        ir_optimize_test_expect(test, memcmp(expected, work.hashes, count * sizeof(uint64_t)) == 0, "GVN parameter hashes match the frozen prefix at every guarded tail");
         // Equality must compare full keys even if every hash collides.
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -157,7 +168,7 @@ static void ir_gvn_test_debug_bindings(IrOptimizeTest* test, const IrFunction* s
     for (uint32_t path = 0; created && path < 3; path += 1)
     {
         IrGvnOptions options = ir_gvn_options();
-        options.scalar = path == 1;
+        options.complete = path == 1;
         options.apply_only = path == 2;
         IrGvnResult a = { 0 };
         IrGvnResult b = { 0 };
@@ -184,74 +195,65 @@ static void ir_gvn_test_debug_bindings(IrOptimizeTest* test, const IrFunction* s
     arena_pop_to(input, im);
 }
 
-// cyclic: the congruence result must remove more than available expressions do; recurrent: some values reach a cycle.
-static void ir_gvn_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* scalar, Arena* scratch, uint32_t minimum_removed, bool cyclic, bool recurrent)
+// Cyclic fixtures freeze the exact removal count. A recurrent input has values that reach a cycle.
+static void ir_gvn_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* reference, Arena* scratch, uint32_t minimum_removed, bool exact_removals, bool recurrent)
 {
     const uint64_t vm = vector->length;
-    const uint64_t sm = scalar->length;
+    const uint64_t sm = reference->length;
     const uint64_t tm = scratch->length;
     IrGvnOptions options = ir_gvn_options();
     IrGvnResult a = { 0 };
-    IrGvnResult b = { 0 };
     const IrCheck ac = ir_optimize_gvn(f, vector, scratch, options, &a);
-    options.scalar = true;
-    const IrCheck bc = ir_optimize_gvn(f, scalar, scratch, options, &b);
-    ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch->length == tm, "GVN paths accept verified fixture and restore scratch");
-    if (ac.error == IR_OK && bc.error == IR_OK)
+    ir_optimize_test_expect(test, ac.error == IR_OK && scratch->length == tm, "GVN accepts a verified fixture and restores scratch");
+    if (ac.error == IR_OK)
     {
-        ir_optimize_test_expect(test, a.removed >= minimum_removed && a.removed >= b.removed, "GVN congruence result removes at least scalar available expressions");
-        if (cyclic)
-        {
-            ir_optimize_test_expect(test, a.removed > b.removed, "GVN refines cyclic congruences missed by scalar available expressions");
-        }
-        ir_optimize_test_expect(test, ir_verify(&a.function, scratch, 0).error == IR_OK && ir_verify(&b.function, scratch, 0).error == IR_OK, "GVN rewritten functions independently verified");
+        ir_optimize_test_fold_function(&test->gvn_digest, &a.function);
+        ir_optimize_test_expect(test, exact_removals ? a.removed == minimum_removed : a.removed >= minimum_removed, "GVN removes the expected congruences");
+        ir_optimize_test_expect(test, ir_verify(&a.function, scratch, 0).error == IR_OK, "Rewritten GVN function verifies independently");
         for (uint32_t trial = 0; trial < 18; trial += 1)
         {
             const uint64_t input = trial == 17 ? UINT64_MAX : trial;
             const IrOptimizeExecution before = ir_optimize_test_execute(f, scratch, input, trial & 1);
             const IrOptimizeExecution after = ir_optimize_test_execute(&a.function, scratch, input, trial & 1);
-            const IrOptimizeExecution reference = ir_optimize_test_execute(&b.function, scratch, input, trial & 1);
             ir_optimize_test_expect(test, before.status != 4 && before.status == after.status && before.value == after.value && before.effects == after.effects, "GVN vector preserves independently interpreted returns, faults and effects");
-            ir_optimize_test_expect(test, before.status == reference.status && before.value == reference.value && before.effects == reference.effects, "GVN scalar preserves independently interpreted returns, faults and effects");
         }
         // Values that reach no cycle are numbered without refinement rounds; only the rest are refined.
         ir_optimize_test_expect(test, recurrent ? a.acyclic < f->instruction_count && a.rounds != 0 : a.acyclic == f->instruction_count && a.rounds == 0, "GVN refines exactly the values that reach a cycle");
         // The production entry may prove every phi distinct before its back edge is numbered.
         // Compare that proof with the full census, including cyclic fixtures and permuted inputs.
-        arena_pop_to(scalar, sm);
+        arena_pop_to(reference, sm);
         IrGvnOptions apply = ir_gvn_options();
         apply.apply_only = true;
         IrGvnResult applied = { 0 };
-        const IrCheck application = ir_optimize_gvn(f, scalar, scratch, apply, &applied);
+        const IrCheck application = ir_optimize_gvn(f, reference, scratch, apply, &applied);
         ir_optimize_test_expect(test, application.error == IR_OK && applied.classes == a.classes &&
                                 ir_optimize_test_equal(&applied.function, &a.function), "GVN production phi proof preserves all congruences");
         // Refining every instruction in synchronous rounds is the acyclic numbering's exact oracle: the same
         // partition, so the same class count and rewritten function, from the same scratch.
-        arena_pop_to(scalar, sm);
-        options.scalar = false;
+        arena_pop_to(reference, sm);
         options.complete = true;
         IrGvnResult complete = { 0 };
-        const IrCheck cc = ir_optimize_gvn(f, scalar, scratch, options, &complete);
+        const IrCheck cc = ir_optimize_gvn(f, reference, scratch, options, &complete);
         ir_optimize_test_expect(test, cc.error == IR_OK && complete.acyclic == 0 && complete.classes == a.classes && complete.scratch_bytes == a.scratch_bytes && ir_optimize_test_equal(&a.function, &complete.function), "GVN acyclic numbering matches complete refinement");
-        arena_pop_to(scalar, sm);
+        arena_pop_to(reference, sm);
         options.sweep_limit = 0;
         IrGvnResult fallback = { 0 };
-        const IrCheck fc = ir_optimize_gvn(f, scalar, scratch, options, &fallback);
-        ir_optimize_test_expect(test, fc.error == IR_OK && fallback.fallback && fallback.classes == complete.classes && fallback.rounds == complete.rounds && fallback.scratch_bytes == complete.scratch_bytes && ir_optimize_test_equal(&complete.function, &fallback.function), "GVN forced scalar refinement completion is exact");
+        const IrCheck fc = ir_optimize_gvn(f, reference, scratch, options, &fallback);
+        ir_optimize_test_expect(test, fc.error == IR_OK && fallback.fallback && fallback.classes == complete.classes && fallback.rounds == complete.rounds && fallback.scratch_bytes == complete.scratch_bytes && ir_optimize_test_equal(&complete.function, &fallback.function), "GVN forced sorted refinement completion is exact");
         // With no probe budget the acyclic numbering gives up at its first occupied bucket and every grouping at its
         // first comparison; complete refinement with sorted grouping still reaches the same partition.
-        arena_pop_to(scalar, sm);
+        arena_pop_to(reference, sm);
         options = ir_gvn_options();
         options.probes = 0;
         IrGvnResult starved = { 0 };
-        const IrCheck sc = ir_optimize_gvn(f, scalar, scratch, options, &starved);
+        const IrCheck sc = ir_optimize_gvn(f, reference, scratch, options, &starved);
         ir_optimize_test_expect(test, sc.error == IR_OK && starved.partition_probes == 0 && starved.classes == a.classes && starved.scratch_bytes == a.scratch_bytes && ir_optimize_test_equal(&a.function, &starved.function), "GVN probe-budget completions are exact");
     }
-    arena_pop_to(scalar, sm);
+    arena_pop_to(reference, sm);
     arena_pop_to(vector, vm);
 }
 
-static void ir_gvn_test_dead_cycle(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+static void ir_gvn_test_dead_cycle(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* reference, Arena* scratch)
 {
     const IrSizes sizes = { .instruction_count = 6, .block_count = 3, .constant_count = 1 };
     IrFunction f = { 0 };
@@ -270,14 +272,14 @@ static void ir_gvn_test_dead_cycle(IrOptimizeTest* test, Arena* input, Arena* ve
         ir_optimize_test_instruction(&f, 3, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_optimize_test_instruction(&f, 4, IR_COPY, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_optimize_test_instruction(&f, 5, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        ir_gvn_test_compare(test, &f, vector, scalar, scratch, 4, false, false);
+        ir_gvn_test_compare(test, &f, vector, reference, scratch, 4, false, false);
     }
     arena_pop_to(input, 0);
 }
 
 // Both operands of each dead-block addition name the same value in a later block. Their pending edges exceed
 // the in-column wait buffer and two further chunks of 256 records. Each addition must be released exactly once.
-static void ir_gvn_test_wait_growth(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+static void ir_gvn_test_wait_growth(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* reference, Arena* scratch)
 {
     const uint64_t mark = input->length;
     const uint32_t adds = 1200;
@@ -302,7 +304,7 @@ static void ir_gvn_test_wait_growth(IrOptimizeTest* test, Arena* input, Arena* v
         ir_optimize_test_instruction(&f, later - 1, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_optimize_test_instruction(&f, later, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_optimize_test_instruction(&f, later + 1, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        ir_gvn_test_compare(test, &f, vector, scalar, scratch, f.instruction_count - 2, false, false);
+        ir_gvn_test_compare(test, &f, vector, reference, scratch, f.instruction_count - 2, false, false);
     }
     arena_pop_to(input, mark);
 }
@@ -384,7 +386,7 @@ static void ir_gvn_test_partitions(IrOptimizeTest* test)
                         // In collision mode each field independently distinguishes some keys.
                         fields[(uint64_t)field * n + i] = kind == 2 ? (field == i % BUSTER_IR_GVN_FIELDS ? (uint64_t)i / BUSTER_IR_GVN_FIELDS + 1 : 0) : ((uint64_t)key << (field * 7)) ^ (UINT64_C(0x9e3779b97f4a7c15) * (field + 1));
                     }
-                    work.hashes[i] = kind >= 2 ? 0 : ir_gvn_hash_one(&work, i, members[i], initial != 0);
+                    work.hashes[i] = kind >= 2 ? 0 : ir_gvn_mix(BUSTER_IR_GVN_HASH_BASIS, key);
                 }
                 const uint32_t classes = ir_gvn_partition_group(&work, n, initial != 0, false, base);
                 if (n != 0)
@@ -418,7 +420,7 @@ static void ir_gvn_test_partitions(IrOptimizeTest* test)
     }
 }
 
-static void ir_gvn_test_large_partition(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+static void ir_gvn_test_large_partition(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* reference, Arena* scratch)
 {
     IrFunction f = { 0 };
     const bool created = ir_optimize_test_random_dag(input, &f, test, 4096);
@@ -429,7 +431,7 @@ static void ir_gvn_test_large_partition(IrOptimizeTest* test, Arena* input, Aren
         {
             ir_optimize_test_instruction(&f, i, f.op[i - 1], f.type[i - 1], f.a[i - 1], f.b[i - 1], f.c[i - 1]);
         }
-        ir_gvn_test_compare(test, &f, vector, scalar, scratch, 1024, false, false);
+        ir_gvn_test_compare(test, &f, vector, reference, scratch, 1024, false, false);
         IrGvnResult result = { 0 };
         const IrCheck check = ir_optimize_gvn(&f, vector, scratch, ir_gvn_options(), &result);
         ir_optimize_test_expect(test, check.error == IR_OK && result.partition_sort_fallbacks == 0 && !result.fallback, "GVN ordinary large DAG needs no comparison-sort completion");
@@ -643,14 +645,14 @@ static bool ir_gvn_test_random_loops(Arena* arena, IrFunction* f, IrOptimizeTest
     return created;
 }
 
-static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* reference, Arena* scratch)
 {
     IrFunction late = { 0 };
     const bool late_created = ir_gvn_test_late_phi(input, &late);
     ir_optimize_test_expect(test, late_created, "GVN late phi fixture allocation");
     if (late_created)
     {
-        ir_gvn_test_compare(test, &late, vector, scalar, scratch, 2, true, true);
+        ir_gvn_test_compare(test, &late, vector, reference, scratch, 3, true, true);
         IrGvnResult result = { 0 };
         const IrCheck check = ir_optimize_gvn(&late, vector, scratch, ir_gvn_options(), &result);
         // Only the counter, its increment and its comparison reach the recurrence.
@@ -665,7 +667,7 @@ static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vecto
         ir_optimize_test_expect(test, created, "GVN chain fixture allocation");
         if (created)
         {
-            ir_gvn_test_compare(test, &chains, vector, scalar, scratch, length, false, false);
+            ir_gvn_test_compare(test, &chains, vector, reference, scratch, length, false, false);
             IrGvnOptions options = ir_gvn_options();
             options.complete = true;
             IrGvnResult complete = { 0 };
@@ -680,7 +682,7 @@ static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vecto
     ir_optimize_test_expect(test, dead_created, "GVN dead arithmetic fixture allocation");
     if (dead_created)
     {
-        ir_gvn_test_compare(test, &dead, vector, scalar, scratch, 4, false, true);
+        ir_gvn_test_compare(test, &dead, vector, reference, scratch, 4, false, true);
         IrGvnResult result = { 0 };
         const IrCheck check = ir_optimize_gvn(&dead, vector, scratch, ir_gvn_options(), &result);
         ir_optimize_test_expect(test, check.error == IR_OK && result.acyclic == 4 && result.classes == 5, "GVN refines congruent unreachable cycles together");
@@ -697,7 +699,7 @@ static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vecto
         ir_optimize_test_expect(test, created, "GVN random loop fixture allocation");
         if (created)
         {
-            ir_gvn_test_compare(test, &f, vector, scalar, scratch, 0, false, true);
+            ir_gvn_test_compare(test, &f, vector, reference, scratch, 0, false, true);
         }
         arena_pop_to(input, 0);
     }
@@ -715,6 +717,12 @@ static void ir_gvn_test_structured_rewrite(IrOptimizeTest* test, Arena* input, A
         ir_optimize_test_expect(test, created, "GVN structured operand fixture allocation");
         if (created)
         {
+            if (kind == 2)
+            {
+                // The second call argument uses a copy that GVN removes before rebuilding the call's operand slice.
+                f.op[1] = IR_COPY;
+                f.extra[1] = 1;
+            }
             IrGvnOptions options = ir_gvn_options();
             IrGvnResult a = { 0 };
             IrGvnResult b = { 0 };
@@ -731,17 +739,51 @@ static void ir_gvn_test_structured_rewrite(IrOptimizeTest* test, Arena* input, A
     }
 }
 
+// Pressure keeps equal constants available for rematerialization. Their users still share a class.
+static void ir_gvn_test_pressure_constants(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    static const char text[] = "function (i32) -> i32 {\n"
+                               "b0:\n"
+                               "  %0 = param.i32 0\n"
+                               "  %1 = const.i32 0x00000000000000000000000000000007\n"
+                               "  %2 = const.i32 0x00000000000000000000000000000007\n"
+                               "  %3 = add.i32 %0, %1\n"
+                               "  %4 = add.i32 %0, %2\n"
+                               "  %5 = sub.i32 %4, %3\n"
+                               "  %6 = ret.void %5\n"
+                               "}\n";
+    IrFunction f = { 0 };
+    const IrParseResult parsed = ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, input, scratch, &f);
+    const bool ready = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
+    ir_optimize_test_expect(test, ready, "GVN duplicate-constant pressure fixture parses");
+    if (ready)
+    {
+        IrGvnOptions options = ir_gvn_options();
+        options.pressure = true;
+        options.apply_only = true;
+        IrGvnResult result = { 0 };
+        const IrCheck check = ir_optimize_gvn(&f, output, scratch, options, &result);
+        ir_optimize_test_expect(test, check.error == IR_OK && result.removed == 1 && result.function.instruction_count == 6 &&
+                                result.function.op[1] == IR_CONST && result.function.op[2] == IR_CONST &&
+                                result.function.a[4] == 3 && result.function.b[4] == 3,
+                                "GVN pressure preserves both constants and forwards the second addition");
+    }
+    arena_pop_to(input, 0);
+    arena_pop_to(output, 0);
+}
+
 static void ir_gvn_test_ir(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(16ull << 20);
     Arena vector = arena_reserve(16ull << 20);
-    Arena scalar = arena_reserve(16ull << 20);
+    Arena reference = arena_reserve(16ull << 20);
     Arena scratch = arena_reserve(32ull << 20);
-    const bool ready = input.base != 0 && vector.base != 0 && scalar.base != 0 && scratch.base != 0;
+    const bool ready = input.base != 0 && vector.base != 0 && reference.base != 0 && scratch.base != 0;
     ir_optimize_test_expect(test, ready, "GVN fixture arenas");
     if (ready)
     {
-        ir_gvn_test_structured_rewrite(test, &input, &vector, &scalar, &scratch);
+        ir_gvn_test_pressure_constants(test, &input, &vector, &scratch);
+        ir_gvn_test_structured_rewrite(test, &input, &vector, &reference, &scratch);
         for (uint32_t kind = 0; kind < 3; kind += 1)
         {
             IrFunction f = { 0 };
@@ -749,10 +791,10 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, created, "GVN straight fixture allocation");
             if (created)
             {
-                ir_gvn_test_compare(test, &f, &vector, &scalar, &scratch, kind == 1 ? 0 : 2, false, false);
+                ir_gvn_test_compare(test, &f, &vector, &reference, &scratch, kind == 1 ? 0 : 2, false, false);
                 if (kind == 0)
                 {
-                    ir_gvn_test_debug_bindings(test, &f, &input, &vector, &scalar, &scratch);
+                    ir_gvn_test_debug_bindings(test, &f, &input, &vector, &reference, &scratch);
                 }
                 if (kind == 1)
                 {
@@ -769,10 +811,10 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
         ir_optimize_test_expect(test, cycle_created, "GVN cyclic fixture allocation");
         if (cycle_created)
         {
-            ir_gvn_test_compare(test, &cycle, &vector, &scalar, &scratch, 4, true, true);
+            ir_gvn_test_compare(test, &cycle, &vector, &reference, &scratch, 4, true, true);
             // Different initial values force the optimistic class to split through the entire recurrence.
             cycle.extra[11] = 1;
-            ir_gvn_test_compare(test, &cycle, &vector, &scalar, &scratch, 2, true, true);
+            ir_gvn_test_compare(test, &cycle, &vector, &reference, &scratch, 2, true, true);
         }
         arena_pop_to(&input, 0);
         IrFunction diamond = { 0 };
@@ -783,7 +825,7 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
             diamond.op[6] = IR_ADD;
             diamond.a[6] = 1;
             diamond.b[6] = 1;
-            ir_gvn_test_compare(test, &diamond, &vector, &scalar, &scratch, 0, false, false);
+            ir_gvn_test_compare(test, &diamond, &vector, &reference, &scratch, 0, false, false);
             IrGvnResult result = { 0 };
             const IrCheck check = ir_optimize_gvn(&diamond, &vector, &scratch, ir_gvn_options(), &result);
             ir_optimize_test_expect(test, check.error == IR_OK && result.removed == 0, "GVN never substitutes an equal expression from a sibling block");
@@ -797,15 +839,15 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, created, "GVN effects fixture allocation");
             if (created)
             {
-                ir_gvn_test_compare(test, &f, &vector, &scalar, &scratch, 0, false, false);
+                ir_gvn_test_compare(test, &f, &vector, &reference, &scratch, 0, false, false);
             }
             arena_pop_to(&input, 0);
         }
-        ir_gvn_test_dead_cycle(test, &input, &vector, &scalar, &scratch);
-        ir_gvn_test_wait_growth(test, &input, &vector, &scalar, &scratch);
+        ir_gvn_test_dead_cycle(test, &input, &vector, &reference, &scratch);
+        ir_gvn_test_wait_growth(test, &input, &vector, &reference, &scratch);
         ir_gvn_test_limits(test, &input, &vector, &scratch);
-        ir_gvn_test_large_partition(test, &input, &vector, &scalar, &scratch);
-        ir_gvn_test_acyclic(test, &input, &vector, &scalar, &scratch);
+        ir_gvn_test_large_partition(test, &input, &vector, &reference, &scratch);
+        ir_gvn_test_acyclic(test, &input, &vector, &reference, &scratch);
         for (uint32_t length = 0; length < 130; length += 1)
         {
             IrFunction f = { 0 };
@@ -817,13 +859,13 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
                 {
                     ir_optimize_test_instruction(&f, i, f.op[i - 1], f.type[i - 1], f.a[i - 1], f.b[i - 1], f.c[i - 1]);
                 }
-                ir_gvn_test_compare(test, &f, &vector, &scalar, &scratch, 0, false, false);
+                ir_gvn_test_compare(test, &f, &vector, &reference, &scratch, 0, false, false);
             }
             arena_pop_to(&input, 0);
         }
     }
     arena_release(&scratch);
-    arena_release(&scalar);
+    arena_release(&reference);
     arena_release(&vector);
     arena_release(&input);
 }
@@ -832,7 +874,7 @@ static void ir_gvn_test_simd(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(UINT64_C(16) << 20);
     Arena vector = arena_reserve(UINT64_C(16) << 20);
-    Arena scalar = arena_reserve(UINT64_C(16) << 20);
+    Arena reference = arena_reserve(UINT64_C(16) << 20);
     Arena scratch = arena_reserve(UINT64_C(16) << 20);
     const IrSizes sizes = {
         .instruction_count = 14,
@@ -840,7 +882,7 @@ static void ir_gvn_test_simd(IrOptimizeTest* test)
         .vector_constant_count = 3,
     };
     IrFunction f = { 0 };
-    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL && ir_create(&input, &sizes, &f) == IR_OK;
+    const bool ready = input.base != NULL && vector.base != NULL && reference.base != NULL && scratch.base != NULL && ir_create(&input, &sizes, &f) == IR_OK;
     ir_optimize_test_expect(test, ready, "GVN SIMD fixture allocation");
     if (ready)
     {
@@ -873,9 +915,9 @@ static void ir_gvn_test_simd(IrOptimizeTest* test)
         for (uint32_t path = 0; path < 2; path += 1)
         {
             IrGvnOptions options = ir_gvn_options();
-            options.scalar = path != 0;
+            options.complete = path != 0;
             IrGvnResult result = { 0 };
-            Arena* output = path != 0 ? &scalar : &vector;
+            Arena* output = path != 0 ? &reference : &vector;
             const IrCheck check = ir_optimize_gvn(&f, output, &scratch, options, &result);
             ir_optimize_test_expect(test, check.error == IR_OK, "GVN takes vector constants, lane operations and masks");
             if (check.error == IR_OK)
@@ -912,18 +954,18 @@ static void ir_gvn_test_simd(IrOptimizeTest* test)
         };
         pure[0] = 1;
         pure[1] = 1;
-        ir_gvn_key(&work, 0, 0, true, false);
-        ir_gvn_key(&work, 1, 1, true, false);
+        ir_gvn_key(&work, 0, 0, true);
+        ir_gvn_key(&work, 1, 1, true);
         ir_optimize_test_expect(test, ir_gvn_compare(&work, 0, 1, 0, 1, true) != 0, "a forced GVN hash collision still compares the complete vector payload");
     }
     arena_release(&input);
     arena_release(&vector);
-    arena_release(&scalar);
+    arena_release(&reference);
     arena_release(&scratch);
 }
 
 // IrGvnOptions.vectors (#2781): equal vector operations merge, but the equal scalar operations that feed their splats
-// stay distinct, although their congruence can still prove the vector users congruent. Both host paths agree.
+// stay distinct, although their congruence can still prove the vector users congruent. Complete refinement checks both policies.
 static void ir_gvn_test_vectors(IrOptimizeTest* test)
 {
     static const char text[] = "function (i32) -> m16 {\n"
@@ -931,19 +973,20 @@ static void ir_gvn_test_vectors(IrOptimizeTest* test)
                                "  %0 = param.i32 0\n"
                                "  %1 = add.i32 %0, %0\n"
                                "  %2 = add.i32 %0, %0\n"
-                               "  %3 = intrinsic.v4i32 %1 splat\n"
-                               "  %4 = intrinsic.v4i32 %2 splat\n"
-                               "  %5 = add.v4i32 %3, %4\n"
-                               "  %6 = add.v4i32 %3, %4\n"
-                               "  %7 = vcmp.m16 %5, %6 eq lanes=i8\n"
-                               "  %8 = ret.void %7\n"
+                               "  %3 = copy.i32 %2\n"
+                               "  %4 = intrinsic.v4i32 %1 splat\n"
+                               "  %5 = intrinsic.v4i32 %3 splat\n"
+                               "  %6 = add.v4i32 %4, %5\n"
+                               "  %7 = add.v4i32 %4, %5\n"
+                               "  %8 = vcmp.m16 %6, %7 eq lanes=i8\n"
+                               "  %9 = ret.void %8\n"
                                "}\n";
     Arena input = arena_reserve(UINT64_C(16) << 20);
     Arena vector = arena_reserve(UINT64_C(16) << 20);
-    Arena scalar = arena_reserve(UINT64_C(16) << 20);
+    Arena reference = arena_reserve(UINT64_C(16) << 20);
     Arena scratch = arena_reserve(UINT64_C(16) << 20);
     IrFunction f = { 0 };
-    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL;
+    const bool ready = input.base != NULL && vector.base != NULL && reference.base != NULL && scratch.base != NULL;
     const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
     const bool fixture = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
     ir_optimize_test_expect(test, fixture, "GVN's vector-only policy fixture parses");
@@ -953,11 +996,11 @@ static void ir_gvn_test_vectors(IrOptimizeTest* test)
         for (uint32_t path = 0; path < 2; path += 1)
         {
             IrGvnOptions options = ir_gvn_options();
-            options.scalar = path != 0;
+            options.complete = path != 0;
             options.vectors = policy != 0;
-            Arena* output = path != 0 ? &scalar : &vector;
+            Arena* output = path != 0 ? &reference : &vector;
             const IrCheck check = ir_optimize_gvn(&f, output, &scratch, options, &results[policy][path]);
-            const uint32_t expected = policy != 0 ? 2 : 3;
+            const uint32_t expected = policy != 0 ? 2 : 4;
             ir_optimize_test_expect(test, check.error == IR_OK && results[policy][path].removed == expected,
                                     policy != 0 ? "GVN's vector-only policy merges the equal splat and vector addition" : "GVN unrestricted merges the scalar, splat and vector duplicates");
             if (check.error == IR_OK)
@@ -974,16 +1017,16 @@ static void ir_gvn_test_vectors(IrOptimizeTest* test)
             }
         }
         ir_optimize_test_expect(test, results[policy][0].function.instruction_count != 0 && results[policy][1].function.instruction_count != 0 &&
-                                    ir_optimize_test_equal(&results[policy][0].function, &results[policy][1].function), "GVN's vector-only policy's host paths agree");
+                                    ir_optimize_test_equal(&results[policy][0].function, &results[policy][1].function), "GVN's vector-only policy agrees with complete refinement");
     }
     arena_release(&input);
     arena_release(&vector);
-    arena_release(&scalar);
+    arena_release(&reference);
     arena_release(&scratch);
 }
 
 // The width changes (#1840) on values SCCP can't fold, a parameter's splat: GVN merges an insert, an extract and a widen
-// equal to another, keeps the insert and the extract of another part (the intrinsic's flags) apart, by both paths, and the
+// equal to another, keeps the insert and the extract of another part (the intrinsic's flags) apart under both refinement modes, and the
 // interpreter's mask is unchanged.
 static void ir_gvn_test_widths(IrOptimizeTest* test)
 {
@@ -1019,7 +1062,7 @@ static void ir_gvn_test_widths(IrOptimizeTest* test)
     for (uint32_t path = 0; parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK && path < 2; path += 1)
     {
         IrGvnOptions options = ir_gvn_options();
-        options.scalar = path != 0;
+        options.complete = path != 0;
         IrGvnResult result = { 0 };
         const IrCheck check = ir_optimize_gvn(&f, &output, &scratch, options, &result);
         ir_optimize_test_expect(test, check.error == IR_OK, "GVN takes the width changes");
@@ -1051,7 +1094,7 @@ static void ir_gvn_test_widths(IrOptimizeTest* test)
 
 static __attribute__((unused)) int run_ir_gvn_tests(int argc, char** argv)
 {
-    IrOptimizeTest test = { .random = 139 };
+    IrOptimizeTest test = { .random = 139, .gvn_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS };
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
     {
@@ -1070,12 +1113,17 @@ static __attribute__((unused)) int run_ir_gvn_tests(int argc, char** argv)
     int result = 2;
     if (valid)
     {
+        const bool frozen = test.random == 139;
         ir_gvn_test_guards(&test);
         ir_gvn_test_partitions(&test);
         ir_gvn_test_ir(&test);
         ir_gvn_test_simd(&test);
         ir_gvn_test_vectors(&test);
         ir_gvn_test_widths(&test);
+        if (frozen)
+        {
+            ir_optimize_test_expect(&test, test.gvn_digest == BUSTER_IR_OPTIMIZE_TEST_GVN_DIGEST, "GVN rewrites match the frozen deterministic corpus");
+        }
         printf("ir-gvn: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }
