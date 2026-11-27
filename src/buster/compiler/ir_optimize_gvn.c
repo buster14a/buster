@@ -121,8 +121,16 @@ struct IrGvnWork
     // IrGvnOptions.pressure, which ir_gvn_available applies, and the congruences it applied.
     bool pressure;
     bool ordered;
+    bool fused;
+    bool vectors_only;
+    uint32_t staged;
+    uint32_t* staged_targets;
+    uint32_t current_block;
+    uint32_t position;
     bool copies;
     uint32_t merged;
+    uint32_t unique;
+    uint32_t pending;
 };
 
 static __attribute__((unused)) IrGvnOptions ir_gvn_options(void)
@@ -177,7 +185,7 @@ static IrError ir_gvn_prepare_uses(IrGvnWork* work, Arena* scratch, Arena* outpu
     return work->ir.queued_count != 0 ? ir_uses_validated(f, scratch, output, &work->ir.uses) : IR_OK;
 }
 
-static void ir_gvn_classify(IrGvnWork* work)
+static void ir_gvn_classify(IrGvnWork* work, bool number_leaves)
 {
     const IrFunction* f = work->ir.function;
     static const uint8_t pure[BUSTER_IR_OP_TABLE] = {
@@ -259,6 +267,16 @@ static void ir_gvn_classify(IrGvnWork* work)
                                                                            _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_PAIRWISE)));
         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
         _mm_mask_storeu_epi8(work->pure + first, valid, _mm_maskz_set1_epi8(eligible, 1));
+        if (number_leaves)
+        {
+            // Impure rows are distinct leaves even when their own operands form cycles. Give them dense class
+            // identifiers now, so the dependency walk only visits rows whose equivalence needs a key.
+            const __mmask16 leaves = valid & ~eligible;
+            const __m512i lanes = _mm512_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+            const __m512i ids = _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)work->unique));
+            _mm512_mask_storeu_epi32(work->classes + first, valid, _mm512_maskz_expand_epi32(leaves, ids));
+            work->unique += (uint32_t)__builtin_popcount(leaves);
+        }
     }
     if (work->copies)
     {
@@ -623,8 +641,10 @@ static uint32_t ir_gvn_freeze_singletons(IrGvnWork* work, uint32_t* count, uint3
 static uint32_t ir_gvn_refine(IrGvnWork* work, uint32_t count, uint32_t base, uint32_t sweep_limit)
 {
     const uint32_t first_base = base;
-    uint32_t classes = ir_gvn_partition(work, count, true, false, base);
-    bool changed = true;
+    // Every pending member still has class zero. A numbered operand has a permanent nonzero class, so
+    // it can distinguish the initial groups immediately, including phi inputs in predecessor order.
+    uint32_t classes = ir_gvn_partition(work, count, base == 0, false, base);
+    bool changed = base == 0 || classes < count;
     while (changed)
     {
         if (count >= 32)
@@ -635,7 +655,7 @@ static uint32_t ir_gvn_refine(IrGvnWork* work, uint32_t count, uint32_t base, ui
         }
         const bool fallback = work->statistics.rounds > sweep_limit;
         const uint32_t refined = ir_gvn_partition(work, count, false, fallback, base);
-        changed = refined != classes;
+        changed = refined != classes && (first_base == 0 || refined < count);
         classes = refined;
         work->statistics.fallback = work->statistics.fallback || fallback;
     }
@@ -687,110 +707,123 @@ static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_
 {
     const IrFunction* f = work->ir.function;
     bool ok = true;
-    if (work->pure[i] == 0)
+    const uint32_t mask = ir_value_mask3(f, i);
+    const IrGvnPayload payload = ir_gvn_payload(work, i);
+    const uint64_t a = (mask & 1) != 0 ? work->classes[work->alias[f->a[i]]] : 0;
+    const uint64_t b = (mask & 2) != 0 ? work->classes[work->alias[f->b[i]]] : 0;
+    const uint64_t c = (mask & 4) != 0 ? work->classes[work->alias[ir_value_third(f, i)]] : 0;
+    if (can_wait)
+    {
+        uint32_t waiting = 0;
+        const uint32_t pending = mask & ((uint32_t)(a == 0) | (uint32_t)(b == 0) << 1 | (uint32_t)(c == 0) << 2);
+        if (pending != 0)
+        {
+            if (((pending & 1) != 0 && !ir_gvn_wait_for(work, work->alias[f->a[i]], i)) ||
+                ((pending & 2) != 0 && !ir_gvn_wait_for(work, work->alias[f->b[i]], i)) ||
+                ((pending & 4) != 0 && !ir_gvn_wait_for(work, work->alias[ir_value_third(f, i)], i)))
+            {
+                return false;
+            }
+            waiting = (uint32_t)__builtin_popcount(pending);
+        }
+        if (f->op[i] == IR_PHI)
+        {
+            for (uint32_t k = 0; k < f->b[i]; k += 1)
+            {
+                const uint32_t v = work->alias[f->extra[f->a[i] + (uint64_t)k * 2 + 1]];
+                if (work->classes[v] == 0)
+                {
+                    if (!ir_gvn_wait_for(work, v, i))
+                    {
+                        return false;
+                    }
+                    waiting += 1;
+                }
+            }
+        }
+        if (waiting != 0)
+        {
+            work->pending += 1;
+            work->waiting[i] = waiting;
+            return true;
+        }
+    }
+    const uint64_t key[BUSTER_IR_GVN_ENTRY_WORDS] = { payload.low, payload.high, ir_gvn_meta(f, i) | c << 32, a | b << 32 };
+    uint64_t hash = BUSTER_IR_GVN_HASH_BASIS;
+    for (uint32_t word = 0; word < BUSTER_IR_GVN_ENTRY_WORDS; word += 1)
+    {
+        hash = ir_gvn_mix(hash, key[word]);
+    }
+    // A vector constant's key holds its first two words (ir_gvn_payload): its other six are hashed and compared
+    // here, as the refinement does, so that constants differing only in upper lanes stay apart (#1450).
+    const bool vector = f->op[i] == IR_VCONST;
+    const uint64_t* const words = vector ? f->vector_constants[f->a[i]].words : NULL;
+    for (uint32_t word = 2; vector && word < 8; word += 1)
+    {
+        hash = ir_gvn_mix(hash, words[word]);
+    }
+    const bool phi = f->op[i] == IR_PHI;
+    const uint32_t block = phi ? work->ir.cfg.instruction_blocks[i] : 0;
+    const uint32_t first_edge = phi ? work->ir.cfg.predecessor_offsets[block] : 0;
+    const uint32_t end_edge = phi ? work->ir.cfg.predecessor_offsets[(uint64_t)block + 1] : 0;
+    for (uint32_t edge = first_edge; edge < end_edge; edge += 1)
+    {
+        hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge], edge - work->ir.cfg.predecessor_offsets[block]));
+    }
+    const uint32_t bucket = (hash ^ (hash >> 32)) & (buckets - 1);
+    uint32_t match = work->temporary_order[bucket];
+    bool equal = false;
+    while (match != BUSTER_IR_NONE && !equal && work->statistics.partition_probes < budget)
+    {
+        work->statistics.partition_probes += 1;
+        const uint64_t* entry = work->fields + (uint64_t)match * BUSTER_IR_GVN_ENTRY_WORDS;
+        equal = work->hashes[match] == hash && _mm256_cmpeq_epi64_mask(_mm256_loadu_si256((const __m256i*)entry), _mm256_loadu_si256((const __m256i*)key)) == 0xf;
+        // Equal keys make both vector constants: compare their whole payloads.
+        equal = equal && (!vector || memcmp(words, f->vector_constants[f->a[match]].words, sizeof(IrSimdValue)) == 0);
+        // Equal keys put both phis in one block: compare their inputs in that block's predecessor order.
+        for (uint32_t edge = first_edge; equal && edge < end_edge; edge += 1)
+        {
+            const uint32_t predecessor = work->ir.cfg.predecessors[edge];
+            equal = ir_gvn_phi_class(work, i, predecessor, edge - first_edge) == ir_gvn_phi_class(work, match, predecessor, edge - first_edge);
+        }
+        if (!equal)
+        {
+            match = work->order[match];
+        }
+    }
+    ok = equal || match == BUSTER_IR_NONE;
+    if (ok && equal)
+    {
+        work->classes[i] = work->classes[match];
+        if (work->fused && (!work->vectors_only || f->type[i] >= IR_V4I32) && (!work->pressure || ir_gvn_free[f->op[i]] == 0))
+        {
+            const uint32_t rep = work->next_classes[match];
+            const uint32_t rep_block = work->ir.cfg.instruction_blocks[rep];
+            const bool available = work->pressure && f->type[i] == IR_I1 ? rep_block == work->current_block :
+                                   work->position < work->ir.dominators.subtree_end[rep_block];
+            if (available)
+            {
+                work->waiting[work->staged] = i;
+                work->staged_targets[work->staged++] = rep;
+            }
+            else
+            {
+                work->next_classes[match] = i;
+            }
+        }
+    }
+    else if (ok)
     {
         *count += 1;
         work->classes[i] = *count;
-    }
-    else
-    {
-        const uint32_t mask = ir_value_mask3(f, i);
-        const IrGvnPayload payload = ir_gvn_payload(work, i);
-        const uint64_t a = (mask & 1) != 0 ? work->classes[work->alias[f->a[i]]] : 0;
-        const uint64_t b = (mask & 2) != 0 ? work->classes[work->alias[f->b[i]]] : 0;
-        const uint64_t c = (mask & 4) != 0 ? work->classes[work->alias[ir_value_third(f, i)]] : 0;
-        if (can_wait)
+        if (work->fused)
         {
-            uint32_t waiting = 0;
-            const uint32_t pending = mask & ((uint32_t)(a == 0) | (uint32_t)(b == 0) << 1 | (uint32_t)(c == 0) << 2);
-            if (pending != 0)
-            {
-                if (((pending & 1) != 0 && !ir_gvn_wait_for(work, work->alias[f->a[i]], i)) ||
-                    ((pending & 2) != 0 && !ir_gvn_wait_for(work, work->alias[f->b[i]], i)) ||
-                    ((pending & 4) != 0 && !ir_gvn_wait_for(work, work->alias[ir_value_third(f, i)], i)))
-                {
-                    return false;
-                }
-                waiting = (uint32_t)__builtin_popcount(pending);
-            }
-            if (f->op[i] == IR_PHI)
-            {
-                for (uint32_t k = 0; k < f->b[i]; k += 1)
-                {
-                    const uint32_t v = work->alias[f->extra[f->a[i] + (uint64_t)k * 2 + 1]];
-                    if (work->classes[v] == 0)
-                    {
-                        if (!ir_gvn_wait_for(work, v, i))
-                        {
-                            return false;
-                        }
-                        waiting += 1;
-                    }
-                }
-            }
-            if (waiting != 0)
-            {
-                work->waiting[i] = waiting;
-                return true;
-            }
+            work->next_classes[i] = i;
         }
-        const uint64_t key[BUSTER_IR_GVN_ENTRY_WORDS] = { payload.low, payload.high, ir_gvn_meta(f, i) | c << 32, a | b << 32 };
-        uint64_t hash = BUSTER_IR_GVN_HASH_BASIS;
-        for (uint32_t word = 0; word < BUSTER_IR_GVN_ENTRY_WORDS; word += 1)
-        {
-            hash = ir_gvn_mix(hash, key[word]);
-        }
-        // A vector constant's key holds its first two words (ir_gvn_payload): its other six are hashed and compared
-        // here, as the refinement does, so that constants differing only in upper lanes stay apart (#1450).
-        const bool vector = f->op[i] == IR_VCONST;
-        const uint64_t* const words = vector ? f->vector_constants[f->a[i]].words : NULL;
-        for (uint32_t word = 2; vector && word < 8; word += 1)
-        {
-            hash = ir_gvn_mix(hash, words[word]);
-        }
-        const bool phi = f->op[i] == IR_PHI;
-        const uint32_t block = phi ? work->ir.cfg.instruction_blocks[i] : 0;
-        const uint32_t first_edge = phi ? work->ir.cfg.predecessor_offsets[block] : 0;
-        const uint32_t end_edge = phi ? work->ir.cfg.predecessor_offsets[(uint64_t)block + 1] : 0;
-        for (uint32_t edge = first_edge; edge < end_edge; edge += 1)
-        {
-            hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge], edge - work->ir.cfg.predecessor_offsets[block]));
-        }
-        const uint32_t bucket = (hash ^ (hash >> 32)) & (buckets - 1);
-        uint32_t match = work->temporary_order[bucket];
-        bool equal = false;
-        while (match != BUSTER_IR_NONE && !equal && work->statistics.partition_probes < budget)
-        {
-            work->statistics.partition_probes += 1;
-            const uint64_t* entry = work->fields + (uint64_t)match * BUSTER_IR_GVN_ENTRY_WORDS;
-            equal = work->hashes[match] == hash && _mm256_cmpeq_epi64_mask(_mm256_loadu_si256((const __m256i*)entry), _mm256_loadu_si256((const __m256i*)key)) == 0xf;
-            // Equal keys make both vector constants: compare their whole payloads.
-            equal = equal && (!vector || memcmp(words, f->vector_constants[f->a[match]].words, sizeof(IrSimdValue)) == 0);
-            // Equal keys put both phis in one block: compare their inputs in that block's predecessor order.
-            for (uint32_t edge = first_edge; equal && edge < end_edge; edge += 1)
-            {
-                const uint32_t predecessor = work->ir.cfg.predecessors[edge];
-                equal = ir_gvn_phi_class(work, i, predecessor, edge - first_edge) == ir_gvn_phi_class(work, match, predecessor, edge - first_edge);
-            }
-            if (!equal)
-            {
-                match = work->order[match];
-            }
-        }
-        ok = equal || match == BUSTER_IR_NONE;
-        if (ok && equal)
-        {
-            work->classes[i] = work->classes[match];
-        }
-        else if (ok)
-        {
-            *count += 1;
-            work->classes[i] = *count;
-            work->hashes[i] = hash;
-            work->order[i] = work->temporary_order[bucket];
-            work->temporary_order[bucket] = i;
-            memcpy(work->fields + (uint64_t)i * BUSTER_IR_GVN_ENTRY_WORDS, key, sizeof(key));
-        }
+        work->hashes[i] = hash;
+        work->order[i] = work->temporary_order[bucket];
+        work->temporary_order[bucket] = i;
+        memcpy(work->fields + (uint64_t)i * BUSTER_IR_GVN_ENTRY_WORDS, key, sizeof(key));
     }
     return ok;
 }
@@ -806,6 +839,7 @@ static bool ir_gvn_wake(IrGvnWork* work, uint32_t value, uint32_t buckets, uint6
             const uint32_t user = edge->user;
             if (--work->waiting[user] == 0)
             {
+                work->pending -= 1;
                 work->members[depth++] = user;
             }
         }
@@ -829,6 +863,30 @@ static bool ir_gvn_visit(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_t
         ok = ir_gvn_wake(work, i, buckets, budget, count);
     }
     return ok;
+}
+
+static bool ir_gvn_visit_block(IrGvnWork* work, uint32_t block, uint32_t buckets, uint64_t budget, uint32_t* count)
+{
+    const IrFunction* f = work->ir.function;
+    const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+    for (uint64_t first = f->block_offsets[block]; first < end; first += 16)
+    {
+        const uint32_t left = end - (uint32_t)first;
+        const __mmask16 valid = (__mmask16)_bzhi_u32(0xffff, left < 16 ? left : 16);
+        const __m128i pure = _mm_maskz_loadu_epi8(valid, work->pure + first);
+        __mmask16 rows = _mm_test_epi8_mask(pure, pure);
+        while (rows != 0)
+        {
+            const uint32_t i = (uint32_t)first + (uint32_t)__builtin_ctz(rows);
+            rows &= rows - 1;
+            const bool ok = work->ordered ? ir_gvn_number(work, i, buckets, budget, count, false) : ir_gvn_visit(work, i, buckets, budget, count);
+            if (!ok)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 // Returns false when the probe budget runs out; the caller then refines every instruction from its static key.
@@ -858,21 +916,40 @@ static bool ir_gvn_acyclic(IrGvnWork* work, uint32_t* count)
     }
     const uint64_t budget = work->statistics.partition_probes + (uint64_t)n * work->probes;
     bool ok = true;
+    const uint32_t* traversal = dominators->rpo;
+    if (work->fused)
+    {
+        // Without phis every operand dominates its use. Dominator preorder is also a dependency order and gives
+        // availability without a second hash-table traversal. Publish substitutions only when numbering succeeds.
+        for (uint32_t block = 0; block < f->block_count; block += 1)
+        {
+            work->members[dominators->preorder[block]] = block;
+        }
+        traversal = work->members;
+        work->staged_targets = n == 0 ? NULL : (uint32_t*)(work->fields + (uint64_t)n * BUSTER_IR_GVN_ENTRY_WORDS);
+    }
     for (uint32_t position = 0; ok && position < dominators->reachable_count; position += 1)
     {
-        const uint32_t block = dominators->rpo[position];
-        for (uint32_t i = f->block_offsets[block]; ok && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
-        {
-            ok = work->ordered ? ir_gvn_number(work, i, buckets, budget, count, false) : ir_gvn_visit(work, i, buckets, budget, count);
-        }
+        work->position = position;
+        work->current_block = traversal[position];
+        ok = ir_gvn_visit_block(work, work->current_block, buckets, budget, count);
     }
     for (uint32_t block = 0; ok && dominators->reachable_count < f->block_count && block < f->block_count; block += 1)
     {
-        for (uint32_t i = f->block_offsets[block]; ok && dominators->rpo_index[block] == BUSTER_DOMINATOR_NONE && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+        if (dominators->rpo_index[block] == BUSTER_DOMINATOR_NONE)
         {
-            ok = ir_gvn_visit(work, i, buckets, budget, count);
+            ok = ir_gvn_visit_block(work, block, buckets, budget, count);
         }
     }
+    if (work->fused && ok)
+    {
+        for (uint32_t k = 0; k < work->staged; k += 1)
+        {
+            work->alias[work->waiting[k]] = work->staged_targets[k];
+        }
+        work->merged += work->staged;
+    }
+    work->fused &= ok;
     arena_pop_to(work->ir.scratch, mark);
     work->statistics.partition_sort_fallbacks += !ok && !work->wait_failed;
     return ok;
@@ -1125,11 +1202,19 @@ static IrError ir_gvn_solve(IrGvnWork* work, IrGvnOptions options)
 {
     // Classes 1..numbered are the acyclic numbering's; the refinement numbers the rest after them.
     const uint32_t n = work->ir.function->instruction_count;
-    uint32_t numbered = 0;
+    uint32_t numbered = work->unique;
+    work->fused = work->ordered && !options.complete;
+    work->vectors_only = options.vectors && !options.pressure;
     const bool acyclic = !options.complete && ir_gvn_acyclic(work, &numbered);
     if (work->wait_failed)
     {
         return IR_ERROR_MEMORY;
+    }
+    if (acyclic && work->pending == 0)
+    {
+        work->statistics.acyclic = n;
+        work->statistics.classes = numbered;
+        return IR_OK;
     }
     uint32_t count = 0;
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -1192,11 +1277,11 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
     }
     if (check.error == IR_OK)
     {
-        ir_gvn_classify(&work);
+        ir_gvn_classify(&work, !options.scalar && !options.complete);
         if (!options.scalar)
         {
             check.error = ir_gvn_solve(&work, options);
-            if (check.error == IR_OK)
+            if (check.error == IR_OK && !work.fused)
             {
                 ir_gvn_available(&work, options.vectors && !options.pressure);
             }
