@@ -432,6 +432,10 @@ static void tier1_frame_rank(const uint64_t* key, uint32_t count, uint32_t* even
     {
         tier1_frame_rank_vectors(key, count, 4, event);
     }
+    else if (count <= 24)
+    {
+        tier1_frame_rank_vectors(key, count, 6, event);
+    }
     else
     {
         tier1_frame_rank_vectors(key, count, 8, event);
@@ -495,11 +499,18 @@ static Tier1FrameError tier1_frame_header(const Tier1FrameRequest* request)
     {
         error = TIER1_FRAME_INVALID;
     }
-    for (uint32_t i = 0; error == TIER1_FRAME_OK && slots->indices != 0 && i < slots->count; i += 1)
+    if (slots->indices != NULL && error == TIER1_FRAME_OK)
     {
-        if (slots->indices[i] >= slots->column_count)
+        const __m512i bound = _mm512_set1_epi32((int32_t)slots->column_count);
+        for (uint32_t i = 0; error == TIER1_FRAME_OK && i < slots->count; i += 16)
         {
-            error = TIER1_FRAME_INVALID;
+            const uint32_t left = slots->count - i;
+            const __mmask16 live = (__mmask16)_bzhi_u32(UINT16_MAX, left < 16 ? left : 16);
+            const __m512i rows = _mm512_maskz_loadu_epi32(live, slots->indices + i);
+            if (_mm512_mask_cmpge_epu32_mask(live, rows, bound) != 0)
+            {
+                error = TIER1_FRAME_INVALID;
+            }
         }
     }
     return error;
@@ -874,12 +885,10 @@ static void tier1_frame_steps(const Tier1FrameRequest* request, const Tier1Frame
         tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_SET_POINTER, BUSTER_ABI_RBP, BUSTER_ABI_RSP, 0, 0);
     }
     // Ascending encoder numbers are the unwind order: RBX, RBP, R12, R13, R14, R15.
-    for (uint32_t reg = 0; reg < 16; reg += 1)
+    for (uint32_t saved = frame->saved_registers; saved != 0; saved &= saved - 1)
     {
-        if ((frame->saved_registers & (1u << reg)) != 0)
-        {
-            tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_PUSH_REGISTER, reg, BUSTER_ABI_RSP, -8, 8);
-        }
+        const uint32_t reg = (uint32_t)__builtin_ctz(saved);
+        tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_PUSH_REGISTER, reg, BUSTER_ABI_RSP, -8, 8);
     }
     // Under PROBE_STACK a realigned frame probes its subtraction whatever its size, so that the alignment gap's probe
     // starts from a touched address: the two together could otherwise cross an unprobed page. So does a frame whose body
@@ -929,12 +938,11 @@ static void tier1_frame_steps(const Tier1FrameRequest* request, const Tier1Frame
     {
         tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_RELEASE, BUSTER_ABI_RSP, BUSTER_ABI_RSP, 0, frame->stack_adjust_bytes);
     }
-    for (uint32_t reg = 16; reg > 0; reg -= 1)
+    for (uint32_t saved = frame->saved_registers; saved != 0; )
     {
-        if ((frame->saved_registers & (1u << (reg - 1))) != 0)
-        {
-            tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_POP_REGISTER, reg - 1, BUSTER_ABI_RSP, 0, 8);
-        }
+        const uint32_t reg = 31 - (uint32_t)__builtin_clz(saved);
+        saved ^= 1u << reg;
+        tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_POP_REGISTER, reg, BUSTER_ABI_RSP, 0, 8);
     }
     if (frame->frame_pointer)
     {
@@ -997,7 +1005,7 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
     data_alignment = candidate.variadic && data_alignment < 16 ? 16 : data_alignment;
     // A red-zone base must compensate for that residue, including sixteen-byte objects. The red zone is below the
     // pushes' rsp.
-    const uint32_t residue = data_alignment <= 16 ? pushed_residue % data_alignment : 0;
+    const uint32_t residue = data_alignment <= 16 ? pushed_residue & (data_alignment - 1) : 0;
     const uint64_t red_span = tier1_frame_align(position + residue, data_alignment) - residue;
     candidate.red_zone = request->call_count == 0 && !candidate.frame_pointer && !requirements.dynamic_stack &&
         (request->flags & BUSTER_TIER1_FRAME_NO_RED_ZONE) == 0 && red_span <= BUSTER_ABI_RED_ZONE_BYTES;
@@ -1040,14 +1048,12 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
         // The k-th push's word is 8 (k + 1) bytes below rbp, or below entry RSP, which is the subtraction and the pushes
         // above the post-prologue rsp.
         uint32_t saved_index = 0;
-        for (uint32_t reg = 0; reg < 16; reg += 1)
+        for (uint32_t saved = candidate.saved_registers; saved != 0; saved &= saved - 1)
         {
-            if ((candidate.saved_registers & (1u << reg)) != 0)
-            {
-                const int64_t below = 8 * (int64_t)(saved_index + 1);
-                candidate.save_offset[reg] = (int32_t)(candidate.frame_pointer ? -below : (int64_t)adjustment + 8 * (int64_t)pushes - below);
-                saved_index += 1;
-            }
+            const uint32_t reg = (uint32_t)__builtin_ctz(saved);
+            const int64_t below = 8 * (int64_t)(saved_index + 1);
+            candidate.save_offset[reg] = (int32_t)(candidate.frame_pointer ? -below : (int64_t)adjustment + 8 * (int64_t)pushes - below);
+            saved_index += 1;
         }
         tier1_frame_steps(request, &requirements, &candidate);
         *result = candidate;
