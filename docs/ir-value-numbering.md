@@ -48,14 +48,14 @@ hashing the static key and the operand classes into a table of
 representatives. It is Kahn's algorithm. Instructions are visited in reverse
 postorder (unreachable blocks last), and an instruction whose operands all
 have classes is numbered at once; otherwise it waits, counting its unnumbered
-operands. When a value that something waits for is numbered, the use lists
-wake its users, and the users of every copy that resolves to it. The
+operands. Each unresolved input registers its user directly against the input’s copy root.
+Numbering the root wakes only those users. The
 instructions still waiting at the end are exactly those that reach a cycle.
 Only they are refined in rounds, their numbered operands' classes held fixed,
 and their classes are numbered after the acyclic ones so the two never
 collide. In reachable SSA code every operand except a phi's input along a back
 edge dominates its use, so it is numbered first. When every block is reachable and the function has no phi, the pass numbers instructions directly.
-It builds use lists for undef propagation or for graphs that can require wakeups. Impure and undef-tainted
+The pass builds complete use lists only when it finds an undef. Impure and undef-tainted
 instructions are unique leaves and never wait.
 
 Numbering one value is a dependent chain: its key needs its operands' classes,
@@ -64,9 +64,10 @@ scalar, one hash, a chain walk and at most one four-word key comparison per
 instruction. The refinement rounds keep the eight-lane key hashing. A
 representative's key (payload, meta word and operand classes) occupies four of
 the eight field words of its own index; the existing hash, link and bucket
-columns hold the rest, so the table needs no scratch of its own. The waiting
-counts, the awaited flags and the list of members to refine add nine bytes per
-instruction, reserved in the same scratch allocation as the keys and ordering columns. Its probes share
+columns hold the rest, so the table needs no scratch of its own. Unresolved operand lists use the four spare field columns, with extra scratch
+chunks for dense forward references. The pass releases those chunks before
+refinement. Singleton classes in large refinement rounds are already final,
+so their members leave the worklist while their classes remain available as operands. Its probes share
 the grouping's budget, `IrGvnOptions.probes` key comparisons per instruction
 (8). If the budget runs out, the numbering is abandoned and every instruction
 is refined in rounds instead, which counts as a collision-budget completion.

@@ -1647,27 +1647,35 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
 {
     const IrFunction* f = work->function;
     bool ok = true;
-    uint32_t* direct = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
+    const bool cleanup_cfg = (options.passes & BUSTER_IR_OPTIMIZE_CFG) != 0;
+    uint32_t* direct = cleanup_cfg ? ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok) : NULL;
     uint32_t* threads = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
     uint32_t* blocks = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
     uint32_t* values = ir_allocate(scratch, f->instruction_count, sizeof(uint32_t), &ok);
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
     for (uint32_t block = 0; ok && block < f->block_count; block += 1)
     {
-        direct[block] = block;
         blocks[block] = BUSTER_IR_NONE;
-        uint32_t live = 0;
-        for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+        if (cleanup_cfg)
         {
-            live += work->live[i] != 0 && ir_optimize_forwarded(work, i) == i;
+            direct[block] = block;
+            uint32_t live = 0;
+            for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+            {
+                live += work->live[i] != 0 && ir_optimize_forwarded(work, i) == i;
+            }
+            const uint32_t target = ir_optimize_single_successor(work, block);
+            if (block != 0 && work->blocks[block] != 0 && live == 1 && target != BUSTER_IR_NONE && f->op[f->block_offsets[target]] != IR_PHI)
+            {
+                direct[block] = target;
+            }
         }
-        const uint32_t target = ir_optimize_single_successor(work, block);
-        if ((options.passes & BUSTER_IR_OPTIMIZE_CFG) != 0 && block != 0 && work->blocks[block] != 0 && live == 1 && target != BUSTER_IR_NONE && f->op[f->block_offsets[target]] != IR_PHI)
+        else
         {
-            direct[block] = target;
+            threads[block] = block;
         }
     }
-    if (ok && !ir_optimize_thread_targets(scratch, direct, f->block_count, threads))
+    if (ok && cleanup_cfg && !ir_optimize_thread_targets(scratch, direct, f->block_count, threads))
     {
         error = IR_ERROR_MEMORY;
     }
@@ -1720,7 +1728,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
             // A folded phi becomes a constant after every surviving phi. Ordinary instruction order is unchanged.
             for (uint32_t phase = 0; phase < 2; phase += 1)
             {
-                for (uint32_t i = f->block_offsets[block]; i < end; i += 1)
+                for (uint32_t i = f->block_offsets[block]; i < end && (phase != 0 || f->op[i] == IR_PHI); i += 1)
                 {
                     const bool phi = f->op[i] == IR_PHI && work->states[i] != IROPT_CONSTANT;
                     if (work->live[i] != 0 && phi == (phase == 0) && ir_optimize_forwarded(work, i) == i)
@@ -1859,9 +1867,11 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
             }
             for (uint32_t block = blocks[head] != BUSTER_IR_NONE && heads[head] == head ? head : BUSTER_IR_NONE; block != BUSTER_IR_NONE; block = next[block])
             {
+                const uint32_t target = ir_optimize_single_successor(work, block);
+                const uint32_t end = f->block_offsets[(uint64_t)block + 1];
                 for (uint32_t phase = 0; phase < 2; phase += 1)
                 {
-                    for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+                    for (uint32_t i = f->block_offsets[block]; i < end && (phase != 0 || f->op[i] == IR_PHI); i += 1)
                     {
                         const bool phi = f->op[i] == IR_PHI && work->states[i] != IROPT_CONSTANT;
                         if (values[i] != BUSTER_IR_NONE && phi == (phase == 0))
@@ -1875,7 +1885,6 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                             candidate.a[out] = f->a[i];
                             candidate.b[out] = f->b[i];
                             candidate.c[out] = f->c[i];
-                            const uint32_t target = ir_optimize_single_successor(work, block);
                             if (work->states[i] == IROPT_CONSTANT && op != IR_CONST && op != IR_VCONST)
                             {
                                 // A known floating value does not discharge its environment effects. Keep its original

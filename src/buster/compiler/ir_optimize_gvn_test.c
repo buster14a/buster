@@ -265,6 +265,38 @@ static void ir_gvn_test_dead_cycle(IrOptimizeTest* test, Arena* input, Arena* ve
     arena_pop_to(input, 0);
 }
 
+// Both operands of each dead-block addition name the same value in a later block. Their pending edges exceed
+// the in-column wait buffer and two further chunks of 256 records. Each addition must be released exactly once.
+static void ir_gvn_test_wait_growth(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    const uint64_t mark = input->length;
+    const uint32_t adds = 1200;
+    const uint32_t later = adds + 3;
+    IrFunction f = { 0 };
+    const IrSizes sizes = { .instruction_count = later + 2, .block_count = 3, .constant_count = 1 };
+    const bool created = ir_create(input, &sizes, &f) == IR_OK;
+    ir_optimize_test_expect(test, created, "GVN pending-edge growth fixture allocation");
+    if (created)
+    {
+        f.result_type = IR_I64;
+        f.constants[0].low = 11;
+        f.block_offsets[1] = 2;
+        f.block_offsets[2] = later;
+        f.block_offsets[3] = later + 2;
+        ir_optimize_test_instruction(&f, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 1, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t i = 2; i < later - 1; i += 1)
+        {
+            ir_optimize_test_instruction(&f, i, IR_ADD, IR_I64, later, later, BUSTER_IR_NONE);
+        }
+        ir_optimize_test_instruction(&f, later - 1, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, later, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, later + 1, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_gvn_test_compare(test, &f, vector, scalar, scratch, f.instruction_count - 2, false, false);
+    }
+    arena_pop_to(input, mark);
+}
+
 static void ir_gvn_test_limits(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
 {
     IrFunction f = { 0 };
@@ -731,6 +763,7 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
             arena_pop_to(&input, 0);
         }
         ir_gvn_test_dead_cycle(test, &input, &vector, &scalar, &scratch);
+        ir_gvn_test_wait_growth(test, &input, &vector, &scalar, &scratch);
         ir_gvn_test_limits(test, &input, &vector, &scratch);
         ir_gvn_test_large_partition(test, &input, &vector, &scalar, &scratch);
         ir_gvn_test_acyclic(test, &input, &vector, &scalar, &scratch);
