@@ -399,11 +399,28 @@ enum's, a record's, one on a pointer's, an array's or a function's declarator)
 is the full pipeline's error or warning, or a type it doesn't model, and leaves
 where it is declared. An attribute after a bit-field's width (`int a : 3
 __attribute__((packed))`) was taken for another member's start, an int; it
-leaves. One
-gap is left: a loop's empty body (`for (...);`) is `-Wempty-body` only where the
-next statement is a block or is indented past the loop, as clang decides, and
-the direct path's tokens keep no columns, so it compiles such loops quietly as
-before. `if (x);` and `switch (x);` leave on any line.
+leaves.
+`if (x);` and `switch (x);` leave on any line. A loop's empty body (`for (...);`)
+is `-Wempty-body` only where the `;` is on the `)`'s line, the loop is a block's
+own statement and the next statement is a block or starts past the keyword's
+column, in bytes (#3667). The tokens keep no lines or columns, so a `for` or
+`while` the preprocessor reads from a file's text has its place as its data
+(`BUSTER_FTOK_PLACED`: its offset in the main file, or its address's low bits
+in another; the window's emitter records it in the branch its macro names
+already take, the keywords added to that stop set, and so does
+`fast_pp_single_token`). At a loop whose `)` a `;` follows (asked there, not at
+each empty statement: `sqlite3.c`'s asserts make 7,508; 20 of its loops ask),
+`fast_cc_empty_statement` finds the text (another file's in the mappings the
+compile kept) and reads it again from the keyword to the next statement's first
+token: the header 64 bytes a step (`fast_cc_raw_header`: its parentheses' and
+`;`s' bits in order, its literals masked, its newlines counted, its names; a
+comment or a longer header a token at a time), the `;` right after the `)`, and
+past an `#endif`, an `#else`'s groups and the directives that give no token.
+The header's names are the stream's, or every macro they reach is balanced with
+no `;`, so the text's `)` is the stream's. A keyword an expansion gives, a text
+it can't read, a conditional it can't judge and a statement an empty macro may
+start leave; a system header's loop and `-w` stay quiet. On the 9700X it adds
+42 K instructions to `sqlite3.c`'s 212 M, all in those 20 reads.
 
 A skipped group's text is passed 64 bytes at a time (`fast_pp_skip_inactive_in`),
 and a line splice there joins its lines as the full pipeline's reading does: a

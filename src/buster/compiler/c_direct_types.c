@@ -426,6 +426,16 @@ struct FastCCState
     uint8_t checking;
     uint32_t checked_obj_sym_count;
     uint32_t checked_obj_syms[BUSTER_FCHECKED_OBJ_SYMS];
+
+    // #3667: the mappings of the files the unit read, listed at the first loop whose body is a lone `;`
+    // (fast_cc_placed_text).
+    const uint8_t** texts;
+    uint64_t* text_sizes;
+    uint32_t text_count;
+    uint32_t text_last;    // the mapping that held the last loop's keyword
+    uintptr_t text_low;    // the lowest mapping's first byte
+    bool text_window;      // the mappings lie in 2^30 bytes from text_low
+    bool texts_listed;
 };
 
 static __attribute__((cold, noinline)) void fast_cc_bail(FastCCState* cc, const char* reason)
