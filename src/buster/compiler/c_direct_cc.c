@@ -10370,8 +10370,8 @@ static __attribute__((cold)) uint8_t fast_cc_raw_punctuator(uint8_t c, uint8_t c
 
 // The text's next token from `p`, past blanks and comments, into *out, with *io_line and *io_line_start kept for the
 // lines it crosses. Returns where the token ends (a directive's after its `#`), or NULL where the text ends first or the
-// token is one this doesn't read: a backslash (a splice, a universal character name), a carriage return that ends a
-// line alone, a byte past ASCII, a prefix before a quote other than a literal's, a literal a newline cuts.
+// token is one this doesn't read: a backslash (a splice, a universal character name), a byte past ASCII, a prefix
+// before a quote other than a literal's, a literal a newline cuts.
 static __attribute__((cold)) const uint8_t* fast_cc_raw_token(const uint8_t* p, const uint8_t* end, uint32_t* io_line, const uint8_t** io_line_start, FastRawTok* out)
 {
     uint32_t line = *io_line;
@@ -10381,6 +10381,9 @@ static __attribute__((cold)) const uint8_t* fast_cc_raw_token(const uint8_t* p, 
     bool blank = true;
     while (ok && blank)
     {
+        // Spaces and tabs, and carriage returns: one alone ends a line for the full pipeline's columns, and a column
+        // counted from the newline before it is never less than its, nor a line counted so another.
+        p = fast_skip_hspace(p, end);
         const uint8_t c = p < end ? p[0] : 0u;
         const uint8_t c1 = p + 1 < end ? p[1] : 0u;
         if (p >= end)
@@ -10394,22 +10397,12 @@ static __attribute__((cold)) const uint8_t* fast_cc_raw_token(const uint8_t* p, 
             line_start = p;
             line_first = true;
         }
-        else if (c == '\r')
-        {
-            ok = c1 == '\n';
-            p += 1;
-        }
-        else if ((fast_char_class[c] & 8u) != 0)
-        {
-            p += 1;
-        }
         else if (c == '/' && c1 == '*')
         {
             // Its newlines are the text's lines.
             const uint8_t* q = p + 2;
-            while (ok && q + 1 < end && !(q[0] == '*' && q[1] == '/'))
+            while (q + 1 < end && !(q[0] == '*' && q[1] == '/'))
             {
-                ok = q[0] != '\r' || q[1] == '\n';
                 line += (uint32_t)(q[0] == '\n');
                 line_start = q[0] == '\n' ? q + 1 : line_start;
                 q += 1;
@@ -10421,12 +10414,11 @@ static __attribute__((cold)) const uint8_t* fast_cc_raw_token(const uint8_t* p, 
         {
             // To its newline, which no backslash before it splices to the next line.
             const uint8_t* q = p + 2;
-            while (ok && q < end && q[0] != '\n')
+            while (q < end && q[0] != '\n')
             {
-                ok = q[0] != '\r' || (q + 1 < end && q[1] == '\n');
                 q += 1;
             }
-            ok = ok && q < end && q[-1] != '\\' && !(q[-1] == '\r' && q[-2] == '\\');
+            ok = q < end && q[-1] != '\\' && !(q[-1] == '\r' && q[-2] == '\\');
             p = q;
         }
         else
@@ -10804,7 +10796,7 @@ static __attribute__((cold)) bool fast_cc_raw_macro_gives(FastCCState* cc, const
 
 // The mappings the compile kept of the files the unit read, listed at its first loop that asks: the guard table's (its
 // used entries, which have a record, four to a 64-byte load) and those mapped for their push alone (fast_pp_release_files'
-// two lists). And whether they lie in one window of 2^30 bytes, where an address's low 30 bits name one address.
+// two lists). And whether they lie in one window of 2^29 bytes, where an address's low 29 bits name one address.
 static __attribute__((cold)) void fast_cc_list_texts(FastCCState* cc)
 {
     FastPP* const pp = cc->pp;
@@ -10849,22 +10841,35 @@ static __attribute__((cold)) void fast_cc_list_texts(FastCCState* cc)
     cc->text_window = count != 0 && high - low <= (uintptr_t)BUSTER_FTOK_PLACED_ADDRESS + 1u;
 }
 
-// The place of a loop keyword whose data is `data` (BUSTER_FTOK_PLACED): the address, in a mapping the compile kept of
-// a file, whose low 30 bits it holds and where `word` stands as a name, with the mapping's first byte and end. NULL
-// where no mapping or more than one has one. Where the mappings lie in one window (fast_cc_list_texts) the bits name one
-// address, which no two mappings hold, and the mapping that held the last loop's is asked first.
+// Whether `word` stands as a name at `offset` in the `size` bytes from `base`: no identifier's byte before or after it.
+static __attribute__((cold)) bool fast_cc_placed_word(const uint8_t* base, uint64_t size, uint64_t offset, const char* word, uint32_t length)
+{
+    const uint8_t* const at = base + offset;
+    return offset + length <= size && memcmp(at, word, length) == 0 && (offset == 0 || (fast_char_class[at[-1]] & 1u) == 0) &&
+           (offset + length == size || (fast_char_class[at[length]] & 1u) == 0);
+}
+
+// The place of a loop keyword whose data is `data` (BUSTER_FTOK_PLACED), where `word` stands as a name, with its text's
+// first byte and end: in the main file at the offset it holds, or else the address in a mapping the compile kept of a
+// file whose low 29 bits it holds. NULL where no mapping or more than one has it. Where the mappings lie in one window
+// (fast_cc_list_texts) the bits name one address, which no two mappings hold, and the mapping that held the last loop's
+// is asked first.
 static __attribute__((cold)) const uint8_t* fast_cc_placed_text(FastCCState* cc, uint32_t data, const char* word, uint32_t length, const uint8_t** out_base,
                                                                 const uint8_t** out_end)
 {
-    if (!cc->texts_listed)
+    const FastPP* const pp = cc->pp;
+    const bool main = (data & BUSTER_FTOK_PLACED_MAIN) != 0;
+    const uint64_t main_size = pp->main_text != NULL ? (uint64_t)(pp->main_text_end - pp->main_text) : 0u;
+    const bool in_main = main && fast_cc_placed_word(pp->main_text, main_size, data & BUSTER_FTOK_PLACED_OFFSET, word, length);
+    if (!main && !cc->texts_listed)
     {
         fast_cc_list_texts(cc);
     }
     const uint64_t window = (uint64_t)BUSTER_FTOK_PLACED_ADDRESS + 1u;
     const uintptr_t named = cc->text_low + (((uintptr_t)(data & BUSTER_FTOK_PLACED_ADDRESS) - cc->text_low) & BUSTER_FTOK_PLACED_ADDRESS);
     uint32_t first = 0;
-    uint32_t last = cc->text_count;
-    if (cc->text_window)
+    uint32_t last = main ? 0u : cc->text_count;
+    if (!main && cc->text_window)
     {
         // The mapping that holds the one address: the last loop's, or else the one whose range does.
         const uint32_t previous = cc->text_last;
@@ -10889,16 +10894,21 @@ static __attribute__((cold)) const uint8_t* fast_cc_placed_text(FastCCState* cc,
         for (uint64_t offset = ((uint64_t)(data & BUSTER_FTOK_PLACED_ADDRESS) - (uint64_t)(uintptr_t)base) & BUSTER_FTOK_PLACED_ADDRESS;
              offset + length <= size; offset += window)
         {
-            const uint8_t* const at = base + offset;
-            if (memcmp(at, word, length) == 0 && (offset == 0 || (fast_char_class[at[-1]] & 1u) == 0) &&
-                (offset + length == size || (fast_char_class[at[length]] & 1u) == 0))
+            if (fast_cc_placed_word(base, size, offset, word, length))
             {
-                found = at;
+                found = base + offset;
                 *out_base = base;
                 *out_end = base + size;
                 matches += 1u;
             }
         }
+    }
+    if (in_main)
+    {
+        found = pp->main_text + (data & BUSTER_FTOK_PLACED_OFFSET);
+        *out_base = pp->main_text;
+        *out_end = pp->main_text_end;
+        matches = 1u;
     }
     return matches == 1u ? found : NULL;
 }
@@ -10969,10 +10979,10 @@ static __attribute__((cold, noinline)) void fast_cc_empty_loop_body(FastCCState*
     }
     const uint32_t keyword = open - 1u;
     const bool loop = level == 0 && open > 0 && (cc->tk[keyword] == FTOK_KW_WHILE || cc->tk[keyword] == FTOK_KW_FOR);
-    // A label's, case's or default's statement, the block's last one, -w and a system header's are quiet (an expansion's
-    // keyword has an IdentId, without BUSTER_FTOK_PLACED_SYSTEM's bit).
+    // A label's, case's or default's statement, the block's last one, -w and a system header's are quiet.
+    const uint32_t placed = cc->td[keyword] & (BUSTER_FTOK_PLACED | BUSTER_FTOK_PLACED_MAIN | BUSTER_FTOK_PLACED_SYSTEM);
     const bool quiet = loop && (cc->quiet || owner != FSTK_BLOCK || (keyword > 0 && cc->tk[keyword - 1u] == FTOK_COLON) ||
-                                cc->tk[rparen + 2u] == FTOK_RBRACE || (cc->td[keyword] & BUSTER_FTOK_PLACED_SYSTEM) != 0);
+                                cc->tk[rparen + 2u] == FTOK_RBRACE || placed == (BUSTER_FTOK_PLACED | BUSTER_FTOK_PLACED_SYSTEM));
     const char* const reason = !loop ? "a loop's empty body this path can't place" : quiet ? NULL : fast_cc_empty_body_verdict(cc, keyword, rparen);
     if (reason != NULL)
     {

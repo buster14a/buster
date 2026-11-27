@@ -405,11 +405,13 @@ is `-Wempty-body` only where the `;` is on the `)`'s line, the loop is a block's
 own statement and the next statement is a block or starts past the keyword's
 column, in bytes (#3667). The tokens keep no lines or columns, so a `for` or
 `while` the preprocessor reads from a file's text has its place as its data
-(`BUSTER_FTOK_PLACED`: the window's emitter records it in the branch its macro
-names already take, the keywords added to that stop set, and so does
+(`BUSTER_FTOK_PLACED`: its offset in the main file, or its address's low bits
+in another; the window's emitter records it in the branch its macro names
+already take, the keywords added to that stop set, and so does
 `fast_pp_single_token`). At a loop whose body is a lone `;` (19 of `sqlite3.c`'s
-1,610), `fast_cc_empty_loop_body` finds the kept mapping that holds the keyword
-and reads the text again from there to the next statement's first token: the
+1,610), `fast_cc_empty_loop_body` finds the text (another file's in the
+mappings the compile kept) and reads it again from the keyword to the next
+statement's first token: the
 header's parentheses (every macro its names reach balanced, with no `;`), the
 `;` right after the `)`, and past an `#endif`, an `#else`'s groups and the
 directives that give no token. A keyword an expansion gives, a text it can't

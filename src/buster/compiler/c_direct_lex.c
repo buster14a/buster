@@ -187,15 +187,16 @@ typedef enum FastTokKind
 // # and ## spell it as written); an integer with a base or a suffix always does.
 #define BUSTER_FTOK_SPELLED     BUSTER_FTOK_HEX
 
-// #3667: the data of a `for` or `while` the preprocessor read from a file's text, in place of its IdentId: this mark,
-// the file's system-header bit then, and its first byte's address's low 30 bits. The statement compiler finds the
-// mapping the compile kept of the file by them where the loop's body is a lone `;` (fast_cc_empty_loop_body,
-// -Wempty-body), and nothing else reads a loop keyword's data. One an expansion gives keeps its IdentId.
+// #3667: the data of a `for` or `while` the preprocessor read from a file's text, in place of its IdentId, which the
+// statement compiler reads where the loop's body is a lone `;` (fast_cc_empty_loop_body, -Wempty-body) and nothing else
+// does: this mark, and in the main file (never a system header) BUSTER_FTOK_PLACED_MAIN and its first byte's offset;
+// in another file the file's system-header bit then and its first byte's address's low 29 bits, by which the statement
+// compiler finds the mapping the compile kept of the file. One an expansion gives keeps its IdentId.
 #define BUSTER_FTOK_PLACED          0x80000000u
-#define BUSTER_FTOK_PLACED_SYSTEM   0x40000000u
-#define BUSTER_FTOK_PLACED_ADDRESS  0x3fffffffu
-#define BUSTER_FTOK_PLACED_DATA(f, at) \
-    (BUSTER_FTOK_PLACED | ((uint32_t)(f)->is_system * BUSTER_FTOK_PLACED_SYSTEM) | ((uint32_t)(uintptr_t)(at) & BUSTER_FTOK_PLACED_ADDRESS))
+#define BUSTER_FTOK_PLACED_MAIN     0x40000000u
+#define BUSTER_FTOK_PLACED_OFFSET   0x3fffffffu
+#define BUSTER_FTOK_PLACED_SYSTEM   0x20000000u
+#define BUSTER_FTOK_PLACED_ADDRESS  0x1fffffffu
 
 // Compact 8-byte token
 typedef struct FastTok FastTok;
@@ -1536,6 +1537,9 @@ struct FastPP
     // The main file's push, or 0 before it: #pragma once and GCC system_header there are the full pipeline's warnings
     // (#3577), which leave the direct path.
     uint32_t main_serial;
+    // The main file's text (#3667: where a loop keyword's BUSTER_FTOK_PLACED_MAIN offset is), or NULL before its push.
+    const uint8_t* main_text;
+    const uint8_t* main_text_end;
 
     // Current source state
     uint32_t counter_val;
@@ -7355,6 +7359,14 @@ static inline bool fast_window_decimal(const uint8_t* s, uint32_t length, uint32
 }
 
 // One token of f's text by fast_lex_one, and what the drain does with it: the file's end, a directive, a macro's name.
+// The data of the `for` or `while` whose first byte is f's text at `at` (BUSTER_FTOK_PLACED, #3667).
+static inline uint32_t fast_pp_placed(const FastPP* pp, const FastIncludeFile* f, const uint8_t* at)
+{
+    const uint32_t other = BUSTER_FTOK_PLACED | ((uint32_t)f->is_system * BUSTER_FTOK_PLACED_SYSTEM) | ((uint32_t)(uintptr_t)at & BUSTER_FTOK_PLACED_ADDRESS);
+    const uint32_t main = BUSTER_FTOK_PLACED | BUSTER_FTOK_PLACED_MAIN | ((uint32_t)(at - f->base) & BUSTER_FTOK_PLACED_OFFSET);
+    return f->serial == pp->main_serial ? main : other;
+}
+
 static void fast_pp_single_token(FastPP* pp, FastIncludeFile* f)
 {
     FastTok tok = { 0 };
@@ -7388,7 +7400,7 @@ static void fast_pp_single_token(FastPP* pp, FastIncludeFile* f)
             // `for` or `while`: its place, as the window's emitter records it (#3667). fast_lex_one has lexed it whole.
             if (__builtin_expect(tok.kind == FTOK_KW_WHILE || tok.kind == FTOK_KW_FOR, 0))
             {
-                tok.data = BUSTER_FTOK_PLACED_DATA(f, f->ptr - (tok.kind == FTOK_KW_WHILE ? 5u : 3u));
+                tok.data = fast_pp_placed(pp, f, f->ptr - (tok.kind == FTOK_KW_WHILE ? 5u : 3u));
             }
             fast_pp_emit_soa(pp, tok);
         }
@@ -7555,7 +7567,7 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                     else if (ident_kind != FTOK_IDENT)
                     {
                         // `for` or `while`, which no #define names: the builtins are identifiers. Its place (#3667).
-                        out_data[out_count + k] = BUSTER_FTOK_PLACED_DATA(f, s);
+                        out_data[out_count + k] = fast_pp_placed(pp, f, s);
                         continue;
                     }
                     out_count += k;
@@ -7846,6 +7858,8 @@ static bool fast_pp_run_file(FastPP* pp, const char* path, bool is_main, bool is
     {
         // The main file's push, and -MD's record of it (#3592), which a guard of an -include file may have skipped.
         pp->main_serial = pp->file_depth != 0 ? pp->files[pp->file_depth - 1u].serial : 0u;
+        pp->main_text = pp->file_depth != 0 ? pp->files[pp->file_depth - 1u].base : NULL;
+        pp->main_text_end = pp->file_depth != 0 ? pp->files[pp->file_depth - 1u].end : NULL;
         pp->dependency_main = pp->dependency_last;
     }
     if (ok)
