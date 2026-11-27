@@ -1,0 +1,17 @@
+buster-fixtures v1 preprocessor-snippet-columns
+# Source bytes (hex), displayed text (= copies the source), width at each byte (hex or - for continuation).
+empty	=	-
+00	<U+0000>	8
+7f	<U+007F>	8
+c2a0	=	1-
+cc81	=	0-
+e4b8ad	=	2--
+f09f9880	=	2---
+c280	<U+0080>	8-
+f48fbfbf	<U+10FFFF>	A---
+c080	<C0><80>	44
+e09fbf	<E0><9F><BF>	444
+eda080	<ED><A0><80>	444
+f08fbfbf	<F0><8F><BF><BF>	4444
+f4908080	<F4><90><80><80>	4444
+f09080	<F0><90><80>	444

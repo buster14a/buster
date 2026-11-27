@@ -5642,6 +5642,65 @@ static int c_direct_unit_tests(void)
         failed += 1u;
     }
 
+    // #3592: `#define NAME BODY` lines whose body is one token, which fast_pp_simple_defines defines without the
+    // directive reader: a decimal, an octal, a hexadecimal, a suffixed and a 33-bit number, an identifier, a keyword and a
+    // plain string, each defined again the same; and lines it leaves to the reader, which must mean the same: two blanks,
+    // a comment or a blank after the token, an escaped string, a character constant.
+    static const char one_token_source[] =
+        "#define A 7\n#define B 010\n#define C 0x1F\n#define D 4294967296\n#define E 5u\n#define F A\n#define G int\n"
+        "#define H 123456789\n#define S \"abc\"\n#define F A\n#define G int\n#define S \"abc\"\n#define C 0x1F\n"
+        "#define I  8\n#define J 9 /* nine */\n#define K 10 \n#define T \"a\\tb\"\n#define U 'x'\n"
+        "const G v[] = { A, B, C, (G)(D >> 32), (G)E, F, H, I, J, K, sizeof(S), sizeof(T), U };\n" BUSTER_DIRECT_TEST_TAIL;
+    static const int32_t expected_one_token[] = { 7, 8, 31, 1, 5, 7, 123456789, 8, 9, 10, 4, 4, 'x' };
+    if (c_direct_test_compile_source_with(one_token_source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_one_token,
+                                          sizeof(expected_one_token), (CDirectTestMode){ 0 }) &&
+        c_direct_test_compile_mode("#define F A\n#define F B\nint f(void) { return 0; }\n" BUSTER_DIRECT_TEST_TAIL, obj_path, 1, NULL, NULL,
+                                   (CDirectTestMode){ 0 }) &&
+        c_direct_test_compile_mode("#define S \"abc\"\n#define S \"abd\"\nint f(void) { return 0; }\n" BUSTER_DIRECT_TEST_TAIL, obj_path, 1,
+                                   NULL, NULL, (CDirectTestMode){ 0 }))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL one-token macro definitions\n");
+        failed += 1u;
+    }
+
+    // #3592: a predefined macro's floating literal is read where it is first used, and only there: the values of a
+    // double, a float and the smallest denormal, and a literal the full pipeline diagnoses (a _Float16's F16 suffix)
+    // left unused, then used.
+    char float_path[128];
+    snprintf(float_path, sizeof(float_path), "/tmp/buster_direct_float_predefs_%d.h", (int)getpid());
+    FILE* float_file = fopen(float_path, "wb");
+    bool floats_ok = float_file != NULL;
+    if (floats_ok)
+    {
+        static const char float_predefs[] =
+            "#define __x86_64__ 1\n#define __LP64__ 1\n#define __STDC__ 1\n#define __STDC_VERSION__ 201710L\n"
+            "#define __DBL_DENORM_MIN__ 4.9406564584124654e-324\n#define __DBL_MAX__ 1.7976931348623157e+308\n"
+            "#define __FLT16_MAX__ 6.5504e+4F16\n#define __FLT_EPSILON__ 1.19209290e-7F\n#define __FLT_MAX__ 3.40282347e+38F\n";
+        floats_ok = fwrite(float_predefs, 1, sizeof(float_predefs) - 1u, float_file) == sizeof(float_predefs) - 1u;
+        floats_ok = fclose(float_file) == 0 && floats_ok;
+    }
+    const CDirectTestMode float_mode = { .predefines_path = float_path };
+    const double expected_floats[] = { 1.7976931348623157e+308, 4.9406564584124654e-324, (double)3.40282347e+38F, (double)1.19209290e-7F };
+    floats_ok = floats_ok &&
+                c_direct_test_compile_source_with("const double v[] = { __DBL_MAX__, __DBL_DENORM_MIN__, __FLT_MAX__, __FLT_EPSILON__ };\n"
+                                                  BUSTER_DIRECT_TEST_TAIL, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_floats,
+                                                  sizeof(expected_floats), float_mode);
+    floats_ok = floats_ok && c_direct_test_compile_mode("const double v = __FLT16_MAX__;\n" BUSTER_DIRECT_TEST_TAIL, obj_path, 1, NULL, NULL, float_mode);
+    unlink(float_path);
+    if (floats_ok)
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL a predefined macro's floating literal\n");
+        failed += 1u;
+    }
+
     if (c_direct_test_tables_and_inline_bodies(obj_path))
     {
         passed += 1u;

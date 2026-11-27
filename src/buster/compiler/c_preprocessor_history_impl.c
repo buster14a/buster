@@ -334,6 +334,21 @@ static void pp_diagnostic_flush(PPDiagnostic* diagnostic)
     }
 }
 
+// Preserve pending bytes when extending a diagnostic. The caller streams the pending prefix if scratch is exhausted.
+static bool pp_diagnostic_grow(PPDiagnostic* diagnostic, uint64_t needed)
+{
+    const uint64_t doubled = diagnostic->capacity <= UINT64_MAX / 2 ? diagnostic->capacity * 2 : 0;
+    const uint64_t capacity = needed > doubled ? needed : doubled;
+    char* grown = diagnostic->arena != 0 ? arena_push(diagnostic->arena, capacity, 1) : 0;
+    if (grown != 0)
+    {
+        memcpy(grown, diagnostic->bytes, diagnostic->count);
+        diagnostic->bytes = grown;
+        diagnostic->capacity = capacity;
+    }
+    return grown != 0;
+}
+
 static void pp_diagnostic_format(PPDiagnostic* diagnostic, const char* format, va_list arguments)
 {
     va_list copy;
@@ -348,16 +363,10 @@ static void pp_diagnostic_format(PPDiagnostic* diagnostic, const char* format, v
     {
         uint64_t needed = 0;
         const bool sized = length >= 0 && !__builtin_add_overflow(diagnostic->count, (uint64_t)(uint32_t)length + 1, &needed);
-        const uint64_t doubled = diagnostic->capacity <= UINT64_MAX / 2 ? diagnostic->capacity * 2 : 0;
-        const uint64_t capacity = needed > doubled ? needed : doubled;
-        char* grown = !diagnostic->direct && sized && diagnostic->arena != 0 ? arena_push(diagnostic->arena, capacity, 1) : 0;
-        if (grown != 0)
+        if (!diagnostic->direct && sized && pp_diagnostic_grow(diagnostic, needed))
         {
-            memcpy(grown, diagnostic->bytes, diagnostic->count);
-            diagnostic->bytes = grown;
-            diagnostic->capacity = capacity;
             va_copy(copy, arguments);
-            const int written = vsnprintf(grown + diagnostic->count, capacity - diagnostic->count, format, copy);
+            const int written = vsnprintf(diagnostic->bytes + diagnostic->count, diagnostic->capacity - diagnostic->count, format, copy);
             va_end(copy);
             if (written == length)
             {
@@ -480,75 +489,154 @@ static uint32_t pp_snippet_code_point(const uint8_t* bytes, uint32_t size)
     return legal ? code_point : UINT32_MAX;
 }
 
-// Appends source line `line` (`length` bytes) as clang's emitSnippet prints it, and fills `columns` (length + 1 entries)
-// with clang's SourceColumnMap: each byte's display column where a character starts there, UINT32_MAX for its other
-// bytes, and the line's width at `length`, which it returns. Printable ASCII is itself, a column a byte; a tab, spaces
-// to the next stop; a well-formed UTF-8 character that LLVM's tables call printable, itself, in unicode_column_width's
-// columns; another well-formed one, <U+XXXX>; and a byte of no well-formed character, <XX>. The plain runs are found,
-// copied and numbered 64 bytes at a time; the other bytes, a line's rare tabs, controls and non-ASCII characters, take
-// a step each, since a character's size and width come from its own bytes and LLVM's range tables. Cold: it runs once
-// a line a printed diagnostic shows.
+// Source snippets contain printable text and escapes. Each piece passed here is nonempty and contains no NUL.
+static void pp_snippet_text(PPDiagnostic* diagnostic, const char* text, uint32_t length)
+{
+    if (!diagnostic->direct && length >= diagnostic->capacity - diagnostic->count)
+    {
+        uint64_t needed;
+        if (__builtin_add_overflow(diagnostic->count, (uint64_t)length + 1, &needed) || !pp_diagnostic_grow(diagnostic, needed))
+        {
+            pp_diagnostic_flush(diagnostic);
+            diagnostic->direct = true;
+        }
+    }
+    if (diagnostic->direct)
+    {
+        fwrite(text, 1, length, diagnostic->stream);
+    }
+    else
+    {
+        memcpy(diagnostic->bytes + diagnostic->count, text, length);
+        diagnostic->count += length;
+        diagnostic->bytes[diagnostic->count] = 0;
+    }
+}
+
+// A printable ASCII run and the character following it have consecutive starting columns.
+static void pp_snippet_columns(uint32_t* columns, uint32_t count, uint32_t first, __m512i lanes)
+{
+    for (uint32_t i = 0; i < count; i += 16)
+    {
+        const __mmask16 live = (__mmask16)_bzhi_u32(UINT16_MAX, count - i);
+        _mm512_mask_storeu_epi32(columns + i, live, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)(first + i))));
+    }
+}
+
+// Append the source as Clang displays it. Map each character's first byte to its starting column, its remaining
+// bytes to UINT32_MAX, and the end of the line to the total width. Tab stops count bytes since the previous tab.
+// Each block classifies UTF-8 and escapes together. Visit the marked characters in source order to emit their text.
 static uint32_t pp_snippet_line(PPDiagnostic* diagnostic, const uint8_t* line, uint32_t length, uint32_t* columns)
 {
-    uint32_t column = 0;
-    // The byte after the last tab, from which a tab's stop counts bytes (bytesSincePreviousTabOrLineBegin).
-    uint32_t tab_end = 0;
-    uint32_t at = 0;
     const __m512i steps = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    while (at < length)
+    uint32_t column = 0;
+    uint32_t tab_end = 0;
+    for (uint32_t first = 0; first < length;)
     {
-        const uint32_t remaining = length - at;
-        const uint32_t loaded = remaining < 64 ? remaining : 64;
-        const __mmask64 valid = _bzhi_u64(~0ull, loaded);
-        const __m512i bytes = _mm512_maskz_loadu_epi8(valid, line + at);
-        const uint64_t special = (_mm512_cmplt_epu8_mask(bytes, _mm512_set1_epi8(0x20)) | _mm512_cmpge_epu8_mask(bytes, _mm512_set1_epi8(0x7f))) & valid;
-        const uint32_t run = special != 0 ? (uint32_t)_tzcnt_u64(special) : loaded;
-        pp_diagnostic_append(diagnostic, "%.*s", (int)run, (const char*)line + at);
-        for (uint32_t i = 0; i < run; i += 16)
+        const uint32_t left = length - first;
+        uint32_t n = left < 64 ? left : 64;
+        uint64_t live = _bzhi_u64(UINT64_MAX, n);
+        const __m512i raw = _mm512_maskz_loadu_epi8(live, line + first);
+        const uint64_t special = (_mm512_cmplt_epu8_mask(raw, _mm512_set1_epi8(32)) | _mm512_cmpge_epu8_mask(raw, _mm512_set1_epi8(127))) & live;
+        uint64_t two = 0;
+        uint64_t three = 0;
+        uint64_t four = 0;
+        uint64_t tails = 0;
+        if (_mm512_movepi8_mask(raw) != 0)
         {
-            const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, run - i);
-            _mm512_mask_storeu_epi32(columns + at + i, lanes, _mm512_add_epi32(steps, _mm512_set1_epi32((int)(column + i))));
+            const uint64_t continuation = _mm512_cmpeq_epi8_mask(_mm512_and_si512(raw, _mm512_set1_epi8((char)0xc0)), _mm512_set1_epi8((char)0x80));
+            const uint64_t pairs = _mm512_mask_cmplt_epu8_mask(_mm512_cmpge_epu8_mask(raw, _mm512_set1_epi8((char)0xc2)), raw, _mm512_set1_epi8((char)0xe0));
+            const uint64_t triples = _mm512_cmpeq_epi8_mask(_mm512_and_si512(raw, _mm512_set1_epi8((char)0xf0)), _mm512_set1_epi8((char)0xe0));
+            const uint64_t quads = _mm512_mask_cmple_epu8_mask(_mm512_cmpge_epu8_mask(raw, _mm512_set1_epi8((char)0xf0)), raw, _mm512_set1_epi8((char)0xf4));
+            // Leave a possible split character for the next load. At end of line a truncated lead is an invalid byte.
+            const uint64_t crossing = (pairs & (UINT64_MAX << 63)) | (triples & (UINT64_MAX << 62)) | (quads & (UINT64_MAX << 61));
+            if (left > 64 && crossing != 0)
+            {
+                n = (uint32_t)__builtin_ctzll(crossing);
+                live = _bzhi_u64(UINT64_MAX, n);
+            }
+            // Constrain the second byte to exclude overlong encodings, surrogates and values above U+10FFFF.
+            const uint64_t low_a0 = _mm512_cmplt_epu8_mask(raw, _mm512_set1_epi8((char)0xa0)) >> 1;
+            const uint64_t low_90 = _mm512_cmplt_epu8_mask(raw, _mm512_set1_epi8((char)0x90)) >> 1;
+            const uint64_t bad3 = (_mm512_cmpeq_epi8_mask(raw, _mm512_set1_epi8((char)0xe0)) & low_a0) |
+                                  (_mm512_cmpeq_epi8_mask(raw, _mm512_set1_epi8((char)0xed)) & ~low_a0);
+            const uint64_t bad4 = (_mm512_cmpeq_epi8_mask(raw, _mm512_set1_epi8((char)0xf0)) & low_90) |
+                                  (_mm512_cmpeq_epi8_mask(raw, _mm512_set1_epi8((char)0xf4)) & ~low_90);
+            two = live & pairs & (continuation >> 1);
+            three = live & triples & (continuation >> 1) & (continuation >> 2) & ~bad3;
+            four = live & quads & (continuation >> 1) & (continuation >> 2) & (continuation >> 3) & ~bad4;
+            tails = ((two | three | four) << 1) | ((three | four) << 2) | (four << 3);
         }
-        column += run;
-        at += run;
-        if (special != 0)
+        uint32_t at = first;
+        const uint32_t stop = first + n;
+        for (uint64_t events = special & live & ~tails; events != 0; events &= events - 1)
         {
-            const uint8_t byte = line[at];
-            // LLVM's getNumBytesForUTF8: a continuation byte counts 1, a lead byte its sequence's length.
-            const uint32_t claimed = byte < 0xC0 ? 1 : byte < 0xE0 ? 2 : byte < 0xF0 ? 3 : byte < 0xF8 ? 4 : byte < 0xFC ? 5 : 6;
-            const uint32_t code_point = byte != '\t' && claimed <= length - at ? pp_snippet_code_point(line + at, claimed) : UINT32_MAX;
-            const int32_t width = code_point != UINT32_MAX && code_point >= 0x80 ? unicode_column_width(code_point) : -1;
-            const uint32_t size = code_point != UINT32_MAX ? claimed : 1;
-            uint32_t shown = 0;
+            const uint32_t lane = (uint32_t)__builtin_ctzll(events);
+            const uint32_t pos = first + lane;
+            const uint32_t plain = pos - at;
+            if (plain != 0)
+            {
+                pp_snippet_text(diagnostic, (const char*)line + at, plain);
+            }
+            pp_snippet_columns(columns + at, plain + 1, column, steps);
+            column += plain;
+            const uint8_t byte = line[pos];
+            const uint64_t bit = UINT64_C(1) << lane;
+            uint32_t size = 1;
             if (byte == '\t')
             {
-                shown = BUSTER_PP_SNIPPET_TAB_STOP - (at - tab_end) % BUSTER_PP_SNIPPET_TAB_STOP;
-                pp_diagnostic_append(diagnostic, "%*s", (int)shown, "");
-                tab_end = at + 1;
-            }
-            else if (width >= 0)
-            {
-                pp_diagnostic_append(diagnostic, "%.*s", (int)size, (const char*)line + at);
-                shown = (uint32_t)width;
+                const uint32_t shown = BUSTER_PP_SNIPPET_TAB_STOP - (pos - tab_end) % BUSTER_PP_SNIPPET_TAB_STOP;
+                pp_snippet_text(diagnostic, "        ", shown);
+                tab_end = pos + 1;
+                column += shown;
             }
             else
             {
-                char escaped[16];
-                const int written = code_point != UINT32_MAX ? snprintf(escaped, sizeof(escaped), "<U+%04X>", code_point) : snprintf(escaped, sizeof(escaped), "<%02X>", byte);
-                pp_diagnostic_append(diagnostic, "%s", escaped);
-                shown = (uint32_t)written;
+                uint32_t point = byte;
+                int32_t width = -1;
+                if ((bit & (two | three | four)) != 0)
+                {
+                    size = (bit & two) != 0 ? 2 : (bit & three) != 0 ? 3 : 4;
+                    point = byte & (0x7fu >> size);
+                    for (uint32_t b = 1; b < size; b += 1)
+                    {
+                        point = (point << 6) | (line[pos + b] & 63u);
+                    }
+                    width = unicode_column_width(point);
+                    _mm_mask_storeu_epi32(columns + pos + 1, (__mmask8)((1u << (size - 1)) - 1), _mm_set1_epi32(-1));
+                }
+                if (width >= 0)
+                {
+                    pp_snippet_text(diagnostic, (const char*)line + pos, size);
+                    column += (uint32_t)width;
+                }
+                else
+                {
+                    const bool invalid = byte >= 0x80 && size == 1;
+                    char escaped[10] = { '<', 'U', '+' };
+                    const uint32_t digits = invalid ? 2 : 4u + (point >= 0x10000) + (point >= 0x100000);
+                    const uint32_t begin = invalid ? 1 : 3;
+                    for (uint32_t j = 0; j < digits; j += 1)
+                    {
+                        escaped[begin + j] = "0123456789ABCDEF"[(point >> (4 * (digits - j - 1))) & 15];
+                    }
+                    escaped[begin + digits] = '>';
+                    pp_snippet_text(diagnostic, escaped, begin + digits + 1);
+                    column += begin + digits + 1;
+                }
             }
-            columns[at] = column;
-            for (uint32_t i = 1; i < size; i += 1)
-            {
-                columns[at + i] = UINT32_MAX;
-            }
-            column += shown;
-            at += size;
+            at = pos + size;
         }
+        if (at < stop)
+        {
+            pp_snippet_text(diagnostic, (const char*)line + at, stop - at);
+            pp_snippet_columns(columns + at, stop - at, column, steps);
+            column += stop - at;
+        }
+        first = stop;
     }
     columns[length] = column;
-    pp_diagnostic_append(diagnostic, "\n");
+    pp_snippet_text(diagnostic, "\n", 1);
     return column;
 }
 
