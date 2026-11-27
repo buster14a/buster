@@ -15,6 +15,9 @@ requirements. [Command index](README.md).
   (`tier1_cfg_anchors`, exit hints, #2553). With `slot_widths`,
   a phi web's spilled values share one slot where none overlaps another, so an
   edge moves nothing for an operand already in its phi's slot (#1216).
+  A late non-phi, non-recipe definition with no existing value or register hint
+  follows its earlier body range's opening (`tier1_cfg_definition_hints`, #2553);
+  the allocator's guarded recipe yielding can keep that register at the definition too.
   `tier1_cfg_verify` is its independent checker, which simulates each block and edge, and checks
   each piece of a range cut at a split where its split's moves leave it. Its
   classes, and `tier1_allocate.c`'s, are general, vector and AVX-512's opmask
@@ -118,7 +121,14 @@ spills, rematerialization and fixed clobbers in all three register classes.
 Small fixtures run the allocator, independent verifier, certificate and
 mutation checks. The dispatch-entry fixture (#2782) checks that a handler a
 `goto` and a dispatch's multiway branch both enter starts its phi in the
-dispatch's register for the phi's operand. Wide joins of 8, 65, 513 and 8,193 predecessors must prepare
+dispatch's register for the phi's operand. The late-definition fixture (#2553)
+keeps a body's register when an unused recipe occupies it at the definition,
+and needs no repair on their edge. Protected-page rows check the definition
+hint's empty inputs, vector tails and divergent interval searches. Existing
+operand, tie, interval and final call-register hints retain priority, including
+call preferences propagated through tied results. Different legal register masks
+at the body and definition remain hard constraints in all three classes.
+Wide joins of 8, 65, 513 and 8,193 predecessors must prepare
 within 8 MiB of scratch with zero or one global value, and every local operand
 must keep exactly its home-tail interval. A ladder of 255, 511, 512, 1,100 and
 20,000 rungs uses each rung's value up to three rungs later, passes it to the
