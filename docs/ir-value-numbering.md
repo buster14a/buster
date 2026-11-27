@@ -60,6 +60,15 @@ cycle before this step. The remaining unresolved values are refined in rounds
 with the final classes held fixed. In reachable SSA, every ordinary operand
 dominates its use. A phi-free function can therefore number instructions and
 check availability in one dominator-preorder traversal.
+Tier 1's three callers consume the rewritten function and can set
+`IrGvnOptions.apply_only`. If every block is reachable, the pass first
+checks whether each eligible phi is statically distinct from the other phis
+in its block. Incoming fingerprints include the predecessor, so their sum is
+independent of storage order. Unique fingerprints prove singleton classes.
+A repeated fingerprint declines the shortcut. When the proof succeeds,
+the phis receive their final classes before the dominator-preorder traversal.
+The omitted dependency-cycle census is reported as `BUSTER_IR_NONE`. The
+standard API and the complete-refinement oracle retain their exact census.
 The pass builds complete use lists only when it finds an undef. Impure and undef-tainted
 instructions are unique leaves and never wait.
 

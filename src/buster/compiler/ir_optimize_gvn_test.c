@@ -215,6 +215,15 @@ static void ir_gvn_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena
         }
         // Values that reach no cycle are numbered without refinement rounds; only the rest are refined.
         ir_optimize_test_expect(test, recurrent ? a.acyclic < f->instruction_count && a.rounds != 0 : a.acyclic == f->instruction_count && a.rounds == 0, "GVN refines exactly the values that reach a cycle");
+        // The production entry may prove every phi distinct before its back edge is numbered.
+        // Compare that proof with the full census, including cyclic fixtures and permuted inputs.
+        arena_pop_to(scalar, sm);
+        IrGvnOptions apply = ir_gvn_options();
+        apply.apply_only = true;
+        IrGvnResult applied = { 0 };
+        const IrCheck application = ir_optimize_gvn(f, scalar, scratch, apply, &applied);
+        ir_optimize_test_expect(test, application.error == IR_OK && applied.classes == a.classes &&
+                                ir_optimize_test_equal(&applied.function, &a.function), "GVN production phi proof preserves all congruences");
         // Refining every instruction in synchronous rounds is the acyclic numbering's exact oracle: the same
         // partition, so the same class count and rewritten function, from the same scratch.
         arena_pop_to(scalar, sm);

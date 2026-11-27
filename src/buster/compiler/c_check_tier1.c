@@ -491,6 +491,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (vectors && !input->numbered)
     {
         IrGvnOptions options = ir_gvn_options();
+        options.apply_only = true;
         options.scalar = scalar;
         options.vectors = true;
         if (!check_tier1_lane_reserve(lane, 0))
@@ -715,6 +716,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         else
         {
             IrGvnOptions options = ir_gvn_options();
+            options.apply_only = true;
             options.scalar = scalar;
             options.pressure = true;
             options.validated = true;
@@ -1102,6 +1104,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED && gvn)
     {
         IrGvnOptions options = ir_gvn_options();
+        options.apply_only = true;
         options.scalar = scalar;
         const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[7], scratch, options, &gvn_result);
         outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);

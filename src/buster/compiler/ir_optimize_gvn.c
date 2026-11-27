@@ -40,6 +40,8 @@ struct IrGvnOptions
     // builds the CFG, use lists and dominator tree without verifying it again. A function the pass rewrites is verified
     // as ever.
     bool validated;
+    // A caller consuming only the rewritten function may omit the dependency-cycle census.
+    bool apply_only;
 };
 
 // IrGvnOptions.pressure's free values by operation: each copy costs nothing at its user.
@@ -63,7 +65,7 @@ struct IrGvnResult
     IrFunction function;
     uint32_t removed;
     uint32_t classes;
-    // Instructions the acyclic numbering gave their final class; the rest were refined in rounds.
+    // Instructions numbered before cyclic refinement, or BUSTER_IR_NONE when the caller omits the cycle census.
     uint32_t acyclic;
     uint64_t rounds;
     uint64_t partition_probes;
@@ -1354,10 +1356,70 @@ static IrCheck ir_gvn_verify(const IrGvnWork* work, Arena* output, Arena* scratc
     return check.error == IR_OK ? check : ir_optimize_verify_result(f, output, scratch);
 }
 
+// In verified reachable SSA, once phis are atoms every other use follows its definition in dominator
+// preorder. A phi is an atom if no other phi in its block can match it. Prove that using static input
+// keys, which are already necessary for congruence even for an unresolved back edge. A fingerprint
+// collision declines the proof. Check the entire function before changing any class or eligibility bit.
+static bool ir_gvn_distinct_phis(IrGvnWork* work)
+{
+    const IrFunction* f = work->ir.function;
+    bool distinct = true;
+    for (uint32_t block = 0; distinct && block < f->block_count; block += 1)
+    {
+        const uint32_t begin = f->block_offsets[block];
+        const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+        if (end - begin <= 1 || f->op[begin + 1] != IR_PHI)
+        {
+            continue;
+        }
+        uint64_t seen = 0;
+        for (uint32_t i = begin; distinct && i < end && f->op[i] == IR_PHI; i += 1)
+        {
+            if (work->pure[i] == 0)
+            {
+                continue;
+            }
+            uint64_t hash = ir_gvn_meta(f, i);
+            // An order-independent sum also covers phis whose predecessor/value pairs are permuted.
+            for (uint32_t k = 0; k < f->b[i]; k += 1)
+            {
+                const uint32_t* input = f->extra + f->a[i] + (uint64_t)k * 2;
+                const uint32_t v = work->alias[input[1]];
+                const IrGvnPayload payload = ir_gvn_payload(work, v);
+                uint64_t term = ir_gvn_mix(ir_gvn_meta(f, v), work->pure[v] == 0 ? (uint64_t)v + 1 : 0);
+                term = ir_gvn_mix(ir_gvn_mix(term, payload.low), payload.high);
+                hash += ir_gvn_mix(term, input[0]);
+            }
+            const uint64_t bit = UINT64_C(1) << ((hash ^ (hash >> 32)) & 63);
+            distinct = (seen & bit) == 0;
+            seen |= bit;
+        }
+    }
+    if (distinct)
+    {
+        for (uint32_t block = 0; block < f->block_count; block += 1)
+        {
+            const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+            for (uint32_t i = f->block_offsets[block]; i < end && f->op[i] == IR_PHI; i += 1)
+            {
+                if (work->pure[i] != 0)
+                {
+                    work->classes[i] = ++work->unique;
+                    work->pure[i] = 0;
+                }
+            }
+        }
+    }
+    return distinct;
+}
+
 static IrError ir_gvn_solve(IrGvnWork* work, IrGvnOptions options)
 {
     // Classes 1..numbered are the acyclic numbering's; the refinement numbers the rest after them.
     const uint32_t n = work->ir.function->instruction_count;
+    const bool census_omitted = !work->ordered && options.apply_only && !options.complete &&
+                                work->ir.dominators.reachable_count == work->ir.function->block_count && ir_gvn_distinct_phis(work);
+    work->ordered |= census_omitted;
     uint32_t numbered = work->unique;
     work->fused = work->ordered && !options.complete;
     work->vectors_only = options.vectors && !options.pressure;
@@ -1365,6 +1427,10 @@ static IrError ir_gvn_solve(IrGvnWork* work, IrGvnOptions options)
     if (work->wait_failed)
     {
         return IR_ERROR_MEMORY;
+    }
+    if (census_omitted)
+    {
+        work->statistics.acyclic = BUSTER_IR_NONE;
     }
     work->repeats_only = acyclic;
     if (acyclic && work->pending == 0)
