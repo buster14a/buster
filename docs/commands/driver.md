@@ -405,6 +405,23 @@ next statement is a block or is indented past the loop, as clang decides, and
 the direct path's tokens keep no columns, so it compiles such loops quietly as
 before. `if (x);` and `switch (x);` leave on any line.
 
+A skipped group's text is passed 64 bytes at a time (`fast_pp_skip_inactive_in`),
+and a line splice there joins its lines as the full pipeline's reading does: a
+`#` after a splice starts a directive only where its line held nothing but
+blanks (or comments) before it, so `int x \` then `#else` is no directive and a
+lone `\` then `#else` is one, with `\r\n` and blanks between the backslash and
+its newline too. Its masks read it as a line's end; only where that would
+misread the line's first character (the text after the splice is a `#`, a
+comment or a backslash, or the splice or its blanks reach the block's end) is
+the splice an event, decided as a comment, a blank. A splice inside or right
+after a skipped directive's name, or between its `#` and its name, leaves where
+the name it makes is another conditional (`#el\` then `se`, `#\` then `endif`),
+and so does a UCN's backslash there. The blocks with no event take an inner
+loop of their own, so that the decisions' code and calls don't take its
+registers: sqlite3.c's skips went from 8.16 M instructions to 7.44 M on the
+9700X with the splices read. A comment between a skipped directive's `#` and
+its name (`#/**/else`) is still read as no directive, a gap left.
+
 `./build/compiler test-direct --differential [--jobs N] [--direct-floor N]
 DIRECTORY...` compiles every C file under the directories with this
 executable twice, each run a child of its own (standard input `/dev/null`,

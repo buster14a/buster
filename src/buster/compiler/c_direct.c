@@ -4084,6 +4084,84 @@ static bool c_direct_test_skipped_ucns(const char* obj_path)
     return ok;
 }
 
+// A line splice in a skipped group (#3577): the line it continues goes on after it, so a '#' there starts a directive only
+// where the line had nothing but blanks before the splice, as the full pipeline reads it. Each source compiles on the
+// direct path only where it reads them so: the #else that a misread takes or misses names an undeclared Z, or leaves
+// `q` undeclared. The splices are tight, "\r\n" and with blanks before the newline, each at every offset of the skip's
+// first blocks (a block's last byte among them), in a mode with raw string literals and in one without, before a
+// directive, a nested #if, a comment and blanks, and in a literal; then splices in and after a directive's name.
+static bool c_direct_test_skipped_splices(const char* obj_path)
+{
+    static const char* const forms[] = { "\\\n", "\\\r\n", "\\ \t\n" };
+    static const char* const sources[] = {
+        // After only blanks the next line's #else is a directive, and `q` is declared.
+        "#if 0\n%*s%s#else\nint q = 1;\n#endif\nint f(void) { return q; }\n",
+        // After text it isn't: the #else group stays skipped.
+        "#if 0\n%*sx %s#else\nint q = Z;\n#endif\nint f(void) { return 0; }\n",
+        // Nor is a nested #if's, which would take the group's #endif.
+        "#if 0\n%*sx %s#if 1\n#endif\nint q = 1;\nint f(void) { return q; }\n",
+        // A comment after the splice is no line's first character, and neither is the #else after it.
+        "#if 0\n%*sx %s/* c */ #else\nint q = Z;\n#endif\nint f(void) { return 0; }\n",
+        // The splice of a line a literal holds.
+        "#if 0\n%*s\"x %s#else\"\nint q = Z;\n#endif\nint f(void) { return 0; }\n",
+        // Blanks after the splice, then the #else.
+        "#if 0\n%*s%s   #else\nint q = 1;\n#endif\nint f(void) { return q; }\n",
+    };
+    const CDirectTestMode modes[] = { { 0 }, { .raw_strings = 1 } };
+    bool ok = true;
+    for (uint32_t m = 0; ok && m < 2u; m += 1)
+    {
+        for (uint32_t form = 0; ok && form < 3u; form += 1)
+        {
+            for (uint32_t s = 0; ok && s < (uint32_t)(sizeof(sources) / sizeof(sources[0])); s += 1)
+            {
+                for (uint32_t pad = 0; ok && pad < 140u; pad += 1)
+                {
+                    char source[512];
+                    snprintf(source, sizeof(source), sources[s], (int)pad, "", forms[form]);
+                    ok = c_direct_test_compile_mode(source, obj_path, 0, NULL, NULL, modes[m]);
+                    if (!ok)
+                    {
+                        fprintf(stderr, "test-direct: a skipped group's splice, mode %u, form %u, source %u, after %u blanks\n", m, form, s, pad);
+                    }
+                }
+            }
+        }
+    }
+    // A splice after a skipped directive's name, or between its '#' and its name: where the name goes on past it into
+    // another conditional's, or a UCN's backslash follows the name, the unit leaves; where it stays the same directive,
+    // or none, it compiles.
+    static const struct
+    {
+        const char* source;
+        int status;
+    } names[] = {
+        { "#if 0\n#el\\\nse\nint q = 1;\n#endif\nint f(void) { return q; }\n", 1 },
+        { "#if 0\n#\\\nendif\nint q = 1;\nint f(void) { return q; }\n", 1 },
+        { "#if 0\n# \\\r\n  else\nint q = 1;\n#endif\nint f(void) { return q; }\n", 1 },
+        { "#if 0\n#endif\\\nx\nint q = Z;\n#endif\nint f(void) { return 0; }\n", 1 },
+        { "#if 0\n#elif\\\nX\nint q = 1;\n#endif\nint f(void) { return 0; }\n", 1 },
+        { "#if 0\n#if\\\ndef X\n#endif\n#endif\nint f(void) { return 0; }\n", 1 },
+        { "#if 0\n#ifdef\\\nX\n#else\nint q = 1;\n#endif\nint f(void) { return q; }\n", 1 },
+        { "#if 0\n#if\\u0041\n#endif\nint f(void) { return 0; }\n", 1 },
+        { "#if 0\n#define\\\n X 1\n#endif\nint f(void) { return 0; }\n", 0 },
+        { "#if 0\n#endif\\\n\nint q = 1;\nint f(void) { return q; }\n", 0 },
+        { "#if 0\n#if\\\n 1\n#else\n#endif\n#else\nint q = 1;\n#endif\nint f(void) { return q; }\n", 0 },
+        { "#if 0\n#define A \\\n  #endif\n#endif\nint f(void) { return 0; }\n", 0 },
+        { "#if 0\n#define S(x) \\\n#x\n#endif\nint f(void) { return 0; }\n", 0 },
+        { "#if 0\n  #endif\nint f(void) { return 0; }\n", 0 },
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(names) / sizeof(names[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(names[i].source, obj_path, names[i].status, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: a skipped directive's spliced name, expected status %d: %s", names[i].status, names[i].source);
+        }
+    }
+    return ok;
+}
+
 // What the dependency test expects of the records (#3592): the paths after the test's directory, in order, and the flags.
 typedef struct CDirectTestDependency CDirectTestDependency;
 struct CDirectTestDependency
@@ -5667,6 +5745,16 @@ static int c_direct_unit_tests(void)
     else
     {
         fprintf(stderr, "test-direct: FAIL skipped groups' UCNs, digit separators and dotted asm labels\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_skipped_splices(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL skipped groups' line splices\n");
         failed += 1u;
     }
 
