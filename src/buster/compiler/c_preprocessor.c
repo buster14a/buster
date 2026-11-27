@@ -3391,29 +3391,9 @@ static uint32_t pp_scan_directives_window(const uint8_t* kinds, uint32_t begin, 
 // The windows' scans start at refinement's block boundaries, a word of 64 tokens apart.
 _Static_assert(BUSTER_REFINE_BLOCK_TOKENS % 64 == 0, "pp_scan_directives_window takes whole words of 64 tokens");
 
-// The places of the tokens whose bits are set in `words`, a word per 64 tokens, `word_count` of them (the directives'
-// '#' tokens that pp_scan_directives_window found), into `places` in order, a bit at a time: what pp_directive_places
-// does for a word of more than 16, and its test's reference. Returns how many.
-static uint32_t pp_directive_places_scalar(const uint64_t* words, uint32_t word_count, uint32_t* places)
-{
-    uint32_t count = 0;
-    for (uint32_t w = 0; w < word_count; w += 1)
-    {
-        for (uint64_t bits = words[w]; bits != 0; bits &= bits - 1)
-        {
-            places[count] = 64 * w + (uint32_t)__builtin_ctzll(bits);
-            count += 1;
-        }
-    }
-    return count;
-}
-
-// pp_directive_places_scalar eight words at a time: a group of no directive is skipped, and each word of the others has
-// the places of its set bits compressed out of a vector of 0 to 63 (vpcompressb), widened to dwords, offset by the
-// word's first token and stored under a mask of their count, without a branch on the word's bits, which a bit at a time
-// mispredicted: sqlite3.c's places took 45 us so on the 9700X (#451). The groups' branch keeps a file of few directives
-// in long lines from paying a word's compress for each 64 tokens. A word of more than 16 (16 directives in 64 tokens,
-// null ones) takes the bit-at-a-time loop for all of its places. Writes `places` only below the count it returns.
+// Collect the token indices of directives in order. Skip empty groups of eight words. For each remaining word, byte
+// compression packs its set-bit positions into register order. Widen and store up to sixteen positions at a time,
+// offset by the word's first token. Only the returned number of places needs storage.
 static uint32_t pp_directive_places(const uint64_t* words, uint32_t word_count, uint32_t* places)
 {
     const __m512i positions = _mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37,
@@ -3423,19 +3403,29 @@ static uint32_t pp_directive_places(const uint64_t* words, uint32_t word_count, 
     for (uint32_t group = 0; group < word_count; group += 8)
     {
         const uint32_t size = word_count - group < 8 ? word_count - group : 8;
-        const __m512i eight = _mm512_maskz_loadu_epi64((__mmask8)_bzhi_u32(0xFF, size), words + group);
-        for (uint32_t w = group; _mm512_test_epi64_mask(eight, eight) != 0 && w < group + size; w += 1)
+        const __m512i eight = size == 8 ? _mm512_loadu_si512(words + group) : _mm512_maskz_loadu_epi64((__mmask8)_bzhi_u32(0xFF, size), words + group);
+        if (_mm512_test_epi64_mask(eight, eight) == 0)
         {
+            continue;
+        }
+        #pragma clang loop unroll_count(8)
+        for (uint32_t lane = 0; lane < size; lane += 1)
+        {
+            const uint32_t w = group + lane;
             const uint64_t bits = words[w];
             const uint32_t here = (uint32_t)__builtin_popcountll(bits);
-            const __m128i set = _mm512_castsi512_si128(_mm512_maskz_compress_epi8(bits, positions));
-            _mm512_mask_storeu_epi32(places + count, (__mmask16)_bzhi_u32(0xFFFF, here), _mm512_add_epi32(_mm512_cvtepu8_epi32(set), _mm512_set1_epi32((int)(64 * w))));
+            __m512i set = _mm512_maskz_compress_epi8(bits, positions);
+            const __m512i base = _mm512_set1_epi32((int)(64 * w));
+            const __m512i first = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(set));
+            _mm512_mask_storeu_epi32(places + count, (__mmask16)_bzhi_u32(0xFFFF, here), _mm512_add_epi32(base, first));
             if (BUSTER_UNLIKELY(here > 16))
             {
-                pp_directive_places_scalar(words + w, 1, places + count);
-                for (uint32_t i = 0; i < here; i += 1)
+                for (uint32_t offset = 16; offset < here; offset += 16)
                 {
-                    places[count + i] += 64 * w;
+                    set = _mm512_shuffle_i32x4(set, set, _MM_SHUFFLE(0, 3, 2, 1));
+                    const __m512i next = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(set));
+                    const __mmask16 valid = (__mmask16)_bzhi_u32(0xFFFF, here - offset);
+                    _mm512_mask_storeu_epi32(places + count + offset, valid, _mm512_add_epi32(base, next));
                 }
             }
             count += here;
