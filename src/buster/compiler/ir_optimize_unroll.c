@@ -1080,8 +1080,8 @@ static void ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count,
     {
         const __mmask16 active = (__mmask16)((1u << (count - (uint32_t)at)) - 1);
         const IrUnrollOperands rows = ir_unroll_load_operands(f, first + (uint32_t)at, view, out + (uint32_t)at, active);
-        __m512i gathered_a = rows.a;
-        __m512i gathered_b = rows.b;
+        __m512i gathered_a;
+        __m512i gathered_b;
         __m512i gathered_c = rows.c;
         // A partial packet can combine columns whose active value lanes fit in five lanes per column, or eight lanes in each of the first two columns.
         if (((rows.use_a | rows.use_b | rows.use_c) & 0xffe0u) == 0)
