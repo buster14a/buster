@@ -7,7 +7,7 @@
 // (check_test_constant_conversion_lowered). The programs are tests/checker/constant-conversions.
 
 // Whether entry `e` of `function` is an integer CONST that a CONVERT follows: the pair the fold leaves none of, a
-// conditional's or a logical operator's constant arm's too, whose CONVERT to an integer or _Bool, after the label that
+// conditional's or a logical operator's constant arm's too, whose exact CONVERT, after the label that
 // joined the arms, went into them (check_lower_conditional_target).
 static bool check_test_constant_conversion_pair(const Tier0Function* function, uint32_t e)
 {
@@ -91,8 +91,8 @@ static bool check_test_constant_conversion_kept(const Tier0Function* function, u
 // among them: no integer CONST a CONVERT follows, F32's and F64's CONSTs where the source writes integers, and _Bool's
 // U8 1; "constant-conversion-code" is the issue's four functions'
 // code (check_test_constant_conversion_code); "constant-conversion-controls" keeps the conversions that round: 16777217
-// and 4294967295 to float, 2^53 + 1 and 2^64 - 1 to double; and those after the label joining a conditional's arms and
-// a logical operator's converted to double (check_lower_conditional_sinks), whose 3 and 1 a CONVERT to F64 follows.
+// and 4294967295 to float, 2^53 + 1 and 2^64 - 1 to double. Conditional joins that can round keep their conversion too;
+// #2842's exact floating arms and logical truths are in the folding fixture.
 static void check_test_constant_conversion_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
                                                    Arena* scratch)
 {
@@ -106,6 +106,8 @@ static void check_test_constant_conversion_lowered(CheckTest* test, const char* 
         bool float_two = false;
         bool double_one = false;
         bool double_two = false;
+        bool float_three = false;
+        bool double_three = false;
         bool bool_one = false;
         uint32_t rounding = 0;
         for (uint32_t b = 0; b < lowered[p].count; b += 1)
@@ -118,13 +120,13 @@ static void check_test_constant_conversion_lowered(CheckTest* test, const char* 
             float_two |= check_test_constant_conversion_has(function, BUSTER_TYPED_CLASS_F32, UINT32_C(0x40000000));
             double_one |= check_test_constant_conversion_has(function, BUSTER_TYPED_CLASS_F64, UINT64_C(0x3ff0000000000000));
             double_two |= check_test_constant_conversion_has(function, BUSTER_TYPED_CLASS_F64, UINT64_C(0xc000000000000000));
+            float_three |= check_test_constant_conversion_has(function, BUSTER_TYPED_CLASS_F32, UINT32_C(0x40400000));
+            double_three |= check_test_constant_conversion_has(function, BUSTER_TYPED_CLASS_F64, UINT64_C(0x4008000000000000));
             bool_one |= check_test_constant_conversion_has(function, BUSTER_TYPED_CLASS_U8, 1);
             rounding |= check_test_constant_conversion_kept(function, 16777217, BUSTER_TYPED_CLASS_F32) ? 1u : 0u;
             rounding |= check_test_constant_conversion_kept(function, UINT64_C(9007199254740993), BUSTER_TYPED_CLASS_F64) ? 2u : 0u;
             rounding |= check_test_constant_conversion_kept(function, UINT64_MAX, BUSTER_TYPED_CLASS_F64) ? 4u : 0u;
             rounding |= check_test_constant_conversion_kept(function, UINT32_MAX, BUSTER_TYPED_CLASS_F32) ? 8u : 0u;
-            rounding |= check_test_constant_conversion_kept(function, 3, BUSTER_TYPED_CLASS_F64) ? 16u : 0u;
-            rounding |= check_test_constant_conversion_kept(function, 1, BUSTER_TYPED_CLASS_F64) ? 32u : 0u;
         }
         if (code)
         {
@@ -133,15 +135,15 @@ static void check_test_constant_conversion_lowered(CheckTest* test, const char* 
         else if (controls)
         {
             snprintf(description, sizeof(description),
-                     "%s (%s): the four constants a conversion rounds, and a conditional's and a logical operator's converted to double, keep their CONVERT (found %#x of 0x3f)",
+                     "%s (%s): the four constants a conversion rounds keep their CONVERT (found %#x of 0xf)",
                      name, way, rounding);
-            check_test_expect(test, rounding == 0x3f, description);
+            check_test_expect(test, rounding == 0xf, description);
         }
         else
         {
             snprintf(description, sizeof(description),
                      "%s (%s): no integer constant is converted at run time, and its F32, F64 and _Bool CONSTs are folded (%u pairs)", name, way, pairs);
-            check_test_expect(test, pairs == 0 && float_two && double_one && double_two && bool_one, description);
+            check_test_expect(test, pairs == 0 && float_two && double_one && double_two && float_three && double_three && bool_one, description);
         }
     }
     CheckProgramLowered templated = { 0 };

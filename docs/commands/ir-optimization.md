@@ -566,12 +566,16 @@ at most four non-constant rows, each join takes at most four selects, and the
 moved rows' cost plus two per select is at most eight. Since #2842 a join's
 `f32` and `f64` phis convert too, their rows constants, copies, selects,
 bitcasts, negations and proven loads, none of which raises a floating
-exception; floating arithmetic, comparisons and conversions keep their arm's
-branch. These are policy bounds, not timings; [the design](../ir-optimization.md#scalar-if-conversion-1382) has
+exception. Integer-to-floating conversions move when their entire source range
+fits the target's precision: through `i16` for `f32`, through `i32` for `f64`,
+or a wider input with a qualifying zero/sign extension of those widths. A sign
+extension only proves a signed conversion's range; looking through a zero
+extension changes the proof to unsigned. Unproven conversions, floating
+arithmetic and comparisons keep their arm's branch. These are policy bounds, not timings; [the design](../ir-optimization.md#scalar-if-conversion-1382) has
 the rules.
 
 `test-ir-optimize` runs `ir_if_convert_test.c`: complete SSA verification,
-independent execution before/after cleanup, every result folded into a frozen
+independent execution before/after cleanup, randomized results folded into a frozen
 digest (#2924), the scans (conditional branches, barriers, keys' filter)
 against their definitions on random columns, every guarded candidate-scan tail, multi-phi edge polarity, both triangle
 orientations, sequential, nested and three-predecessor regions over rounds,
@@ -581,7 +585,9 @@ refusal of unsafe or expensive speculation, the reload and truth fixtures,
 addition, a subtraction, a multiplication, a division and a dead comparison
 refused, a floating load speculated behind the head's integer access of its
 bytes and refused past them or volatile, drawing their trials from a stream of
-their own),
+their own), exact integer-to-floating conversions through both triangle
+orientations and a diamond (including extension chains and unsigned
+reinterpretations that must keep their branch),
 a running maximum kept as a branch (and converted with a constant bound), and
 the loop's conditional sum sunk below its addition.
 The reload fixtures reuse a reload, speculate it behind a store or a fence, and

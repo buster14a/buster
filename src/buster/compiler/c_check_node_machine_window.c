@@ -421,14 +421,13 @@ static __attribute__((noinline, cold)) bool node_contexts_converted(const struct
 // check_lower_conditional_target, #2678): the rule's own terms that a record here separates, and no more, so that
 // what this lists is all the rule leaves and a little else:
 // - a target that is another type than its own (the rule's first; to none, nothing is converted);
-// - of an integer's class, a pointer's and a bool's among them (check_lower_conditional_sinks' first: the conversion
-//   folds into a constant of such a class alone);
+// - of an integer's class, a pointer's and a bool's among them, or F32/F64 (check_lower_conditional_sinks);
 // - with an arm that is a constant: a logical operator's 0 or 1 is, and a conditional's arm is where it is an integer
 //   constant (check_lower_integer_constant's kind; its second operand's record, and its third, the record before its
 //   own).
 // The rule asks more, each a term that takes: that the conversion write entries (two types of one class convert by
 // none: `int` to an enumeration's), that it fold for these classes and facts, and that the arm be no lvalue, of an
-// integer's class and with no effect. An expression those would take is listed here (the measurement record has
+// integer's class and with no effect, and every floating arm's conversion must be exact. An expression those would take is listed here (the measurement record has
 // their count on the corpora). An aggregate's target has no class's number: an argument's of a transparent union, in
 // a call that is not plain, and a cast's to a union, which lists its expression itself. Out of line: one record in
 // some hundreds asks.
@@ -443,7 +442,7 @@ static __attribute__((noinline, cold)) bool node_contexts_sinks(const struct Nod
         const uint8_t second = state->window_c_standings[x - 1] & 0x1c;
         const bool conditional = (front->ops[x] & 0x7f) == CHECK_OP_CONDITIONAL;
         const bool constant = !conditional || first == (CHECK_CONSTANT_INTEGER << 2) || second == (CHECK_CONSTANT_INTEGER << 2);
-        sinks = constant && target >= BUSTER_TYPED_CLASS_I8 && target <= BUSTER_TYPED_CLASS_U64;
+        sinks = constant && ((target >= BUSTER_TYPED_CLASS_I8 && target <= BUSTER_TYPED_CLASS_U64) || target == BUSTER_TYPED_CLASS_F32 || target == BUSTER_TYPED_CLASS_F64);
     }
     return sinks;
 }

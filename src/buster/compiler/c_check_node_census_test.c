@@ -2039,14 +2039,15 @@ struct NodeProducerExpected
 // The refusals that stand for what the walk's actions and the passes after it would say (#2850's gate against the
 // diagnostics), each with a body beside it that is taken. Taken: `present` and `calls` (an internal function the unit
 // defines, named; and the unit declares a function with a result's attribute, which is no unit's reason), `same` (one
-// enumeration's values stored, passed and compared), `kept`, `exact` and `halves` (a
-// conditional whose arms its conversion keeps: small integers to a floating type, floats to a double), `narrow` (a
+// enumeration's values stored, passed and compared), `halves` (a conditional whose float-to-double conversion stays
+// after its join), `narrow` (a
 // compound shift inside its operand's own width). A root that may be warned of: `mixed` (two enumerations' enumerators
 // compared), `stored` and `passed` (an enumeration's value to another's object and parameter), `armed` and `started` (a
 // conditional's floating arms converted to an integer, by a return and by an initialization), `inexact` (an integer arm
 // a float does not hold), `narrowed` (double arms to a float). A token's kind: `pragmatic` (a pragma in the body), `undefined` (an internal function the
 // unit does not define, named). The machine's: `shifted` (a compound shift by its operand's own width, the census's
-// constants'). Something said of it before the walk: `said` (a tag a prototype's list declares, -Wvisibility). An
+// constants'), `kept` and `exact` (the tasks now fold both integer arms into exact floating constants, #2842).
+// Something said of it before the walk: `said` (a tag a prototype's list declares, -Wvisibility). An
 // initialization of another form: `aligned` and `typed` (an object aligned past 8 bytes, by its attribute and by its
 // type, whose local is a frame object). A gate of the controls': `bounded` (a parameter whose array's bound the
 // function's entry evaluates).
@@ -7591,10 +7592,11 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem),
                                                                BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_system),
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");
-    // C on the window: its own fixture's counts, each rule on both sides.
+    // C on the window: its own fixture's counts, each rule on both sides. Floating targets list four more joins
+    // (#2842): three whose exact integer/logical conversion sinks, and the conservative float-to-double case.
     static const NodeContextsExpected contexts_expected = {
         .expressions = 2536,
-        .decided = 2276,
+        .decided = 2272,
         .refused = 61,
         .strides = 241,
         .asked = 7,
@@ -7605,11 +7607,11 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .branched = 1722,
         .branched_roots = 523,
         .valued = 470,
-        .sunk = 18,
+        .sunk = 22,
         .commas = 224,
         .listed = {
             [BUSTER_NODE_CONTEXTS_REASON_CALL] = 44,
-            [BUSTER_NODE_CONTEXTS_REASON_LOGICAL] = 183,
+            [BUSTER_NODE_CONTEXTS_REASON_LOGICAL] = 187,
             [BUSTER_NODE_CONTEXTS_REASON_UPDATE] = 15,
             [BUSTER_NODE_CONTEXTS_REASON_COMMA] = 5,
             [BUSTER_NODE_CONTEXTS_REASON_DIVISION] = 2,
@@ -7697,13 +7699,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows.c", node_rows_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_expected),
                       "node-rows: X's rows on the window make each shape's entries' kinds and classes as X does on T's columns, and list what they don't make");
     static const NodeRowsExpected rows_contexts_expected = {
-        .expressions = 2215,
-        .taken = 2194,
-        .entries = 20965,
+        .expressions = 2211,
+        .taken = 2191,
+        .entries = 20932,
         .listed_update = 0,
         .listed_branches = 5,
         .listed_conversion = 10,
-        .listed_floating = 6,
+        .listed_floating = 5,
         .written = 23354,
         .words = 537,
         .lines = 501,
@@ -7720,7 +7722,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         },
         .numbered = 223,
         .steps = 1895,
-        .control_valued = 548,
+        .control_valued = 547,
         .chunks = 23,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_contexts_expected),
@@ -8054,7 +8056,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // The refusals that stand for a diagnostic of the walk's or of a pass after it, each beside a body that is taken; and
     // the two units that take no body for a member's mark and for a result's attribute on a type.
     NodeProducerExpected produced_silent = {
-        .reasons = { [NODE_PRODUCER_TAKEN] = 7, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_GATE] = 1, [NODE_PRODUCER_MACHINE] = 1,
+        .reasons = { [NODE_PRODUCER_TAKEN] = 5, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_GATE] = 1, [NODE_PRODUCER_MACHINE] = 3,
                      [NODE_PRODUCER_INITIALIZER] = 2,
                      [NODE_PRODUCER_LOUD] = 7 },
     };

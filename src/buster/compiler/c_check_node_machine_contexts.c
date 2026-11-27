@@ -123,7 +123,7 @@ static bool node_machine_testable(const NodeMachine* machine, TypeId type)
 
 // Whether the tasks put conditional or logical operator record `r`'s conversion into its arms
 // (check_lower_conditional_target, #2678): its context a value's and its conversion to its target one that writes entries
-// (node_machine_convert's), to an integer or _Bool that folds (check_lower_conditional_sinks), and `constant` (a logical
+// (node_machine_convert's), to an integer, _Bool or exact floating value that folds (check_lower_conditional_sinks), and `constant` (a logical
 // operator's 0 or 1) or one of a conditional's arms `b` and `c` it evaluates (UINT32_MAX for one it doesn't) an integer
 // constant (check_lower_integer_constant). X writes a record's conversion once, after its row, so C leaves such a record
 // to the tasks. Out of line, as only these ask.
@@ -139,18 +139,26 @@ static __attribute__((noinline)) bool node_machine_sinks(const NodeMachine* mach
         const uint8_t source = node_machine_record_class(machine, r);
         const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
         const bool empty = check_lower_conversion_empty_by_class(source, from_facts, target, to_facts);
+        const bool bounded = constant || check_lower_conditional_exact(source, target);
+        bool exact = true;
         for (uint32_t k = 0; k < 2; k += 1)
         {
             const uint32_t arm = k == 0 ? b : c;
             if (arm != UINT32_MAX)
             {
-                constant |= check_lower_integer_constant(node_machine_record_class(machine, arm), node_machine_record_facts(machine, arm),
-                                                         node_machine_record_constant_kind(machine, arm), node_machine_record_fault(machine, arm),
-                                                         node_machine_record_flags(machine, arm), node_machine_record_category(machine, arm),
-                                                         node_machine_record_op(machine, arm));
+                const uint8_t arm_class = node_machine_record_class(machine, arm);
+                const uint8_t arm_facts = node_machine_record_facts(machine, arm);
+                bool folds = check_lower_integer_constant(arm_class, arm_facts, node_machine_record_constant_kind(machine, arm), node_machine_record_fault(machine, arm),
+                                                         node_machine_record_flags(machine, arm), node_machine_record_category(machine, arm), node_machine_record_op(machine, arm));
+                constant |= folds;
+                if (!bounded && folds)
+                {
+                    folds = check_lower_conditional_constant(arm_class, arm_facts, source, from_facts, target, to_facts, node_machine_record_integer(machine, arm));
+                }
+                exact &= folds;
             }
         }
-        sinks = !empty && constant && check_lower_conditional_sinks(source, from_facts, target, to_facts);
+        sinks = !empty && constant && (bounded || exact) && check_lower_conditional_sinks(source, from_facts, target, to_facts);
     }
     return sinks;
 }
