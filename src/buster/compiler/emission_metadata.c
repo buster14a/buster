@@ -208,33 +208,26 @@ static __attribute__((unused)) EmissionCheck emission_metadata_resolve(const Emi
                                                                        const EmissionStorage* storage, bool scalar, EmissionResolved* result);
 static __attribute__((unused)) uint32_t emission_anchor_offset(const EmissionLayout* layout, EmissionAnchor at);
 
+// Both row validators receive a structurally complete layout from emission_metadata_check.
 static EmissionCheck emission_layout_check_scalar(const EmissionLayout* layout)
 {
-    EmissionCheck check = {
-        .error = EMISSION_INVALID,
-        .part = EMISSION_LAYOUT,
-    };
-    if (layout != NULL && (layout->count == 0 || (layout->starts != NULL && layout->ends != NULL)))
+    EmissionCheck check = { .error = EMISSION_OK, .part = EMISSION_NONE };
+    const uint32_t count = layout->count;
+    const uint32_t size = layout->size;
+    const uint32_t* const starts = layout->starts;
+    const uint32_t* const ends = layout->ends;
+    uint32_t previous = 0;
+    for (uint32_t i = 0; check.error == EMISSION_OK && i < count; i += 1)
     {
-        const uint32_t count = layout->count;
-        const uint32_t size = layout->size;
-        const uint32_t* const starts = layout->starts;
-        const uint32_t* const ends = layout->ends;
-        uint32_t previous = 0;
-        check.error = EMISSION_OK;
-        check.part = EMISSION_NONE;
-        for (uint32_t i = 0; check.error == EMISSION_OK && i < count; i += 1)
+        const uint32_t start = starts[i];
+        const uint32_t end = ends[i];
+        if (start < previous || end < start || end > size)
         {
-            const uint32_t start = starts[i];
-            const uint32_t end = ends[i];
-            if (start < previous || end < start || end > size)
-            {
-                check.error = EMISSION_INVALID;
-                check.part = EMISSION_LAYOUT;
-                check.index = i;
-            }
-            previous = end;
+            check.error = EMISSION_INVALID;
+            check.part = EMISSION_LAYOUT;
+            check.index = i;
         }
+        previous = end;
     }
     return check;
 }
@@ -244,7 +237,7 @@ static EmissionCheck emission_layout_check_scalar(const EmissionLayout* layout)
 static EmissionCheck emission_layout_check(const EmissionLayout* layout, bool scalar)
 {
     EmissionCheck check;
-    if (scalar || layout == NULL || (layout->count != 0 && (layout->starts == NULL || layout->ends == NULL)))
+    if (scalar)
     {
         check = emission_layout_check_scalar(layout);
     }
@@ -327,89 +320,94 @@ static EmissionCheck emission_metadata_check(const EmissionMetadata* metadata, c
         if ((sources == 0 || source_events != NULL) && (frames == 0 || frame_events != NULL) &&
             registers <= BUSTER_EMISSION_MAX_REGISTERS && (frames == 0 || registers != 0))
         {
-            check = emission_layout_check(layout, scalar);
-            const uint32_t count = check.error == EMISSION_OK ? layout->count : 0;
-            EmissionAnchor previous = { 0 };
-            for (uint32_t i = 0; check.error == EMISSION_OK && i < sources; i += 1)
+            // An absent column in a non-empty layout is a layout error before either row validator runs.
+            check.part = EMISSION_LAYOUT;
+            if (layout != NULL && (layout->count == 0 || (layout->starts != NULL && layout->ends != NULL)))
             {
-                const EmissionSourceEvent event = source_events[i];
-                const bool origin = event.kind == EMISSION_SOURCE_ORIGIN && event.origin < origins && event.origin != BUSTER_EMISSION_NO_ORIGIN;
-                const bool generated = event.kind == EMISSION_SOURCE_GENERATED && event.origin == BUSTER_EMISSION_NO_ORIGIN;
-                // A present source map explicitly describes the start, including a generated prologue or leading padding.
-                const bool order = i == 0 ? event.at.boundary == 0 && event.at.side == EMISSION_LEFT : emission_anchor_before(previous, event.at);
-                if (!emission_anchor_valid(event.at, count) || !order || (!origin && !generated))
+                check = emission_layout_check(layout, scalar);
+                const uint32_t count = layout->count;
+                EmissionAnchor previous = { 0 };
+                for (uint32_t i = 0; check.error == EMISSION_OK && i < sources; i += 1)
                 {
-                    check = (EmissionCheck){
-                        .error = EMISSION_INVALID,
-                        .part = EMISSION_SOURCE,
-                        .index = i,
-                    };
+                    const EmissionSourceEvent event = source_events[i];
+                    const bool origin = event.kind == EMISSION_SOURCE_ORIGIN && event.origin < origins && event.origin != BUSTER_EMISSION_NO_ORIGIN;
+                    const bool generated = event.kind == EMISSION_SOURCE_GENERATED && event.origin == BUSTER_EMISSION_NO_ORIGIN;
+                    // A present source map explicitly describes the start, including a generated prologue or leading padding.
+                    const bool order = i == 0 ? event.at.boundary == 0 && event.at.side == EMISSION_LEFT : emission_anchor_before(previous, event.at);
+                    if (!emission_anchor_valid(event.at, count) || !order || (!origin && !generated))
+                    {
+                        check = (EmissionCheck){
+                            .error = EMISSION_INVALID,
+                            .part = EMISSION_SOURCE,
+                            .index = i,
+                        };
+                    }
+                    previous = event.at;
                 }
-                previous = event.at;
-            }
-            previous = (EmissionAnchor){ 0 };
-            uint32_t depth = 0;
-            for (uint32_t i = 0; check.error == EMISSION_OK && i < frames; i += 1)
-            {
-                const EmissionFrameEvent event = frame_events[i];
-                bool valid = emission_anchor_valid(event.at, count) && !emission_anchor_before(event.at, previous) && event.reserved == 0;
-                switch (event.kind)
+                previous = (EmissionAnchor){ 0 };
+                uint32_t depth = 0;
+                for (uint32_t i = 0; check.error == EMISSION_OK && i < frames; i += 1)
                 {
-                    case EMISSION_FRAME_CFA:
-                    case EMISSION_FRAME_OFFSET:
+                    const EmissionFrameEvent event = frame_events[i];
+                    bool valid = emission_anchor_valid(event.at, count) && !emission_anchor_before(event.at, previous) && event.reserved == 0;
+                    switch (event.kind)
                     {
-                        valid &= event.reg < registers;
-                    } break;
-                    case EMISSION_FRAME_CFA_OFFSET:
+                        case EMISSION_FRAME_CFA:
+                        case EMISSION_FRAME_OFFSET:
+                        {
+                            valid &= event.reg < registers;
+                        } break;
+                        case EMISSION_FRAME_CFA_OFFSET:
+                        {
+                            valid &= event.reg == 0;
+                        } break;
+                        case EMISSION_FRAME_REGISTER:
+                        {
+                            valid &= event.reg < registers && event.value >= 0 && event.value < registers;
+                        } break;
+                        case EMISSION_FRAME_RESTORE:
+                        case EMISSION_FRAME_SAME_VALUE:
+                        case EMISSION_FRAME_UNDEFINED:
+                        {
+                            valid &= event.reg < registers && event.value == 0;
+                        } break;
+                        case EMISSION_FRAME_REMEMBER_STATE:
+                        {
+                            valid &= event.reg == 0 && event.value == 0;
+                            depth += 1;
+                        } break;
+                        case EMISSION_FRAME_RESTORE_STATE:
+                        {
+                            valid &= event.reg == 0 && event.value == 0 && depth != 0;
+                            depth -= depth != 0;
+                        } break;
+                        default:
+                        {
+                            valid = false;
+                        } break;
+                    }
+                    if (!valid)
                     {
-                        valid &= event.reg == 0;
-                    } break;
-                    case EMISSION_FRAME_REGISTER:
-                    {
-                        valid &= event.reg < registers && event.value >= 0 && event.value < registers;
-                    } break;
-                    case EMISSION_FRAME_RESTORE:
-                    case EMISSION_FRAME_SAME_VALUE:
-                    case EMISSION_FRAME_UNDEFINED:
-                    {
-                        valid &= event.reg < registers && event.value == 0;
-                    } break;
-                    case EMISSION_FRAME_REMEMBER_STATE:
-                    {
-                        valid &= event.reg == 0 && event.value == 0;
-                        depth += 1;
-                    } break;
-                    case EMISSION_FRAME_RESTORE_STATE:
-                    {
-                        valid &= event.reg == 0 && event.value == 0 && depth != 0;
-                        depth -= depth != 0;
-                    } break;
-                    default:
-                    {
-                        valid = false;
-                    } break;
+                        check = (EmissionCheck){
+                            .error = EMISSION_INVALID,
+                            .part = EMISSION_FRAME,
+                            .index = i,
+                        };
+                    }
+                    previous = event.at;
                 }
-                if (!valid)
+                if (check.error == EMISSION_OK && depth != 0)
                 {
                     check = (EmissionCheck){
                         .error = EMISSION_INVALID,
                         .part = EMISSION_FRAME,
-                        .index = i,
+                        .index = frames,
                     };
                 }
-                previous = event.at;
-            }
-            if (check.error == EMISSION_OK && depth != 0)
-            {
-                check = (EmissionCheck){
-                    .error = EMISSION_INVALID,
-                    .part = EMISSION_FRAME,
-                    .index = frames,
-                };
-            }
-            if (check.error == EMISSION_OK)
-            {
-                check.part = EMISSION_NONE;
+                if (check.error == EMISSION_OK)
+                {
+                    check.part = EMISSION_NONE;
+                }
             }
         }
     }
