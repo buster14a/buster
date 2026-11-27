@@ -1042,6 +1042,116 @@ static bool pp_test_history_row(PPTestFixtures* table, const char* directory, ch
     return valid;
 }
 
+typedef struct PPSnippetColumnCase PPSnippetColumnCase;
+struct PPSnippetColumnCase
+{
+    char input[5];
+    uint32_t size;
+    const char* output;
+    uint32_t columns[4];
+    uint32_t width;
+};
+
+static bool pp_test_snippet_row(PPTestFixtures* table, const char* directory, char** fields, uint32_t line)
+{
+    (void)directory;
+    (void)line;
+    PPSnippetColumnCase* row = pp_test_fixture_row(table, fields[0]);
+    const size_t digits = strcmp(fields[0], "empty") == 0 ? 0 : strlen(fields[0]);
+    bool valid = row != NULL && digits <= 8 && digits % 2 == 0 && (digits == 0 ? strcmp(fields[2], "-") == 0 : strlen(fields[2]) == digits / 2);
+    for (uint32_t i = 0; valid && i < digits / 2; i += 1)
+    {
+        const int32_t high = hex_digit_value(fields[0][2 * i]);
+        const int32_t low = hex_digit_value(fields[0][2 * i + 1]);
+        const int32_t width = hex_digit_value(fields[2][i]);
+        valid = high >= 0 && low >= 0 && (width >= 0 || (i != 0 && fields[2][i] == '-'));
+        if (valid)
+        {
+            row->input[row->size++] = (char)((high << 4) | low);
+            row->columns[i] = width < 0 ? UINT32_MAX : row->width;
+            row->width += width < 0 ? 0 : (uint32_t)width;
+        }
+    }
+    if (valid)
+    {
+        row->output = strcmp(fields[1], "=") == 0 ? row->input : fields[1];
+        valid = strlen(row->output) <= 32;
+    }
+    return valid;
+}
+
+// Move each spelling through the ends of 16- and 64-byte vectors. The tab following it counts source bytes,
+// including continuation bytes and escaped controls. Each output mode must preserve an already buffered prefix.
+static bool pp_test_snippet_columns(void)
+{
+    PPTestFixtures table;
+    const bool loaded = pp_test_fixture_table(&table, "snippet-columns", "buster-fixtures v1 preprocessor-snippet-columns", 3, sizeof(PPSnippetColumnCase), pp_test_snippet_row, NULL);
+    const PPSnippetColumnCase* cases = (const PPSnippetColumnCase*)table.rows;
+    Arena arena = arena_reserve_small(1 << 16, 1 << 16);
+    bool result = loaded && arena.base != 0;
+    uint32_t checked = 0;
+    for (uint32_t mode = 0; result && mode < 4; mode += 1)
+    {
+        for (uint32_t c = 0; result && c < table.count; c += 1)
+        {
+            for (uint32_t prefix = 0; result && prefix <= 65; prefix += 1)
+            {
+                uint8_t line[72];
+                memset(line, 'x', prefix);
+                memcpy(line + prefix, cases[c].input, cases[c].size);
+                const uint32_t tab = prefix + cases[c].size;
+                line[tab] = '\t';
+                line[tab + 1] = '\t';
+                const uint32_t spaces = 8 - tab % 8 + 8;
+                const uint32_t width = prefix + cases[c].width + spaces;
+                uint32_t columns[BUSTER_ARRAY_LENGTH(line) + 2];
+                memset(columns, 0x77, sizeof(columns));
+                char expected[128];
+                const int length = snprintf(expected, sizeof(expected), "!%.*s%s%*s\n", (int)prefix, line, cases[c].output, (int)spaces, "");
+                FILE* stream = tmpfile();
+                char buffer[128];
+                PPDiagnostic diagnostic =
+                {
+                    .stream = stream,
+                    .arena = mode == 1 ? &arena : NULL,
+                    .bytes = buffer,
+                    .capacity = mode == 0 ? sizeof(buffer) : 3,
+                    .direct = mode == 3,
+                };
+                if (stream == NULL)
+                {
+                    result = false;
+                    break;
+                }
+                pp_diagnostic_append(&diagnostic, "!");
+                result = pp_snippet_line(&diagnostic, line, tab + 2, columns) == width && diagnostic.direct == (mode >= 2);
+                result = result && (diagnostic.direct || diagnostic.bytes[diagnostic.count] == 0);
+                for (uint32_t i = 0; result && i < prefix; i += 1)
+                {
+                    result = columns[i] == i;
+                }
+                for (uint32_t i = 0; result && i < cases[c].size; i += 1)
+                {
+                    const uint32_t col = cases[c].columns[i];
+                    result = columns[prefix + i] == (col == UINT32_MAX ? col : prefix + col);
+                }
+                result = result && columns[tab] == prefix + cases[c].width && columns[tab + 1] == width - 8;
+                result = result && columns[tab + 2] == width && columns[tab + 3] == 0x77777777u;
+                pp_diagnostic_flush(&diagnostic);
+                char output[sizeof(expected)];
+                result = result && fseek(stream, 0, SEEK_SET) == 0 && fread(output, 1, sizeof(output), stream) == (size_t)length && memcmp(output, expected, (size_t)length) == 0;
+                fclose(stream);
+                arena.length = 0;
+                checked += 1;
+            }
+        }
+    }
+    arena_release(&arena);
+    arena_release(&table.storage);
+    printf("snippet columns: %s (%u spellings, positions and buffer modes)\n", result ? "pass" : "FAIL", checked);
+    return result;
+}
+
 static bool pp_test_history(const char* directory, bool with_clang)
 {
     PPTestFixtures table;
@@ -1059,11 +1169,12 @@ static bool pp_test_history(const char* directory, bool with_clang)
     const bool lifetimes = pp_test_history_lifetimes(directory);
     const bool places = pp_test_history_invocation_places(directory);
     const bool growth = pp_test_history_growth(directory, with_clang);
+    const bool snippet_columns = pp_test_snippet_columns();
     const bool diagnostic_buffer = pp_test_diagnostic_buffer();
     const bool publication = pp_test_history_publication();
     const bool collection = pp_test_diagnostic_collection();
     const bool hints = pp_test_diagnostic_hint_ownership();
-    return runs && copies && lifetimes && places && growth && diagnostic_buffer && publication && collection && hints && failures == 0;
+    return runs && copies && lifetimes && places && growth && snippet_columns && diagnostic_buffer && publication && collection && hints && failures == 0;
 }
 
 #endif
