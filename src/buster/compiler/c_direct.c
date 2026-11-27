@@ -4804,8 +4804,9 @@ static int c_direct_differential(int argc, char** argv)
 // before the keyword's column, in bytes (tabs, a two-byte character in a comment before the keyword, code before it,
 // a header over lines, a #line); a macro's call in the header, a compound literal, a statement a macro starts, an
 // assert reduced to its `;` (fast_pp_window_macro), a #define, #else or #endif between; a short text's (fast_lex_one's)
-// and carriage returns before newlines. The forms it warns compile under -w, and from a system header; a user header's
-// leave.
+// and carriage returns before newlines; character constants and a string with a header's marks, a header past 64 bytes,
+// a comment in one (fast_cc_raw_loop's), a division, macros in one. The forms it warns compile under -w, and from a
+// system header; a user header's leave.
 static bool c_direct_test_empty_loop_bodies(const char* obj_path)
 {
     static const char* const quiet[] = {
@@ -4835,6 +4836,14 @@ static bool c_direct_test_empty_loop_bodies(const char* obj_path)
         "int f(int x)\n{\n#ifndef NOPE\n    while (x--);\n#endif\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
         "int f(int x)\r\n{\r\n    while (x--);\r\n    return x;\r\n}\r\n" BUSTER_DIRECT_TEST_TAIL,
         "int f(int x)\n{\n    for (; x; x--);\n    return x;\n}\n",
+        "int f(const char* s)\n{\n    for (; *s && *s != ';'; s++);\n    return *s;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(const char* s)\n{\n    while (*s && *s != ')' && *s++ != '\\'');\n    return *s;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int g(const char*);\nint f(int x)\n{\n    while (x-- && g(\"a(b;c\"));\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int a_quite_long_name_for_a_counter, int another_long_name_to_cross_a_step)\n{\n    for (; a_quite_long_name_for_a_counter < "
+        "another_long_name_to_cross_a_step; a_quite_long_name_for_a_counter++);\n    return a_quite_long_name_for_a_counter;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x-- /* ) ; */ > 0);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    for (; x / 2 > 0; x--);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define LIM(v) ((v) * 2)\n#define ONE 1\nint f(int x, int y)\n{\n    for (x = ONE; x < LIM(y); x++);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
     };
     bool ok = true;
     for (uint32_t i = 0; i < (uint32_t)(sizeof(quiet) / sizeof(quiet[0])); i += 1)
@@ -5268,10 +5277,10 @@ static int c_direct_unit_tests(void)
         "int f(int x) { switch (x); return x; }\n",
         // ... and a for's or a while's (#3667), on its `)`'s line, of a loop that is a block's own statement with a
         // statement after it that is a compound one or starts past the keyword's column, in bytes: on one line, in a short
-        // text that fast_lex_one lexes as in a window's; indented deeper (a tab is a column, one column is enough); a
-        // block, a declaration, a label, an empty statement, a case; a header over two lines; a `)` a macro gives, an
-        // empty macro before the `;`; a dead branch's; past an #else; a conditional whose group the text doesn't say; a
-        // statement an empty macro starts, or an empty function-like one's `;`.
+        // text that fast_lex_one lexes as in a window's; indented deeper (a tab is a column, one column is enough); after
+        // a block; a block, a declaration, a label, an empty statement, a case; a header over two lines; a `)` a macro
+        // gives, an empty macro before the `;`; a dead branch's; past an #else; a conditional whose group the text doesn't
+        // say; a statement an empty macro starts, or an empty function-like one's `;`.
         "int f(int x) { while (x--); return x; }\n",
         "int f(int x) { for (; x; x--); return x; }\n",
         "int f(int x) { while (x--); return x; }\n" BUSTER_DIRECT_TEST_TAIL,
@@ -5279,6 +5288,7 @@ static int c_direct_unit_tests(void)
         "int f(int x)\n{\n\twhile (x--);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
         "int f(int x)\n{\n    while (x--);\n     x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
         "int f(int x)\n{\n    while (x--);\n    {\n        x += 1;\n    }\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x, int y)\n{\n    if (y) { y = 2; }\n    while (x--);\n        x += y;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
         "int f(int x)\n{\n    while (x--);\n        int y = x;\n    return y;\n}\n" BUSTER_DIRECT_TEST_TAIL,
         "int f(int x)\n{\n    while (x--);\n      L: x += 1;\n    if (x < 3) goto L;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
         "int f(int x)\n{\n    while (x--);\n        ;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
@@ -5291,6 +5301,18 @@ static int c_direct_unit_tests(void)
         "int f(int x)\n{\n    while (x--);\n#ifdef NOPE\n    x += 2;\n#else\n        x += 1;\n#endif\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
         "#define EMPTY\nint f(int x)\n{\n    while (x--);\n    EMPTY x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
         "#define testcase(X)\nint f(int x)\n{\n    while (x--);\n    testcase(x);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        // ... and as the header's text reads 64 bytes a step (fast_cc_raw_header) or a token at a time: a character
+        // constant's `;`, a string's `(`, a header past a step, a comment in it.
+        "int f(const char* s)\n{\n    for (; *s && *s != ';'; s++);\n        return *s;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int g(const char*);\nint f(int x)\n{\n    while (x-- && g(\"a(b;c\"));\n        return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int a_quite_long_name_for_a_counter, int another_long_name_to_cross_a_step)\n{\n    for (; a_quite_long_name_for_a_counter < "
+        "another_long_name_to_cross_a_step; a_quite_long_name_for_a_counter++);\n        return a_quite_long_name_for_a_counter;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x-- /* ) ; */ > 0);\n        return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        // ... and where macros give a for's `;`s and `)` (the text's `)` is another's, a later `(`'s macro its match), the
+        // loop's `;` on the line its `)` is expanded on, the next statement after it there, and the line after the text's
+        // `;` starting as it does (fast_cc_raw_macros_balanced).
+        "#define SEP ;\n#define RP )\n#define LP (\nint f(int x)\n{\n    int i;\n    for (i = 0 SEP i < x SEP i++ RP ; x++ ; LP x++ ) ;\n"
+        "    x++;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
         // -Wsizeof-array-decay: sizeof of an array under + and a comma.
         "int f(void) { int a[3] = { 0 }; return (int)sizeof(a + 0); }\n",
         "int f(void) { int a[3] = { 0 }; return (int)sizeof((0, a)); }\n",

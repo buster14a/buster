@@ -10237,10 +10237,11 @@ static __attribute__((cold, noinline)) bool fast_cc_dead_simple(FastCCState* cc,
 // It is quiet in a system header and under -w; -Wno-empty-body and a diagnostic pragma keep a unit off this path.
 //
 // The stream says neither lines nor columns. The keyword's data says where its text is (BUSTER_FTOK_PLACED), and the
-// text is read again from there, a token at a time and with none of the preprocessor's tables, to the first token of
-// the statement after the `;`. That reading is scalar: it runs at a loop whose body is a lone `;` (19 of sqlite3.c's
-// 1,610 loops) over its header's few dozen bytes, and the stream's own pass pays nothing for it but a test of the
-// token after a loop's `)`. Whatever it can't place leaves the unit to the full pipeline.
+// text is read again from there, with none of the preprocessor's tables, to the first token of the statement after the
+// `;`: the header 64 bytes a step (fast_cc_raw_header), or a token at a time where it holds a comment or is longer
+// (fast_cc_raw_loop), and the statement past the directives between (fast_cc_raw_statement). It runs where a loop's
+// `)` a `;` follows (20 of sqlite3.c's 1,610 loops, 42 K instructions of its 212 M on the 9700X), and the stream's own
+// pass pays for it a test of the token after a loop's `)`. Whatever it can't place leaves the unit to the full pipeline.
 
 // A token of the text as fast_lex_one splits it: a name (FTOK_IDENT), a number of any kind (FTOK_INT_LIT), a string or a
 // character constant, or a punctuator's kind; where it starts, its line after the keyword's and its column from 1, and
@@ -10671,6 +10672,177 @@ static __attribute__((cold)) bool fast_cc_raw_loop(const uint8_t* at, uint32_t l
     return p != NULL && shaped && separators == (is_for ? 2u : 0u) && out_semi->kind == FTOK_SEMI;
 }
 
+// The names a loop header's text has that a header's check reads (fast_cc_raw_macros_balanced) when its bytes are read
+// 64 at a time (fast_cc_raw_header).
+#define BUSTER_FRAW_HEADER_NAMES 64u
+// The 64-byte steps a header's text is read in before it leaves to fast_cc_raw_loop's reading.
+#define BUSTER_FRAW_HEADER_STEPS 4u
+
+// The loop's header from the end of its keyword at `p`, 64 bytes a step, and the `;` after it: the `(` first past
+// blanks, the parentheses' and `;`s' bits in order to the `)` that closes it (a while's with no `;`, a for's with two
+// at its own level), the newlines' bits counted, and each name's place and length into `names` (room for
+// BUSTER_FRAW_HEADER_NAMES), and its parentheses' and `;`s' count into *out_marks. Where the `)` is, past blanks and
+// newlines a `;` must follow. Returns where the text goes
+// on after the `;`, with *io_line (lines after the keyword's) and *io_line_start at the `)` and then the `;` (their
+// lines in *out_close_line and *out_semi_line), or NULL where the header holds a byte this doesn't read so (a comment's
+// `/`, a backslash, a `#`, a `$`, a carriage return, a byte past ASCII, a literal with a prefix or past the step), or is
+// longer: fast_cc_raw_loop reads those a token at a time. A name's run never ends a step: the next step starts at it.
+static __attribute__((cold)) const uint8_t* fast_cc_raw_header(const uint8_t* p, const uint8_t* end, bool is_for, FastRawTok* names, uint32_t* out_names,
+                                                               uint32_t* out_marks, uint32_t* io_line, const uint8_t** io_line_start, uint32_t* out_close_line,
+                                                               uint32_t* out_semi_line)
+{
+    const __m512i v_run = _mm512_set1_epi8((char)BUSTER_FCLASS_RUN);
+    const __m512i v_class_lo = _mm512_load_si512((const void*)fast_lex_class);
+    const __m512i v_class_hi = _mm512_load_si512((const void*)(fast_lex_class + 64));
+    while (p < end && (p[0] == ' ' || p[0] == '\t'))
+    {
+        p += 1;
+    }
+    const uint8_t* q = p < end && p[0] == '(' ? p : NULL;
+    uint32_t line = *io_line;
+    const uint8_t* line_start = *io_line_start;
+    uint32_t level = 0;
+    uint32_t separators = 0;
+    uint32_t marks = 0;
+    uint32_t count = 0;
+    const uint8_t* close = NULL;
+    bool ok = q != NULL;
+    for (uint32_t step = 0; ok && close == NULL && step < BUSTER_FRAW_HEADER_STEPS; step += 1)
+    {
+        const uint64_t room = (uint64_t)(end - q);
+        const uint64_t valid = room >= 64u ? ~UINT64_C(0) : _bzhi_u64(~UINT64_C(0), (uint32_t)room);
+        const __m512i v = _mm512_maskz_loadu_epi8(valid, (const void*)q);
+        const uint64_t opens = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('(')) & valid;
+        const uint64_t closes = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(')')) & valid;
+        const uint64_t semis = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(';')) & valid;
+        const uint64_t newlines = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('\n')) & valid;
+        // A `/` that starts a comment: a `*` or a `/` after it, or the step's last byte.
+        const uint64_t slashes = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('/'));
+        const uint64_t comments = slashes & (((_mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('*')) | slashes) >> 1) | (UINT64_C(1) << 63));
+        const __m512i classes = _mm512_permutex2var_epi8(v_class_lo, v, v_class_hi);
+        const uint64_t all_runs = _mm512_test_epi8_mask(classes, v_run) & ~_mm512_movepi8_mask(v) & valid;
+        // The literals, each from its quote to the one that closes it, which a newline or the step's end mustn't cut
+        // (fast_cc_raw_literal_end) and no name's byte may stand before (a prefix's): their bytes are no other mark's.
+        uint64_t quotes = (_mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('"')) | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('\''))) & valid;
+        uint64_t inside = 0;
+        while (ok && quotes != 0)
+        {
+            const uint32_t bit = (uint32_t)__builtin_ctzll(quotes);
+            const uint8_t* const closed_at = ((all_runs << 1) >> bit & 1u) == 0 ? fast_cc_raw_literal_end(q + bit, end) : NULL;
+            ok = closed_at != NULL && closed_at - q <= 64;
+            const uint64_t literal = ok ? _bzhi_u64(~UINT64_C(0), (uint32_t)(closed_at - q)) & ~_bzhi_u64(~UINT64_C(0), bit) : 0u;
+            inside |= literal;
+            quotes &= ~literal & ~(UINT64_C(1) << bit);
+        }
+        const uint64_t special = (comments | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('\\')) |
+                                  _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('#')) | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('\r')) |
+                                  _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('$')) | _mm512_movepi8_mask(v)) & valid & ~inside;
+        const uint64_t runs = all_runs & ~inside;
+        const uint64_t digits = _mm512_cmple_epu8_mask(_mm512_sub_epi8(v, _mm512_set1_epi8('0')), _mm512_set1_epi8(9)) & valid;
+        // The parentheses' and `;`s' bits in order, to the `)` that closes the header.
+        uint64_t events = (opens | closes | semis) & ~inside;
+        uint32_t closed = 64u;
+        while (ok && events != 0 && closed == 64u)
+        {
+            const uint32_t bit = (uint32_t)__builtin_ctzll(events);
+            events &= events - 1u;
+            const bool semi = ((semis >> bit) & 1u) != 0;
+            ok = !semi || (is_for && level == 1u);
+            separators += (uint32_t)semi;
+            level += (uint32_t)((opens >> bit) & 1u);
+            level -= (uint32_t)((closes >> bit) & 1u);
+            closed = ((closes >> bit) & 1u) != 0 && level == 0 ? bit : 64u;
+        }
+        // The bytes this step reads: to the `)`, or else to the name that runs past the step's end, which the next reads
+        // (one that fills the step leaves).
+        const uint32_t run_start = (runs >> 63) != 0 ? 64u - (uint32_t)_lzcnt_u64(~runs) : 64u;
+        const uint32_t read = closed != 64u ? closed + 1u : run_start;
+        const uint64_t span = _bzhi_u64(~UINT64_C(0), read) & valid;
+        ok = ok && (special & span) == 0 && read != 0 && (closed != 64u || room > 64u);
+        line += (uint32_t)__builtin_popcountll(newlines & span);
+        marks += (uint32_t)__builtin_popcountll((opens | closes | semis) & span & ~inside);
+        line_start = (newlines & span) != 0 ? q + (64u - _lzcnt_u64(newlines & span)) : line_start;
+        // Each name's start (a run's first byte that is no digit, where no run goes on into it) and its length.
+        uint64_t starts = runs & ~(runs << 1) & ~digits & span;
+        while (ok && starts != 0)
+        {
+            const uint32_t bit = (uint32_t)__builtin_ctzll(starts);
+            starts &= starts - 1u;
+            ok = count < BUSTER_FRAW_HEADER_NAMES;
+            if (ok)
+            {
+                names[count] = (FastRawTok){
+                    .at = q + bit,
+                    .length = (uint32_t)__builtin_ctzll(~(runs >> bit)),
+                    .kind = FTOK_IDENT,
+                };
+                count += 1u;
+            }
+        }
+        close = ok && closed != 64u ? q + closed : NULL;
+        q += read;
+    }
+    *out_close_line = line;
+    // Past the `)`: blanks and newlines, and the `;`.
+    const uint8_t* r = close != NULL ? close + 1 : NULL;
+    while (r != NULL && r < end && (r[0] == ' ' || r[0] == '\t' || r[0] == '\n'))
+    {
+        line += (uint32_t)(r[0] == '\n');
+        line_start = r[0] == '\n' ? r + 1 : line_start;
+        r += 1;
+    }
+    const bool semi = r != NULL && r < end && r[0] == ';';
+    *out_semi_line = line;
+    *out_names = count;
+    *out_marks = marks;
+    *io_line = line;
+    *io_line_start = line_start;
+    return ok && close != NULL && semi && separators == (is_for ? 2u : 0u) ? r + 1 : NULL;
+}
+
+// The next statement's first token from `p`, past spaces, tabs and newlines in one 64-byte load, where it is a name or a
+// punctuator that starts no comment or directive (no `/`, `#` or `.`) and ends before the load and the text do: into
+// *out, with *io_line and *io_line_start kept for the newlines it crosses. NULL otherwise, for fast_cc_raw_statement,
+// which reads every other.
+static __attribute__((cold)) const uint8_t* fast_cc_raw_next(const uint8_t* p, const uint8_t* end, uint32_t* io_line, const uint8_t** io_line_start, FastRawTok* out)
+{
+    const uint64_t room = (uint64_t)(end - p);
+    const uint64_t valid = room >= 64u ? ~UINT64_C(0) : _bzhi_u64(~UINT64_C(0), (uint32_t)room);
+    const __m512i v = _mm512_maskz_loadu_epi8(valid, (const void*)p);
+    const uint64_t newlines = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('\n'));
+    const uint64_t blanks = (_mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(' ')) | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('\t')) | newlines) & valid;
+    const __m512i classes = _mm512_permutex2var_epi8(_mm512_load_si512((const void*)fast_lex_class), v, _mm512_load_si512((const void*)(fast_lex_class + 64)));
+    const uint64_t runs = _mm512_test_epi8_mask(classes, _mm512_set1_epi8((char)BUSTER_FCLASS_RUN)) & ~_mm512_movepi8_mask(v) & valid;
+    const uint64_t solid = ~blanks & valid;
+    const uint32_t first = solid != 0 ? (uint32_t)__builtin_ctzll(solid) : 64u;
+    const uint8_t c = first < 64u ? p[first] : 0u;
+    // A name (no digit's run), wholly in the load; or a punctuator of fast_cc_raw_punctuator's.
+    const bool name = first < 64u && ((runs >> first) & 1u) != 0 && (c < '0' || c > '9') && c != '$';
+    const uint32_t name_length = name ? (uint32_t)__builtin_ctzll(~(runs >> first)) : 0u;
+    uint32_t punct_length = 0;
+    const uint8_t kind = name ? FTOK_IDENT : first < 64u && c != '/' && c != '#' && c != '.' ?
+                                fast_cc_raw_punctuator(c, p + first + 1u < end ? p[first + 1u] : 0u, p + first + 2u < end ? p[first + 2u] : 0u, &punct_length) :
+                                FTOK_EOF;
+    const uint32_t length = name ? name_length : punct_length;
+    // Wholly in the load and before the text's end; a name before a quote or a backslash is a literal's prefix or goes on.
+    const uint8_t after = first + length < 64u && first + length < room ? p[first + length] : '\\';
+    const bool taken = kind != FTOK_EOF && after != '\\' && (!name || (after != '"' && after != '\''));
+    const uint64_t crossed = newlines & _bzhi_u64(~UINT64_C(0), first);
+    if (taken)
+    {
+        *io_line += (uint32_t)__builtin_popcountll(crossed);
+        *io_line_start = crossed != 0 ? p + (64u - _lzcnt_u64(crossed)) : *io_line_start;
+        *out = (FastRawTok){
+            .at = p + first,
+            .length = length,
+            .line = *io_line,
+            .column = (uint32_t)(p + first - *io_line_start) + 1u,
+            .kind = kind,
+        };
+    }
+    return taken ? p + first + length : NULL;
+}
+
 // Whether the text's token `r` is the stream's token at `o`: a name spelled as the token is (a loop keyword whose data
 // is its place, as its kind), a number or a literal of the token's kind, or the same punctuator.
 static __attribute__((cold)) bool fast_cc_raw_same(const FastCCState* cc, const FastRawTok* r, uint32_t o)
@@ -10711,11 +10883,52 @@ static __attribute__((cold)) uint32_t fast_cc_raw_name(FastCCState* cc, const Fa
     return end - r->at >= 8 ? fast_ident_lookup(&cc->pp->idents, r->at, r->length, &kind) : fast_ident_intern(&cc->pp->idents, r->at, r->length);
 }
 
+// Whether the header's names (`names`, in the text's order) are the stream's names between the keyword at `keyword` and
+// the `)` at `rparen`, one for one and spelled alike, and its parentheses and `;`s (`marks`) as many as the stream's:
+// then no macro was expanded there but one whose expansion is its own name and no parenthesis or `;`, and none needs
+// its body read (fast_cc_raw_macros_balanced). The stream's kinds 64 a step, its names by their bits, each spelling
+// compared with masked loads (a loop keyword's name is its kind's: its data is its place).
+static __attribute__((cold)) bool fast_cc_raw_names_unexpanded(const FastCCState* cc, const FastRawTok* names, uint32_t count, uint32_t marks, uint32_t keyword,
+                                                               uint32_t rparen)
+{
+    const FastIdentTable* const idents = &cc->pp->idents;
+    uint32_t matched = 0;
+    uint32_t stream_marks = 0;
+    bool same = true;
+    for (uint32_t first = keyword + 1u; same && first <= rparen; first += 64u)
+    {
+        const uint32_t n = rparen + 1u - first < 64u ? rparen + 1u - first : 64u;
+        const uint64_t valid = _bzhi_u64(~UINT64_C(0), n);
+        const __m512i kinds = _mm512_loadu_si512((const void*)(cc->tk + first));
+        stream_marks += (uint32_t)__builtin_popcountll((_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(FTOK_LPAREN)) |
+                                                        _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(FTOK_RPAREN)) |
+                                                        _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(FTOK_SEMI))) & valid);
+        uint64_t named = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(FTOK_IDENT)) |
+                          _mm512_cmple_epu8_mask(_mm512_sub_epi8(kinds, _mm512_set1_epi8(FTOK_KW_AUTO)), _mm512_set1_epi8(FTOK_KW_FUNC - FTOK_KW_AUTO))) & valid;
+        while (same && named != 0)
+        {
+            const uint32_t o = first + (uint32_t)__builtin_ctzll(named);
+            named &= named - 1u;
+            const uint8_t k = cc->tk[o];
+            const bool placed = (k == FTOK_KW_WHILE || k == FTOK_KW_FOR) && (cc->td[o] & BUSTER_FTOK_PLACED) != 0;
+            const FastIdentEntry* const entry = placed ? NULL : idents->entries + cc->td[o];
+            const char* const text = placed ? (k == FTOK_KW_WHILE ? "while" : "for") : idents->strings + entry->str_offset;
+            const uint32_t length = placed ? (k == FTOK_KW_WHILE ? 5u : 3u) : entry->length;
+            same = matched < count && names[matched].length == length && length <= 64u;
+            const uint64_t bytes = same ? _bzhi_u64(~UINT64_C(0), length) : 0u;
+            same = same && _mm512_mask_cmpneq_epi8_mask(bytes, _mm512_maskz_loadu_epi8(bytes, (const void*)text),
+                                                        _mm512_maskz_loadu_epi8(bytes, (const void*)names[matched].at)) == 0;
+            matched += 1u;
+        }
+    }
+    return same && matched == count && stream_marks == marks;
+}
+
 // The macros a loop header's names reach (BUSTER_FRAW_MACROS: its names' and the names in their bodies', a level at a
 // time) that a header's check reads before it leaves.
 #define BUSTER_FRAW_MACROS 64u
 
-// Whether every macro the header's names reach has a body whose parentheses match and that holds no `;`. An
+// Whether every macro the names among `tokens` reach has a body whose parentheses match and that holds no `;`. An
 // argument's parentheses match in the text, so then each expansion's do, the header's tokens in the stream are at the
 // text's levels, and the stream's `)` that closes it and the `;` after it are the text's. The table is the unit's end's:
 // a macro redefined after the loop is read as its last definition.
@@ -10725,7 +10938,7 @@ static __attribute__((cold)) bool fast_cc_raw_macros_balanced(FastCCState* cc, c
     uint32_t pending[BUSTER_FRAW_MACROS];
     uint32_t pending_count = 0;
     bool balanced = true;
-    for (uint32_t i = 1; balanced && i < count; i += 1)
+    for (uint32_t i = 0; balanced && i < count; i += 1)
     {
         const uint32_t id = tokens[i].kind == FTOK_IDENT ? fast_cc_raw_name(cc, tokens + i, end) : 0u;
         const uint32_t index = id != 0 && fast_ident_is_macro(&pp->idents, id) ? pp->idents.entries[id].macro_idx : 0u;
@@ -10913,6 +11126,23 @@ static __attribute__((cold)) const uint8_t* fast_cc_placed_text(FastCCState* cc,
     return matches == 1u ? found : NULL;
 }
 
+// The loop's text from its keyword at `at` a token at a time (fast_cc_raw_loop), where fast_cc_raw_header doesn't read
+// it 64 bytes a step: the `)`'s and the `;`'s lines and the next statement's first token, where the header's macros are
+// balanced (fast_cc_raw_macros_balanced).
+static __attribute__((cold, noinline)) bool fast_cc_raw_loop_tokens(FastCCState* cc, const uint8_t* at, uint32_t length, const uint8_t* line_start,
+                                                                    const uint8_t* end, bool is_for, uint32_t* out_close_line, uint32_t* out_semi_line,
+                                                                    FastRawTok* out_next)
+{
+    FastRawTok tokens[BUSTER_FRAW_HEADER_TOKENS];
+    uint32_t count = 0;
+    FastRawTok semi = { 0 };
+    const bool read = fast_cc_raw_loop(at, length, line_start, end, is_for, tokens, &count, &semi, out_next) &&
+                      fast_cc_raw_macros_balanced(cc, tokens + 1, count - 1u, end);
+    *out_close_line = read ? tokens[count - 1u].line : 0u;
+    *out_semi_line = semi.line;
+    return read;
+}
+
 // The rule that refuses the loop whose `)` is at `rparen` (the full pipeline's warning, or a text this can't place), or
 // NULL where the full pipeline is quiet: the `;` on another line than the `)`, or the next statement's first token at
 // or before the keyword's column.
@@ -10934,24 +11164,34 @@ static __attribute__((cold)) const char* fast_cc_empty_body_verdict(FastCCState*
         plain = line_start[-1] != '\r';
         line_start -= 1;
     }
-    FastRawTok tokens[BUSTER_FRAW_HEADER_TOKENS];
-    uint32_t count = 0;
-    FastRawTok semi = { 0 };
+    const uint32_t column = at != NULL ? (uint32_t)(at - line_start) + 1u : 0u;
+    // The header 64 bytes a step, or else a token at a time; the next statement's first token after the `;`.
+    FastRawTok names[BUSTER_FRAW_HEADER_NAMES];
+    uint32_t name_count = 0;
+    uint32_t marks = 0;
+    uint32_t line = 0;
+    uint32_t close_line = 0;
+    uint32_t semi_line = 0;
     FastRawTok next = { 0 };
-    if (plain && fast_cc_raw_loop(at, word_length, line_start, end, is_for, tokens, &count, &semi, &next) &&
-        fast_cc_raw_macros_balanced(cc, tokens, count, end))
+    const uint8_t* text_line_start = line_start;
+    const uint8_t* const after = plain ? fast_cc_raw_header(at + word_length, end, is_for, names, &name_count, &marks, &line, &text_line_start, &close_line,
+                                                                   &semi_line) : NULL;
+    const bool read = after != NULL ? (fast_cc_raw_next(after, end, &line, &text_line_start, &next) != NULL ||
+                                       fast_cc_raw_statement(after, end, &line, &text_line_start, &next) != NULL) &&
+                                      (fast_cc_raw_names_unexpanded(cc, names, name_count, marks, keyword, rparen) || fast_cc_raw_macros_balanced(cc, names, name_count, end)) :
+                      plain && fast_cc_raw_loop_tokens(cc, at, word_length, line_start, end, is_for, &close_line, &semi_line, &next);
+    if (read)
     {
-        const FastRawTok* const close = tokens + (count - 1u);
         const uint32_t following = rparen + 2u;
         // The next statement's first token: the stream's, or a macro's name whose expansion starts it.
         const bool same = fast_cc_raw_same(cc, &next, following);
         const bool expanded = !same && next.kind == FTOK_IDENT && fast_cc_raw_macro_gives(cc, &next, end);
         const bool compound = same && cc->tk[following] == FTOK_LBRACE;
-        if (semi.line != close->line)
+        if (semi_line != close_line)
         {
             reason = NULL;
         }
-        else if ((same || expanded) && !compound && next.column <= tokens[0].column)
+        else if ((same || expanded) && !compound && next.column <= column)
         {
             reason = NULL;
         }
@@ -10963,27 +11203,44 @@ static __attribute__((cold)) const char* fast_cc_empty_body_verdict(FastCCState*
     return reason;
 }
 
-// A `for` or `while` whose `)` is followed by the lone `;` at cc->pos, which `owner`'s frame (a FastStmtKind) has for
-// its statement: the unit leaves where the full pipeline may warn -Wempty-body (fast_cc_empty_body_verdict).
-static __attribute__((cold, noinline)) void fast_cc_empty_loop_body(FastCCState* cc, uint32_t owner)
+// The empty statement at cc->pos, after a loop's `)`: where it is a `for`'s or a `while`'s body, the unit leaves where
+// the full pipeline may warn -Wempty-body (fast_cc_empty_body_verdict). The loop is a block's own
+// statement where a `;`, `{` or `}` is before its keyword: a statement that ends there leaves its owner's block (a
+// do's `while` has no loop's frame), and a label, a case, a head's `)`, an else or a do own it otherwise.
+static __attribute__((cold, noinline)) void fast_cc_empty_statement(FastCCState* cc)
 {
     const uint32_t rparen = cc->pos - 1u;
-    // The `(` the `)` closes; the keyword is before it.
-    uint32_t open = rparen;
-    uint32_t level = 1u;
-    while (level != 0 && open > 0)
+    const bool body = cc->tk[rparen] == FTOK_RPAREN;
+    // The `(` the `)` closes, 64 kinds a step back from it, their parentheses' bits from the last down; the keyword is
+    // before it. The stream has 64 bytes past its end (fast_pp_init).
+    uint32_t open = UINT32_MAX;
+    uint32_t level = 0;
+    for (uint32_t top = body ? rparen + 1u : 0u; open == UINT32_MAX && top > 0; )
     {
-        open -= 1u;
-        level += (uint32_t)(cc->tk[open] == FTOK_RPAREN);
-        level -= (uint32_t)(cc->tk[open] == FTOK_LPAREN);
+        const uint32_t low = top > 64u ? top - 64u : 0u;
+        const __m512i kinds = _mm512_loadu_si512((const void*)(cc->tk + low));
+        const uint64_t mine = _bzhi_u64(~UINT64_C(0), top - low);
+        const uint64_t opens = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(FTOK_LPAREN)) & mine;
+        const uint64_t closes = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(FTOK_RPAREN)) & mine;
+        uint64_t events = opens | closes;
+        while (events != 0 && open == UINT32_MAX)
+        {
+            const uint32_t bit = 63u - (uint32_t)_lzcnt_u64(events);
+            events &= ~(UINT64_C(1) << bit);
+            level += (uint32_t)((closes >> bit) & 1u);
+            level -= (uint32_t)((opens >> bit) & 1u);
+            open = level == 0 ? low + bit : UINT32_MAX;
+        }
+        top = low;
     }
     const uint32_t keyword = open - 1u;
-    const bool loop = level == 0 && open > 0 && (cc->tk[keyword] == FTOK_KW_WHILE || cc->tk[keyword] == FTOK_KW_FOR);
-    // A label's, case's or default's statement, the block's last one, -w and a system header's are quiet.
-    const uint32_t placed = cc->td[keyword] & (BUSTER_FTOK_PLACED | BUSTER_FTOK_PLACED_MAIN | BUSTER_FTOK_PLACED_SYSTEM);
-    const bool quiet = loop && (cc->quiet || owner != FSTK_BLOCK || (keyword > 0 && cc->tk[keyword - 1u] == FTOK_COLON) ||
-                                cc->tk[rparen + 2u] == FTOK_RBRACE || placed == (BUSTER_FTOK_PLACED | BUSTER_FTOK_PLACED_SYSTEM));
-    const char* const reason = !loop ? "a loop's empty body this path can't place" : quiet ? NULL : fast_cc_empty_body_verdict(cc, keyword, rparen);
+    const bool loop = open != UINT32_MAX && open > 0 && (cc->tk[keyword] == FTOK_KW_WHILE || cc->tk[keyword] == FTOK_KW_FOR);
+    const uint8_t before = loop && keyword > 0 ? cc->tk[keyword - 1u] : FTOK_SEMI;
+    const bool owned = before == FTOK_SEMI || before == FTOK_LBRACE || before == FTOK_RBRACE;
+    // The block's last statement, -w and a system header's are quiet.
+    const uint32_t placed = loop ? cc->td[keyword] & (BUSTER_FTOK_PLACED | BUSTER_FTOK_PLACED_MAIN | BUSTER_FTOK_PLACED_SYSTEM) : 0u;
+    const bool quiet = cc->quiet || !owned || cc->tk[rparen + 2u] == FTOK_RBRACE || placed == (BUSTER_FTOK_PLACED | BUSTER_FTOK_PLACED_SYSTEM);
+    const char* const reason = !loop || quiet ? NULL : fast_cc_empty_body_verdict(cc, keyword, rparen);
     if (reason != NULL)
     {
         fast_cc_bail(cc, reason);
@@ -12838,8 +13095,10 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             fast_cc_reset_tmps(cc);
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) after while cond"); break; }
             cc->pos += 1u;
-            // #3667: a lone `;` body, which the full pipeline's -Wempty-body may question. The stream ends in FTOK_EOF.
-            if (cc->tk[cc->pos] == FTOK_SEMI) { fast_cc_empty_loop_body(cc, top->kind); }
+            // #3667: a lone `;` body, which the full pipeline's -Wempty-body may question (fast_cc_empty_statement): asked
+            // at a loop's `)`, not at each empty statement, which sqlite3.c's asserts make 7,508 of. The stream ends in
+            // FTOK_EOF.
+            if (cc->tk[cc->pos] == FTOK_SEMI) { fast_cc_empty_statement(cc); }
             break_frame[break_sp] = (uint8_t)ssp;
             cont_frame[cont_sp] = (uint8_t)ssp;
             break_stack[break_sp++] = brk_lbl;
@@ -12977,7 +13236,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) in for"); break; }
             cc->pos += 1u;
             // #3667: a lone `;` body, as a while's.
-            if (cc->tk[cc->pos] == FTOK_SEMI) { fast_cc_empty_loop_body(cc, top->kind); }
+            if (cc->tk[cc->pos] == FTOK_SEMI) { fast_cc_empty_statement(cc); }
             break_frame[break_sp] = (uint8_t)ssp;
             cont_frame[cont_sp] = (uint8_t)ssp;
             break_stack[break_sp++] = brk_lbl;

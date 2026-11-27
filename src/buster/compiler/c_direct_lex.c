@@ -188,7 +188,7 @@ typedef enum FastTokKind
 #define BUSTER_FTOK_SPELLED     BUSTER_FTOK_HEX
 
 // #3667: the data of a `for` or `while` the preprocessor read from a file's text, in place of its IdentId, which the
-// statement compiler reads where the loop's body is a lone `;` (fast_cc_empty_loop_body, -Wempty-body) and nothing else
+// statement compiler reads where the loop's body is a lone `;` (fast_cc_empty_statement, -Wempty-body) and nothing else
 // does: this mark, and in the main file (never a system header) BUSTER_FTOK_PLACED_MAIN and its first byte's offset;
 // in another file the file's system-header bit then and its first byte's address's low 29 bits, by which the statement
 // compiler finds the mapping the compile kept of the file. One an expansion gives keeps its IdentId.
@@ -7359,12 +7359,19 @@ static inline bool fast_window_decimal(const uint8_t* s, uint32_t length, uint32
 }
 
 // One token of f's text by fast_lex_one, and what the drain does with it: the file's end, a directive, a macro's name.
-// The data of the `for` or `while` whose first byte is f's text at `at` (BUSTER_FTOK_PLACED, #3667).
-static inline uint32_t fast_pp_placed(const FastPP* pp, const FastIncludeFile* f, const uint8_t* at)
+// The data of the `for` or `while` whose first byte is f's text at `at` (BUSTER_FTOK_PLACED, #3667). Out of line: the
+// window's emitter calls it from the branch its macro names take, as it calls fast_pp_window_macro.
+static __attribute__((cold, noinline)) uint32_t fast_pp_placed(const FastPP* pp, const FastIncludeFile* f, const uint8_t* at)
 {
     const uint32_t other = BUSTER_FTOK_PLACED | ((uint32_t)f->is_system * BUSTER_FTOK_PLACED_SYSTEM) | ((uint32_t)(uintptr_t)at & BUSTER_FTOK_PLACED_ADDRESS);
     const uint32_t main = BUSTER_FTOK_PLACED | BUSTER_FTOK_PLACED_MAIN | ((uint32_t)(at - f->base) & BUSTER_FTOK_PLACED_OFFSET);
     return f->serial == pp->main_serial ? main : other;
+}
+
+// The data of the window's token `t`, a `for` or a `while` of f's text (fast_pp_placed).
+static __attribute__((cold, noinline)) uint32_t fast_pp_window_placed(const FastPP* pp, const FastIncludeFile* f, uint32_t t)
+{
+    return fast_pp_placed(pp, f, f->base + pp->win.origin + pp->win.starts[t]);
 }
 
 static void fast_pp_single_token(FastPP* pp, FastIncludeFile* f)
@@ -7566,8 +7573,9 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                     }
                     else if (ident_kind != FTOK_IDENT)
                     {
-                        // `for` or `while`, which no #define names: the builtins are identifiers. Its place (#3667).
-                        out_data[out_count + k] = fast_pp_placed(pp, f, s);
+                        // `for` or `while`, which no #define names: the builtins are identifiers. Its place (#3667), from
+                        // the window again: `s` kept for this rare branch would cost every name a register.
+                        out_data[out_count + k] = fast_pp_window_placed(pp, f, i + k);
                         continue;
                     }
                     out_count += k;

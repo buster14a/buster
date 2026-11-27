@@ -408,15 +408,19 @@ column, in bytes (#3667). The tokens keep no lines or columns, so a `for` or
 (`BUSTER_FTOK_PLACED`: its offset in the main file, or its address's low bits
 in another; the window's emitter records it in the branch its macro names
 already take, the keywords added to that stop set, and so does
-`fast_pp_single_token`). At a loop whose body is a lone `;` (19 of `sqlite3.c`'s
-1,610), `fast_cc_empty_loop_body` finds the text (another file's in the
-mappings the compile kept) and reads it again from the keyword to the next
-statement's first token: the
-header's parentheses (every macro its names reach balanced, with no `;`), the
-`;` right after the `)`, and past an `#endif`, an `#else`'s groups and the
-directives that give no token. A keyword an expansion gives, a text it can't
-read, a conditional it can't judge and a statement an empty macro may start
-leave; a system header's loop and `-w` stay quiet.
+`fast_pp_single_token`). At a loop whose `)` a `;` follows (asked there, not at
+each empty statement: `sqlite3.c`'s asserts make 7,508; 20 of its loops ask),
+`fast_cc_empty_statement` finds the text (another file's in the mappings the
+compile kept) and reads it again from the keyword to the next statement's first
+token: the header 64 bytes a step (`fast_cc_raw_header`: its parentheses' and
+`;`s' bits in order, its literals masked, its newlines counted, its names; a
+comment or a longer header a token at a time), the `;` right after the `)`, and
+past an `#endif`, an `#else`'s groups and the directives that give no token.
+The header's names are the stream's, or every macro they reach is balanced with
+no `;`, so the text's `)` is the stream's. A keyword an expansion gives, a text
+it can't read, a conditional it can't judge and a statement an empty macro may
+start leave; a system header's loop and `-w` stay quiet. On the 9700X it adds
+42 K instructions to `sqlite3.c`'s 212 M, all in those 20 reads.
 
 `./build/compiler test-direct --differential [--jobs N] [--direct-floor N]
 DIRECTORY...` compiles every C file under the directories with this
