@@ -2227,6 +2227,108 @@ static __attribute__((noinline, cold)) bool fast_quote_may_separate(const uint8_
     return (fast_char_class[before] & 1u) != 0 || before == '.' || sign;
 }
 
+// The text after the line splices that start at `p` (fast_skip_splices's), with the newlines they hold in *lines; `p`
+// where no splice starts there.
+static __attribute__((noinline, cold)) const uint8_t* fast_pass_splices(const uint8_t* p, const uint8_t* end, uint32_t* lines)
+{
+    const uint8_t* const joined = fast_skip_splices(p, end);
+    uint32_t newlines = 0;
+    for (const uint8_t* c = p; c < joined; c += 1)
+    {
+        newlines += *c == '\n' ? 1u : 0u;
+    }
+    *lines = newlines;
+    return joined;
+}
+
+// A conditional's keyword (FPP_KW_*) for the name of `length` bytes at `name`, or 0.
+static uint32_t fast_conditional_keyword(const uint8_t* name, uint32_t length)
+{
+    uint32_t kw = 0;
+    if (length == 2u && name[0] == 'i' && name[1] == 'f') { kw = FPP_KW_IF; }
+    else if (length == 5u && memcmp(name, "ifdef", 5) == 0) { kw = FPP_KW_IFDEF; }
+    else if (length == 6u && memcmp(name, "ifndef", 6) == 0) { kw = FPP_KW_IFNDEF; }
+    else if (length == 5u && memcmp(name, "endif", 5) == 0) { kw = FPP_KW_ENDIF; }
+    else if (length == 4u && memcmp(name, "else", 4) == 0) { kw = FPP_KW_ELSE; }
+    else if (length == 4u && memcmp(name, "elif", 4) == 0) { kw = FPP_KW_ELIF; }
+    else if (length == 7u && memcmp(name, "elifdef", 7) == 0) { kw = FPP_KW_ELIFDEF; }
+    else if (length == 8u && memcmp(name, "elifndef", 8) == 0) { kw = FPP_KW_ELIFNDEF; }
+    return kw;
+}
+
+// A backslash at `at` right after a skipped directive's name, or after its '#' and blanks (#3577): where it starts a
+// line splice, the name goes on past it. Where the name the full pipeline reads then is another conditional than the one
+// the skip read (`#el\` + newline + `se` is an #else, `#endif\` + newline + `x` no directive), or a backslash in the
+// name starts no splice (a UCN's), the unit leaves the direct path. Text before `at` that isn't a '#', blanks and a name
+// is no directive's, and is left as it is.
+static __attribute__((noinline, cold)) void fast_check_spliced_directive(FastPP* pp, const uint8_t* base, const uint8_t* at, const uint8_t* end)
+{
+    const uint8_t* name = at;
+    while (name > base && (fast_char_class[name[-1]] & 1u) != 0)
+    {
+        name -= 1;
+    }
+    const uint8_t* after_hash = name;
+    while (after_hash > base && (fast_char_class[after_hash[-1]] & 8u) != 0)
+    {
+        after_hash -= 1;
+    }
+    if (after_hash > base && after_hash[-1] == '#')
+    {
+        const uint32_t read = fast_conditional_keyword(name, (uint32_t)(at - name));
+        const uint8_t* p = name;
+        bool leave = false;
+        bool before = true;
+        while (before && !leave && p < end)
+        {
+            const uint8_t* const joined = fast_skip_splices(p, end);
+            before = joined != p || (fast_char_class[*p] & 8u) != 0;
+            p = joined != p ? joined : p + (before ? 1 : 0);
+        }
+        uint8_t spelled[8] = { 0 };
+        uint32_t length = 0;
+        bool more = true;
+        while (more && !leave && p < end)
+        {
+            if ((fast_char_class[*p] & 1u) != 0)
+            {
+                spelled[length & 7u] = *p;
+                length += 1;
+                p += 1;
+            }
+            else if (*p == '\\')
+            {
+                const uint8_t* const joined = fast_skip_splices(p, end);
+                leave = joined == p;
+                p = joined;
+            }
+            else
+            {
+                more = false;
+            }
+        }
+        if (leave || fast_conditional_keyword(spelled, length) != read)
+        {
+            fast_pp_bail(pp, "directive name across a line splice in a skipped group");
+        }
+    }
+}
+
+// The skip's event at a backslash that may start a line splice (#3577): the text after the splices, with their newlines
+// in *lines. A backslash before blanks that starts none leaves the direct path.
+static __attribute__((noinline, cold)) const uint8_t* fast_skip_line_splices(FastPP* pp, const uint8_t* base, const uint8_t* at, const uint8_t* end,
+                                                                             uint32_t* lines)
+{
+    fast_check_spliced_directive(pp, base, at, end);
+    const uint8_t* joined = fast_pass_splices(at, end, lines);
+    if (joined == at)
+    {
+        fast_pp_bail(pp, "backslash before a blank in a skipped group");
+        joined = end;
+    }
+    return joined;
+}
+
 // Lex ONE raw preprocessing token from [p, end), updating *line_count and *at_bol.
 // Returns pointer past the lexed token (or end if FTOK_EOF).
 // If stop_at_eol is true, returns FTOK_EOF upon reaching '\n' without consuming '\n'.
@@ -2510,6 +2612,9 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
 //   end (the rare block with an R before a '"' tests each, so "ERROR" makes none): decided the same way, one literal
 //   of its line at a time, until it is inside one or opens one. A literal that a raw prefix opens leaves the direct
 //   path. Without raw string literals the blocks don't look for them.
+// - a line splice whose newline the line starts would take for a line's end (#3577), seen at the byte after its
+//   backslash: decided as a comment is, a blank, so that a '#' after it starts a directive only where its line had
+//   nothing but blanks before the splice; and one at the block's first byte, which may go on a directive's name;
 // - a universal character name's start, seen at the byte after a backslash: a 'u', 'U' or 'N', or another backslash,
 //   which a line splice between the backslash and its letter starts. The full pipeline's raw lexer still reports a
 //   basic, control or surrogate character's UCN that starts a token in a skipped group (#3655, `pp_read_skipped_ucns`),
@@ -2553,70 +2658,104 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
     const __m512i v_lower_u = _mm512_set1_epi8('u');
     const __m512i v_upper_n = _mm512_set1_epi8('N');
 
+    // Two loops (#3577): the inner one passes the blocks with no event and leaves at a block with one, with the masks the
+    // event's decision reads; the outer one decides it. On their own, the inner loop's registers don't depend on the
+    // decisions' calls and code: as one loop, sqlite3.c's skips took 8.16 M instructions on the 9700X, and any change to a
+    // decision moved that count by up to half a million; as two, 7.44 M with this function's splice reads.
     while (p < end && !done)
     {
-        uint32_t avail = 0;
-        const __m512i v = fast_load64_bounded(p, end, &avail);
-        const __mmask64 valid = _bzhi_u64(~UINT64_C(0), avail);
-        const __mmask64 nl = _mm512_cmpeq_epi8_mask(v, v_nl);
-        const __mmask64 hash = _mm512_cmpeq_epi8_mask(v, v_hash);
-        const __mmask64 slash = _mm512_cmpeq_epi8_mask(v, v_slash);
-        const __mmask64 star = _mm512_cmpeq_epi8_mask(v, v_star);
-        const __mmask64 dq = _mm512_cmpeq_epi8_mask(v, v_dq);
-        const __mmask64 quote = dq | _mm512_cmpeq_epi8_mask(v, v_sq);
-        const __mmask64 backslash = _mm512_cmpeq_epi8_mask(v, v_bs);
-        // Blanks are fast_char_class's 8: ' ', and '\t' '\v' '\f' '\r' (9 to 13 without the newline). The bytes past
-        // the file's end count as blanks, so that what is carried out of the block is the state at the file's end.
-        const __mmask64 blank = _mm512_cmpeq_epi8_mask(v, v_space) | (_mm512_cmple_epu8_mask(_mm512_sub_epi8(v, v_tab), v_four) & ~nl) | ~valid;
-
-        const __mmask64 starts = (nl << 1) | bol_in;
-        unsigned long long lead_sum = 0;
-        const uint64_t lead_out = _addcarry_u64(0, blank, starts & blank, &lead_sum);
-        const __mmask64 first = (starts | lead_sum) & ~blank;
-
-        const __mmask64 opens = (star | slash) & ((slash << 1) | slash_in);
-
-        const __mmask64 passes = ~(nl & ~((backslash << 1) | backslash_in));
-        unsigned long long taint_sum = 0;
-        const uint64_t taint_out = _addcarry_u64((unsigned char)taint_in, passes, quote, &taint_sum);
-        const __mmask64 tainted = passes & ~taint_sum;
-
-        const __mmask64 directives = hash & first;
-        // A UCN's letters are looked for only in a block with a byte after a backslash, which most blocks have none of.
-        const __mmask64 escaped = (backslash << 1) | backslash_in;
+        __mmask64 events = 0;
+        __mmask64 nl = 0;
+        __mmask64 first = 0;
+        __mmask64 tainted = 0;
+        __mmask64 directives = 0;
         __mmask64 ucns = 0;
-        if (__builtin_expect(escaped != 0, 0))
-        {
-            ucns = (_mm512_cmpeq_epi8_mask(_mm512_or_si512(v, v_case), v_lower_u) | _mm512_cmpeq_epi8_mask(v, v_upper_n) | backslash) & escaped;
-        }
         __mmask64 raws = 0;
-        uint64_t r_out = 0;
-        if (raw_on)
+        while (events == 0 && p < end)
         {
-            const __mmask64 upper_r = _mm512_cmpeq_epi8_mask(v, v_upper_r);
-            uint64_t candidates = dq & ((upper_r << 1) | r_in);
-            r_out = upper_r >> 63;
-            while (__builtin_expect(candidates != 0, 0))
+            uint32_t avail = 0;
+            const __m512i v = fast_load64_bounded(p, end, &avail);
+            const __mmask64 valid = _bzhi_u64(~UINT64_C(0), avail);
+            nl = _mm512_cmpeq_epi8_mask(v, v_nl);
+            const __mmask64 hash = _mm512_cmpeq_epi8_mask(v, v_hash);
+            const __mmask64 slash = _mm512_cmpeq_epi8_mask(v, v_slash);
+            const __mmask64 star = _mm512_cmpeq_epi8_mask(v, v_star);
+            const __mmask64 dq = _mm512_cmpeq_epi8_mask(v, v_dq);
+            const __mmask64 quote = dq | _mm512_cmpeq_epi8_mask(v, v_sq);
+            const __mmask64 backslash = _mm512_cmpeq_epi8_mask(v, v_bs);
+            // Blanks are fast_char_class's 8: ' ', and '\t' '\v' '\f' '\r' (9 to 13 without the newline). The bytes past
+            // the file's end count as blanks, so that what is carried out of the block is the state at the file's end.
+            const __mmask64 blank = _mm512_cmpeq_epi8_mask(v, v_space) | (_mm512_cmple_epu8_mask(_mm512_sub_epi8(v, v_tab), v_four) & ~nl) | ~valid;
+
+            const __mmask64 starts = (nl << 1) | bol_in;
+            unsigned long long lead_sum = 0;
+            const uint64_t lead_out = _addcarry_u64(0, blank, starts & blank, &lead_sum);
+            first = (starts | lead_sum) & ~blank;
+
+            const __mmask64 opens = (star | slash) & ((slash << 1) | slash_in);
+
+            const __mmask64 passes = ~(nl & ~((backslash << 1) | backslash_in));
+            unsigned long long taint_sum = 0;
+            const uint64_t taint_out = _addcarry_u64((unsigned char)taint_in, passes, quote, &taint_sum);
+            tainted = passes & ~taint_sum;
+
+            directives = hash & first;
+            // A UCN's letters are looked for only in a block with a byte after a backslash, which most blocks have none
+            // of, and so are line splices.
+            const __mmask64 escaped = (backslash << 1) | backslash_in;
+            ucns = 0;
+            if (__builtin_expect(escaped != 0, 0))
             {
-                const uint32_t at = (uint32_t)__builtin_ctzll(candidates);
-                candidates &= candidates - 1u;
-                raws |= fast_raw_string_before(f->base, p + at, pp->raw_strings) ? UINT64_C(1) << at : 0u;
+                ucns = (_mm512_cmpeq_epi8_mask(_mm512_or_si512(v, v_case), v_lower_u) | _mm512_cmpeq_epi8_mask(v, v_upper_n) | backslash) & escaped;
+                // #3577: a line splice's newline (after a backslash and any blanks) ends no line, but the line starts
+                // above take it for one. That misreads a line's first character only where the text after the splice,
+                // past its blanks, is a '#', a '/' or a backslash (the bytes whose first-ness the decisions ask), or where
+                // the splice or those blanks reach the block's end. A splice at the block's first byte follows a decision
+                // that stopped at it, a directive's name or the blanks after its '#', which it may go on. There the byte
+                // after each backslash that a splice may start with is an event, decided as a comment is.
+                const __mmask64 heads = escaped & (nl | blank);
+                unsigned long long run = 0;
+                const uint64_t run_out = _addcarry_u64(0, blank, escaped & blank, &run);
+                const __mmask64 spliced = nl & (escaped | run);
+                unsigned long long lead = 0;
+                const uint64_t lead_on = _addcarry_u64(0, blank, (spliced << 1) & blank, &lead);
+                // The masks the loop computes above, again from a copy of the block the compiler can't see through:
+                // shared, they would be kept from above to here in registers the loop spills.
+                __m512i opaque = v;
+                __asm__("" : "+v"(opaque));
+                const __mmask64 marks = _mm512_cmpeq_epi8_mask(opaque, v_hash) | _mm512_cmpeq_epi8_mask(opaque, v_slash) | backslash;
+                const uint64_t misread = (((spliced << 1) | lead) & marks) | lead_on | run_out | (spliced >> 63) | (heads & 2u);
+                ucns |= misread != 0 ? heads : 0u;
+            }
+            raws = 0;
+            uint64_t r_out = 0;
+            if (raw_on)
+            {
+                const __mmask64 upper_r = _mm512_cmpeq_epi8_mask(v, v_upper_r);
+                uint64_t candidates = dq & ((upper_r << 1) | r_in);
+                r_out = upper_r >> 63;
+                while (__builtin_expect(candidates != 0, 0))
+                {
+                    const uint32_t at = (uint32_t)__builtin_ctzll(candidates);
+                    candidates &= candidates - 1u;
+                    raws |= fast_raw_string_before(f->base, p + at, pp->raw_strings) ? UINT64_C(1) << at : 0u;
+                }
+            }
+            events = (directives | opens | raws | ucns) & valid;
+            if (__builtin_expect(events == 0, 1))
+            {
+                line += (uint32_t)__builtin_popcountll(nl);
+                bol_in = lead_out | (nl >> 63);
+                taint_in = taint_out;
+                backslash_in = backslash >> 63;
+                slash_in = slash >> 63;
+                slash_first = first >> 63;
+                slash_tainted = tainted >> 63;
+                r_in = r_out;
+                p += avail;
             }
         }
-        const __mmask64 events = (directives | opens | raws | ucns) & valid;
-        if (__builtin_expect(events == 0, 1))
-        {
-            line += (uint32_t)__builtin_popcountll(nl);
-            bol_in = lead_out | (nl >> 63);
-            taint_in = taint_out;
-            backslash_in = backslash >> 63;
-            slash_in = slash >> 63;
-            slash_first = first >> 63;
-            slash_tainted = tainted >> 63;
-            r_in = r_out;
-            p += avail;
-        }
-        else
+        if (events != 0)
         {
             const uint32_t pos = (uint32_t)__builtin_ctzll(events);
             const bool directive = ((directives >> pos) & 1u) != 0;
@@ -2676,7 +2815,15 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                     s += 1;
                     while (s < end && *s != quote_char && *s != '\n')
                     {
-                        if (*s == '\\' && s + 1 < end)
+                        if (*s == '\\' && s + 1 < end && (fast_char_class[s[1]] & 8u) != 0)
+                        {
+                            // #3577: a splice with blanks or "\r\n" before its newline goes on too.
+                            uint32_t splice_lines = 0;
+                            const uint8_t* const joined = fast_pass_splices(s, end, &splice_lines);
+                            line += splice_lines;
+                            s = joined != s ? joined : s + 2;
+                        }
+                        else if (*s == '\\' && s + 1 < end)
                         {
                             if (s[1] == '\n') { line += 1u; }
                             s += 2;
@@ -2734,7 +2881,8 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                     }
                 }
             }
-            else if (!decided && ucn)
+            // A splice's event, a newline or a blank after the backslash, is decided as a comment's (#3577).
+            else if (!decided && ucn && at[1] != '\n' && (fast_char_class[at[1]] & 8u) == 0)
             {
                 // The backslash and, past any line splices, its letter: a UCN's start leaves (#3577); a backslash before a
                 // backslash that starts none is passed, and the text goes on from that one.
@@ -2753,7 +2901,8 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
             else if (!decided)
             {
                 // A comment is a blank: the line's first character may still follow it. Its lines are counted apart, so
-                // that the loop's count stays in a register.
+                // that the loop's count stays in a register. So is a line splice (#3577), the event at a newline or a blank
+                // after a backslash.
                 uint32_t comment_lines = 0;
                 next_bol = at_first ? 1u : 0u;
                 if (at[1] == '*')
@@ -2766,9 +2915,13 @@ static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(Fa
                         done = true;
                     }
                 }
-                else
+                else if (at[1] == '/')
                 {
                     next = fast_skip_line_comment(at + 2, end, &comment_lines);
+                }
+                else
+                {
+                    next = fast_skip_line_splices(pp, f->base, at, end, &comment_lines);
                 }
                 line += comment_lines;
             }
@@ -7746,6 +7899,13 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
             }
             else if (kw == FPP_KW_ELIF || kw == FPP_KW_ELIFDEF || kw == FPP_KW_ELIFNDEF)
             {
+                // #3577: a line splice after the name may make it another; after #endif's and #else's, the letters that
+                // would go on the name are the extra tokens fast_pp_finish_directive leaves at.
+                if (__builtin_expect(f->ptr < f->end && *f->ptr == '\\', 0))
+                {
+                    fast_check_spliced_directive(pp, f->base, f->ptr, f->end);
+                    if (pp->bailout) { break; }
+                }
                 if (cf->is_guard) { f->guard_state = 3u; cf->is_guard = 0; }
                 if (cf->saw_else) { fast_pp_bail(pp, "#elif after #else"); break; }
                 if (!cf->taken)
