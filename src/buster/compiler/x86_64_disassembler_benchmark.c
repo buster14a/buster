@@ -298,7 +298,9 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
         const uint64_t table_bytes = sizeof(x86_decode_buckets) + x86_decode_storage_bytes + sizeof(x86_decode_lane_indices) + (uint64_t)x86_decode_cell_count * sizeof(*x86_decode_cells) +
                                      (uint64_t)x86_decode_list_count * sizeof(*x86_decode_lists) + sizeof(x86_decode_tails) + sizeof(x86_decode_legacy_tails) + sizeof(x86_decode_vector_tails) +
                                      sizeof(x86_decode_map_tails) + sizeof(x86_decode_checks) + sizeof(x86_decode_lane_forms) + sizeof(x86_decode_lane_rows) + sizeof(x86_disassembly_plans) +
-                                     sizeof(x86_disassembly_registers);
+                                     sizeof(x86_disassembly_registers) + sizeof(x86_decode_short) + sizeof(x86_decode_rex_direct) + sizeof(x86_decode_escaped_direct) +
+                                     sizeof(x86_decode_direct_pages) + sizeof(x86_decode_shuffles) + sizeof(x86_decode_trailing_class) + sizeof(x86_decode_trailing) +
+                                     sizeof(x86_decode_literal) + sizeof(x86_decode_sib_fields);
         printf("initialization=%.3fms (encoder64=%.3fms address32=%.3fms decoder+format=%.3fms) decoder-tables=%llu bytes entries=%u lane-index-cells=%u\n", initialization_ns / 1000000.0,
                (normal_initialized - initialization_start) / 1000000.0, (addresses_initialized - normal_initialized) / 1000000.0, (initialization_ns - (addresses_initialized - initialization_start)) / 1000000.0,
                (unsigned long long)table_bytes, x86_decode_entry_count, x86_decode_cell_count);

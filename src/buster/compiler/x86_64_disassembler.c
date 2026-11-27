@@ -136,6 +136,37 @@ BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_decode_list_count;
 BUSTER_X86_SHARED BUSTER_BAKED uint8_t x86_decode_legacy_tails[2 * 256] __attribute__((aligned(64)));
 BUSTER_X86_SHARED BUSTER_BAKED uint8_t x86_decode_vector_tails[256] __attribute__((aligned(64)));
 BUSTER_X86_SHARED BUSTER_BAKED uint8_t x86_decode_map_tails[3 * BUSTER_X86_DECODE_MAPS];
+// Complete one- and two-byte encodings, materialized by the same lane decoder while baking.
+BUSTER_X86_SHARED BUSTER_BAKED X86Decoded x86_decode_short[65536];
+// A REX prefix, single-byte opcode and direct ModRM encode a complete record at this key.
+BUSTER_X86_SHARED BUSTER_BAKED uint16_t x86_decode_rex_direct[16][256];
+BUSTER_X86_SHARED BUSTER_BAKED uint16_t x86_decode_escaped_direct[3][256];
+// The catalogue uses fewer than 540 distinct pages for the 4,864 prefix/opcode pairs.
+#define BUSTER_X86_DIRECT_PAGES 640
+BUSTER_X86_SHARED BUSTER_BAKED X86Decoded x86_decode_direct_pages[BUSTER_X86_DIRECT_PAGES][64];
+// Integer ModRM forms whose trailing bytes are unconstrained displacement and immediate fields.
+typedef struct X86DecodeTrailing X86DecodeTrailing;
+struct X86DecodeTrailing
+{
+    uint32_t registers;
+    uint16_t form;
+    uint8_t length;
+    uint8_t shuffle;
+};
+typedef struct X86DecodeShuffle X86DecodeShuffle;
+struct X86DecodeShuffle
+{
+    uint8_t fields[8];
+    uint8_t sib;
+    uint8_t sign_bytes;
+};
+// Masks are shared by instructions with the same field lengths and positions.
+BUSTER_X86_SHARED BUSTER_BAKED X86DecodeShuffle x86_decode_shuffles[256];
+BUSTER_X86_SHARED BUSTER_BAKED uint8_t x86_decode_trailing_class[512];
+BUSTER_X86_SHARED BUSTER_BAKED X86DecodeTrailing x86_decode_trailing[17][128][256];
+BUSTER_X86_SHARED BUSTER_BAKED X86DecodeTrailing x86_decode_literal[17][512];
+BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_decode_sib_fields[17][256];
+static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity);
 BUSTER_X86_SHARED BUSTER_BAKED bool x86_decode_initialized;
 BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_decode_entry_count;
 
@@ -640,6 +671,211 @@ static bool x86_decode_lane_indices_initialize(void)
     return valid;
 }
 
+// Intern the 64 ModRM register encodings of a prefix/opcode pair. Page zero
+// is the empty page, so unavailable forms use the ordinary lane decoder.
+static bool x86_decode_intern_direct(const X86Decoded page[64], uint16_t* index, uint32_t* count)
+{
+    uint32_t row = 0;
+    while (row < *count && memcmp(page, x86_decode_direct_pages[row], sizeof(x86_decode_direct_pages[row])) != 0)
+    {
+        row += 1;
+    }
+    if (row == BUSTER_X86_DIRECT_PAGES)
+    {
+        return false;
+    }
+    if (row == *count)
+    {
+        memcpy(x86_decode_direct_pages[row], page, sizeof(x86_decode_direct_pages[row]));
+        *count += 1;
+    }
+    *index = (uint16_t)row;
+    return true;
+}
+
+// Build the values and byte shuffles for integer and unprefixed 0F forms.
+static bool x86_decode_trailing_initialize(void)
+{
+    uint32_t next_class = 1;
+    uint32_t shuffle_count = 0;
+    for (uint32_t key = 0; key < 512; key += 1)
+    {
+        const uint32_t opcode = key & 255;
+        const bool escaped = key >= 256;
+        const bool modrm = escaped ? ((opcode >= 0x40 && opcode <= 0x4f) || (opcode >= 0x90 && opcode <= 0x9f) ||
+                                       opcode == 0xb6 || opcode == 0xb7 || opcode == 0xbe || opcode == 0xbf || opcode == 0xaf ||
+                                       opcode == 0x28 || opcode == 0x29 || opcode == 0x57) :
+                                    (opcode < 64 && (opcode & 7) < 4) || (opcode >= 0x80 && opcode <= 0x8b) || opcode == 0x8d ||
+                           opcode == 0x63 || opcode == 0x69 || opcode == 0x6b || opcode == 0xc0 || opcode == 0xc1 ||
+                           opcode == 0xc6 || opcode == 0xc7 || (opcode >= 0xd0 && opcode <= 0xd3);
+        const bool literal = escaped ? (opcode >= 0x80 && opcode <= 0x8f) :
+                                       (opcode < 64 && ((opcode & 7) == 4 || (opcode & 7) == 5)) ||
+                             (opcode >= 0xb0 && opcode <= 0xbf) || opcode == 0xa8 || opcode == 0xa9 ||
+                             opcode == 0x68 || opcode == 0x6a || opcode == 0xe8 || opcode == 0xe9;
+        if (!modrm && !literal)
+        {
+            continue;
+        }
+        const uint32_t kind = modrm ? next_class++ : 0xff;
+        if (modrm && kind >= 128)
+        {
+            return false;
+        }
+        for (uint32_t rex = 0; rex <= 16; rex += 1)
+        {
+            const uint32_t prefix = (rex != 0) + (uint32_t)escaped;
+            for (uint32_t row = 0; row < (modrm ? 256u : 1u); row += 1)
+            {
+                uint8_t bytes[15] = { 0 };
+                bytes[0] = (uint8_t)(0x40 | (rex - 1));
+                if (escaped)
+                {
+                    bytes[prefix - 1] = 0x0f;
+                }
+                bytes[prefix] = (uint8_t)opcode;
+                bytes[prefix + 1] = (uint8_t)row;
+                const bool sib = modrm && row < 192 && (row & 7) == 4;
+                if (sib)
+                {
+                    bytes[prefix + 2] = 0x24;
+                }
+                X86Decoded record = { 0 };
+                const X86DecodeResult seen = x86_disassemble(bytes, sizeof(bytes), &record, 1);
+                const uint32_t begin = prefix + 1 + (uint32_t)modrm + (uint32_t)sib;
+                if (seen.count != 1 || record.length < begin || record.instruction.form >= X86_FORM_COUNT)
+                {
+                    continue;
+                }
+                const X86FormDescription* form = &x86_form_descriptions[record.instruction.form];
+                const uint32_t imm = form->immediate_bytes;
+                const uint32_t disp = record.length - begin - imm;
+                if ((imm > 4 && (imm != 8 || disp != 0 || modrm)) || (disp != 0 && disp != 1 && disp != 4))
+                {
+                    continue;
+                }
+                X86DecodeTrailing* out = modrm ? &x86_decode_trailing[rex][kind][row] : &x86_decode_literal[rex][key];
+                if (record.address32 || record.instruction.vvvv != 0 || record.instruction.decorations != 0)
+                {
+                    continue;
+                }
+                memcpy(&out->registers, &record.instruction.reg, sizeof(out->registers));
+                out->form = record.instruction.form;
+                out->length = record.length;
+                X86DecodeShuffle shuffle = { 0 };
+                shuffle.sib = (uint8_t)sib;
+                shuffle.sign_bytes = disp == 1 ? 0xe0 : 0;
+                for (uint32_t byte = 0; byte < 4; byte += 1)
+                {
+                    shuffle.fields[byte] = byte < imm ? (uint8_t)(begin + disp + byte) : 0x80;
+                    shuffle.fields[4 + byte] = imm == 8 ? (uint8_t)(begin + 4 + byte) : byte < disp ? (uint8_t)(begin + byte) : disp == 1 ? (uint8_t)begin : 0x80;
+                }
+                uint32_t id = 0;
+                while (id < shuffle_count && memcmp(&shuffle, &x86_decode_shuffles[id], sizeof(shuffle)) != 0)
+                {
+                    id += 1;
+                }
+                if (id == 256)
+                {
+                    return false;
+                }
+                if (id == shuffle_count)
+                {
+                    x86_decode_shuffles[shuffle_count++] = shuffle;
+                }
+                out->shuffle = (uint8_t)id;
+            }
+        }
+        x86_decode_trailing_class[key] = (uint8_t)kind;
+    }
+    return true;
+}
+
+// Bake complete short encodings, register-ModRM pages and the SIB register fields
+// by decoding their canonical bytes against the catalogue.
+static bool x86_decode_operand_tables_initialize(void)
+{
+    for (uint32_t prefix = 0; prefix < 65536; prefix += 1)
+    {
+        uint8_t bytes[2] = { (uint8_t)prefix, (uint8_t)(prefix >> 8) };
+        X86Decoded decoded = { 0 };
+        const X86DecodeResult seen = x86_disassemble(bytes, sizeof(bytes), &decoded, 1);
+        // FWAIT may prefix an x87 waiting form whose third byte is outside this table.
+        if (seen.count == 1 && bytes[0] != 0x9b)
+        {
+            x86_decode_short[prefix] = decoded;
+        }
+    }
+    uint32_t direct_count = 1;
+    for (uint32_t rex = 0; rex < 16; rex += 1)
+    {
+        for (uint32_t opcode = 0; opcode < 256; opcode += 1)
+        {
+            X86Decoded page[64] = { 0 };
+            for (uint32_t row = 0; row < 64; row += 1)
+            {
+                const uint8_t bytes[3] = { (uint8_t)(0x40 | rex), (uint8_t)opcode, (uint8_t)(0xc0 | row) };
+                X86Decoded decoded = { 0 };
+                const X86DecodeResult seen = x86_disassemble(bytes, sizeof(bytes), &decoded, 1);
+                if (seen.count == 1 && decoded.length == sizeof(bytes) && opcode != 0x9b)
+                {
+                    page[row] = decoded;
+                }
+            }
+            if (!x86_decode_intern_direct(page, &x86_decode_rex_direct[rex][opcode], &direct_count))
+            {
+                return false;
+            }
+        }
+    }
+    if (!x86_decode_trailing_initialize())
+    {
+        return false;
+    }
+    const uint8_t legacy[3] = { 0x66, 0xf2, 0xf3 };
+    for (uint32_t prefix = 0; prefix < 3; prefix += 1)
+    {
+        for (uint32_t op = 0; op < 256; op += 1)
+        {
+            X86Decoded page[64] = { 0 };
+            for (uint32_t row = 0; row < 64; row += 1)
+            {
+                const uint8_t bytes[] = { legacy[prefix], 0x0f, (uint8_t)op, (uint8_t)(0xc0 | row) };
+                X86Decoded one = { 0 };
+                const X86DecodeResult got = x86_disassemble(bytes, sizeof(bytes), &one, 1);
+                if (got.count == 1 && one.length == sizeof(bytes))
+                {
+                    page[row] = one;
+                }
+            }
+            if (!x86_decode_intern_direct(page, &x86_decode_escaped_direct[prefix][op], &direct_count))
+            {
+                return false;
+            }
+        }
+    }
+    for (uint32_t rex = 0; rex <= 16; rex += 1)
+    {
+        for (uint32_t sib = 0; sib < 256; sib += 1)
+        {
+            const uint32_t prefix = rex != 0;
+            uint8_t bytes[5];
+            bytes[0] = (uint8_t)(0x40 | (rex - 1));
+            bytes[prefix] = 0x8b;
+            bytes[prefix + 1] = 0x44;
+            bytes[prefix + 2] = (uint8_t)sib;
+            bytes[prefix + 3] = 0;
+            X86Decoded one = { 0 };
+            const X86DecodeResult got = x86_disassemble(bytes, prefix + 4, &one, 1);
+            if (got.count == 1 && one.length == prefix + 4)
+            {
+                const X86Instruction inst = one.instruction;
+                x86_decode_sib_fields[rex][sib] = (uint32_t)inst.rm | (uint32_t)inst.index << 8 | (uint32_t)inst.mode << 16 | 1u << 24;
+            }
+        }
+    }
+    return true;
+}
+
 static bool x86_disassembler_initialize(void)
 {
     // A baked executable starts with the tables built; the checks build the address32 templates they read themselves.
@@ -716,6 +952,9 @@ static bool x86_disassembler_initialize(void)
                 x86_disassembly_initialize();
                 x86_decode_entry_count = total;
                 x86_decode_initialized = true;
+                // The ordinary lane tables are ready for decoding the catalogue samples below.
+                result = x86_decode_operand_tables_initialize();
+                x86_decode_initialized = result;
             }
         }
     }
@@ -1362,6 +1601,124 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
     return written;
 }
 
+// Decode operand fields across byte lanes for a plain vector prefix and its ModRM.
+// Only a compact catalogue check can publish a record. Other encodings continue in the lane matcher.
+static uint32_t x86_decode_vector_operands(const uint8_t* source, uint64_t remaining, X86Instruction* instruction)
+{
+    const uint8_t lead = source[0];
+    const bool evex = lead == 0x62;
+    const bool vex2 = lead == 0xc5;
+    const uint32_t header = evex ? 4 : vex2 ? 2 : 3;
+    if ((!evex && !vex2 && lead != 0xc4) || remaining < header + 2)
+    {
+        return 0;
+    }
+    const uint32_t raw0 = source[1];
+    const uint32_t middle = vex2 ? raw0 : source[2];
+    const uint32_t last = evex ? source[3] : 8;
+    const uint32_t modrm = source[header + 1];
+    const uint32_t map = vex2 ? 1 : raw0 & (evex ? 7u : 31u);
+    const uint32_t mod = modrm >> 6;
+    const bool memory = mod != 3;
+    if (map >= BUSTER_X86_DECODE_MAPS || (evex && ((raw0 & 8) || !(middle & 4) || map == 4 || map == 7)))
+    {
+        return 0;
+    }
+
+    const uint32_t w = vex2 ? 0 : middle >> 7;
+    const uint32_t length = evex ? ((last >> 5) & 3) : ((middle >> 2) & 1);
+    const uint32_t key = (w << 9) | (length << 10) | ((last & 16) << 8) | ((middle & 3) << 13) | (modrm << 15) | ((uint32_t)memory << 23);
+    const X86DecodeLaneIndex* index = &x86_decode_lane_indices[x86_decode_bucket(evex ? 2 : 1, map, source[header])];
+    if ((key & index->common_mask) != index->common_key)
+    {
+        return 0;
+    }
+    const uint32_t cell = x86_decode_cells[index->first + _pext_u32(key, index->varying)];
+    const uint32_t row = cell & BUSTER_X86_DECODE_LIST ? x86_decode_lists[cell & ~BUSTER_X86_DECODE_LIST] : cell;
+    const uint32_t* entry = x86_decode_lane_rows[row];
+    const uint32_t form = entry[0];
+    const uint32_t flags = entry[3];
+    const uint32_t imm = form & 15;
+    if ((form & (BUSTER_X86_LANE_MODRM | BUSTER_X86_LANE_FIXED | BUSTER_X86_LANE_ADDRESS | 0xf0u)) != BUSTER_X86_LANE_MODRM ||
+        (flags & 1) == 0 || (flags & (memory ? 4u : 2u)) == 0 || (memory && (form & (BUSTER_X86_LANE_VSIB | BUSTER_X86_LANE_SIB))) || imm > 4)
+    {
+        return 0;
+    }
+
+    // In each dword the bytes are inverted extension bits, inverted vvvv, EVEX decorations and ModRM.
+    // Extract low register fields, extension bit 3, and extension bit 4 in parallel. Decorations share the fourth byte.
+    const uint32_t p0 = vex2 ? (raw0 | 0x60) : raw0;
+    const uint32_t normalized = (p0 ^ 0xffu) | ((middle ^ 0x78u) << 8) | ((last ^ 8u) << 16) | (modrm << 24);
+    const __m128i shifts = _mm_setr_epi8(27,24,11,16, 4,2,15,0, 0,2,0,0, 0,0,0,0);
+    const __m128i extracted = _mm_multishift_epi64_epi8(shifts, _mm_set1_epi32((int)normalized));
+    const uint32_t decor = evex ? (form & BUSTER_X86_LANE_ROUNDING ? 0xe7u : 0x87u) : 0;
+    const uint32_t reg = form & BUSTER_X86_LANE_REG ? 0xffu : 0u;
+    const __m128i mask = _mm_setr_epi32((int)((7u & reg) | 7u << 8 | 15u << 16 | decor << 24),
+                                        (int)((8u & reg) | 8u << 8 | (evex ? 16u << 16 : 0u)),
+                                        evex ? (int)((16u & reg) | 16u << 8) : 0, 0);
+    const __m128i parts = _mm_and_si128(extracted, mask);
+    uint32_t fields = (uint32_t)_mm_cvtsi128_si32(_mm_ternarylogic_epi32(parts, _mm_srli_si128(parts,4), _mm_srli_si128(parts,8), 0xfe));
+    uint32_t bytes = header + 2;
+    uint32_t rm = (fields >> 8) & 255;
+    uint32_t mode = 0;
+    uint32_t index_register = 0;
+    int32_t displacement = 0;
+    if (memory)
+    {
+        const uint32_t low = modrm & 7;
+        const bool indexed = low == 4;
+        // The regular SIB descriptors contain a base. No-base and RIP-relative encodings use the lane matcher.
+        if (remaining < bytes + (uint32_t)indexed || (mod == 0 && (low == 5 || (indexed && (source[bytes] & 7) == 5))))
+        {
+            return 0;
+        }
+        mode = BUSTER_X86_MEMORY_BASE;
+        rm &= 15;
+        if (indexed)
+        {
+            const uint32_t rex_xb = ((~p0) >> 5) & 3;
+            const uint32_t address = x86_decode_sib_fields[1 + rex_xb][source[bytes++]];
+            if (address == 0)
+            {
+                return 0;
+            }
+            rm = (uint8_t)address;
+            index_register = (uint8_t)(address >> 8);
+            mode = (uint8_t)(address >> 16);
+        }
+        const uint32_t disp_bytes = mod == 1 ? 1 : mod == 2 ? 4 : 0;
+        if (remaining < bytes + disp_bytes)
+        {
+            return 0;
+        }
+        if (mod == 1)
+        {
+            displacement = (int8_t)source[bytes] * (int32_t)((form >> 8) & 255);
+        }
+        else if (mod == 2)
+        {
+            memcpy(&displacement, source + bytes, sizeof(displacement));
+        }
+        bytes += disp_bytes;
+        fields = (fields & ~0xff00u) | (rm << 8);
+    }
+    const bool zeroing = (fields >> 31) != 0;
+    if ((fields & entry[memory ? 2 : 1]) != 0 || (zeroing && (!(fields & 0x07000000u) || (memory && (flags & (1u << 10))))) ||
+        bytes + imm > 15 || remaining < bytes + imm)
+    {
+        return 0;
+    }
+    uint32_t immediate = 0;
+    if (imm != 0)
+    {
+        immediate = (uint32_t)_mm_cvtsi128_si32(_mm_maskz_loadu_epi8((__mmask16)((1u << imm) - 1), source + bytes));
+    }
+    *instruction = (X86Instruction){ .form = (uint16_t)row, .immediate = immediate, .reg = (uint8_t)fields, .rm = (uint8_t)rm,
+                                     .mode = (uint8_t)mode, .index = (uint8_t)index_register, .displacement = displacement,
+                                     .vvvv = (uint8_t)(fields >> 16), .decorations = (uint8_t)(fields >> 24) };
+    return bytes + imm;
+}
+
 // Decodes `source[0, size)` into at most `capacity` records, a window at a time: the length pass (x86_decode_lengths)
 // chains up to 16 instruction starts through the hints, and the lane decoder (x86_decode_lanes) decodes them in one
 // pass; the next window starts after the last instruction decoded.
@@ -1382,6 +1739,76 @@ static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86
         {
             const uint64_t start = result.consumed;
             const uint64_t remaining = size - start;
+            const uint32_t prefix = source[start] | (remaining >= 2 ? (uint32_t)source[start + 1] << 8 : 0);
+            const X86Decoded* short_form = &x86_decode_short[prefix];
+            if (short_form->length == 0 && (source[start] & 0xf0) == 0x40 && remaining >= 3 &&
+                (source[start + 2] & 0xc0) == 0xc0)
+            {
+                short_form = &x86_decode_direct_pages[x86_decode_rex_direct[source[start] & 15][source[start + 1]]][source[start + 2] & 63];
+            }
+            if (short_form->length == 0 && remaining >= 4 && source[start + 1] == 0x0f &&
+                (source[start + 3] & 0xc0) == 0xc0 && (source[start] == 0x66 || (source[start] & 0xfe) == 0xf2))
+            {
+                const uint32_t legacy = source[start] == 0x66 ? 0 : 1u + (source[start] & 1u);
+                short_form = &x86_decode_direct_pages[x86_decode_escaped_direct[legacy][source[start + 2]]][source[start + 3] & 63];
+            }
+            if (short_form->length != 0 && short_form->length <= remaining)
+            {
+                X86Decoded one = *short_form;
+                one.offset = (uint32_t)start;
+                output[result.count++] = one;
+                result.consumed += one.length;
+                continue;
+            }
+            const uint32_t rex_prefix = (source[start] & 0xf0) == 0x40;
+            if (remaining >= rex_prefix + 2u)
+            {
+                const bool escaped = source[start + rex_prefix] == 0x0f;
+                const uint32_t prefix_bytes = rex_prefix + (uint32_t)escaped;
+                const uint32_t key = ((uint32_t)escaped << 8) | source[start + prefix_bytes];
+                const uint32_t kind = x86_decode_trailing_class[key];
+                if (kind != 0 && remaining >= prefix_bytes + 2u)
+                {
+                    const uint32_t row = source[start + prefix_bytes + 1];
+                    const uint32_t rex = rex_prefix != 0 ? (source[start] & 15) + 1u : 0;
+                    const X86DecodeTrailing* recipe = kind == 0xff ? &x86_decode_literal[rex][key] : &x86_decode_trailing[rex][kind][row];
+                    const X86DecodeShuffle* shuffle = &x86_decode_shuffles[recipe->shuffle];
+                    const uint32_t n = recipe->length;
+                    const bool full = n != 0 && n <= remaining;
+                    const uint32_t sib = full && shuffle->sib ? source[start + prefix_bytes + 2] : 0x24;
+                    const uint32_t address = sib != 0x24 && ((row & 0xc0) != 0 || (sib & 7) != 5) ? x86_decode_sib_fields[rex][sib] : 0;
+                    if (full && (sib == 0x24 || address != 0))
+                    {
+                        const __m128i raw = _mm_maskz_loadu_epi8((__mmask16)((1u << n) - 1), source + start);
+                        const __m128i fields = _mm_shuffle_epi8(raw, _mm_loadl_epi64((const __m128i*)shuffle->fields));
+                        const __m128i values = _mm_mask_mov_epi8(fields, shuffle->sign_bytes, _mm_cmpgt_epi8(_mm_setzero_si128(), fields));
+                        X86Decoded one = { .instruction.form = recipe->form, .length = recipe->length };
+                        memcpy(&one.instruction.reg, &recipe->registers, sizeof(recipe->registers));
+                        _mm_storel_epi64((__m128i*)&one.instruction, values);
+                        if (address != 0)
+                        {
+                            one.instruction.rm = (uint8_t)address;
+                            one.instruction.index = (uint8_t)(address >> 8);
+                            one.instruction.mode = (uint8_t)(address >> 16);
+                        }
+                        one.offset = (uint32_t)start;
+                        output[result.count++] = one;
+                        result.consumed += n;
+                        continue;
+                    }
+                }
+            }
+            if (source[start] == 0x62 || (source[start] & 0xfe) == 0xc4)
+            {
+                X86Decoded decoded = { .offset = (uint32_t)start };
+                decoded.length = (uint8_t)x86_decode_vector_operands(source + start, remaining, &decoded.instruction);
+                if (decoded.length != 0)
+                {
+                    output[result.count++] = decoded;
+                    result.consumed += decoded.length;
+                    continue;
+                }
+            }
             uint8_t lengths[64];
             X86DecodeWindow window;
             x86_decode_lengths(source + start, remaining, lengths, &window);
