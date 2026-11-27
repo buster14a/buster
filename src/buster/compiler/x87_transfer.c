@@ -45,6 +45,8 @@ static uint16_t x87_literal_bits(uint64_t low, uint16_t high, uint64_t* bits)
 }
 
 #define BUSTER_X87_TRANSFER_NONE UINT32_MAX
+#define BUSTER_X87_TRANSFER_STORE 1u
+#define BUSTER_X87_TRANSFER_RELOAD 2u
 #define BUSTER_X87_TRANSFER_BOUNDARY 1u
 #define BUSTER_X87_TRANSFER_CUT 2u
 #define BUSTER_X87_TRANSFER_RECORDS 64u
@@ -174,49 +176,21 @@ static bool x87_transfer_span(const X86Instruction* records, uint32_t first, uin
     return valid && depth == 0;
 }
 
-static uint64_t x87_transfer_candidates(const X86Instruction* records, const uint32_t* tokens, const uint8_t* eligible, uint32_t first, uint32_t count, bool vector)
+// Both emitters certify the private store while assigning its unique reload. Read up to one region of
+// certificates in a single masked load. A malformed certificate still has to pass the store and token
+// check below, and every proposed transformation is independently replayed before publication.
+static __m512i x87_transfer_annotations(const uint8_t* annotations, uint32_t first, uint32_t count)
 {
-    uint64_t candidates = 0;
-    if (BUSTER_VECTOR_PATH(vector))
-    {
-        const __m512i indices = _mm512_setr_epi32(0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240);
-        const __m512i lanes_ids = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        for (uint32_t r = 0; r < count; r += 16)
-        {
-            const uint32_t left = count - r;
-            const __mmask16 lanes = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
-            const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, indices, &records[first + r].form, 1);
-            const __m512i forms = _mm512_and_si512(words, _mm512_set1_epi32(0xffff));
-            const __m512i ids = _mm512_add_epi32(lanes_ids, _mm512_set1_epi32((int32_t)(first + r)));
-            const __m512i names = _mm512_maskz_loadu_epi32(lanes, tokens + first + r);
-            const __mmask16 stores = lanes & _mm512_cmpeq_epi32_mask(forms, _mm512_set1_epi32(X86_FORM_FSTP_M80)) & _mm512_cmpeq_epi32_mask(names, ids);
-            candidates |= (uint64_t)stores << r;
-        }
-    }
-    else
-    {
-        for (uint32_t r = 0; r < count; r += 1)
-        {
-            candidates |= (uint64_t)(records[first + r].form == X86_FORM_FSTP_M80 && tokens[first + r] == first + r) << r;
-        }
-    }
-    uint64_t enabled = candidates;
-    while (enabled != 0)
-    {
-        const uint32_t r = (uint32_t)__builtin_ctzll(enabled);
-        candidates &= eligible[first + r] != 0 ? UINT64_MAX : ~(UINT64_C(1) << r);
-        enabled &= enabled - 1;
-    }
-    return candidates;
+    return _mm512_maskz_loadu_epi8(_bzhi_u64(UINT64_MAX, count), annotations + first);
 }
 
 // Independently replay both stacks. Values name original loads and arithmetic results. A resident
 // full-width store has its own identity: its destination can reflect the architecture's SNaN handling.
-static bool x87_transfer_verify(const X86Instruction* original, const X86Instruction* proposed, const uint32_t* tokens, const uint8_t* eligible, uint32_t first, uint32_t count)
+static bool x87_transfer_verify(const X86Instruction* original, const X86Instruction* proposed, const uint32_t* tokens, const uint8_t* annotations, uint32_t first, uint32_t count)
 {
     uint64_t before[8], after[8], homes[BUSTER_X87_TRANSFER_RECORDS] = { 0 };
     uint32_t old_depth = 0, new_depth = 0;
-    uint64_t live = 0;
+    uint64_t live = 0, transported = 0;
     bool valid = count <= BUSTER_X87_TRANSFER_RECORDS;
     for (uint32_t r = 0; valid && r < count; r += 1)
     {
@@ -236,7 +210,7 @@ static bool x87_transfer_verify(const X86Instruction* original, const X86Instruc
             valid = old_depth < 8;
             if (valid && same)
             {
-                valid = new_depth < 8;
+                valid = new_depth < 8 && (home >= count || ((transported >> home) & 1) == 0);
                 if (valid)
                 {
                     after[new_depth++] = value;
@@ -274,11 +248,12 @@ static bool x87_transfer_verify(const X86Instruction* original, const X86Instruc
             else if (valid)
             {
                 const X86Instruction store = { .form = X86_FORM_FST_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
-                valid = home == r && eligible[token] != 0 && memcmp(&store, &proposed[r], sizeof(store)) == 0;
+                valid = home == r && (annotations[token] & BUSTER_X87_TRANSFER_STORE) != 0 && memcmp(&store, &proposed[r], sizeof(store)) == 0;
                 if (valid)
                 {
                     after[new_depth - 1] = identity;
                     live |= UINT64_C(1) << r;
+                    transported |= UINT64_C(1) << r;
                 }
             }
             if (valid)
@@ -313,7 +288,7 @@ static bool x87_transfer_verify(const X86Instruction* original, const X86Instruc
 // The small physical stack contains a store's local record number while its value is parked there,
 // and NONE for an ordinary operand. A reload exchanges its saved value with st0 at its original wait.
 // The independent replay checks the complete operand order, including other values that exchange moved.
-static bool x87_transfer_plan(const X86Instruction* records, X86Instruction* proposed, const uint32_t* tokens, const uint8_t* eligible, uint32_t first, uint32_t count, uint64_t candidates)
+static bool x87_transfer_plan(const X86Instruction* records, X86Instruction* proposed, const uint32_t* tokens, const uint8_t* annotations, uint32_t first, uint32_t count, uint64_t candidates)
 {
     uint32_t stack[8];
     uint32_t depth = 0;
@@ -362,19 +337,25 @@ static bool x87_transfer_plan(const X86Instruction* records, X86Instruction* pro
             depth -= valid;
         }
     }
-    return valid && depth == 0 && x87_transfer_verify(records, proposed, tokens, eligible, first, count);
+    return valid && depth == 0 && x87_transfer_verify(records, proposed, tokens, annotations, first, count);
 }
 
-static uint32_t x87_transfer_region(X86Instruction* records, const uint32_t* tokens, const uint8_t* eligible, uint32_t first, uint32_t end, bool vector)
+static uint32_t x87_transfer_region(X86Instruction* records, const uint32_t* tokens, const uint8_t* annotations, uint32_t first, uint32_t end)
 {
     const uint32_t count = end - first;
     X86Instruction proposed[BUSTER_X87_TRANSFER_RECORDS];
-    uint64_t candidates = x87_transfer_candidates(records, tokens, eligible, first, count, vector);
+    const __m512i tags = x87_transfer_annotations(annotations, first, count);
+    uint64_t candidates = _mm512_test_epi8_mask(tags, _mm512_set1_epi8(BUSTER_X87_TRANSFER_STORE));
+    uint64_t loads = _mm512_test_epi8_mask(tags, _mm512_set1_epi8(BUSTER_X87_TRANSFER_RELOAD));
     uint64_t reads = 0, repeated = 0;
-    for (uint32_t r = 0; candidates != 0 && r < count; r += 1)
+    while (loads != 0 && candidates != 0)
     {
-        const uint32_t home = tokens[first + r] - first;
-        if (home < r && records[first + r].form == X86_FORM_FLD_M80)
+        const uint32_t r = (uint32_t)__builtin_ctzll(loads);
+        loads &= loads - 1;
+        const uint32_t owner = tokens[first + r];
+        const uint32_t home = owner - first;
+        if (home < r && records[first + r].form == X86_FORM_FLD_M80 &&
+            records[owner].form == X86_FORM_FSTP_M80 && tokens[owner] == owner)
         {
             const uint64_t bit = UINT64_C(1) << home;
             repeated |= reads & bit;
@@ -386,19 +367,19 @@ static uint32_t x87_transfer_region(X86Instruction* records, const uint32_t* tok
     if (candidates != 0)
     {
         uint64_t selected = candidates;
-        if (!x87_transfer_plan(records + first, proposed, tokens, eligible, first, count, selected))
+        if (!x87_transfer_plan(records + first, proposed, tokens, annotations, first, count, selected))
         {
             // Under pressure or an unrepresentable permutation, retain only independently proven pairs.
             selected = 0;
             for (uint64_t remaining = candidates; remaining != 0; remaining &= remaining - 1)
             {
                 const uint64_t trial = selected | (remaining & -remaining);
-                if (x87_transfer_plan(records + first, proposed, tokens, eligible, first, count, trial))
+                if (x87_transfer_plan(records + first, proposed, tokens, annotations, first, count, trial))
                 {
                     selected = trial;
                 }
             }
-            if (selected != 0 && !x87_transfer_plan(records + first, proposed, tokens, eligible, first, count, selected))
+            if (selected != 0 && !x87_transfer_plan(records + first, proposed, tokens, annotations, first, count, selected))
             {
                 selected = 0;
             }
@@ -412,25 +393,35 @@ static uint32_t x87_transfer_region(X86Instruction* records, const uint32_t* tok
     return pairs;
 }
 
-// `tokens[r]` is the private FSTP definition's record, or NONE. `eligible[definition]` certifies that one read consumes
-// that value. `boundaries` has count + 1 entries: empty-stack entry boundaries, plus mandatory cuts.
+// A token names its private FSTP definition, or NONE. A store tag certifies a single consumer, and a reload
+// tag accompanies each load token. The count + 1 boundary bytes mark empty-stack entries and mandatory cuts.
 // Missing annotations, unsupported spans, a full stack and rejected proofs leave the original records unchanged.
-static X87TransferStats x87_transfer_records(X86Instruction* records, uint32_t count, const uint32_t* tokens, const uint8_t* eligible, const uint8_t* boundaries, bool vector)
+static X87TransferStats x87_transfer_records(X86Instruction* records, uint32_t count, const uint32_t* tokens, const uint8_t* annotations, const uint8_t* boundaries)
 {
     X87TransferStats stats = { 0 };
     uint32_t region_first = 0;
     uint32_t region_end = 0;
     uint32_t first = 0;
-    for (uint32_t end = 1; end <= count; end += 1)
+    for (uint64_t start = 1; start <= count; start += 64)
     {
-        if (boundaries[end] != 0 || end == count)
+        const uint32_t left = (uint32_t)(count - start + 1);
+        const __mmask64 lanes = _bzhi_u64(UINT64_MAX, left);
+        const __m512i bytes = _mm512_maskz_loadu_epi8(lanes, boundaries + start);
+        uint64_t ends = _mm512_test_epi8_mask(bytes, bytes);
+        if (left <= 64)
         {
+            ends |= UINT64_C(1) << (left - 1);
+        }
+        while (ends != 0)
+        {
+            const uint32_t end = (uint32_t)start + (uint32_t)__builtin_ctzll(ends);
+            ends &= ends - 1;
             const bool safe = (boundaries[first] & BUSTER_X87_TRANSFER_BOUNDARY) != 0 && (boundaries[end] & BUSTER_X87_TRANSFER_BOUNDARY) != 0 &&
                               x87_transfer_span(records, first, end);
             const bool cut = !safe || (boundaries[first] & BUSTER_X87_TRANSFER_CUT) != 0 || end - region_first > BUSTER_X87_TRANSFER_RECORDS;
             if (cut && region_end > region_first)
             {
-                const uint32_t pairs = x87_transfer_region(records, tokens, eligible, region_first, region_end, vector);
+                const uint32_t pairs = x87_transfer_region(records, tokens, annotations, region_first, region_end);
                 stats.pairs += pairs;
                 stats.regions += pairs != 0;
                 region_first = region_end;
@@ -450,7 +441,7 @@ static X87TransferStats x87_transfer_records(X86Instruction* records, uint32_t c
     }
     if (region_end > region_first)
     {
-        const uint32_t pairs = x87_transfer_region(records, tokens, eligible, region_first, region_end, vector);
+        const uint32_t pairs = x87_transfer_region(records, tokens, annotations, region_first, region_end);
         stats.pairs += pairs;
         stats.regions += pairs != 0;
     }

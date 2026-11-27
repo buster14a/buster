@@ -11515,16 +11515,18 @@ static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entrie
         const uint32_t* const positions = entries->positions;
         uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);
         uint32_t* slots = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, depths);
-        uint8_t* uses = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count);
-        uint8_t* eligible = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count);
+        uint8_t* annotations = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count);
         uint8_t* boundaries = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
-        const bool ready = tokens != 0 && slots != 0 && uses != 0 && eligible != 0 && boundaries != 0;
+        const bool ready = tokens != 0 && slots != 0 && annotations != 0 && boundaries != 0;
         if (ready)
         {
+            bool has_store = false;
             memset(tokens, 0xff, (uint64_t)count * sizeof(uint32_t));
             memset(slots, 0xff, (uint64_t)depths * sizeof(uint32_t));
-            memset(uses, 0, count);
-            memset(eligible, 0, count);
+            // The upper bits of a store annotation count reloads, saturating at two. Its low bits are
+            // the published store/reload tags, so no separate per-record use column is needed.
+            enum { read_once = 4, read_twice = 8 };
+            memset(annotations, 0, count);
             memset(boundaries, 0, (uint64_t)count + 1);
             boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
             boundaries[count] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
@@ -11570,7 +11572,8 @@ static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entrie
                             if (token != BUSTER_X87_TRANSFER_NONE)
                             {
                                 tokens[r] = token;
-                                uses[token] += uses[token] < 2;
+                                annotations[r] = BUSTER_X87_TRANSFER_RELOAD;
+                                annotations[token] += (annotations[token] & read_twice) == 0 ? read_once : 0;
                             }
                         }
                         else if (slot != BUSTER_X87_TRANSFER_NONE)
@@ -11584,14 +11587,20 @@ static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entrie
                         const uint32_t token = previous[k];
                         if (token != BUSTER_X87_TRANSFER_NONE)
                         {
-                            eligible[token] = uses[token] == 1;
+                            const uint8_t reads = annotations[token] & (read_once | read_twice);
+                            const bool single = reads == read_once;
+                            annotations[token] = reads | (single ? BUSTER_X87_TRANSFER_STORE : 0);
+                            has_store |= single;
                             const uint32_t slot = depth - 1 - k;
                             slots[slot] = slots[slot] == token ? BUSTER_X87_TRANSFER_NONE : slots[slot];
                         }
                     }
                 }
             }
-            (void)x87_transfer_records(records, count, tokens, eligible, boundaries, true);
+            if (has_store)
+            {
+                (void)x87_transfer_records(records, count, tokens, annotations, boundaries);
+            }
         }
         arena_pop_to(scratch, mark);
     }

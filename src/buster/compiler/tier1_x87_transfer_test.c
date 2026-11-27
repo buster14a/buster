@@ -20,12 +20,13 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
         { .form = X86_FORM_FSTP_M80, .rm = X86_REGISTER_RDX, .mode = BUSTER_X86_MEMORY_BASE },
     };
     uint32_t tokens[24];
-    uint8_t eligible[24] = { 0 };
+    uint8_t annotations[24] = { 0 };
     uint8_t boundaries[25] = { 0 };
     memset(tokens, 0xff, sizeof(tokens));
     tokens[3] = 3;
     tokens[4] = 3;
-    eligible[3] = 1;
+    annotations[4] = BUSTER_X87_TRANSFER_RELOAD;
+    annotations[3] = 1;
     boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY;
     boundaries[4] = BUSTER_X87_TRANSFER_BOUNDARY;
     boundaries[6] = BUSTER_X87_TRANSFER_BOUNDARY;
@@ -33,10 +34,9 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
     X86Instruction twin[24];
     memcpy(chosen, original, sizeof(original));
     memcpy(twin, original, sizeof(original));
-    const X87TransferStats vector = x87_transfer_records(chosen, 6, tokens, eligible, boundaries, true);
-    const X87TransferStats scalar = x87_transfer_records(twin, 6, tokens, eligible, boundaries, false);
-    tier1_wide_test_expect(test, vector.pairs == 1 && scalar.pairs == 1 && memcmp(chosen, twin, sizeof(chosen)) == 0, "both transport paths replace the single private round trip alike");
-    tier1_wide_test_expect(test, chosen[3].form == X86_FORM_FST_ST && chosen[4].form == X86_FORM_FXCH_ST && x87_transfer_verify(original, chosen, tokens, eligible, 0, 6), "the register store and exchange preserve both waiting points and pass independent replay");
+    const X87TransferStats transfer = x87_transfer_records(chosen, 6, tokens, annotations, boundaries);
+    tier1_wide_test_expect(test, transfer.pairs == 1 && transfer.regions == 1, "one private round trip in one region");
+    tier1_wide_test_expect(test, chosen[3].form == X86_FORM_FST_ST && chosen[4].form == X86_FORM_FXCH_ST && x87_transfer_verify(original, chosen, tokens, annotations, 0, 6), "the register store and exchange preserve both waiting points and pass independent replay");
     for (uint32_t mutant = 0; mutant < 9; mutant += 1)
     {
         memcpy(twin, chosen, sizeof(twin));
@@ -62,7 +62,7 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
         }
         else if (mutant == 5)
         {
-            eligible[3] = 0;
+            annotations[3] = 0;
         }
         else if (mutant == 6)
         {
@@ -76,15 +76,83 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
         {
             twin[3] = (X86Instruction){ 0 };
         }
-        tier1_wide_test_expect(test, !x87_transfer_verify(original, twin, tokens, eligible, 0, 6), "the transport proof rejects a changed value, operation, access, stack action or eligibility certificate");
-        eligible[3] = 1;
+        tier1_wide_test_expect(test, !x87_transfer_verify(original, twin, tokens, annotations, 0, 6), "the transport proof rejects a changed value, operation, access, stack action or eligibility certificate");
+        annotations[3] = 1;
         tokens[4] = 3;
+        annotations[4] = BUSTER_X87_TRANSFER_RELOAD;
+    }
+    for (uint32_t variant = 0; variant < 5; variant += 1)
+    {
+        const uint32_t first = 7;
+        memcpy(chosen + first, original, 6 * sizeof(*original));
+        uint32_t shifted_tokens[24];
+        uint8_t shifted_annotations[24] = { 0 };
+        memset(shifted_tokens, 0xff, sizeof(shifted_tokens));
+        shifted_tokens[first + 3] = first + 3 + (variant == 1);
+        shifted_tokens[first + 4] = first + 3;
+        shifted_annotations[first + 3] = variant == 2 ? 0 : BUSTER_X87_TRANSFER_STORE;
+        shifted_annotations[first + 4] = BUSTER_X87_TRANSFER_RELOAD;
+        if (variant == 3)
+        {
+            chosen[first + 3].form = X86_FORM_FSTP_M80 + 1;
+        }
+        if (variant == 4)
+        {
+            chosen[first + 5] = chosen[first + 4];
+            shifted_tokens[first + 5] = first + 3;
+            shifted_annotations[first + 5] = BUSTER_X87_TRANSFER_RELOAD;
+        }
+        memcpy(twin + first, chosen + first, 6 * sizeof(*chosen));
+        const uint32_t pairs = x87_transfer_region(chosen, shifted_tokens, shifted_annotations, first, first + 6);
+        const bool expected = variant == 0;
+        tier1_wide_test_expect(test, pairs == (uint32_t)expected && (expected
+                              ? chosen[first + 3].form == X86_FORM_FST_ST && chosen[first + 4].form == X86_FORM_FXCH_ST
+                              : memcmp(chosen + first, twin + first, 6 * sizeof(*chosen)) == 0),
+                              "a shifted private home needs its own FSTP token and exactly one certified reload");
+    }
+    // Omitting a repeated reload's tag must not let a stale private memory slot escape the independent replay.
+    memcpy(chosen, original, 6 * sizeof(*chosen));
+    chosen[6] = original[4];
+    chosen[7] = original[5];
+    memcpy(twin, chosen, 8 * sizeof(*chosen));
+    tokens[6] = 3;
+    const uint32_t missing_tag = x87_transfer_region(chosen, tokens, annotations, 0, 8);
+    tier1_wide_test_expect(test, missing_tag == 0 && memcmp(chosen, twin, 8 * sizeof(*chosen)) == 0,
+                           "a second read of an already transported definition still rejects the plan");
+    chosen[3] = (X86Instruction){ .form = X86_FORM_FST_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
+    chosen[4] = (X86Instruction){ .form = X86_FORM_FXCH_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
+    tier1_wide_test_expect(test, !x87_transfer_verify(twin, chosen, tokens, annotations, 0, 8),
+                           "independent replay rejects a stale home read after its first register reload");
+    tokens[6] = BUSTER_X87_TRANSFER_NONE;
+    // Vary the actual region's position across a cache line of boundary bytes, including the last boundary.
+    for (uint32_t first = 0; first <= 65; first += 1)
+    {
+        X86Instruction shifted[72] = { 0 };
+        uint32_t names[72];
+        uint8_t tags[72] = { 0 };
+        uint8_t cuts[73] = { 0 };
+        memset(names, 0xff, sizeof(names));
+        shifted[0].form = X86_FORM_FCHS;
+        memcpy(shifted + first, original, 6 * sizeof(*original));
+        names[first + 3] = first + 3;
+        names[first + 4] = first + 3;
+        tags[first + 3] = BUSTER_X87_TRANSFER_STORE;
+        tags[first + 4] = BUSTER_X87_TRANSFER_RELOAD;
+        cuts[0] = BUSTER_X87_TRANSFER_BOUNDARY;
+        cuts[first] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
+        cuts[first + 4] = BUSTER_X87_TRANSFER_BOUNDARY;
+        cuts[first + 6] = BUSTER_X87_TRANSFER_BOUNDARY;
+        const X87TransferStats result = x87_transfer_records(shifted, first + 6, names, tags, cuts);
+        tier1_wide_test_expect(test, result.pairs == 1 && result.regions == 1 &&
+                               shifted[first + 3].form == X86_FORM_FST_ST && shifted[first + 4].form == X86_FORM_FXCH_ST,
+                               "shifted and final boundaries retain exactly one proven pair");
     }
     // The integer staging store before FILD may touch the edge of the private ten-byte slot.
     original[6] = original[5];
     original[5] = original[4];
     tokens[4] = BUSTER_X87_TRANSFER_NONE;
     tokens[5] = 3;
+    annotations[5] = BUSTER_X87_TRANSFER_RELOAD;
     boundaries[6] = 0;
     boundaries[7] = BUSTER_X87_TRANSFER_BOUNDARY;
     for (uint32_t variant = 0; variant < 3; variant += 1)
@@ -92,7 +160,7 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
         const uint32_t base = variant == 2 ? X86_REGISTER_RBP : X86_REGISTER_RSP;
         original[4] = tier1_x87_transfer_memory(X86_FORM_MOV_RM32_R32, base, variant == 0 ? 41 : 42);
         memcpy(chosen, original, sizeof(original));
-        const X87TransferStats result = x87_transfer_records(chosen, 7, tokens, eligible, boundaries, true);
+        const X87TransferStats result = x87_transfer_records(chosen, 7, tokens, annotations, boundaries);
         tier1_wide_test_expect(test, result.pairs == (variant == 1), "only a provably disjoint integer store can cross the private x87 transfer");
     }
     // One retained register leaves seven available for the intervening sequence.
@@ -104,6 +172,7 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
         memset(boundaries, 0, sizeof(boundaries));
         tokens[3] = 3;
         tokens[load] = 3;
+        annotations[load] = BUSTER_X87_TRANSFER_RELOAD;
         boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY;
         boundaries[4] = BUSTER_X87_TRANSFER_BOUNDARY;
         boundaries[load] = BUSTER_X87_TRANSFER_BOUNDARY;
@@ -116,14 +185,14 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
         original[load] = tier1_x87_transfer_memory(X86_FORM_FLD_M80, X86_REGISTER_RSP, 32);
         original[load + 1] = tier1_x87_transfer_memory(X86_FORM_FSTP_M80, X86_REGISTER_RDX, 0);
         memcpy(chosen, original, sizeof(original));
-        const X87TransferStats stats = x87_transfer_records(chosen, count, tokens, eligible, boundaries, true);
+        const X87TransferStats stats = x87_transfer_records(chosen, count, tokens, annotations, boundaries);
         tier1_wide_test_expect(test, stats.pairs == (pressure <= 7) && (pressure <= 7 || memcmp(chosen, original, sizeof(original)) == 0), "the complete physical depth includes the retained register and rejects overflow transactionally");
         // A hidden overlapping read cannot be waved through by giving it no token.
         if (pressure == 6)
         {
             original[4] = tier1_x87_transfer_memory(X86_FORM_FLD_M80, X86_REGISTER_RSP, 32);
             memcpy(chosen, original, sizeof(original));
-            const X87TransferStats overlap = x87_transfer_records(chosen, count, tokens, eligible, boundaries, true);
+            const X87TransferStats overlap = x87_transfer_records(chosen, count, tokens, annotations, boundaries);
             tier1_wide_test_expect(test, overlap.pairs == 0 && memcmp(chosen, original, sizeof(original)) == 0, "the independent replay rejects an unannotated private-home reader");
         }
     }
@@ -134,11 +203,12 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
     memset(boundaries, 0, sizeof(boundaries));
     tokens[3] = 3;
     tokens[4] = 3;
+    annotations[4] = BUSTER_X87_TRANSFER_RELOAD;
     boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY;
     boundaries[4] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
     boundaries[6] = BUSTER_X87_TRANSFER_BOUNDARY;
     memcpy(chosen, original, sizeof(original));
-    const X87TransferStats cut = x87_transfer_records(chosen, 6, tokens, eligible, boundaries, true);
+    const X87TransferStats cut = x87_transfer_records(chosen, 6, tokens, annotations, boundaries);
     tier1_wide_test_expect(test, cut.pairs == 0 && memcmp(chosen, original, sizeof(original)) == 0, "the transport never crosses an adapter's control or environment cut");
 }
 
@@ -146,35 +216,33 @@ static void tier1_x87_transfer_candidate_bounds(Tier1WideTest* test)
 {
     const long page_value = sysconf(_SC_PAGESIZE);
     const uint64_t page = page_value > 0 ? (uint64_t)page_value : 4096;
-    uint8_t* records_memory = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint8_t* tokens_memory = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    const bool ready = records_memory != MAP_FAILED && tokens_memory != MAP_FAILED && mprotect(records_memory + page, page, PROT_NONE) == 0 && mprotect(tokens_memory + page, page, PROT_NONE) == 0;
-    if (tier1_wide_test_expect(test, ready, "the transport classifier's guarded columns"))
+    uint8_t* memory = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = memory != MAP_FAILED && mprotect(memory + page, page, PROT_NONE) == 0;
+    if (tier1_wide_test_expect(test, ready, "guard the end of the x87 store certificates"))
     {
-        uint8_t eligible[BUSTER_X87_TRANSFER_RECORDS];
-        memset(eligible, 1, sizeof(eligible));
         for (uint32_t count = 0; count <= BUSTER_X87_TRANSFER_RECORDS; count += 1)
         {
-            X86Instruction* records = (X86Instruction*)(records_memory + page - (uint64_t)count * sizeof(X86Instruction));
-            uint32_t* tokens = (uint32_t*)(tokens_memory + page - (uint64_t)count * 4);
-            for (uint32_t r = 0; r < count; r += 1)
+            const uint32_t first = 7;
+            uint8_t* annotations = memory + page - count - first;
+            for (uint32_t lane = 0; lane <= count; lane += 1)
             {
-                records[r] = tier1_x87_transfer_memory(X86_FORM_FSTP_M80, X86_REGISTER_RSP, (int32_t)(16 * r));
-                tokens[r] = r;
+                memset(annotations, 0, first + count);
+                annotations[first - 1] = 1;
+                if (lane < count)
+                {
+                    annotations[first + lane] = lane & 1 ? BUSTER_X87_TRANSFER_RELOAD : BUSTER_X87_TRANSFER_STORE;
+                }
+                const uint64_t expected = lane < count ? UINT64_C(1) << lane : 0;
+                const __m512i tags = x87_transfer_annotations(annotations, first, count);
+                const uint64_t stores = _mm512_test_epi8_mask(tags, _mm512_set1_epi8(BUSTER_X87_TRANSFER_STORE));
+                const uint64_t loads = _mm512_test_epi8_mask(tags, _mm512_set1_epi8(BUSTER_X87_TRANSFER_RELOAD));
+                tier1_wide_test_expect(test, stores == (lane & 1 ? 0 : expected) && loads == (lane & 1 ? expected : 0), "only the certified lane in the guarded window is set");
             }
-            const uint64_t expected = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-            const uint64_t vector = x87_transfer_candidates(records, tokens, eligible, 0, count, true);
-            const uint64_t scalar = x87_transfer_candidates(records, tokens, eligible, 0, count, false);
-            tier1_wide_test_expect(test, vector == expected && scalar == expected, "the transport classifier's scalar/vector tails end exactly at a protected page");
         }
     }
-    if (records_memory != MAP_FAILED)
+    if (memory != MAP_FAILED)
     {
-        munmap(records_memory, page * 2);
-    }
-    if (tokens_memory != MAP_FAILED)
-    {
-        munmap(tokens_memory, page * 2);
+        munmap(memory, page * 2);
     }
 }
 
