@@ -974,6 +974,59 @@ static void tier1_frame_test_boundaries(Tier1FrameTest* test, Arena* output, Are
     }
 }
 
+// Each output ID must locate its original key. Key order, stable ties and a permutation specify the complete result.
+static void tier1_frame_test_sort(Tier1FrameTest* test)
+{
+    const uint32_t widths[] = { 0, 1, 2, 7, 8, 9, 16, 17, 18, 25, 32, 63, 64 };
+    uint64_t state = 3450;
+    for (uint32_t shape = 0; shape < BUSTER_ARRAY_LENGTH(widths); shape += 1)
+    {
+        uint64_t mask = 0;
+        for (uint32_t bit = 0; bit < widths[shape]; bit += 1)
+        {
+            mask |= UINT64_C(1) << ((bit * 17 + 63) & 63);
+        }
+        for (uint32_t count = 0; count <= 73; count += 1)
+        {
+            uint64_t original[73];
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint64_t high = tier1_frame_test_random(&state);
+                const uint64_t value = high << 32 | tier1_frame_test_random(&state);
+                original[i] = i % 3 == 0 ? 0 : value & mask;
+            }
+            for (uint32_t keys_needed = 0; keys_needed <= 1; keys_needed += 1)
+            {
+                uint64_t key[73], temporary_key[73];
+                uint32_t id[73], temporary_id[73];
+                bool seen[73] = { false };
+                memcpy(key, original, (uint64_t)count * sizeof(*key));
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    id[i] = count - 1 - i;
+                }
+                const bool swapped = tier1_frame_sort(key, id, temporary_key, temporary_id, count, keys_needed != 0);
+                const uint32_t* sorted_id = swapped ? temporary_id : id;
+                const uint64_t* sorted_key = swapped ? temporary_key : key;
+                bool valid = true;
+                uint32_t previous = 0;
+                for (uint32_t i = 0; valid && i < count; i += 1)
+                {
+                    const uint32_t row = count - 1 - sorted_id[i];
+                    valid = row < count && !seen[row] && (keys_needed == 0 || sorted_key[i] == original[row]) &&
+                            (i == 0 || original[previous] < original[row] || (original[previous] == original[row] && previous < row));
+                    if (valid)
+                    {
+                        seen[row] = true;
+                        previous = row;
+                    }
+                }
+                tier1_frame_test_expect(test, valid, "radix scatter preserves full unsigned keys, input places and stable ties");
+            }
+        }
+    }
+}
+
 static int run_tier1_frame_tests(int argc, char** argv)
 {
     Tier1FrameTest test = {
@@ -1011,6 +1064,7 @@ static int run_tier1_frame_tests(int argc, char** argv)
     tier1_frame_test_expect(&test, options && output.capacity != 0 && scratch.capacity != 0, "valid options and test arenas");
     if (options && output.capacity != 0 && scratch.capacity != 0)
     {
+        tier1_frame_test_sort(&test);
         const uint32_t counts[] = {0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 257};
         uint32_t columns[5][257];
         uint64_t state = test.seed;

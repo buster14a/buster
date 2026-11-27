@@ -216,52 +216,181 @@ static __m512i tier1_frame_scan64(__m512i values)
     return values;
 }
 
-// Stable eight-bit radix passes over the key bytes that differ between keys, so a function's small positions and few
-// classes take two or three passes of the eight (#2699). Event positions have the full u32 range: a dense counting
-// table would make memory depend on the producer's position numbering. The ordered scatter is shared; its cost is
-// included in preparation. Returns whether the sorted columns are the temporary ones: an odd number of passes ran.
-static bool tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_key, uint32_t* temporary_id, uint32_t count)
+// Each eight-byte selector picks eight significant bits, in increasing order, from each 64-bit key.
+// A ninth bit can avoid another whole radix pass. All other key bits are equal or belong to another pass.
+typedef struct Tier1FrameDigit Tier1FrameDigit;
+struct Tier1FrameDigit
 {
-    uint64_t differing = 0;
-    for (uint32_t i = 1; i < count; i += 1)
+    uint64_t selector;
+    uint64_t byte_mask;
+    uint64_t ninth;
+    uint32_t buckets;
+};
+
+BUSTER_INLINE void tier1_frame_digit_rows(const uint64_t* key, const uint32_t* id, uint64_t* target_key, uint32_t* target_id,
+                                          uint32_t count, uint32_t* offsets, __m512i selector, uint64_t byte_mask, __m512i ninth,
+                                          bool wide, bool distribute, bool keep_key)
+{
+    const __mmask8 live = (__mmask8)_bzhi_u32(255, count);
+    const __m512i keys = _mm512_maskz_loadu_epi64(live, key);
+    const uint64_t digits = _mm512_bitshuffle_epi64_mask(keys, selector) & byte_mask;
+    const uint32_t high = wide ? _mm512_test_epi64_mask(keys, ninth) : 0;
+    for (uint32_t lane = 0; lane < count; lane += 1)
     {
-        differing |= key[i] ^ key[0];
-    }
-    bool swapped = false;
-    for (uint32_t shift = 0; shift < 64; shift += 8)
-    {
-        if (((differing >> shift) & 255) != 0)
+        const uint32_t bucket = (uint8_t)(digits >> (8 * lane)) | (((high >> lane) & 1) << 8);
+        // Equal digits advance the same cursor in input order. The positions therefore keep ties stable.
+        const uint32_t at = offsets[bucket]++;
+        if (distribute)
         {
-            uint32_t offsets[256] = {0};
-            for (uint32_t i = 0; i < count; i += 1)
+            target_id[at] = id[lane];
+            if (keep_key)
             {
-                offsets[(key[i] >> shift) & 255] += 1;
+                target_key[at] = key[lane];
             }
-            uint32_t sum = 0;
-            for (uint32_t bucket = 0; bucket < 256; bucket += 1)
-            {
-                const uint32_t amount = offsets[bucket];
-                offsets[bucket] = sum;
-                sum += amount;
-            }
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const uint32_t bucket = (key[i] >> shift) & 255;
-                const uint32_t at = offsets[bucket];
-                offsets[bucket] += 1;
-                temporary_key[at] = key[i];
-                temporary_id[at] = id[i];
-            }
-            uint64_t* swap_key = key;
-            key = temporary_key;
-            temporary_key = swap_key;
-            uint32_t* swap_id = id;
-            id = temporary_id;
-            temporary_id = swap_id;
-            swapped = !swapped;
         }
     }
-    return swapped;
+}
+
+BUSTER_INLINE void tier1_frame_digit_pass(uint64_t* key, uint32_t* id, uint64_t* target_key, uint32_t* target_id,
+                                          uint32_t count, uint32_t* offsets, Tier1FrameDigit digit, bool wide, bool distribute, bool keep_key)
+{
+    const __m512i selector = _mm512_set1_epi64((long long)digit.selector);
+    const __m512i ninth = _mm512_set1_epi64((long long)digit.ninth);
+    uint32_t first = 0;
+    for (; count - first >= 8; first += 8)
+    {
+        tier1_frame_digit_rows(key + first, id + first, target_key, target_id, 8, offsets, selector, digit.byte_mask, ninth, wide, distribute, keep_key);
+    }
+    if (first < count)
+    {
+        tier1_frame_digit_rows(key + first, id + first, target_key, target_id, count - first, offsets, selector, digit.byte_mask, ninth, wide, distribute, keep_key);
+    }
+}
+
+// A one-bit digit has two contiguous output streams. Count set bits or compress the two groups directly.
+BUSTER_INLINE void tier1_frame_bit_pass(const uint64_t* key, const uint32_t* id, uint64_t* target_key, uint32_t* target_id,
+                                        uint32_t count, uint32_t* offsets, uint64_t selector, bool distribute, bool keep_key)
+{
+    const __m512i bit = _mm512_set1_epi64((long long)(UINT64_C(1) << (selector & 63)));
+    uint32_t lo = 0;
+    uint32_t hi = distribute ? offsets[1] : 0;
+    for (uint32_t first = 0; first < count; first += 8)
+    {
+        const uint32_t left = count - first;
+        const __mmask8 live = left >= 8 ? 255 : (__mmask8)_bzhi_u32(255, left);
+        const __m512i keys = _mm512_maskz_loadu_epi64(live, key + first);
+        const __mmask8 high = _mm512_test_epi64_mask(keys, bit);
+        const __mmask8 low = live ^ high;
+        if (distribute)
+        {
+            const __m256i ids = _mm256_maskz_loadu_epi32(live, id + first);
+            _mm256_mask_compressstoreu_epi32(target_id + lo, low, ids);
+            _mm256_mask_compressstoreu_epi32(target_id + hi, high, ids);
+            if (keep_key)
+            {
+                _mm512_mask_compressstoreu_epi64(target_key + lo, low, keys);
+                _mm512_mask_compressstoreu_epi64(target_key + hi, high, keys);
+            }
+            lo += (uint32_t)__builtin_popcount(low);
+        }
+        hi += (uint32_t)__builtin_popcount(high);
+    }
+    if (!distribute)
+    {
+        offsets[0] = count - hi;
+        offsets[1] = hi;
+    }
+}
+
+BUSTER_INLINE void tier1_frame_radix_pass(uint64_t* key, uint32_t* id, uint64_t* target_key, uint32_t* target_id,
+                                          uint32_t count, uint32_t* offsets, Tier1FrameDigit digit, bool distribute, bool keep_key)
+{
+    if (digit.buckets == 2)
+    {
+        tier1_frame_bit_pass(key, id, target_key, target_id, count, offsets, digit.selector, distribute, keep_key);
+    }
+    else if (digit.ninth != 0)
+    {
+        tier1_frame_digit_pass(key, id, target_key, target_id, count, offsets, digit, true, distribute, keep_key);
+    }
+    else
+    {
+        tier1_frame_digit_pass(key, id, target_key, target_id, count, offsets, digit, false, distribute, keep_key);
+    }
+}
+
+static void tier1_frame_bucket_offsets(uint32_t* offsets, uint32_t count)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    uint32_t carry = 0;
+    for (uint32_t first = 0; first < count; first += 16)
+    {
+        const uint32_t left = count - first;
+        const __mmask16 live = left >= 16 ? 0xffff : (__mmask16)_bzhi_u32(0xffff, left);
+        const __m512i amounts = _mm512_maskz_loadu_epi32(live, offsets + first);
+        __m512i sums = _mm512_add_epi32(amounts, _mm512_alignr_epi32(amounts, zero, 15));
+        sums = _mm512_add_epi32(sums, _mm512_alignr_epi32(sums, zero, 14));
+        sums = _mm512_add_epi32(sums, _mm512_alignr_epi32(sums, zero, 12));
+        sums = _mm512_add_epi32(sums, _mm512_alignr_epi32(sums, zero, 8));
+        const __m512i starts = _mm512_add_epi32(_mm512_sub_epi32(sums, amounts), _mm512_set1_epi32((int)carry));
+        _mm512_mask_storeu_epi32(offsets + first, live, starts);
+        carry += (uint32_t)_mm_extract_epi32(_mm512_extracti32x4_epi32(sums, 3), 3);
+    }
+}
+
+// Stable LSD radix over the key bits that vary. Memory is independent of the numeric key range.
+// Return whether the sorted IDs (and keys when requested) are in the temporary columns.
+static bool tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_key, uint32_t* temporary_id, uint32_t count, bool need_keys)
+{
+    const __m512i first = _mm512_set1_epi64(count == 0 ? 0 : (long long)key[0]);
+    __m512i changed = _mm512_setzero_si512();
+    for (uint32_t i = 0; i < count; i += 8)
+    {
+        const uint32_t left = count - i;
+        const __mmask8 live = left >= 8 ? 255 : (__mmask8)_bzhi_u32(255, left);
+        changed = _mm512_or_si512(changed, _mm512_xor_si512(first, _mm512_mask_loadu_epi64(first, live, key + i)));
+    }
+    uint64_t bits = (uint64_t)_mm512_reduce_or_epi64(changed);
+    Tier1FrameDigit digits[8];
+    uint32_t offsets[8][512];
+    uint32_t passes = 0;
+    while (bits != 0)
+    {
+        const uint32_t remaining = (uint32_t)__builtin_popcountll(bits);
+        const bool wide = (remaining + 8) / 9 < (remaining + 7) / 8;
+        Tier1FrameDigit digit = { 0 };
+        uint32_t width = 0;
+        do
+        {
+            digit.selector |= (uint64_t)__builtin_ctzll(bits) << (width * 8);
+            bits &= bits - 1;
+            width += 1;
+        } while (bits != 0 && width < 8);
+        digit.byte_mask = UINT64_C(0x0101010101010101) * ((1u << width) - 1);
+        if (wide)
+        {
+            digit.ninth = bits & -bits;
+            bits &= bits - 1;
+            width += 1;
+        }
+        digit.buckets = 1u << width;
+        digits[passes] = digit;
+        memset(offsets[passes], 0, digit.buckets * sizeof(uint32_t));
+        tier1_frame_radix_pass(key, id, temporary_key, temporary_id, count, offsets[passes], digit, false, false);
+        passes += 1;
+    }
+    for (uint32_t pass = 0; pass < passes; pass += 1)
+    {
+        tier1_frame_bucket_offsets(offsets[pass], digits[pass].buckets);
+        tier1_frame_radix_pass(key, id, temporary_key, temporary_id, count, offsets[pass], digits[pass], true, need_keys || pass + 1 < passes);
+        uint64_t* swap_key = key;
+        key = temporary_key;
+        temporary_key = swap_key;
+        uint32_t* swap_id = id;
+        id = temporary_id;
+        temporary_id = swap_id;
+    }
+    return (passes & 1) != 0;
 }
 
 // Preparation's sort of up to BUSTER_TIER1_FRAME_RANK_EVENTS events (#2699): an event's rank is the count of keys
@@ -585,7 +714,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
                 key[i] = indices[i];
                 candidate.event[i] = i;
             }
-            const uint64_t* const sorted = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count) ? temporary_key : key;
+            const uint64_t* const sorted = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count, true) ? temporary_key : key;
             for (uint32_t i = 1; i < count; i += 1)
             {
                 different |= sorted[i] == sorted[i - 1];
@@ -623,7 +752,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
             {
                 candidate.event[i] = i;
             }
-            const bool swapped = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count);
+            const bool swapped = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count, true);
             const uint64_t* const sorted_key = swapped ? temporary_key : key;
             const uint32_t* const sorted_item = swapped ? temporary_event : candidate.event;
             for (uint32_t i = 0; i < count; i += 1)
@@ -665,7 +794,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
                 key[count + i] = (uint64_t)group << 32 | request->slots.start[row];
                 candidate.event[count + i] = i * 2 + 1;
             }
-            if (tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, events))
+            if (tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, events, false))
             {
                 candidate.event = temporary_event;
             }
