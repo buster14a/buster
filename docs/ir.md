@@ -1549,11 +1549,9 @@ scalar work), under its twin's 151.1, with 2,208 instructions per entry against
 record](https://github.com/buster14a/buster-performance/tree/11e845e033dc696b47969899e6837c1ed2e6218c/docs/measurements/ssa-vector-cutover-787-2026-10-29)).
 #134's later measurement of both promotions, with each path's phis, is in [the SSA
 guide](ssa.md)'s "Benchmark". #2924 deleted the scalar twin and the bound: the
-dense constructor works a block's locals at a time at every size. Since #866 `benchmark-ir-source` also runs both
-of GVN's paths once on every prepared function, requires both to accept it, and
-times `gvn` and `gvn-scalar` on the same lowered IR; [the value-numbering
-guide](ir-value-numbering.md)'s performance acceptance has those medians and the
-work counters.
+dense constructor works a block's locals at a time at every size. The source benchmark measures GVN on
+the lowered IR. The [value-numbering guide](ir-value-numbering.md) records the
+historical measurements of both implementations and their work counters.
 
 Against main (`9bb5060e`), in the same record: `-c` of `sqlite3.c` runs the same
 instructions but 0.0004% and writes the same object. The checker's unit compiled

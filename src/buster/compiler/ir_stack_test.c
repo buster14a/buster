@@ -90,7 +90,7 @@ static void ir_stack_test_consumers(IrLowerTestTally* tally, const IrFunction* f
             case 2:
             {
                 IrGvnOptions options = ir_gvn_options();
-                options.scalar = scalar != 0;
+                options.complete = scalar != 0;
                 IrGvnResult result = { 0 };
                 check = ir_optimize_gvn(function, output, scratch, options, &result);
                 transformed = result.function;
@@ -228,7 +228,7 @@ static void ir_stack_test_chain(IrLowerTestTally* tally, const IrFunction* funct
             case 2:
             {
                 IrGvnOptions options = ir_gvn_options();
-                options.scalar = scalar != 0;
+                options.complete = scalar != 0;
                 IrGvnResult result = { 0 };
                 check = ir_optimize_gvn(&current, output, scratch, options, &result);
                 next = result.function;

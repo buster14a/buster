@@ -524,8 +524,8 @@ The output reports nanoseconds, TSC ticks (not core cycles), useful input
 instructions per second, output size and retained analysis workspace. That
 workspace count excludes temporary verifier and dominance allocations; it is
 not a peak-memory measurement. For real source-derived IR, `benchmark-ir-source`
-prepares the files as `test-ir-source` does and now runs both GVN paths once on
-every function before timing `gvn` and `gvn-scalar` with the same medians. Its
+prepares the files as `test-ir-source` does and runs GVN once on every function
+before measuring it. Its
 #866 results are in [the value-numbering guide](ir-value-numbering.md)'s
 performance acceptance. No benchmark result or speed claim is recorded
 yet. Local ASan/UBSan diagnostic checks passed 189,731 checks with zero

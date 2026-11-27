@@ -127,15 +127,13 @@ and as promoted. The correctness list runs it on c-testsuite's subset, the froze
 `sqlite3.c` and the frozen musl's units.
 
 `./build/compiler benchmark-ir-source [--only promote|gvn|
-gvn-scalar|optimize|lower|verify]
-[--after-scalar MS] [preprocessor options]
+optimize|lower|verify] [preprocessor options]
 file...` (`ir_source_benchmark.c`) prepares the files' functions as test-ir-source
 does, lowers and promotes each once outside the time, and reports the IR's bytes
 (each function's arena, alignment gaps and all, as an arena of its own) per
 source token (the parser's), per typed entry and per instruction, lowered and
 promoted, and the ten largest functions with their shares; then 21-pass medians
-per typed entry and per IR instruction of each variant over every function, each
-pair's paths taking turns first. Any file or function that fails fails it. Run it
+per typed entry and per IR instruction of each variant over every function. Any file or function that fails fails it. Run it
 under the 9700X's lock with `taskset -c 2`; the 9700X job runs it on the frozen
 `sqlite3.c` where the IR or its lowering changes.
 
@@ -151,11 +149,10 @@ and remove BMI, LZCNT and POPCNT through their target attributes (#1374).
 `./build/compiler test-ir-source --passes [preprocessor options] file...`
 (`ir_source_passes.c`) is #139's check on real C. It prepares, lowers and
 promotes every function as `test-ir-source` does, then runs each of #139's
-passes, each by its one path since #2924 but GVN, which keeps its scalar twin:
+passes.
 - SROA with Tier 1's options, on the lowered form;
 - #866's solver on the lowered form: its acyclic numbering must give its
-  complete-refinement oracle's function, and its scalar available-expression
-  twin must accept the function and remove no more instructions;
+  complete-refinement oracle's function;
 - the optimizer on the promoted form, with SCCP alone, dead-code removal
   alone, CFG cleanup alone and with its merges, the three together, Tier 1's
   set (the three with the merges, layout and identities), value numbering
@@ -182,12 +179,9 @@ c-testsuite's subset and `sqlite3.c` had 7 and 219 such units). The correctness 
 frozen `sqlite3.c` and musl, every pass agreeing on all 5,807 functions.
 
 `./build/compiler benchmark-ir-source --passes [--only PASS] [preprocessor
-options] file...` times the same passes on the same inputs, by their one
-version since #2924, and #866's solver by its vector path and its scalar twin.
+options] file...` times the same passes on the same inputs, including #866's solver.
 The inputs are prepared outside the time, and so are the callers' units that
-both inliner versions take. Each pass runs over the whole corpus by each
-version, in 21 rounds that alternate which of GVN's runs first, after a warm-up of
-each. A run is the public call with its checks, analyses, rewrite and
+both inliner versions take. Each pass runs over the whole corpus in 21 rounds after warm-up. A run is the public call with its checks, analyses, rewrite and
 verification. The report gives each version's median total and its
 nanoseconds, cycles and instructions per lowered IR instruction. Run it
 under the 9700X's lock, pinned to one CPU.

@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Original SSA value numbering (#139), included after ir_optimize.c. The vector path computes the coarsest congruence
+// Original SSA value numbering (#139), included after ir_optimize.c. The solver computes the coarsest congruence
 // partition: values no cycle is reachable from are numbered once each in dependency order (#866), and only the values
-// that reach a cycle are refined in rounds. The independent scalar path hashes available expressions while walking
-// the dominator tree with scope rollback. Hashes never establish equality: full keys and predecessor-ordered phi
+// that reach a cycle are refined in rounds. Hashes never establish equality: full keys and predecessor-ordered phi
 // operands are compared on every collision. Loads, calls, environment-sensitive floating operations and all
 // undef-tainted values are excluded.
 
@@ -21,7 +20,6 @@ struct IrGvnOptions
     uint32_t sweep_limit;
     // Key comparisons a grouping may make per instruction before it completes another way. Tests lower it.
     uint32_t probes;
-    bool scalar;
     // Refine every instruction in synchronous rounds instead of numbering the acyclic ones first: the exact oracle
     // of the acyclic numbering.
     bool complete;
@@ -40,6 +38,8 @@ struct IrGvnOptions
     // builds the CFG, use lists and dominator tree without verifying it again. A function the pass rewrites is verified
     // as ever.
     bool validated;
+    // A caller consuming only the rewritten function may omit the dependency-cycle census.
+    bool apply_only;
 };
 
 // IrGvnOptions.pressure's free values by operation: each copy costs nothing at its user.
@@ -63,7 +63,7 @@ struct IrGvnResult
     IrFunction function;
     uint32_t removed;
     uint32_t classes;
-    // Instructions the acyclic numbering gave their final class; the rest were refined in rounds.
+    // Instructions numbered before cyclic refinement, or BUSTER_IR_NONE when the caller omits the cycle census.
     uint32_t acyclic;
     uint64_t rounds;
     uint64_t partition_probes;
@@ -72,20 +72,18 @@ struct IrGvnResult
     bool fallback;
 };
 
-typedef struct IrGvnFrame IrGvnFrame;
-struct IrGvnFrame
-{
-    uint32_t block;
-    uint32_t child;
-    uint32_t mark;
-    bool entered;
-};
-
 typedef struct IrGvnPayload IrGvnPayload;
 struct IrGvnPayload
 {
     uint64_t low;
     uint64_t high;
+};
+
+typedef struct IrGvnWait IrGvnWait;
+struct IrGvnWait
+{
+    IrGvnWait* next;
+    uint32_t user;
 };
 
 typedef struct IrGvnWork IrGvnWork;
@@ -105,12 +103,30 @@ struct IrGvnWork
     uint64_t* hashes;
     uint8_t* pure;
     uint8_t* tainted;
-    uint8_t* awaited;
+    IrGvnWait** waiters;
+    IrGvnWait* wait_free;
+    uint64_t wait_left;
+    bool wait_failed;
     uint32_t probes;
     IrGvnResult statistics;
     // IrGvnOptions.pressure, which ir_gvn_available applies, and the congruences it applied.
     bool pressure;
+    bool ordered;
+    bool relative_keys;
+    bool repeats_only;
+    bool fused;
+    bool vectors_only;
+    uint32_t staged;
+    uint32_t* staged_targets;
+    uint32_t* tags;
+    uint32_t* owners;
+    uint32_t current_block;
+    uint32_t position;
+    bool copies;
     uint32_t merged;
+    uint32_t taint_count;
+    uint32_t unique;
+    uint32_t pending;
 };
 
 static __attribute__((unused)) IrGvnOptions ir_gvn_options(void)
@@ -138,7 +154,35 @@ static uint32_t ir_gvn_resolve(uint32_t* aliases, uint32_t value)
     return result;
 }
 
-static void ir_gvn_classify(IrGvnWork* work)
+// In reachable SSA without phis every operand precedes its use in reverse postorder. Such a walk can number
+// instructions directly. Only undef propagation needs the complete use lists.
+static IrError ir_gvn_prepare_uses(IrGvnWork* work, Arena* scratch, Arena* output)
+{
+    const IrFunction* f = work->ir.function;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    bool phis = false;
+    for (uint64_t first = 0; first < f->instruction_count; first += 16)
+    {
+        const uint32_t left = f->instruction_count - (uint32_t)first;
+        const __mmask16 valid = (__mmask16)_bzhi_u32(0xffff, left < 16 ? left : 16);
+        const __m128i op = _mm_maskz_loadu_epi8(valid, f->op + first);
+        phis |= _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_PHI)) != 0;
+        work->copies |= _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_COPY)) != 0;
+        _mm512_mask_storeu_epi32(work->alias + first, valid, _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)first)));
+        const __mmask16 undef = _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_UNDEF));
+        if (undef != 0)
+        {
+            _mm_mask_storeu_epi8(work->tainted + first, undef, _mm_set1_epi8(1));
+            const __m512i ids = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first));
+            _mm512_mask_compressstoreu_epi32(work->members + work->taint_count, undef, ids);
+            work->taint_count += (uint32_t)__builtin_popcount(undef);
+        }
+    }
+    work->ordered = !phis && work->ir.dominators.reachable_count == f->block_count;
+    return work->taint_count != 0 ? ir_uses_validated(f, scratch, output, &work->ir.uses) : IR_OK;
+}
+
+static void ir_gvn_classify(IrGvnWork* work, bool number_leaves)
 {
     const IrFunction* f = work->ir.function;
     static const uint8_t pure[BUSTER_IR_OP_TABLE] = {
@@ -177,25 +221,17 @@ static void ir_gvn_classify(IrGvnWork* work)
         [IR_ADDRESS] = 1,
         [IR_PHI] = 1,
     };
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    // Taint is permanent. Each user enters this list at most once, before partitioning reuses the column.
+    for (uint32_t at = 0; at < work->taint_count; at += 1)
     {
-        work->alias[i] = i;
-        if (f->op[i] == IR_UNDEF)
-        {
-            work->tainted[i] = 1;
-            ir_optimize_enqueue(&work->ir, i);
-        }
-    }
-    while (work->ir.queued_count != 0)
-    {
-        const uint32_t value = ir_optimize_dequeue(&work->ir);
+        const uint32_t value = work->members[at];
         for (uint32_t use = work->ir.uses.offsets[value]; use < work->ir.uses.offsets[(uint64_t)value + 1]; use += 1)
         {
             const uint32_t instruction = work->ir.uses.uses[use].instruction;
             if (work->tainted[instruction] == 0)
             {
                 work->tainted[instruction] = 1;
-                ir_optimize_enqueue(&work->ir, instruction);
+                work->members[work->taint_count++] = instruction;
             }
         }
     }
@@ -229,33 +265,48 @@ static void ir_gvn_classify(IrGvnWork* work)
                                                                            _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_PAIRWISE)));
         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
         _mm_mask_storeu_epi8(work->pure + first, valid, _mm_maskz_set1_epi8(eligible, 1));
-    }
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
-    {
-        if (f->op[i] == IR_COPY && work->tainted[i] == 0 && work->ir.dominators.rpo_index[work->ir.cfg.instruction_blocks[i]] != BUSTER_DOMINATOR_NONE)
+        if (number_leaves)
         {
-            work->alias[i] = f->a[i];
+            // Impure rows are distinct leaves even when their own operands form cycles. Give them dense class
+            // identifiers now, so the dependency walk only visits rows whose equivalence needs a key.
+            const __mmask16 leaves = valid & ~eligible;
+            const __m512i lanes = _mm512_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+            const __m512i ids = _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)work->unique));
+            _mm512_mask_storeu_epi32(work->classes + first, valid, _mm512_maskz_expand_epi32(leaves, ids));
+            work->unique += (uint32_t)__builtin_popcount(leaves);
         }
     }
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    if (work->copies)
     {
-        ir_gvn_resolve(work->alias, i);
+        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+        {
+            if (f->op[i] == IR_COPY && work->tainted[i] == 0 && work->ir.dominators.rpo_index[work->ir.cfg.instruction_blocks[i]] != BUSTER_DOMINATOR_NONE)
+            {
+                work->alias[i] = f->a[i];
+            }
+        }
+        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+        {
+            ir_gvn_resolve(work->alias, i);
+        }
     }
 }
 
-static uint32_t ir_gvn_phi_class(const IrGvnWork* work, uint32_t instruction, uint32_t predecessor)
+// Phi operands may be stored in any order. Try the canonical predecessor position first. A verified phi
+// contains every predecessor exactly once, including when two instructions share an extra slice.
+static uint32_t ir_gvn_phi_class(const IrGvnWork* work, uint32_t instruction, uint32_t predecessor, uint32_t position)
 {
     const IrFunction* f = work->ir.function;
-    uint32_t result = 0;
-    for (uint32_t incoming = 0; incoming < f->b[instruction]; incoming += 1)
+    const uint32_t* inputs = f->extra + f->a[instruction];
+    if (inputs[(uint64_t)position * 2] != predecessor)
     {
-        const uint32_t at = f->a[instruction] + incoming * 2;
-        if (f->extra[at] == predecessor)
+        position = 0;
+        while (inputs[(uint64_t)position * 2] != predecessor)
         {
-            result = work->classes[work->alias[f->extra[at + 1]]];
+            position += 1;
         }
     }
-    return result;
+    return work->classes[work->alias[inputs[(uint64_t)position * 2 + 1]]];
 }
 
 // The static key words beside the opcode, type, flags and alignment. The acyclic numbering and the refinement rounds
@@ -273,7 +324,7 @@ static IrGvnPayload ir_gvn_payload(const IrGvnWork* work, uint32_t i)
     else if (op == IR_VCONST)
     {
         // The remaining six words take part in hashing and in collision equality, in the acyclic numbering
-        // (ir_gvn_number) and in the refinement (ir_gvn_hash_one, ir_gvn_compare): table indices alone would miss
+        // (ir_gvn_number) and in the refinement (ir_gvn_hash_payload, ir_gvn_compare): table indices alone would miss
         // identical payloads at distinct indices, and two-word keys would merge different upper lanes.
         payload.low = f->vector_constants[f->a[i]].words[0];
         payload.high = f->vector_constants[f->a[i]].words[1];
@@ -315,14 +366,14 @@ static uint64_t ir_gvn_mix(uint64_t hash, uint64_t value)
 }
 
 // Writes instruction i's key at position in the field columns.
-static void ir_gvn_key(IrGvnWork* work, uint32_t position, uint32_t i, bool initial, bool parent)
+static void ir_gvn_key(IrGvnWork* work, uint32_t position, uint32_t i, bool initial)
 {
     const IrFunction* f = work->ir.function;
     const uint64_t n = f->instruction_count;
     const uint32_t mask = ir_value_mask3(f, i);
     const IrGvnPayload payload = ir_gvn_payload(work, i);
     work->fields[position] = ir_gvn_meta(f, i);
-    work->fields[n + position] = parent && !initial ? work->classes[i] : 0;
+    work->fields[n + position] = !initial ? work->classes[i] : 0;
     work->fields[n * 2 + position] = payload.low;
     work->fields[n * 3 + position] = payload.high;
     work->fields[n * 4 + position] = !initial && (mask & 1) != 0 ? work->classes[ir_gvn_resolve(work->alias, f->a[i])] : 0;
@@ -331,14 +382,9 @@ static void ir_gvn_key(IrGvnWork* work, uint32_t position, uint32_t i, bool init
     work->fields[n * 7 + position] = work->pure[i] == 0 ? (uint64_t)i + 1 : 0;
 }
 
-static uint64_t ir_gvn_hash_one(const IrGvnWork* work, uint32_t position, uint32_t i, bool initial)
+static uint64_t ir_gvn_hash_payload(const IrGvnWork* work, uint64_t hash, uint32_t i, bool initial)
 {
     const IrFunction* f = work->ir.function;
-    uint64_t hash = BUSTER_IR_GVN_HASH_BASIS;
-    for (uint32_t field = 0; field < BUSTER_IR_GVN_FIELDS; field += 1)
-    {
-        hash = ir_gvn_mix(hash, work->fields[(uint64_t)field * f->instruction_count + position]);
-    }
     if (f->op[i] == IR_VCONST)
     {
         const uint64_t* const words = f->vector_constants[f->a[i]].words;
@@ -352,47 +398,87 @@ static uint64_t ir_gvn_hash_one(const IrGvnWork* work, uint32_t position, uint32
         const uint32_t block = work->ir.cfg.instruction_blocks[i];
         for (uint32_t edge = work->ir.cfg.predecessor_offsets[block]; edge < work->ir.cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
         {
-            hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge]));
+            hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge], edge - work->ir.cfg.predecessor_offsets[block]));
         }
     }
     return hash;
 }
 
-// Keys and hashes of the first count members, by position.
-static void ir_gvn_keys(IrGvnWork* work, uint32_t count, bool initial, bool scalar)
+// The previous partition already distinguishes every static field, including all vector-constant words.
+// A later round can only split a parent by the classes of its direct operands or its phi inputs.
+static void ir_gvn_relative_keys(IrGvnWork* work, uint32_t count)
 {
-    (void)scalar;
+    const IrFunction* f = work->ir.function;
+    const uint32_t n = f->instruction_count;
+    const __m512i multiplier = _mm512_set1_epi64(BUSTER_IR_GVN_HASH_MULTIPLIER);
+    for (uint64_t first = 0; first < count; first += 8)
+    {
+        const uint32_t amount = count - first < 8 ? count - first : 8;
+        const __mmask8 live = (__mmask8)_bzhi_u32(255, amount);
+        uint32_t phis = 0;
+        for (uint32_t lane = 0; lane < amount; lane += 1)
+        {
+            const uint32_t j = (uint32_t)first + lane;
+            const uint32_t i = work->members[j];
+            const uint32_t mask = ir_value_mask3(f, i);
+            const uint64_t a = (mask & 1) != 0 ? work->classes[work->alias[f->a[i]]] : 0;
+            const uint64_t b = (mask & 2) != 0 ? work->classes[work->alias[f->b[i]]] : 0;
+            const uint64_t c = (mask & 4) != 0 ? work->classes[work->alias[ir_value_third(f, i)]] : 0;
+            work->fields[j] = work->classes[i] | c << 32;
+            work->fields[(uint64_t)n + j] = a | b << 32;
+            phis |= (uint32_t)(f->op[i] == IR_PHI && work->pure[i] != 0) << lane;
+        }
+        const __m512i parents = _mm512_maskz_loadu_epi64(live, work->fields + first);
+        const __m512i pairs = _mm512_maskz_loadu_epi64(live, work->fields + n + first);
+        const __m512i prefix = _mm512_mullo_epi64(_mm512_xor_si512(_mm512_set1_epi64(BUSTER_IR_GVN_HASH_BASIS), parents), multiplier);
+        _mm512_mask_storeu_epi64(work->hashes + first, live, _mm512_mullo_epi64(_mm512_xor_si512(prefix, pairs), multiplier));
+        while (phis != 0)
+        {
+            const uint32_t j = (uint32_t)first + (uint32_t)__builtin_ctz(phis);
+            const uint32_t i = work->members[j];
+            const uint32_t block = work->ir.cfg.instruction_blocks[i];
+            const uint32_t start = work->ir.cfg.predecessor_offsets[block];
+            uint64_t hash = work->hashes[j];
+            for (uint32_t edge = start; edge < work->ir.cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+            {
+                hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge], edge - start));
+            }
+            work->hashes[j] = hash;
+            phis &= phis - 1;
+        }
+    }
+}
 
+// Keys and hashes of the first count members, by position.
+static void ir_gvn_keys(IrGvnWork* work, uint32_t count, bool initial)
+{
     const uint64_t n = work->ir.function->instruction_count;
     for (uint32_t position = 0; position < count; position += 1)
     {
-        ir_gvn_key(work, position, work->members[position], initial, true);
+        ir_gvn_key(work, position, work->members[position], initial);
     }
     for (uint64_t first = 0; first < count; first += BUSTER_IR_OPTIMIZE_BATCH)
     {
         const uint32_t batch = count - first < BUSTER_IR_OPTIMIZE_BATCH ? count - first : BUSTER_IR_OPTIMIZE_BATCH;
-        if (!BUSTER_SCALAR_PATH(scalar))
+        for (uint32_t half = 0; half < batch; half += 8)
         {
-            for (uint32_t half = 0; half < batch; half += 8)
+            const uint32_t amount = batch - half < 8 ? batch - half : 8;
+            const __mmask8 valid = (UINT32_C(1) << amount) - 1;
+            __m512i hash = _mm512_set1_epi64(BUSTER_IR_GVN_HASH_BASIS);
+            for (uint32_t field = 0; field < BUSTER_IR_GVN_FIELDS; field += 1)
             {
-                const uint32_t amount = batch - half < 8 ? batch - half : 8;
-                const __mmask8 valid = (UINT32_C(1) << amount) - 1;
-                __m512i hash = _mm512_set1_epi64(BUSTER_IR_GVN_HASH_BASIS);
-                for (uint32_t field = 0; field < BUSTER_IR_GVN_FIELDS; field += 1)
-                {
-                    const __m512i key = _mm512_maskz_loadu_epi64(valid, work->fields + (uint64_t)field * n + first + half);
-                    hash = _mm512_mullo_epi64(_mm512_xor_si512(hash, key), _mm512_set1_epi64(BUSTER_IR_GVN_HASH_MULTIPLIER));
-                }
-                _mm512_mask_storeu_epi64(work->hashes + first + half, valid, hash);
+                const __m512i key = _mm512_maskz_loadu_epi64(valid, work->fields + (uint64_t)field * n + first + half);
+                hash = _mm512_mullo_epi64(_mm512_xor_si512(hash, key), _mm512_set1_epi64(BUSTER_IR_GVN_HASH_MULTIPLIER));
             }
+            _mm512_mask_storeu_epi64(work->hashes + first + half, valid, hash);
         }
         for (uint32_t lane = 0; lane < batch; lane += 1)
         {
             const uint32_t position = first + lane;
             const uint32_t i = work->members[position];
-            if (BUSTER_SCALAR_PATH(scalar) || work->ir.function->op[i] == IR_VCONST || (!initial && work->ir.function->op[i] == IR_PHI && work->pure[i] != 0))
+            if (work->ir.function->op[i] == IR_VCONST || (!initial && work->ir.function->op[i] == IR_PHI && work->pure[i] != 0))
             {
-                work->hashes[position] = ir_gvn_hash_one(work, position, i, initial);
+                work->hashes[position] = ir_gvn_hash_payload(work, work->hashes[position], i, initial);
             }
         }
     }
@@ -403,13 +489,14 @@ static int ir_gvn_compare(const IrGvnWork* work, uint32_t a, uint32_t b, uint32_
 {
     int result = work->hashes[a] < work->hashes[b] ? -1 : work->hashes[a] != work->hashes[b];
     const IrFunction* f = work->ir.function;
-    for (uint32_t field = 0; result == 0 && field < BUSTER_IR_GVN_FIELDS; field += 1)
+    const uint32_t fields = work->relative_keys ? 2 : BUSTER_IR_GVN_FIELDS;
+    for (uint32_t field = 0; result == 0 && field < fields; field += 1)
     {
         const uint64_t left = work->fields[(uint64_t)field * f->instruction_count + a];
         const uint64_t right = work->fields[(uint64_t)field * f->instruction_count + b];
         result = left < right ? -1 : left != right;
     }
-    if (result == 0 && f->op[ia] == IR_VCONST)
+    if (result == 0 && !work->relative_keys && f->op[ia] == IR_VCONST)
     {
         const uint64_t* const left = f->vector_constants[f->a[ia]].words;
         const uint64_t* const right = f->vector_constants[f->a[ib]].words;
@@ -424,8 +511,8 @@ static int ir_gvn_compare(const IrGvnWork* work, uint32_t a, uint32_t b, uint32_
         for (uint32_t edge = work->ir.cfg.predecessor_offsets[block]; result == 0 && edge < work->ir.cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
         {
             const uint32_t predecessor = work->ir.cfg.predecessors[edge];
-            const uint32_t left = ir_gvn_phi_class(work, ia, predecessor);
-            const uint32_t right = ir_gvn_phi_class(work, ib, predecessor);
+            const uint32_t left = ir_gvn_phi_class(work, ia, predecessor, edge - work->ir.cfg.predecessor_offsets[block]);
+            const uint32_t right = ir_gvn_phi_class(work, ib, predecessor, edge - work->ir.cfg.predecessor_offsets[block]);
             result = left < right ? -1 : left != right;
         }
     }
@@ -532,10 +619,17 @@ static uint32_t ir_gvn_partition_group(IrGvnWork* work, uint32_t count, bool ini
     return classes;
 }
 
-static uint32_t ir_gvn_partition(IrGvnWork* work, uint32_t count, bool initial, bool scalar, uint32_t base)
+static uint32_t ir_gvn_partition(IrGvnWork* work, uint32_t count, bool initial, bool sorted, uint32_t base)
 {
-    ir_gvn_keys(work, count, initial, BUSTER_SCALAR_PATH(scalar));
-    const uint32_t classes = ir_gvn_partition_group(work, count, initial, scalar, base);
+    if (work->relative_keys)
+    {
+        ir_gvn_relative_keys(work, count);
+    }
+    else
+    {
+        ir_gvn_keys(work, count, initial);
+    }
+    const uint32_t classes = ir_gvn_partition_group(work, count, initial, sorted, base);
     for (uint32_t position = 0; position < count; position += 1)
     {
         work->classes[work->members[position]] = work->next_classes[position];
@@ -544,22 +638,70 @@ static uint32_t ir_gvn_partition(IrGvnWork* work, uint32_t count, bool initial, 
     return classes;
 }
 
-// Refine the first count members from their static keys to the coarsest partition stable under operand classes. An
-// operand outside the members keeps its published class throughout. After sweep_limit rounds, scalar hashing and
-// comparison sorting complete the same fixed point.
-static uint32_t ir_gvn_refine(IrGvnWork* work, uint32_t count, uint32_t base, uint32_t sweep_limit)
+// Refinement can only split a class. Give every singleton a permanent class before the next round and keep
+// only members of the other classes in its worklist. Keys still read the permanent labels of all their operands.
+static uint32_t ir_gvn_freeze_singletons(IrGvnWork* work, uint32_t* count, uint32_t base, uint32_t classes)
 {
-    uint32_t classes = ir_gvn_partition(work, count, true, false, base);
-    bool changed = true;
+    uint32_t* sizes = work->temporary_order;
+    uint32_t* labels = work->order;
+    memset(sizes, 0, (uint64_t)classes * sizeof(*sizes));
+    for (uint32_t j = 0; j < *count; j += 1)
+    {
+        sizes[work->classes[work->members[j]] - base - 1] += 1;
+    }
+    uint32_t frozen = 0;
+    for (uint32_t c = 0; c < classes; c += 1)
+    {
+        frozen += sizes[c] == 1;
+    }
+    if (frozen != 0)
+    {
+        uint32_t singleton = base;
+        uint32_t repeated = base + frozen;
+        for (uint32_t c = 0; c < classes; c += 1)
+        {
+            labels[c] = sizes[c] == 1 ? ++singleton : ++repeated;
+        }
+        uint32_t next = 0;
+        for (uint32_t j = 0; j < *count; j += 1)
+        {
+            const uint32_t value = work->members[j];
+            const uint32_t c = work->classes[value] - base - 1;
+            work->classes[value] = labels[c];
+            work->members[next] = value;
+            next += sizes[c] != 1;
+        }
+        *count = next;
+    }
+    return frozen;
+}
+
+// Refine the first count members from their static keys to the coarsest partition stable under operand classes. An
+// operand outside the members keeps its published class throughout. After sweep_limit rounds, comparison sorting completes the same fixed point.
+static uint32_t ir_gvn_refine(IrGvnWork* work, uint32_t count, uint32_t base, uint32_t sweep_limit, bool compact)
+{
+    const uint32_t first_base = base;
+    // Every pending member still has class zero. A numbered operand has a permanent nonzero class, so
+    // it can distinguish the initial groups immediately, including phi inputs in predecessor order.
+    uint32_t classes = ir_gvn_partition(work, count, base == 0, false, base);
+    bool changed = base == 0 || classes < count;
+    work->relative_keys = compact;
     while (changed)
     {
+        if (count >= 32)
+        {
+            const uint32_t frozen = ir_gvn_freeze_singletons(work, &count, base, classes);
+            base += frozen;
+            classes -= frozen;
+        }
         const bool fallback = work->statistics.rounds > sweep_limit;
         const uint32_t refined = ir_gvn_partition(work, count, false, fallback, base);
-        changed = refined != classes;
+        changed = refined != classes && (first_base == 0 || refined < count);
         classes = refined;
         work->statistics.fallback = work->statistics.fallback || fallback;
     }
-    return classes;
+    work->relative_keys = false;
+    return (base - first_base) + classes;
 }
 
 // #866: the acyclic numbering. Partition refinement needs as many rounds as the longest dependency chain, each over
@@ -567,199 +709,310 @@ static uint32_t ir_gvn_refine(IrGvnWork* work, uint32_t count, uint32_t base, ui
 // with its static key and congruent operands, by induction on its depth, and never to a value that reaches a cycle:
 // matching operands position by position would follow that cycle forever. So these values are numbered once each,
 // in dependency order, by hashing (static key, operand classes) into a table of representatives: Kahn's algorithm,
-// with use lists to wake an instruction whose operand was numbered after it was visited. Whatever is left reaches a
+// with a wait list for each unresolved operand. Whatever is left reaches a
 // cycle, and only those values are refined in rounds, with the numbered operands' classes fixed. The partition is the
 // coarsest congruence either way; only class labels may differ from the synchronous refinement's.
 //
 // The visits follow reverse postorder, so in reachable SSA code every operand but a phi's input along a back edge is
-// numbered first and the use lists are walked only from the few values such a phi waits for. Numbering a value is a
+// numbered first and only unresolved dependencies get a wait record. Numbering a value is a
 // dependent chain (its key needs its operands' classes, published by the instructions just before it), so it is
 // scalar; the refinement rounds keep the eight-lane key hashing.
 //
 // A representative's key is four words at four times its index in the field columns: payload low and high, the meta
 // word with operand class c above it, and operand classes a and b. Its hash is in hashes, its chain link in order and
 // the bucket heads in temporary_order.
-static uint32_t ir_gvn_waiting(IrGvnWork* work, uint32_t i)
+// Record an unresolved operand at its copy root. A value can wake exactly the visits which actually waited
+// for it. The acyclic keys occupy only the first four field columns, leaving room for the usual wait lists.
+static bool ir_gvn_wait_for(IrGvnWork* work, uint32_t value, uint32_t user)
 {
-    const IrFunction* f = work->ir.function;
-    uint32_t waiting = 0;
-    if (work->pure[i] != 0 && f->op[i] == IR_PHI)
+    if (work->wait_left == 0)
     {
-        // A verified phi has exactly one input per predecessor edge, so every input is part of its key.
-        for (uint32_t incoming = 0; incoming < f->b[i]; incoming += 1)
+        work->wait_free = arena_push_array(work->ir.scratch, 256, sizeof(IrGvnWait), _Alignof(IrGvnWait));
+        if (work->wait_free == NULL)
         {
-            const uint32_t value = work->alias[f->extra[f->a[i] + incoming * 2 + 1]];
-            const bool unnumbered = work->classes[value] == 0;
-            waiting += unnumbered;
-            work->awaited[value] |= unnumbered;
+            work->wait_failed = true;
+            return false;
         }
+        work->wait_left = 256;
     }
-    else if (work->pure[i] != 0)
-    {
-        const uint32_t mask = ir_value_mask3(f, i);
-        const uint32_t operands[3] = { f->a[i], f->b[i], ir_value_third(f, i) };
-        for (uint32_t operand = 0; operand < 3; operand += 1)
-        {
-            if ((mask >> operand & 1) != 0)
-            {
-                const uint32_t value = work->alias[operands[operand]];
-                const bool unnumbered = work->classes[value] == 0;
-                waiting += unnumbered;
-                work->awaited[value] |= unnumbered;
-            }
-        }
-    }
-    return waiting;
+    IrGvnWait* edge = work->wait_free++;
+    work->wait_left -= 1;
+    edge->user = user;
+    edge->next = work->waiters[value];
+    work->waiters[value] = edge;
+    return true;
 }
 
-// Number instruction i, whose operands all have classes. Returns false, publishing nothing for i, when the probe
-// budget runs out with candidates left in its chain.
-static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_t budget, uint32_t* count)
+// Read operand classes once. A first visit can wait for an operand and leave its class zero. A released instruction
+// or a block in dependency order can number immediately. An exhausted probe budget restarts the partition.
+static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_t budget, uint32_t* count, bool can_wait)
 {
     const IrFunction* f = work->ir.function;
-    bool ok = true;
-    if (work->pure[i] == 0)
+    const uint32_t mask = ir_value_mask3(f, i);
+    const IrGvnPayload payload = ir_gvn_payload(work, i);
+    const uint64_t a = (mask & 1) != 0 ? work->classes[work->alias[f->a[i]]] : 0;
+    const uint64_t b = (mask & 2) != 0 ? work->classes[work->alias[f->b[i]]] : 0;
+    const uint64_t c = (mask & 4) != 0 ? work->classes[work->alias[ir_value_third(f, i)]] : 0;
+    if (can_wait)
     {
-        *count += 1;
-        work->classes[i] = *count;
+        uint32_t waiting = 0;
+        const uint32_t pending = mask & ((uint32_t)(a == 0) | (uint32_t)(b == 0) << 1 | (uint32_t)(c == 0) << 2);
+        if (pending != 0)
+        {
+            if (((pending & 1) != 0 && !ir_gvn_wait_for(work, work->alias[f->a[i]], i)) ||
+                ((pending & 2) != 0 && !ir_gvn_wait_for(work, work->alias[f->b[i]], i)) ||
+                ((pending & 4) != 0 && !ir_gvn_wait_for(work, work->alias[ir_value_third(f, i)], i)))
+            {
+                return false;
+            }
+            waiting = (uint32_t)__builtin_popcount(pending);
+        }
+        if (f->op[i] == IR_PHI)
+        {
+            for (uint32_t k = 0; k < f->b[i]; k += 1)
+            {
+                const uint32_t v = work->alias[f->extra[f->a[i] + (uint64_t)k * 2 + 1]];
+                if (work->classes[v] == 0)
+                {
+                    if (!ir_gvn_wait_for(work, v, i))
+                    {
+                        return false;
+                    }
+                    waiting += 1;
+                }
+            }
+        }
+        if (waiting != 0)
+        {
+            work->pending += 1;
+            work->waiting[i] = waiting;
+            return true;
+        }
     }
-    else
+    const uint64_t key[BUSTER_IR_GVN_ENTRY_WORDS] = { payload.low, payload.high, ir_gvn_meta(f, i) | c << 32, a | b << 32 };
+    uint64_t hash = BUSTER_IR_GVN_HASH_BASIS;
+    for (uint32_t word = 0; word < BUSTER_IR_GVN_ENTRY_WORDS; word += 1)
     {
-        const uint32_t mask = ir_value_mask3(f, i);
-        const IrGvnPayload payload = ir_gvn_payload(work, i);
-        const uint64_t a = (mask & 1) != 0 ? work->classes[work->alias[f->a[i]]] : 0;
-        const uint64_t b = (mask & 2) != 0 ? work->classes[work->alias[f->b[i]]] : 0;
-        const uint64_t c = (mask & 4) != 0 ? work->classes[work->alias[ir_value_third(f, i)]] : 0;
-        const uint64_t key[BUSTER_IR_GVN_ENTRY_WORDS] = { payload.low, payload.high, ir_gvn_meta(f, i) | c << 32, a | b << 32 };
-        uint64_t hash = BUSTER_IR_GVN_HASH_BASIS;
-        for (uint32_t word = 0; word < BUSTER_IR_GVN_ENTRY_WORDS; word += 1)
+        hash = ir_gvn_mix(hash, key[word]);
+    }
+    // A vector constant's key holds its first two words (ir_gvn_payload): its other six are hashed and compared
+    // here, as the refinement does, so that constants differing only in upper lanes stay apart (#1450).
+    const bool vector = f->op[i] == IR_VCONST;
+    const uint64_t* const words = vector ? f->vector_constants[f->a[i]].words : NULL;
+    for (uint32_t word = 2; vector && word < 8; word += 1)
+    {
+        hash = ir_gvn_mix(hash, words[word]);
+    }
+    const bool phi = f->op[i] == IR_PHI;
+    const uint32_t block = phi ? work->ir.cfg.instruction_blocks[i] : 0;
+    const uint32_t first_edge = phi ? work->ir.cfg.predecessor_offsets[block] : 0;
+    const uint32_t end_edge = phi ? work->ir.cfg.predecessor_offsets[(uint64_t)block + 1] : 0;
+    for (uint32_t edge = first_edge; edge < end_edge; edge += 1)
+    {
+        hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge], edge - work->ir.cfg.predecessor_offsets[block]));
+    }
+    // An empty tag terminates the group search. For a matching fingerprint compare the entire key,
+    // including the extra phi or vector-constant words. Charge full groups against the collision budget too.
+    const uint32_t width = buckets < 8 ? buckets : 8;
+    const uint32_t tag = (uint32_t)(hash >> 32) | 1;
+    uint32_t group = ((uint32_t)hash ^ (uint32_t)(hash >> 32)) & (buckets - width);
+    const __mmask8 valid = (__mmask8)((1u << width) - 1);
+    uint32_t slot = 0;
+    uint32_t match = BUSTER_IR_NONE;
+    bool equal = false;
+    for (;;)
+    {
+        const __m256i tags = _mm256_maskz_loadu_epi32(valid, work->tags + group);
+        __mmask8 matches = _mm256_cmpeq_epi32_mask(tags, _mm256_set1_epi32((int)tag));
+        while (matches != 0 && !equal)
         {
-            hash = ir_gvn_mix(hash, key[word]);
-        }
-        // A vector constant's key holds its first two words (ir_gvn_payload): its other six are hashed and compared
-        // here, as the refinement does, so that constants differing only in upper lanes stay apart (#1450).
-        const bool vector = f->op[i] == IR_VCONST;
-        const uint64_t* const words = vector ? f->vector_constants[f->a[i]].words : NULL;
-        for (uint32_t word = 2; vector && word < 8; word += 1)
-        {
-            hash = ir_gvn_mix(hash, words[word]);
-        }
-        const bool phi = f->op[i] == IR_PHI;
-        const uint32_t block = work->ir.cfg.instruction_blocks[i];
-        const uint32_t first_edge = work->ir.cfg.predecessor_offsets[block];
-        const uint32_t end_edge = work->ir.cfg.predecessor_offsets[(uint64_t)block + 1];
-        for (uint32_t edge = first_edge; phi && edge < end_edge; edge += 1)
-        {
-            hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge]));
-        }
-        const uint32_t bucket = (hash ^ (hash >> 32)) & (buckets - 1);
-        uint32_t match = work->temporary_order[bucket];
-        bool equal = false;
-        while (match != BUSTER_IR_NONE && !equal && work->statistics.partition_probes < budget)
-        {
+            if (work->statistics.partition_probes == budget)
+            {
+                return false;
+            }
             work->statistics.partition_probes += 1;
+            const uint32_t lane = (uint32_t)__builtin_ctz(matches);
+            matches &= matches - 1;
+            match = work->owners[group + lane];
             const uint64_t* entry = work->fields + (uint64_t)match * BUSTER_IR_GVN_ENTRY_WORDS;
-            equal = work->hashes[match] == hash && entry[0] == key[0] && entry[1] == key[1] && entry[2] == key[2] && entry[3] == key[3];
+            equal = _mm256_cmpeq_epi64_mask(_mm256_loadu_si256((const __m256i*)entry), _mm256_loadu_si256((const __m256i*)key)) == 0xf;
             // Equal keys make both vector constants: compare their whole payloads.
             equal = equal && (!vector || memcmp(words, f->vector_constants[f->a[match]].words, sizeof(IrSimdValue)) == 0);
             // Equal keys put both phis in one block: compare their inputs in that block's predecessor order.
-            for (uint32_t edge = first_edge; phi && equal && edge < end_edge; edge += 1)
+            for (uint32_t edge = first_edge; equal && edge < end_edge; edge += 1)
             {
                 const uint32_t predecessor = work->ir.cfg.predecessors[edge];
-                equal = ir_gvn_phi_class(work, i, predecessor) == ir_gvn_phi_class(work, match, predecessor);
+                equal = ir_gvn_phi_class(work, i, predecessor, edge - first_edge) == ir_gvn_phi_class(work, match, predecessor, edge - first_edge);
             }
-            if (!equal)
+        }
+        if (equal)
+        {
+            break;
+        }
+        const __mmask8 empty = valid & _mm256_cmpeq_epi32_mask(tags, _mm256_setzero_si256());
+        if (empty != 0)
+        {
+            slot = group + (uint32_t)__builtin_ctz(empty);
+            break;
+        }
+        if (work->statistics.partition_probes == budget)
+        {
+            return false;
+        }
+        work->statistics.partition_probes += 1;
+        group = (group + width) & (buckets - 1);
+    }
+    if (equal)
+    {
+        work->classes[i] = work->classes[match];
+        if (!work->fused)
+        {
+            work->pure[i] = 2;
+            work->pure[match] = 2;
+        }
+        if (work->fused && (!work->vectors_only || f->type[i] >= IR_V4I32) && (!work->pressure || ir_gvn_free[f->op[i]] == 0))
+        {
+            const uint32_t rep = work->next_classes[match];
+            const uint32_t rep_block = work->ir.cfg.instruction_blocks[rep];
+            const bool available = work->pressure && f->type[i] == IR_I1 ? rep_block == work->current_block :
+                                   work->position < work->ir.dominators.subtree_end[rep_block];
+            if (available)
             {
-                match = work->order[match];
+                work->waiting[work->staged] = i;
+                work->staged_targets[work->staged++] = rep;
             }
-        }
-        ok = equal || match == BUSTER_IR_NONE;
-        if (ok && equal)
-        {
-            work->classes[i] = work->classes[match];
-        }
-        else if (ok)
-        {
-            *count += 1;
-            work->classes[i] = *count;
-            work->hashes[i] = hash;
-            work->order[i] = work->temporary_order[bucket];
-            work->temporary_order[bucket] = i;
-            memcpy(work->fields + (uint64_t)i * BUSTER_IR_GVN_ENTRY_WORDS, key, sizeof(key));
+            else
+            {
+                work->next_classes[match] = i;
+            }
         }
     }
-    return ok;
+    else
+    {
+        *count += 1;
+        work->classes[i] = *count;
+        if (work->fused)
+        {
+            work->next_classes[i] = i;
+        }
+        work->owners[slot] = i;
+        work->tags[slot] = tag;
+        memcpy(work->fields + (uint64_t)i * BUSTER_IR_GVN_ENTRY_WORDS, key, sizeof(key));
+    }
+    return true;
 }
 
-// Value was just numbered and something waits for it: wake its users, and the users of every copy that resolves to
-// it, which read its class through the copy. Number every instruction that releases, and wake whatever waits for
-// those in turn. next_classes is the stack of released instructions and members the stack of values whose users to
-// wake; each instruction is released once and each copy is walked once per walk, so neither stack outgrows n.
+// Each wait edge is consumed once. A waiting instruction becomes ready after its last unnumbered input.
 static bool ir_gvn_wake(IrGvnWork* work, uint32_t value, uint32_t buckets, uint64_t budget, uint32_t* count)
 {
-    uint32_t* ready = work->next_classes;
-    uint32_t* values = work->members;
     uint32_t depth = 0;
-    uint32_t woken = value;
-    bool ok = true;
-    bool walk = true;
-    while (ok && walk)
+    for (;;)
     {
-        uint32_t pending = 1;
-        values[0] = woken;
-        while (pending != 0)
+        for (IrGvnWait* edge = work->waiters[value]; edge != NULL; edge = edge->next)
         {
-            pending -= 1;
-            const uint32_t used = values[pending];
-            for (uint32_t use = work->ir.uses.offsets[used]; use < work->ir.uses.offsets[(uint64_t)used + 1]; use += 1)
+            const uint32_t user = edge->user;
+            if (--work->waiting[user] == 0)
             {
-                const uint32_t user = work->ir.uses.uses[use].instruction;
-                if (work->alias[user] != user)
-                {
-                    values[pending] = user;
-                    pending += 1;
-                }
-                else if (work->classes[user] == 0 && work->waiting[user] != 0)
-                {
-                    work->waiting[user] -= 1;
-                    if (work->waiting[user] == 0)
-                    {
-                        ready[depth] = user;
-                        depth += 1;
-                    }
-                }
+                work->pending -= 1;
+                work->members[depth++] = user;
             }
         }
-        walk = false;
-        while (ok && !walk && depth != 0)
+        if (depth == 0)
         {
-            depth -= 1;
-            woken = ready[depth];
-            ok = ir_gvn_number(work, woken, buckets, budget, count);
-            walk = ok && work->awaited[woken] != 0;
+            return true;
+        }
+        value = work->members[--depth];
+        if (!ir_gvn_number(work, value, buckets, budget, count, false))
+        {
+            return false;
         }
     }
+}
+
+// Every phi belongs to its block's phi prefix, and phis in different blocks have different static keys.
+// A fingerprint that occurs once in a prefix proves a singleton even before all back-edge classes are
+// known. Equal phis have equal known inputs in canonical predecessor order. Collisions stay in the
+// general refinement. Snapshot each prefix before waking users so every fingerprint uses one partition.
+static bool ir_gvn_seed_phis(IrGvnWork* work, uint32_t buckets, uint64_t budget, uint32_t* classes)
+{
+    const IrFunction* f = work->ir.function;
+    bool ok = true;
+    bool seeded = false;
+    for (uint32_t block = 0; ok && work->pending != 0 && block < f->block_count; block += 1)
+    {
+        const uint32_t begin = f->block_offsets[block];
+        const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+        uint32_t limit = begin;
+        uint64_t seen = 0;
+        uint64_t crowded = 0;
+        while (limit < end && f->op[limit] == IR_PHI)
+        {
+            const uint32_t i = limit++;
+            if (work->classes[i] == 0)
+            {
+                uint64_t hash = ir_gvn_meta(f, i);
+                const uint32_t start = work->ir.cfg.predecessor_offsets[block];
+                for (uint32_t edge = start; edge < work->ir.cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+                {
+                    hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge], edge - start));
+                }
+                const uint32_t bit = (uint32_t)(hash ^ (hash >> 32)) & 63;
+                work->next_classes[i] = bit;
+                const uint64_t mask = UINT64_C(1) << bit;
+                crowded |= seen & mask;
+                seen |= mask;
+            }
+        }
+        const uint64_t single = seen & ~crowded;
+        for (uint32_t i = begin; ok && single != 0 && i < limit; i += 1)
+        {
+            if (work->classes[i] == 0 && ((single >> work->next_classes[i]) & 1) != 0)
+            {
+                // This phi no longer needs a wake. Leave one extra count after its remaining edges drain.
+                work->waiting[i] += 1;
+                work->classes[i] = ++*classes;
+                work->pending -= 1;
+                seeded = true;
+                ok = ir_gvn_wake(work, i, buckets, budget, classes);
+            }
+        }
+    }
+    work->statistics.rounds += seeded && ok;
     return ok;
 }
 
 static bool ir_gvn_visit(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_t budget, uint32_t* count)
 {
-    const uint32_t waiting = ir_gvn_waiting(work, i);
-    bool ok = true;
-    if (waiting != 0)
+    bool ok = ir_gvn_number(work, i, buckets, budget, count, true);
+    if (ok && work->classes[i] != 0 && work->waiters[i] != NULL)
     {
-        work->waiting[i] = waiting;
-    }
-    else
-    {
-        ok = ir_gvn_number(work, i, buckets, budget, count);
-        // A user visited earlier (a phi, along its back edge) may already wait for i.
-        if (ok && work->awaited[i] != 0)
-        {
-            ok = ir_gvn_wake(work, i, buckets, budget, count);
-        }
+        ok = ir_gvn_wake(work, i, buckets, budget, count);
     }
     return ok;
+}
+
+static bool ir_gvn_visit_block(IrGvnWork* work, uint32_t block, uint32_t buckets, uint64_t budget, uint32_t* count)
+{
+    const IrFunction* f = work->ir.function;
+    const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+    for (uint64_t first = f->block_offsets[block]; first < end; first += 16)
+    {
+        const uint32_t left = end - (uint32_t)first;
+        const __mmask16 valid = (__mmask16)_bzhi_u32(0xffff, left < 16 ? left : 16);
+        const __m128i pure = _mm_maskz_loadu_epi8(valid, work->pure + first);
+        __mmask16 rows = _mm_test_epi8_mask(pure, pure);
+        while (rows != 0)
+        {
+            const uint32_t i = (uint32_t)first + (uint32_t)__builtin_ctz(rows);
+            rows &= rows - 1;
+            const bool ok = work->ordered ? ir_gvn_number(work, i, buckets, budget, count, false) : ir_gvn_visit(work, i, buckets, budget, count);
+            if (!ok)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 // Returns false when the probe budget runs out; the caller then refines every instruction from its static key.
@@ -769,189 +1022,143 @@ static bool ir_gvn_acyclic(IrGvnWork* work, uint32_t* count)
     const uint32_t n = f->instruction_count;
     const Dominators* dominators = &work->ir.dominators;
     uint32_t buckets = 1;
-    while (buckets <= n / 2)
+    while (buckets <= n && buckets < (UINT32_C(1) << 31))
     {
         buckets *= 2;
     }
+    const uint64_t mark = work->ir.scratch->length;
     if (n != 0)
     {
-        memset(work->temporary_order, 0xff, (uint64_t)buckets * sizeof(uint32_t));
+        uint64_t* spare = work->fields + (uint64_t)n * BUSTER_IR_GVN_ENTRY_WORDS;
+        // Tags and owners consume at most two spare words per instruction. Unordered input uses the
+        // remaining space for wait heads and edges until the acyclic partition is done.
+        work->tags = (uint32_t*)spare;
+        work->owners = work->tags + buckets;
+        memset(work->tags, 0, (uint64_t)buckets * sizeof(*work->tags));
+        if (!work->ordered)
+        {
+            work->waiters = (IrGvnWait**)(spare + buckets);
+            memset(work->waiters, 0, (uint64_t)n * sizeof(*work->waiters));
+            work->wait_free = (IrGvnWait*)(work->waiters + n);
+            const uint64_t spare_bytes = ((uint64_t)n * (BUSTER_IR_GVN_FIELDS - BUSTER_IR_GVN_ENTRY_WORDS) - buckets) * sizeof(*spare);
+            work->wait_left = (spare_bytes - (uint64_t)n * sizeof(*work->waiters)) / sizeof(*work->wait_free);
+        }
     }
     const uint64_t budget = work->statistics.partition_probes + (uint64_t)n * work->probes;
     bool ok = true;
+    const uint32_t* traversal = dominators->rpo;
+    if (work->fused)
+    {
+        // Without phis every operand dominates its use. Dominator preorder is also a dependency order and gives
+        // availability without a second hash-table traversal. Publish substitutions only when numbering succeeds.
+        for (uint32_t block = 0; block < f->block_count; block += 1)
+        {
+            work->members[dominators->preorder[block]] = block;
+        }
+        traversal = work->members;
+        work->staged_targets = work->temporary_order;
+    }
     for (uint32_t position = 0; ok && position < dominators->reachable_count; position += 1)
     {
-        const uint32_t block = dominators->rpo[position];
-        for (uint32_t i = f->block_offsets[block]; ok && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
-        {
-            ok = ir_gvn_visit(work, i, buckets, budget, count);
-        }
+        work->position = position;
+        work->current_block = traversal[position];
+        ok = ir_gvn_visit_block(work, work->current_block, buckets, budget, count);
     }
-    for (uint32_t block = 0; ok && block < f->block_count; block += 1)
+    for (uint32_t block = 0; ok && dominators->reachable_count < f->block_count && block < f->block_count; block += 1)
     {
-        for (uint32_t i = f->block_offsets[block]; ok && dominators->rpo_index[block] == BUSTER_DOMINATOR_NONE && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+        if (dominators->rpo_index[block] == BUSTER_DOMINATOR_NONE)
         {
-            ok = ir_gvn_visit(work, i, buckets, budget, count);
+            ok = ir_gvn_visit_block(work, block, buckets, budget, count);
         }
     }
-    work->statistics.partition_sort_fallbacks += !ok;
+    if (ok)
+    {
+        work->statistics.acyclic = n - work->pending;
+        if (work->pending != 0)
+        {
+            ok = ir_gvn_seed_phis(work, buckets, budget, count);
+        }
+    }
+    if (work->fused && ok)
+    {
+        for (uint32_t k = 0; k < work->staged; k += 1)
+        {
+            work->alias[work->waiting[k]] = work->staged_targets[k];
+        }
+        work->merged += work->staged;
+    }
+    work->fused &= ok;
+    arena_pop_to(work->ir.scratch, mark);
+    work->statistics.partition_sort_fallbacks += !ok && !work->wait_failed;
     return ok;
 }
 
-static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
+// Each congruence class has one available representative. In dominator preorder a block occupies one half-open
+// interval. Once a representative expires it cannot dominate a later block, so no stack or rollback is needed.
+static void ir_gvn_available(IrGvnWork* work, bool vectors)
 {
-    (void)scalar;
-
     const IrFunction* f = work->ir.function;
-    uint64_t buckets = 1;
-    while (buckets < (uint64_t)f->instruction_count * 2 + 1)
+    const Dominators* tree = &work->ir.dominators;
+    const __m128i flags = _mm_set1_epi8(work->repeats_only ? 2 : -1);
+    uint32_t* block_order = work->temporary_order;
+    uint32_t* representative = work->order;
+    uint32_t* until = work->next_classes;
+    if (work->statistics.classes != 0)
     {
-        buckets *= 2;
+        memset(until, 0, (uint64_t)work->statistics.classes * sizeof(uint32_t));
     }
-    bool ok = true;
-    uint32_t* heads = ir_allocate(scratch, buckets, sizeof(uint32_t), &ok);
-    uint32_t* previous = ir_allocate(scratch, f->instruction_count, sizeof(uint32_t), &ok);
-    uint32_t* inserted = ir_allocate(scratch, f->instruction_count, sizeof(uint32_t), &ok);
-    IrGvnFrame* frames = ir_allocate(scratch, f->block_count, sizeof(IrGvnFrame), &ok);
-    IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
-    if (ok)
+    for (uint32_t block = 0; block < f->block_count; block += 1)
     {
-        memset(heads, 0xff, buckets * sizeof(uint32_t));
-        if (scalar)
+        if (tree->subtree_end[block] != 0)
         {
-            for (uint32_t i = 0; i < f->instruction_count; i += 1)
+            block_order[tree->preorder[block]] = block;
+        }
+    }
+    for (uint32_t position = 0; position < tree->reachable_count; position += 1)
+    {
+        const uint32_t block = block_order[position];
+        const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+        for (uint64_t first = f->block_offsets[block]; first < end; first += 16)
+        {
+            const uint32_t left = end - (uint32_t)first;
+            const __mmask16 valid = (__mmask16)_bzhi_u32(0xffff, left < 16 ? left : 16);
+            const __m128i pure = _mm_maskz_loadu_epi8(valid, work->pure + first);
+            __mmask16 candidates = _mm_test_epi8_mask(pure, flags);
+            if (vectors)
             {
-                work->classes[i] = i + 1;
-                if (f->op[i] == IR_PHI)
-                {
-                    work->pure[i] = 0;
-                }
+                const __m128i types = _mm_maskz_loadu_epi8(valid, f->type + first);
+                candidates &= _mm_cmpge_epu8_mask(types, _mm_set1_epi8(IR_V4I32));
             }
-        }
-        uint32_t depth = f->block_count != 0;
-        uint32_t insertions = 0;
-        if (depth != 0)
-        {
-            frames[0] = (IrGvnFrame){ .block = 0 };
-        }
-        while (depth != 0)
-        {
-            IrGvnFrame* frame = &frames[depth - 1];
-            if (!frame->entered)
+            while (candidates != 0)
             {
-                frame->entered = true;
-                frame->mark = insertions;
-                frame->child = work->ir.dominators.tree_offsets[frame->block];
-                for (uint32_t i = f->block_offsets[frame->block]; i < f->block_offsets[(uint64_t)frame->block + 1]; i += 1)
+                const uint32_t i = (uint32_t)first + (uint32_t)__builtin_ctz(candidates);
+                candidates &= candidates - 1;
+                if (!work->pressure || ir_gvn_free[f->op[i]] == 0)
                 {
-                    if (work->pure[i] != 0 && work->alias[i] == i)
+                    const uint32_t c = work->classes[i] - 1;
+                    if (position < until[c])
                     {
-                        if (scalar)
-                        {
-                            ir_gvn_key(work, i, i, false, false);
-                            work->hashes[i] = ir_gvn_hash_one(work, i, i, false);
-                        }
-                        else
-                        {
-                            work->hashes[i] = work->classes[i];
-                        }
-                        const uint64_t bucket = work->hashes[i] & (buckets - 1);
-                        uint32_t match = heads[bucket];
-                        while (match != BUSTER_IR_NONE && (scalar ? ir_gvn_compare(work, i, match, i, match, false) != 0 : work->classes[i] != work->classes[match]))
-                        {
-                            match = previous[match];
-                        }
-                        // IrGvnOptions.pressure: a free value stays its own, and a truth value too where its class's
-                        // representative is another block's. It is the representative of what it dominates instead.
-                        const bool refused = work->pressure && match != BUSTER_IR_NONE &&
-                                             (ir_gvn_free[f->op[i]] != 0 || (f->type[i] == IR_I1 && work->ir.cfg.instruction_blocks[match] != frame->block));
-                        match = refused ? BUSTER_IR_NONE : match;
-                        work->merged += match != BUSTER_IR_NONE;
-                        if (match != BUSTER_IR_NONE)
-                        {
-                            work->alias[i] = match;
-                            if (scalar)
-                            {
-                                work->classes[i] = work->classes[match];
-                            }
-                        }
-                        else
-                        {
-                            previous[i] = heads[bucket];
-                            heads[bucket] = i;
-                            inserted[insertions++] = i;
-                        }
+                        work->alias[i] = representative[c];
+                        work->merged += 1;
+                    }
+                    else
+                    {
+                        representative[c] = i;
+                        until[c] = work->pressure && f->type[i] == IR_I1 ? position + 1 : tree->subtree_end[block];
                     }
                 }
             }
-            if (frame->child < work->ir.dominators.tree_offsets[(uint64_t)frame->block + 1])
-            {
-                const uint32_t child = work->ir.dominators.tree_children[frame->child++];
-                frames[depth++] = (IrGvnFrame){ .block = child };
-            }
-            else
-            {
-                while (insertions > frame->mark)
-                {
-                    const uint32_t value = inserted[--insertions];
-                    heads[work->hashes[value] & (buckets - 1)] = previous[value];
-                }
-                depth -= 1;
-            }
         }
     }
-    return error;
 }
 
-// Materialize private operand columns and independent variable slices before remapping. Input side slices may alias
-// each other, even with different metadata roles; mutating a copied extra array in place would corrupt such inputs.
-static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* result)
+// A GVN substitution moves a debug binding's anchor as well as its value. The common IR rewrite handles operands,
+// shared extra slices and call arguments with its forwarding map. Only debug records need a private input view.
+static IrError ir_gvn_debug_view(IrGvnWork* work, Arena* scratch, IrFunction* result)
 {
     const IrFunction* f = work->ir.function;
-    uint64_t extras = 0;
-    uint64_t calls = 0;
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
-    {
-        if (f->op[i] == IR_PHI)
-        {
-            extras += (uint64_t)f->b[i] * 2;
-        }
-        else if (f->op[i] == IR_SWITCH)
-        {
-            extras += (uint64_t)f->c[i] * 2 + 1;
-        }
-        else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
-        {
-            extras += f->c[i];
-        }
-        else if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
-        {
-            extras += f->calls[f->b[i]].argument_count;
-            calls += 1;
-        }
-        else if (ir_extra_value_count(f, i) != 0)
-        {
-            extras += ir_extra_value_count(f, i);
-        }
-    }
-    IrError error = extras <= UINT32_MAX && calls <= UINT32_MAX ? IR_OK : IR_ERROR_LIMIT;
     IrFunction view = *f;
-    if (error == IR_OK)
-    {
-        bool ok = true;
-        view.a = ir_allocate(scratch, f->instruction_count, sizeof(uint32_t), &ok);
-        view.b = ir_allocate(scratch, f->instruction_count, sizeof(uint32_t), &ok);
-        view.c = ir_allocate(scratch, f->instruction_count, sizeof(uint32_t), &ok);
-        view.extra = ir_allocate(scratch, extras, sizeof(uint32_t), &ok);
-        view.calls = ir_allocate(scratch, calls, sizeof(IrCall), &ok);
-        view.extra_count = extras;
-        view.call_count = calls;
-        error = ok ? IR_OK : IR_ERROR_MEMORY;
-    }
-    if (error == IR_OK && !ir_debug_create(scratch, &view, f->debug))
-    {
-        error = IR_ERROR_MEMORY;
-    }
+    IrError error = ir_debug_create(scratch, &view, f->debug) ? IR_OK : IR_ERROR_MEMORY;
     if (error == IR_OK)
     {
         ir_debug_remap(f, &view, NULL, NULL, NULL);
@@ -973,56 +1180,6 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
             }
         }
     }
-    uint32_t extra = 0;
-    uint32_t call = 0;
-    for (uint32_t i = 0; error == IR_OK && i < f->instruction_count; i += 1)
-    {
-        const uint32_t mask = ir_value_mask(f, i);
-        view.a[i] = (mask & 1) != 0 ? ir_gvn_resolve(work->alias, f->a[i]) : f->a[i];
-        view.b[i] = (mask & 2) != 0 ? ir_gvn_resolve(work->alias, f->b[i]) : f->b[i];
-        view.c[i] = (mask & 4) != 0 ? ir_gvn_resolve(work->alias, f->c[i]) : f->c[i];
-        if (f->op[i] == IR_PHI)
-        {
-            view.a[i] = extra;
-            for (uint32_t incoming = 0; incoming < f->b[i]; incoming += 1)
-            {
-                view.extra[extra++] = f->extra[f->a[i] + incoming * 2];
-                view.extra[extra++] = ir_gvn_resolve(work->alias, f->extra[f->a[i] + incoming * 2 + 1]);
-            }
-        }
-        else if (f->op[i] == IR_SWITCH)
-        {
-            view.b[i] = extra;
-            const uint64_t count = (uint64_t)f->c[i] * 2 + 1;
-            memcpy(view.extra + extra, f->extra + f->b[i], count * sizeof(uint32_t));
-            extra += count;
-        }
-        else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
-        {
-            view.b[i] = extra;
-            memcpy(view.extra + extra, f->extra + f->b[i], (uint64_t)f->c[i] * sizeof(uint32_t));
-            extra += f->c[i];
-        }
-        else if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
-        {
-            view.b[i] = call;
-            view.calls[call] = f->calls[f->b[i]];
-            view.calls[call].argument_first = extra;
-            for (uint32_t argument = 0; argument < view.calls[call].argument_count; argument += 1)
-            {
-                view.extra[extra++] = ir_gvn_resolve(work->alias, f->extra[f->calls[f->b[i]].argument_first + argument]);
-            }
-            call += 1;
-        }
-        else if (ir_extra_value_count(f, i) != 0)
-        {
-            view.c[i] = ir_intrinsic_ternary_c(f->c[i], extra);
-            for (uint32_t k = 0, extra_values = ir_extra_value_count(f, i); k < extra_values; k += 1)
-            {
-                view.extra[extra++] = ir_gvn_resolve(work->alias, ir_extra_value(f, i, k));
-            }
-        }
-    }
     if (error == IR_OK)
     {
         *result = view;
@@ -1030,30 +1187,389 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
     return error;
 }
 
-// IrGvnOptions.vectors (#2781): every value that is no vector and no mask is its own again, sixteen at a time or, on the
-// scalar twin, one at a time. A vector's or a mask's alias is a value of its own type, so the chains that stay are whole.
-static void ir_gvn_keep_vectors(IrGvnWork* work, bool scalar)
+// A vector or mask alias has its own type. Restoring every other alias preserves entire vector chains.
+static void ir_gvn_keep_vectors(IrGvnWork* work)
 {
     const IrFunction* f = work->ir.function;
-    if (BUSTER_SCALAR_PATH(scalar))
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint64_t first = 0; first < f->instruction_count; first += 16)
     {
-        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+        const uint32_t count = f->instruction_count - first < 16 ? (uint32_t)(f->instruction_count - first) : 16;
+        const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
+        const __m128i types = _mm_maskz_loadu_epi8(valid, f->type + first);
+        const __mmask16 own = valid & _mm_cmplt_epu8_mask(types, _mm_set1_epi8(IR_V4I32));
+        _mm512_mask_storeu_epi32(work->alias + first, own, _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), lanes));
+    }
+}
+
+// GVN can remove instructions without changing any edge. Check the rewritten rows, joins and successor lists
+// from scratch. When the labeled graph is identical, its existing dominator intervals give the exact SSA check
+// for the new instruction map. A different graph or failed check takes the standard verifier and its diagnostics.
+static IrCheck ir_gvn_verify(const IrGvnWork* work, Arena* output, Arena* scratch)
+{
+    const IrFunction* f = &work->statistics.function;
+    const IrCfg* before = &work->ir.cfg;
+    IrCheck check = ir_check(IR_ERROR_DOMINANCE, BUSTER_IR_NONE, 0);
+    if (f->block_count == before->block_count)
+    {
+        const uint64_t mark = scratch->length;
+        IrCfg cfg = { 0 };
+        check = ir_prepare_cfg(f, scratch, output, &cfg, false);
+        if (check.error == IR_OK)
         {
-            work->alias[i] = f->type[i] >= IR_V4I32 ? work->alias[i] : i;
+            const bool same = cfg.edge_count == before->edge_count &&
+                              memcmp(cfg.successor_offsets, before->successor_offsets, ((uint64_t)cfg.block_count + 1) * sizeof(uint32_t)) == 0 &&
+                              (cfg.edge_count == 0 || memcmp(cfg.successors, before->successors, (uint64_t)cfg.edge_count * sizeof(uint32_t)) == 0);
+            if (same)
+            {
+                const IrDominance tree = { .block_count = cfg.block_count, .enter = work->ir.dominators.preorder, .leave = work->ir.dominators.subtree_end };
+                check = ir_verify_dominance(f, &cfg, &tree);
+            }
+            else
+            {
+                check.error = IR_ERROR_DOMINANCE;
+            }
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return check.error == IR_OK ? check : ir_optimize_verify_result(f, output, scratch);
+}
+
+// In verified reachable SSA, once phis are atoms every other use follows its definition in dominator
+// preorder. A phi is an atom if no other phi in its block can match it. Prove that using static input
+// keys, which are already necessary for congruence even for an unresolved back edge. A fingerprint
+// collision declines the proof. Check the entire function before changing any class or eligibility bit.
+static bool ir_gvn_distinct_phis(IrGvnWork* work)
+{
+    const IrFunction* f = work->ir.function;
+    bool distinct = true;
+    for (uint32_t block = 0; distinct && block < f->block_count; block += 1)
+    {
+        const uint32_t begin = f->block_offsets[block];
+        const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+        if (end - begin <= 1 || f->op[begin + 1] != IR_PHI)
+        {
+            continue;
+        }
+        uint64_t seen = 0;
+        for (uint32_t i = begin; distinct && i < end && f->op[i] == IR_PHI; i += 1)
+        {
+            if (work->pure[i] == 0)
+            {
+                continue;
+            }
+            uint64_t hash = ir_gvn_meta(f, i);
+            // An order-independent sum also covers phis whose predecessor/value pairs are permuted.
+            for (uint32_t k = 0; k < f->b[i]; k += 1)
+            {
+                const uint32_t* input = f->extra + f->a[i] + (uint64_t)k * 2;
+                const uint32_t v = work->alias[input[1]];
+                const IrGvnPayload payload = ir_gvn_payload(work, v);
+                uint64_t term = ir_gvn_mix(ir_gvn_meta(f, v), work->pure[v] == 0 ? (uint64_t)v + 1 : 0);
+                term = ir_gvn_mix(ir_gvn_mix(term, payload.low), payload.high);
+                hash += ir_gvn_mix(term, input[0]);
+            }
+            const uint64_t bit = UINT64_C(1) << ((hash ^ (hash >> 32)) & 63);
+            distinct = (seen & bit) == 0;
+            seen |= bit;
         }
     }
-    else
+    if (distinct)
     {
-        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        for (uint64_t first = 0; first < f->instruction_count; first += 16)
+        for (uint32_t block = 0; block < f->block_count; block += 1)
         {
-            const uint32_t count = f->instruction_count - first < 16 ? (uint32_t)(f->instruction_count - first) : 16;
-            const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
-            const __m128i types = _mm_maskz_loadu_epi8(valid, f->type + first);
-            const __mmask16 own = valid & _mm_cmplt_epu8_mask(types, _mm_set1_epi8(IR_V4I32));
-            _mm512_mask_storeu_epi32(work->alias + first, own, _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), lanes));
+            const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+            for (uint32_t i = f->block_offsets[block]; i < end && f->op[i] == IR_PHI; i += 1)
+            {
+                if (work->pure[i] != 0)
+                {
+                    work->classes[i] = ++work->unique;
+                    work->pure[i] = 0;
+                }
+            }
         }
     }
+    return distinct;
+}
+
+static IrError ir_gvn_solve(IrGvnWork* work, IrGvnOptions options)
+{
+    // Classes 1..numbered are the acyclic numbering's; the refinement numbers the rest after them.
+    const uint32_t n = work->ir.function->instruction_count;
+    const bool census_omitted = !work->ordered && options.apply_only && !options.complete &&
+                                work->ir.dominators.reachable_count == work->ir.function->block_count && ir_gvn_distinct_phis(work);
+    work->ordered |= census_omitted;
+    uint32_t numbered = work->unique;
+    work->fused = work->ordered && !options.complete;
+    work->vectors_only = options.vectors && !options.pressure;
+    const bool acyclic = !options.complete && ir_gvn_acyclic(work, &numbered);
+    if (work->wait_failed)
+    {
+        return IR_ERROR_MEMORY;
+    }
+    if (census_omitted)
+    {
+        work->statistics.acyclic = BUSTER_IR_NONE;
+    }
+    work->repeats_only = acyclic;
+    if (acyclic && work->pending == 0)
+    {
+        work->statistics.classes = numbered;
+        return IR_OK;
+    }
+    uint32_t count = 0;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint64_t first = 0; first < n; first += 16)
+    {
+        const __mmask16 valid = (__mmask16)_bzhi_u32(0xFFFF, n - (uint32_t)first < 16 ? n - (uint32_t)first : 16);
+        const __m512i ids = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first));
+        const __m512i classes = _mm512_maskz_loadu_epi32(valid, work->classes + first);
+        const __mmask16 pending = acyclic ? _mm512_mask_cmpeq_epi32_mask(valid, classes, _mm512_setzero_si512()) : valid;
+        if (acyclic)
+        {
+            // Cyclic members still need refinement. Keep them eligible regardless of the class they receive.
+            _mm_mask_storeu_epi8(work->pure + first, pending, _mm_set1_epi8(2));
+        }
+        _mm512_mask_compressstoreu_epi32(work->members + count, pending, ids);
+        count += (uint32_t)__builtin_popcount(pending);
+    }
+    numbered = acyclic ? numbered : 0;
+    if (!acyclic)
+    {
+        work->statistics.acyclic = 0;
+    }
+    work->statistics.classes = numbered + (count != 0 ? ir_gvn_refine(work, count, numbered, options.sweep_limit, !options.complete) : 0);
+    return IR_OK;
+}
+
+// GVN keeps reachable blocks in their original order and substitutes congruent values. Number retained rows once, compress their seven
+// columns in order and rebuild shared extra slices in the same order as the general rewrite.
+static IrError ir_gvn_compact(IrGvnWork* work, Arena* output)
+{
+    const IrFunction* f = work->ir.function;
+    const IrCfg* cfg = &work->ir.cfg;
+    IrSizes sizes = ir_optimize_metadata_sizes(f);
+    const bool pruning = work->ir.dominators.reachable_count != f->block_count;
+    sizes.block_count = work->ir.dominators.reachable_count;
+    uint32_t* blocks = work->order;
+    uint32_t kept_blocks = 0;
+    for (uint32_t block = 0; block < f->block_count; block += 1)
+    {
+        if (pruning && work->ir.dominators.rpo_index[block] == BUSTER_DOMINATOR_NONE)
+        {
+            blocks[block] = BUSTER_IR_NONE;
+            const uint32_t begin = f->block_offsets[block];
+            memset(work->alias + begin, 0xff, (uint64_t)(f->block_offsets[(uint64_t)block + 1] - begin) * sizeof(uint32_t));
+        }
+        else
+        {
+            blocks[block] = kept_blocks++;
+        }
+    }
+    uint32_t* places = work->classes;
+    uint32_t* operands = work->next_classes;
+    uint32_t* special_rows = work->temporary_order;
+    uint32_t special_count = 0;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint64_t first = 0; first < f->instruction_count; first += 16)
+    {
+        const uint32_t left = f->instruction_count - (uint32_t)first;
+        const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, left < 16 ? left : 16);
+        const __m512i ids = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first));
+        const __m512i aliases = _mm512_maskz_loadu_epi32(active, work->alias + first);
+        const __mmask16 kept = _mm512_mask_cmpeq_epi32_mask(active, aliases, ids);
+        const __m512i numbered = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)sizes.instruction_count));
+        _mm512_mask_storeu_epi32(places + first, active, _mm512_mask_expand_epi32(_mm512_set1_epi32(-1), kept, numbered));
+        sizes.instruction_count += (uint32_t)__builtin_popcount(kept);
+        const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
+        const __m512i kind = ir_lookup_bytes(ir_optimize_rewrite_kinds, op);
+        const __mmask16 special = kept & (_mm512_test_epi32_mask(kind, kind) | _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_BR)) |
+                                          _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_SCATTER)) | _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_INTRINSIC)));
+        _mm512_mask_compressstoreu_epi32(special_rows + special_count, special, ids);
+        special_count += (uint32_t)__builtin_popcount(special);
+    }
+    for (uint32_t k = 0; k < special_count; k += 1)
+    {
+        const uint32_t i = special_rows[k];
+        const uint32_t kind = ir_optimize_rewrite_kinds[f->op[i]];
+        if (kind == 1)
+        {
+            uint32_t count = f->b[i];
+            if (pruning)
+            {
+                count = 0;
+                for (uint32_t j = 0; j < f->b[i]; j += 1)
+                {
+                    count += blocks[f->extra[f->a[i] + (uint64_t)j * 2]] != BUSTER_IR_NONE;
+                }
+            }
+            sizes.extra_count += (uint64_t)2 * count;
+        }
+        else if (kind == 2)
+        {
+            sizes.call_count += 1;
+            sizes.extra_count += f->calls[f->b[i]].argument_count;
+        }
+        else if (kind == 4)
+        {
+            const uint32_t block = cfg->instruction_blocks[i];
+            if (cfg->successor_offsets[block + 1] - cfg->successor_offsets[block] != 1)
+            {
+                sizes.extra_count += 1 + (uint64_t)2 * f->c[i];
+            }
+        }
+        else if (kind == 5 && f->b[i] != BUSTER_IR_NONE)
+        {
+            sizes.extra_count += f->c[i];
+        }
+        else
+        {
+            sizes.extra_count += ir_extra_value_count(f, i);
+        }
+    }
+    IrFunction result = { 0 };
+    const IrError error = ir_create(output, &sizes, &result);
+    if (error != IR_OK)
+    {
+        return error;
+    }
+    if (!ir_debug_create(output, &result, f->debug))
+    {
+        return IR_ERROR_MEMORY;
+    }
+    ir_optimize_copy_metadata(f, &result);
+    for (uint32_t k = 0; k < f->label_count; k += 1)
+    {
+        result.labels[k] = f->labels[k] == BUSTER_IR_NONE ? BUSTER_IR_NONE : blocks[f->labels[k]];
+    }
+    for (uint32_t b = 0; b < f->block_count; b += 1)
+    {
+        if (blocks[b] != BUSTER_IR_NONE)
+        {
+            result.block_offsets[blocks[b] + 1] = places[f->block_offsets[b + 1] - 1] + 1;
+        }
+    }
+    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    {
+        operands[i] = work->alias[i] == BUSTER_IR_NONE ? BUSTER_IR_NONE : places[ir_gvn_resolve(work->alias, i)];
+    }
+    // AVX-512 gathers sign-extend the index. Center the base of a table wider than INT32_MAX.
+    const uint32_t center = f->instruction_count > INT32_MAX ? UINT32_C(1) << 31 : 0;
+    uint32_t out = 0;
+    for (uint64_t first = 0; first < f->instruction_count; first += 16)
+    {
+        const uint32_t left = f->instruction_count - (uint32_t)first;
+        const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, left < 16 ? left : 16);
+        const __m512i ids = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first));
+        const __mmask16 kept = _mm512_mask_cmpeq_epi32_mask(active, _mm512_maskz_loadu_epi32(active, work->alias + first), ids);
+        if (kept == 0)
+        {
+            continue;
+        }
+        const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
+        _mm_mask_compressstoreu_epi8(result.op + out, kept, op);
+        _mm_mask_compressstoreu_epi8(result.type + out, kept, _mm_maskz_loadu_epi8(active, f->type + first));
+        _mm_mask_compressstoreu_epi8(result.flags + out, kept, _mm_maskz_loadu_epi8(active, f->flags + first));
+        _mm_mask_compressstoreu_epi8(result.alignment_log2 + out, kept, _mm_maskz_loadu_epi8(active, f->alignment_log2 + first));
+        const __m512i fixed = ir_lookup_bytes(ir_operand_table, op);
+        const __m512i optional = ir_lookup_bytes(ir_optional_table, op);
+        const uint32_t* inputs[] = { f->a, f->b, f->c };
+        uint32_t* outputs[] = { result.a, result.b, result.c };
+        for (uint32_t col = 0; col < 3; col += 1)
+        {
+            const __m512i bits = _mm512_set1_epi32(1 << col);
+            const __m512i values = _mm512_maskz_loadu_epi32(active, inputs[col] + first);
+            const __mmask16 use = kept & (_mm512_test_epi32_mask(fixed, bits) | (_mm512_test_epi32_mask(optional, bits) &
+                                          _mm512_cmpneq_epi32_mask(values, _mm512_set1_epi32(-1))));
+            const __m512i rewritten = _mm512_mask_i32gather_epi32(values, use, _mm512_sub_epi32(values, _mm512_set1_epi32((int)center)), operands + center, 4);
+            _mm512_mask_compressstoreu_epi32(outputs[col] + out, kept, rewritten);
+        }
+        out += (uint32_t)__builtin_popcount(kept);
+    }
+    uint32_t extra = 0;
+    uint32_t calls = 0;
+    for (uint32_t k = 0; k < special_count; k += 1)
+    {
+        const uint32_t i = special_rows[k];
+        const uint32_t to = places[i];
+        const uint32_t kind = ir_optimize_rewrite_kinds[f->op[i]];
+        const uint32_t block = cfg->instruction_blocks[i];
+        const uint32_t first_edge = cfg->successor_offsets[block];
+        if (f->op[i] == IR_BR || ((kind == 3 || kind == 4) && cfg->successor_offsets[block + 1] - first_edge == 1))
+        {
+            result.op[to] = IR_BR;
+            result.flags[to] = 0;
+            result.a[to] = blocks[cfg->successors[first_edge]];
+            result.b[to] = BUSTER_IR_NONE;
+            result.c[to] = BUSTER_IR_NONE;
+        }
+        else if (kind == 1)
+        {
+            result.a[to] = extra;
+            result.b[to] = 0;
+            for (uint32_t j = 0; j < f->b[i]; j += 1)
+            {
+                const uint32_t* pair = f->extra + f->a[i] + (uint64_t)j * 2;
+                if (blocks[pair[0]] != BUSTER_IR_NONE)
+                {
+                    result.extra[extra++] = blocks[pair[0]];
+                    result.extra[extra++] = operands[pair[1]];
+                    result.b[to] += 1;
+                }
+            }
+        }
+        else if (kind == 2)
+        {
+            const IrCall* call = f->calls + f->b[i];
+            result.b[to] = calls;
+            result.calls[calls] = *call;
+            result.calls[calls++].argument_first = extra;
+            for (uint32_t j = 0; j < call->argument_count; j += 1)
+            {
+                result.extra[extra++] = operands[f->extra[call->argument_first + j]];
+            }
+        }
+        else if (kind == 3)
+        {
+            result.b[to] = blocks[f->b[i]];
+            result.c[to] = blocks[f->c[i]];
+        }
+        else if (kind == 4)
+        {
+            const uint32_t* entries = f->extra + f->b[i];
+            result.b[to] = extra;
+            result.extra[extra++] = blocks[entries[0]];
+            for (uint32_t j = 0; j < f->c[i]; j += 1)
+            {
+                result.extra[extra++] = entries[1 + (uint64_t)j * 2];
+                result.extra[extra++] = blocks[entries[2 + (uint64_t)j * 2]];
+            }
+        }
+        else if (kind == 5 && f->b[i] != BUSTER_IR_NONE)
+        {
+            result.b[to] = extra;
+            if (f->c[i] != 0)
+            {
+                memcpy(result.extra + extra, f->extra + f->b[i], (uint64_t)f->c[i] * sizeof(uint32_t));
+                extra += f->c[i];
+            }
+        }
+        else
+        {
+            const uint32_t count = ir_extra_value_count(f, i);
+            if (count != 0)
+            {
+                result.c[to] = ir_intrinsic_ternary_c(f->c[i], extra);
+                for (uint32_t j = 0; j < count; j += 1)
+                {
+                    result.extra[extra++] = operands[ir_extra_value(f, i, j)];
+                }
+            }
+        }
+    }
+    ir_debug_remap(f, &result, places, NULL, blocks);
+    work->statistics.function = result;
+    return IR_OK;
 }
 
 static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* function, Arena* output, Arena* scratch, IrGvnOptions options, IrGvnResult* result)
@@ -1063,6 +1579,8 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
     IrGvnWork work = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     work.ir.validated = options.validated;
+    work.ir.analysis_only = options.apply_only;
+    work.ir.without_uses = true;
     if (output != scratch)
     {
         check = ir_optimize_prepare(&work.ir, function, output, scratch, true);
@@ -1071,57 +1589,59 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
     {
         bool ok = true;
         const uint64_t n = function->instruction_count;
-        work.alias = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
-        work.classes = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
-        work.next_classes = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
-        work.order = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
-        work.temporary_order = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
-        work.members = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
-        work.waiting = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
-        work.fields = ir_allocate(scratch, n * BUSTER_IR_GVN_FIELDS, sizeof(uint64_t), &ok);
-        work.hashes = ir_allocate(scratch, n, sizeof(uint64_t), &ok);
-        work.pure = ir_allocate(scratch, n, sizeof(uint8_t), &ok);
-        work.tainted = ir_allocate(scratch, n, sizeof(uint8_t), &ok);
-        work.awaited = ir_allocate(scratch, n, sizeof(uint8_t), &ok);
+        // Only the class and undef-taint columns need initial zeros. The partition's sort
+        // and availability walk reuse the same columns. One reservation also avoids clearing the four-word keys
+        // again before the dependency walk overwrites them.
+        const uint64_t bytes_per_instruction = (BUSTER_IR_GVN_FIELDS + 1) * sizeof(uint64_t) + 7 * sizeof(uint32_t) + 2;
+        uint8_t* const storage = n != 0 ? arena_push_array(scratch, n, bytes_per_instruction, 64) : NULL;
+        ok = n == 0 || storage != NULL;
+        if (storage != NULL)
+        {
+            work.fields = (uint64_t*)storage;
+            work.hashes = work.fields + n * BUSTER_IR_GVN_FIELDS;
+            work.alias = (uint32_t*)(work.hashes + n);
+            work.next_classes = work.alias + n;
+            work.order = work.next_classes + n;
+            work.temporary_order = work.order + n;
+            work.members = work.temporary_order + n;
+            work.classes = work.members + n;
+            work.waiting = work.classes + n;
+            work.tainted = (uint8_t*)(work.waiting + n);
+            work.pure = work.tainted + n;
+            memset(work.classes, 0, n * sizeof(uint32_t));
+            memset(work.tainted, 0, n);
+        }
         work.probes = options.probes;
         work.pressure = options.pressure;
-        check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+        check.error = ok ? ir_gvn_prepare_uses(&work, scratch, output) : IR_ERROR_MEMORY;
     }
     if (check.error == IR_OK)
     {
-        ir_gvn_classify(&work);
-        if (!options.scalar)
+        ir_gvn_classify(&work, !options.complete);
+        check.error = ir_gvn_solve(&work, options);
+        if (check.error == IR_OK && !work.fused)
         {
-            // Classes 1..numbered are the acyclic numbering's; the refinement numbers the rest after them.
-            const uint32_t n = function->instruction_count;
-            uint32_t numbered = 0;
-            const bool acyclic = !options.complete && ir_gvn_acyclic(&work, &numbered);
-            uint32_t count = 0;
-            for (uint32_t i = 0; i < n; i += 1)
-            {
-                work.members[count] = i;
-                count += !acyclic || work.classes[i] == 0;
-            }
-            numbered = acyclic ? numbered : 0;
-            work.statistics.acyclic = n - count;
-            work.statistics.classes = numbered + (count != 0 ? ir_gvn_refine(&work, count, numbered, options.sweep_limit) : 0);
+            ir_gvn_available(&work, options.vectors && !options.pressure);
         }
-        check.error = ir_gvn_available(&work, scratch, options.scalar);
         if (check.error == IR_OK && options.vectors)
         {
-            ir_gvn_keep_vectors(&work, options.scalar);
+            ir_gvn_keep_vectors(&work);
         }
     }
     // IrGvnOptions.pressure: a function where nothing merges stays the caller's, unwritten.
     const bool rewritten = check.error == IR_OK && (!options.pressure || work.merged != 0);
     IrFunction view = { 0 };
-    if (rewritten)
+    if (rewritten && function->debug != NULL)
     {
-        check.error = ir_gvn_alias_view(&work, scratch, &view);
+        check.error = ir_gvn_debug_view(&work, scratch, &view);
     }
-    if (rewritten && check.error == IR_OK)
+    work.ir.function = rewritten && function->debug != NULL ? &view : function;
+    if (rewritten && check.error == IR_OK && options.apply_only)
     {
-        work.ir.function = &view;
+        check.error = ir_gvn_compact(&work, output);
+    }
+    else if (rewritten && check.error == IR_OK)
+    {
         for (uint32_t block = 0; block < function->block_count; block += 1)
         {
             work.ir.blocks[block] = work.ir.dominators.rpo_index[block] != BUSTER_DOMINATOR_NONE;
@@ -1135,13 +1655,14 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
             work.ir.states[i] = IROPT_OVERDEFINED;
             work.ir.live[i] = ir_gvn_resolve(work.alias, i) == i && work.ir.blocks[work.ir.cfg.instruction_blocks[i]] != 0;
         }
+        work.ir.forward = work.alias;
         IrOptimizeOptions rewrite = ir_optimize_options();
         rewrite.passes = 0;
         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
     }
     if (rewritten && check.error == IR_OK)
     {
-        check = ir_optimize_verify_result(&work.statistics.function, output, scratch);
+        check = ir_gvn_verify(&work, output, scratch);
     }
     if (check.error == IR_OK)
     {
