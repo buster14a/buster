@@ -187,6 +187,16 @@ typedef enum FastTokKind
 // # and ## spell it as written); an integer with a base or a suffix always does.
 #define BUSTER_FTOK_SPELLED     BUSTER_FTOK_HEX
 
+// #3667: the data of a `for` or `while` the preprocessor read from a file's text, in place of its IdentId: this mark,
+// the file's system-header bit then, and its first byte's address's low 30 bits. The statement compiler finds the
+// mapping the compile kept of the file by them where the loop's body is a lone `;` (fast_cc_empty_loop_body,
+// -Wempty-body), and nothing else reads a loop keyword's data. One an expansion gives keeps its IdentId.
+#define BUSTER_FTOK_PLACED          0x80000000u
+#define BUSTER_FTOK_PLACED_SYSTEM   0x40000000u
+#define BUSTER_FTOK_PLACED_ADDRESS  0x3fffffffu
+#define BUSTER_FTOK_PLACED_DATA(f, at) \
+    (BUSTER_FTOK_PLACED | ((uint32_t)(f)->is_system * BUSTER_FTOK_PLACED_SYSTEM) | ((uint32_t)(uintptr_t)(at) & BUSTER_FTOK_PLACED_ADDRESS))
+
 // Compact 8-byte token
 typedef struct FastTok FastTok;
 struct FastTok
@@ -299,6 +309,9 @@ static void* fast_arena_alloc(FastArena* a, uint64_t size, uint64_t align)
 #define BUSTER_FIDENT_SMALL_GROUPS    64u
 #define BUSTER_FIDENT_RESERVED_GROUPS 512u
 #define BUSTER_FIDENT_MAX_IDS         49152u
+// A bit set's words, one bit an IdentId. FastIdentTable.macro_bits holds two sets: the macros', then the window
+// emitter's stop set (#3667), the macros' bits and `for` and `while`, whose places it records (BUSTER_FTOK_PLACED).
+#define BUSTER_FIDENT_BIT_WORDS       (BUSTER_FIDENT_MAX_IDS / 64u + 1u)
 #define BUSTER_FIDENT_CACHE_BITS      14u
 // Small units start with 64 hash groups (20 KiB touched on demand) and 2,048 cache slots (16 KiB).
 // #3592 measured a unit with six standard headers on the 9700X. Starting with 64 groups saved two
@@ -697,7 +710,7 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
     t->ctrl = (uint8_t*)fast_arena_alloc(arena, slot_count, 64);
     t->slots = (uint32_t*)fast_arena_alloc(arena, slot_count * sizeof(uint32_t), 64);
     t->entries = (FastIdentEntry*)fast_arena_alloc(arena, (uint64_t)t->capacity * sizeof(FastIdentEntry), 64);
-    t->macro_bits = (uint64_t*)fast_arena_alloc(arena, ((uint64_t)t->capacity / 64u + 1u) * sizeof(uint64_t), 64);
+    t->macro_bits = (uint64_t*)fast_arena_alloc(arena, 2u * BUSTER_FIDENT_BIT_WORDS * sizeof(uint64_t), 64);
     // A short cached spelling can be compared with one masked eight-byte word, even at the end.
     t->strings = (char*)fast_arena_alloc(arena, t->str_cap + 7u, 64);
     const uint32_t cache_bits = small ? BUSTER_FIDENT_SMALL_CACHE_BITS : BUSTER_FIDENT_CACHE_BITS;
@@ -891,6 +904,11 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
             if (seeds[i].pp >= FPP_KW_LINE_MACRO && seeds[i].pp <= BUSTER_FPP_KW_LAST_BUILTIN)
             {
                 t->macro_bits[id >> 6] |= (UINT64_C(1) << (id & 63u));
+                t->macro_bits[BUSTER_FIDENT_BIT_WORDS + (id >> 6)] |= (UINT64_C(1) << (id & 63u));
+            }
+            if (seeds[i].kw == FTOK_KW_WHILE || seeds[i].kw == FTOK_KW_FOR)
+            {
+                t->macro_bits[BUSTER_FIDENT_BIT_WORDS + (id >> 6)] |= (UINT64_C(1) << (id & 63u));
             }
         }
         // t->cache comes from zero-filled anonymous mmap and fast_ident_intern_cstr does not populate it.
@@ -983,10 +1001,17 @@ static inline void fast_ident_set_macro_bit(FastIdentTable* t, uint32_t id, bool
     if (active)
     {
         t->macro_bits[id >> 6] |= mask;
+        t->macro_bits[BUSTER_FIDENT_BIT_WORDS + (id >> 6)] |= mask;
     }
     else
     {
         t->macro_bits[id >> 6] &= ~mask;
+        // An #undef of `for` or `while` leaves it in the window emitter's stop set (#3667).
+        const uint8_t kw = t->entries[id].kw_kind;
+        if (kw != FTOK_KW_WHILE && kw != FTOK_KW_FOR)
+        {
+            t->macro_bits[BUSTER_FIDENT_BIT_WORDS + (id >> 6)] &= ~mask;
+        }
     }
 }
 
@@ -7360,6 +7385,11 @@ static void fast_pp_single_token(FastPP* pp, FastIncludeFile* f)
         }
         if (!expanded)
         {
+            // `for` or `while`: its place, as the window's emitter records it (#3667). fast_lex_one has lexed it whole.
+            if (__builtin_expect(tok.kind == FTOK_KW_WHILE || tok.kind == FTOK_KW_FOR, 0))
+            {
+                tok.data = BUSTER_FTOK_PLACED_DATA(f, f->ptr - (tok.kind == FTOK_KW_WHILE ? 5u : 3u));
+            }
             fast_pp_emit_soa(pp, tok);
         }
     }
@@ -7463,7 +7493,9 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
     uint8_t* const out_kind = pp->out_kind;
     uint32_t* const out_data = pp->out_data;
     const uint32_t out_limit = pp->out_cap - 64u;
-    const uint64_t* const macro_bits = pp->idents.macro_bits;
+    // The stop set: the macros' bits, and `for` and `while`, whose places this records (#3667). An identifier's bit is
+    // its macro bit.
+    const uint64_t* const stop_bits = pp->idents.macro_bits + BUSTER_FIDENT_BIT_WORDS;
     const __m512i v_work_max = _mm512_set1_epi8(FTOK_STR_LIT);
     uint32_t out_count = pp->out_count;
     uint32_t i = w->pos;
@@ -7504,7 +7536,7 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                 }
                 out_data[out_count + k] = id;
                 out_kind[out_count + k] = ident_kind;
-                if (__builtin_expect((macro_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0, 0))
+                if (__builtin_expect((stop_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0, 0))
                 {
                     // A one-token object macro (SQLITE_OK, OP_*) is replaced where it stands.
                     const uint32_t midx = pp->idents.entries[id].macro_idx;
@@ -7513,12 +7545,18 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                         const FastMacro* fm = pp->macros + midx;
                         if (fm->fast_mode == 1u &&
                             (fm->fast_kind != FTOK_IDENT ||
-                             (macro_bits[fm->fast_data >> 6] & (UINT64_C(1) << (fm->fast_data & 63u))) == 0))
+                             (stop_bits[fm->fast_data >> 6] & (UINT64_C(1) << (fm->fast_data & 63u))) == 0))
                         {
                             out_kind[out_count + k] = fm->fast_kind;
                             out_data[out_count + k] = fm->fast_data;
                             continue;
                         }
+                    }
+                    else if (ident_kind != FTOK_IDENT)
+                    {
+                        // `for` or `while`, which no #define names: the builtins are identifiers. Its place (#3667).
+                        out_data[out_count + k] = BUSTER_FTOK_PLACED_DATA(f, s);
+                        continue;
                     }
                     out_count += k;
                     w->pos = t;

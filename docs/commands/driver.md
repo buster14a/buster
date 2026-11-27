@@ -399,11 +399,22 @@ enum's, a record's, one on a pointer's, an array's or a function's declarator)
 is the full pipeline's error or warning, or a type it doesn't model, and leaves
 where it is declared. An attribute after a bit-field's width (`int a : 3
 __attribute__((packed))`) was taken for another member's start, an int; it
-leaves. One
-gap is left: a loop's empty body (`for (...);`) is `-Wempty-body` only where the
-next statement is a block or is indented past the loop, as clang decides, and
-the direct path's tokens keep no columns, so it compiles such loops quietly as
-before. `if (x);` and `switch (x);` leave on any line.
+leaves.
+`if (x);` and `switch (x);` leave on any line. A loop's empty body (`for (...);`)
+is `-Wempty-body` only where the `;` is on the `)`'s line, the loop is a block's
+own statement and the next statement is a block or starts past the keyword's
+column, in bytes (#3667). The tokens keep no lines or columns, so a `for` or
+`while` the preprocessor reads from a file's text has its place as its data
+(`BUSTER_FTOK_PLACED`: the window's emitter records it in the branch its macro
+names already take, the keywords added to that stop set, and so does
+`fast_pp_single_token`). At a loop whose body is a lone `;` (19 of `sqlite3.c`'s
+1,610), `fast_cc_empty_loop_body` finds the kept mapping that holds the keyword
+and reads the text again from there to the next statement's first token: the
+header's parentheses (every macro its names reach balanced, with no `;`), the
+`;` right after the `)`, and past an `#endif`, an `#else`'s groups and the
+directives that give no token. A keyword an expansion gives, a text it can't
+read, a conditional it can't judge and a statement an empty macro may start
+leave; a system header's loop and `-w` stay quiet.
 
 `./build/compiler test-direct --differential [--jobs N] [--direct-floor N]
 DIRECTORY...` compiles every C file under the directories with this

@@ -10229,6 +10229,756 @@ static __attribute__((cold, noinline)) bool fast_cc_dead_simple(FastCCState* cc,
     return ok;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// #3667: -Wempty-body on a `for` or `while` whose body is a lone `;`, as the full pipeline judges it
+// (c_check_common_warnings.c, check_common_empty_bodies): it warns where the `;` is spelled on the line of the `)` before
+// it, the loop is a block's own statement (no label's, case's or other statement's body), and a statement follows it in
+// the block: a compound one, or one whose first token's column, in bytes from its line's start, is past the keyword's.
+// It is quiet in a system header and under -w; -Wno-empty-body and a diagnostic pragma keep a unit off this path.
+//
+// The stream says neither lines nor columns. The keyword's data says where its text is (BUSTER_FTOK_PLACED), and the
+// text is read again from there, a token at a time and with none of the preprocessor's tables, to the first token of
+// the statement after the `;`. That reading is scalar: it runs at a loop whose body is a lone `;` (19 of sqlite3.c's
+// 1,610 loops) over its header's few dozen bytes, and the stream's own pass pays nothing for it but a test of the
+// token after a loop's `)`. Whatever it can't place leaves the unit to the full pipeline.
+
+// A token of the text as fast_lex_one splits it: a name (FTOK_IDENT), a number of any kind (FTOK_INT_LIT), a string or a
+// character constant, or a punctuator's kind; where it starts, its line after the keyword's and its column from 1, and
+// whether it is a directive's `#` (the first token of its line).
+typedef struct FastRawTok FastRawTok;
+struct FastRawTok
+{
+    const uint8_t* at;
+    uint32_t length;
+    uint32_t line;
+    uint32_t column;
+    uint8_t kind;
+    bool directive;
+};
+
+// A loop header's tokens in the text, the keyword's and the closing `)`'s included.
+#define BUSTER_FRAW_HEADER_TOKENS 256u
+
+// The end of the literal whose quote is at `p`, or NULL where a newline, a splice or the text's end comes first.
+static __attribute__((cold)) const uint8_t* fast_cc_raw_literal_end(const uint8_t* p, const uint8_t* end)
+{
+    const uint8_t quote = p[0];
+    const uint8_t* q = p + 1;
+    const uint8_t* result = NULL;
+    bool going = true;
+    while (going)
+    {
+        const uint8_t c = q < end ? q[0] : '\n';
+        const uint8_t c1 = q + 1 < end ? q[1] : '\n';
+        if (c == '\n' || c == '\r' || (c == '\\' && (c1 == '\n' || c1 == '\r')))
+        {
+            going = false;
+        }
+        else if (c == quote)
+        {
+            result = q + 1;
+            going = false;
+        }
+        else
+        {
+            q += c == '\\' ? 2 : 1;
+        }
+    }
+    return result;
+}
+
+// A punctuator's kind and length from its first three bytes, as fast_lex_one reads them, or FTOK_EOF for none of its.
+static __attribute__((cold)) uint8_t fast_cc_raw_punctuator(uint8_t c, uint8_t c1, uint8_t c2, uint32_t* out_length)
+{
+    uint8_t kind = FTOK_EOF;
+    uint32_t length = 1u;
+    switch (c)
+    {
+        case '(': kind = FTOK_LPAREN; break;
+        case ')': kind = FTOK_RPAREN; break;
+        case '{': kind = FTOK_LBRACE; break;
+        case '}': kind = FTOK_RBRACE; break;
+        case '[': kind = FTOK_LBRACKET; break;
+        case ']': kind = FTOK_RBRACKET; break;
+        case ';': kind = FTOK_SEMI; break;
+        case ',': kind = FTOK_COMMA; break;
+        case '?': kind = FTOK_QUESTION; break;
+        case ':': kind = FTOK_COLON; break;
+        case '~': kind = FTOK_TILDE; break;
+        case '.':
+            kind = c1 == '.' && c2 == '.' ? FTOK_ELLIPSIS : FTOK_DOT;
+            length = c1 == '.' && c2 == '.' ? 3u : 1u;
+            break;
+        case '-':
+            kind = c1 == '>' ? FTOK_ARROW : c1 == '-' ? FTOK_DEC : c1 == '=' ? FTOK_SUB_ASSIGN : FTOK_MINUS;
+            length = c1 == '>' || c1 == '-' || c1 == '=' ? 2u : 1u;
+            break;
+        case '+':
+            kind = c1 == '+' ? FTOK_INC : c1 == '=' ? FTOK_ADD_ASSIGN : FTOK_PLUS;
+            length = c1 == '+' || c1 == '=' ? 2u : 1u;
+            break;
+        case '*':
+            kind = c1 == '=' ? FTOK_MUL_ASSIGN : FTOK_STAR;
+            length = c1 == '=' ? 2u : 1u;
+            break;
+        case '/':
+            kind = c1 == '=' ? FTOK_DIV_ASSIGN : FTOK_SLASH;
+            length = c1 == '=' ? 2u : 1u;
+            break;
+        case '%':
+            kind = c1 == '=' ? FTOK_MOD_ASSIGN : FTOK_PERCENT;
+            length = c1 == '=' ? 2u : 1u;
+            break;
+        case '&':
+            kind = c1 == '&' ? FTOK_LAND : c1 == '=' ? FTOK_AND_ASSIGN : FTOK_AMP;
+            length = c1 == '&' || c1 == '=' ? 2u : 1u;
+            break;
+        case '|':
+            kind = c1 == '|' ? FTOK_LOR : c1 == '=' ? FTOK_OR_ASSIGN : FTOK_PIPE;
+            length = c1 == '|' || c1 == '=' ? 2u : 1u;
+            break;
+        case '^':
+            kind = c1 == '=' ? FTOK_XOR_ASSIGN : FTOK_CARET;
+            length = c1 == '=' ? 2u : 1u;
+            break;
+        case '!':
+            kind = c1 == '=' ? FTOK_NE : FTOK_BANG;
+            length = c1 == '=' ? 2u : 1u;
+            break;
+        case '=':
+            kind = c1 == '=' ? FTOK_EQ : FTOK_ASSIGN;
+            length = c1 == '=' ? 2u : 1u;
+            break;
+        case '<':
+            kind = c1 == '<' ? (c2 == '=' ? FTOK_SHL_ASSIGN : FTOK_LSHIFT) : c1 == '=' ? FTOK_LE : FTOK_LT;
+            length = c1 == '<' ? (c2 == '=' ? 3u : 2u) : c1 == '=' ? 2u : 1u;
+            break;
+        case '>':
+            kind = c1 == '>' ? (c2 == '=' ? FTOK_SHR_ASSIGN : FTOK_RSHIFT) : c1 == '=' ? FTOK_GE : FTOK_GT;
+            length = c1 == '>' ? (c2 == '=' ? 3u : 2u) : c1 == '=' ? 2u : 1u;
+            break;
+        case '#':
+            kind = c1 == '#' ? FTOK_HASHHASH : FTOK_HASH;
+            length = c1 == '#' ? 2u : 1u;
+            break;
+        default:
+            break;
+    }
+    *out_length = length;
+    return kind;
+}
+
+// The text's next token from `p`, past blanks and comments, into *out, with *io_line and *io_line_start kept for the
+// lines it crosses. Returns where the token ends (a directive's after its `#`), or NULL where the text ends first or the
+// token is one this doesn't read: a backslash (a splice, a universal character name), a carriage return that ends a
+// line alone, a byte past ASCII, a prefix before a quote other than a literal's, a literal a newline cuts.
+static __attribute__((cold)) const uint8_t* fast_cc_raw_token(const uint8_t* p, const uint8_t* end, uint32_t* io_line, const uint8_t** io_line_start, FastRawTok* out)
+{
+    uint32_t line = *io_line;
+    const uint8_t* line_start = *io_line_start;
+    bool line_first = false;
+    bool ok = true;
+    bool blank = true;
+    while (ok && blank)
+    {
+        const uint8_t c = p < end ? p[0] : 0u;
+        const uint8_t c1 = p + 1 < end ? p[1] : 0u;
+        if (p >= end)
+        {
+            ok = false;
+        }
+        else if (c == '\n')
+        {
+            p += 1;
+            line += 1u;
+            line_start = p;
+            line_first = true;
+        }
+        else if (c == '\r')
+        {
+            ok = c1 == '\n';
+            p += 1;
+        }
+        else if ((fast_char_class[c] & 8u) != 0)
+        {
+            p += 1;
+        }
+        else if (c == '/' && c1 == '*')
+        {
+            // Its newlines are the text's lines.
+            const uint8_t* q = p + 2;
+            while (ok && q + 1 < end && !(q[0] == '*' && q[1] == '/'))
+            {
+                ok = q[0] != '\r' || q[1] == '\n';
+                line += (uint32_t)(q[0] == '\n');
+                line_start = q[0] == '\n' ? q + 1 : line_start;
+                q += 1;
+            }
+            ok = ok && q + 1 < end;
+            p = q + 2;
+        }
+        else if (c == '/' && c1 == '/')
+        {
+            // To its newline, which no backslash before it splices to the next line.
+            const uint8_t* q = p + 2;
+            while (ok && q < end && q[0] != '\n')
+            {
+                ok = q[0] != '\r' || (q + 1 < end && q[1] == '\n');
+                q += 1;
+            }
+            ok = ok && q < end && q[-1] != '\\' && !(q[-1] == '\r' && q[-2] == '\\');
+            p = q;
+        }
+        else
+        {
+            blank = false;
+        }
+    }
+    const uint8_t* const at = p;
+    uint8_t kind = FTOK_EOF;
+    if (ok)
+    {
+        const uint8_t c = p[0];
+        const uint8_t c1 = p + 1 < end ? p[1] : 0u;
+        const uint8_t c2 = p + 2 < end ? p[2] : 0u;
+        if ((fast_char_class[c] & 2u) != 0)
+        {
+            const uint32_t length = fast_scan_ident_len(p, end);
+            const uint8_t after = p + length < end ? p[length] : 0u;
+            const bool prefix = (length == 1u && (c == 'L' || c == 'u' || c == 'U')) || (length == 2u && c == 'u' && c1 == '8');
+            if (after == '"' || after == '\'')
+            {
+                p = prefix ? fast_cc_raw_literal_end(p + length, end) : NULL;
+                kind = after == '"' ? FTOK_STR_LIT : FTOK_CHAR_LIT;
+            }
+            else
+            {
+                ok = after != '\\' && after < 0x80u;
+                kind = FTOK_IDENT;
+                p += length;
+            }
+        }
+        else if ((fast_char_class[c] & 4u) != 0 || (c == '.' && c1 >= '0' && c1 <= '9'))
+        {
+            // A preprocessing number: digits, letters, `_`, `.`, and a sign after an exponent's letter.
+            const uint8_t* q = p + 1;
+            bool going = true;
+            while (going && q < end)
+            {
+                const uint8_t d = q[0];
+                const uint8_t letter = (uint8_t)(q[-1] | 0x20u);
+                going = (fast_char_class[d] & 1u) != 0 || d == '.' || ((d == '+' || d == '-') && (letter == 'e' || letter == 'p'));
+                q += going ? 1 : 0;
+            }
+            ok = q >= end || (q[0] != '\'' && q[0] != '\\' && q[0] < 0x80u);
+            kind = FTOK_INT_LIT;
+            p = q;
+        }
+        else if (c == '"' || c == '\'')
+        {
+            p = fast_cc_raw_literal_end(p, end);
+            kind = c == '"' ? FTOK_STR_LIT : FTOK_CHAR_LIT;
+        }
+        else
+        {
+            uint32_t length = 0;
+            kind = fast_cc_raw_punctuator(c, c1, c2, &length);
+            ok = kind != FTOK_EOF;
+            // A directive's `#`, alone: its name follows.
+            kind = c == '#' && line_first ? FTOK_HASH : kind;
+            p += c == '#' && line_first ? 1u : length;
+        }
+    }
+    out->at = at;
+    out->length = ok && p != NULL ? (uint32_t)(p - at) : 0u;
+    out->line = line;
+    out->column = (uint32_t)(at - line_start) + 1u;
+    out->kind = kind;
+    out->directive = kind == FTOK_HASH && line_first;
+    *io_line = line;
+    *io_line_start = line_start;
+    return ok ? p : NULL;
+}
+
+// The end of the logical line from `p`: past its newline, which a splice or a block comment carries to a later line, or
+// NULL where the text ends first. A line comment ends at the newline. With `quotes`, a literal's bytes are its own (an
+// active directive's line); without, they aren't read, as fast_pp_skip_inactive reads an inactive group's.
+static __attribute__((cold)) const uint8_t* fast_cc_raw_line_end(const uint8_t* p, const uint8_t* end, bool quotes, uint32_t* io_line, const uint8_t** io_line_start)
+{
+    uint32_t line = *io_line;
+    const uint8_t* line_start = *io_line_start;
+    const uint8_t* result = NULL;
+    bool going = true;
+    while (going && p != NULL)
+    {
+        const uint8_t c = p < end ? p[0] : 0u;
+        const uint8_t c1 = p + 1 < end ? p[1] : 0u;
+        const uint8_t c2 = p + 2 < end ? p[2] : 0u;
+        // A splice: a backslash before a newline, or before a carriage return and a newline.
+        const uint32_t splice = c == '\\' && c1 == '\n' ? 2u : c == '\\' && c1 == '\r' && c2 == '\n' ? 3u : 0u;
+        if (p >= end)
+        {
+            going = false;
+        }
+        else if (c == '\n' || splice != 0)
+        {
+            p += c == '\n' ? 1u : splice;
+            line += 1u;
+            line_start = p;
+            result = c == '\n' ? p : NULL;
+            going = c != '\n';
+        }
+        else if (c == '/' && c1 == '*')
+        {
+            const uint8_t* q = p + 2;
+            bool plain = true;
+            while (plain && q + 1 < end && !(q[0] == '*' && q[1] == '/'))
+            {
+                plain = q[0] != '\r' || q[1] == '\n';
+                line += (uint32_t)(q[0] == '\n');
+                line_start = q[0] == '\n' ? q + 1 : line_start;
+                q += 1;
+            }
+            p = plain && q + 1 < end ? q + 2 : NULL;
+        }
+        else if (c == '/' && c1 == '/')
+        {
+            const uint8_t* q = p + 2;
+            while (q < end && q[0] != '\n')
+            {
+                q += 1;
+            }
+            // A backslash before its newline splices the next line to it.
+            p = q < end && q[-1] != '\\' && !(q[-1] == '\r' && q[-2] == '\\') ? q : NULL;
+        }
+        else if (quotes && (c == '"' || c == '\''))
+        {
+            p = fast_cc_raw_literal_end(p, end);
+        }
+        else
+        {
+            // A carriage return alone ends a line for the full pipeline's columns.
+            going = c != '\r' || c1 == '\n';
+            p += 1;
+        }
+    }
+    *io_line = line;
+    *io_line_start = line_start;
+    return result;
+}
+
+// Whether the directive name at `p` (`length` bytes) is `name`.
+static __attribute__((cold)) bool fast_cc_raw_named(const uint8_t* p, uint32_t length, const char* name)
+{
+    return length == (uint32_t)strlen(name) && memcmp(p, name, length) == 0;
+}
+
+// The text after the directive whose `#` ends at `p`, which stands between a loop's `;` and the next statement in the
+// group the loop is in, a taken one: a #define, #undef, #pragma, #line or null directive gives no token, #endif ends a
+// conditional, and #else and the #elif family end the taken group, so the text to their #endif is skipped. NULL for any
+// other: a conditional this can't judge (#if, #ifdef, #ifndef), an #include's tokens, and the text's end.
+static __attribute__((cold)) const uint8_t* fast_cc_raw_directive(const uint8_t* p, const uint8_t* end, uint32_t* io_line, const uint8_t** io_line_start)
+{
+    const uint8_t* q = p;
+    while (q < end && (q[0] == ' ' || q[0] == '\t'))
+    {
+        q += 1;
+    }
+    uint32_t length = q < end && (fast_char_class[q[0]] & 2u) != 0 ? fast_scan_ident_len(q, end) : 0u;
+    const bool passes = (length == 0 && q < end && q[0] == '\n') || fast_cc_raw_named(q, length, "define") ||
+                        fast_cc_raw_named(q, length, "undef") || fast_cc_raw_named(q, length, "pragma") ||
+                        fast_cc_raw_named(q, length, "line") || fast_cc_raw_named(q, length, "endif");
+    const bool ends = fast_cc_raw_named(q, length, "else") || fast_cc_raw_named(q, length, "elif") ||
+                      fast_cc_raw_named(q, length, "elifdef") || fast_cc_raw_named(q, length, "elifndef");
+    const uint8_t* result = passes || ends ? fast_cc_raw_line_end(q, end, passes, io_line, io_line_start) : NULL;
+    // The groups after the taken one, to the #endif at their level.
+    uint32_t level = 0;
+    bool skipping = ends && result != NULL;
+    while (skipping)
+    {
+        q = result;
+        while (q < end && (fast_char_class[q[0]] & 8u) != 0 && q[0] != '\r')
+        {
+            q += 1;
+        }
+        bool closes = false;
+        if (q < end && q[0] == '#')
+        {
+            q += 1;
+            while (q < end && (q[0] == ' ' || q[0] == '\t'))
+            {
+                q += 1;
+            }
+            length = q < end && (fast_char_class[q[0]] & 2u) != 0 ? fast_scan_ident_len(q, end) : 0u;
+            const bool opens = fast_cc_raw_named(q, length, "if") || fast_cc_raw_named(q, length, "ifdef") || fast_cc_raw_named(q, length, "ifndef");
+            closes = level == 0 && fast_cc_raw_named(q, length, "endif");
+            level += (uint32_t)opens;
+            level -= (uint32_t)(fast_cc_raw_named(q, length, "endif") && level != 0);
+        }
+        result = fast_cc_raw_line_end(q, end, false, io_line, io_line_start);
+        skipping = !closes && result != NULL;
+    }
+    return result;
+}
+
+// The first token of the statement after a loop's `;`, from `p` on, past the directives between that give it no token
+// (fast_cc_raw_directive). NULL where it can't be read.
+static __attribute__((cold)) const uint8_t* fast_cc_raw_statement(const uint8_t* p, const uint8_t* end, uint32_t* io_line, const uint8_t** io_line_start, FastRawTok* out)
+{
+    p = fast_cc_raw_token(p, end, io_line, io_line_start, out);
+    while (p != NULL && out->directive)
+    {
+        p = fast_cc_raw_directive(p, end, io_line, io_line_start);
+        p = p != NULL ? fast_cc_raw_token(p, end, io_line, io_line_start, out) : NULL;
+    }
+    return p;
+}
+
+// The loop's text from its keyword at `at`: its header (the keyword, `(` and the tokens to the `)` that closes it) into
+// `tokens` (room for BUSTER_FRAW_HEADER_TOKENS), the `;` after it into *out_semi and the next statement's first token
+// into *out_next (fast_cc_raw_statement). True where it reads them all, the `;` follows the `)` directly and the header
+// has a loop's shape: a while's no `;`, a for's two `;` at its own level and no other (a statement expression's `;` is
+// deeper). Braces, a compound literal's, move no parenthesis's level.
+static __attribute__((cold)) bool fast_cc_raw_loop(const uint8_t* at, uint32_t length, const uint8_t* line_start, const uint8_t* end, bool is_for, FastRawTok* tokens,
+                             uint32_t* out_count, FastRawTok* out_semi, FastRawTok* out_next)
+{
+    tokens[0] = (FastRawTok){
+        .at = at,
+        .length = length,
+        .line = 0,
+        .column = (uint32_t)(at - line_start) + 1u,
+        .kind = FTOK_IDENT,
+    };
+    uint32_t count = 1u;
+    uint32_t line = 0;
+    uint32_t level = 0;
+    uint32_t separators = 0;
+    bool shaped = true;
+    const uint8_t* p = at + length;
+    bool reading = true;
+    while (reading)
+    {
+        const bool room = count < BUSTER_FRAW_HEADER_TOKENS;
+        p = room ? fast_cc_raw_token(p, end, &line, &line_start, tokens + count) : NULL;
+        const uint8_t kind = room ? tokens[count].kind : FTOK_EOF;
+        const bool taken = p != NULL && kind != FTOK_HASH && (count != 1u || kind == FTOK_LPAREN);
+        if (taken)
+        {
+            separators += (uint32_t)(kind == FTOK_SEMI && level == 1u);
+            shaped = shaped && (kind != FTOK_SEMI || (is_for && level == 1u));
+            level += (uint32_t)(kind == FTOK_LPAREN);
+            level -= (uint32_t)(kind == FTOK_RPAREN);
+            count += 1u;
+        }
+        reading = taken && level != 0;
+        p = taken ? p : NULL;
+    }
+    p = p != NULL ? fast_cc_raw_token(p, end, &line, &line_start, out_semi) : NULL;
+    p = p != NULL && out_semi->kind == FTOK_SEMI ? fast_cc_raw_statement(p, end, &line, &line_start, out_next) : NULL;
+    *out_count = count;
+    return p != NULL && shaped && separators == (is_for ? 2u : 0u) && out_semi->kind == FTOK_SEMI;
+}
+
+// Whether the text's token `r` is the stream's token at `o`: a name spelled as the token is (a loop keyword whose data
+// is its place, as its kind), a number or a literal of the token's kind, or the same punctuator.
+static __attribute__((cold)) bool fast_cc_raw_same(const FastCCState* cc, const FastRawTok* r, uint32_t o)
+{
+    const uint8_t k = cc->tk[o];
+    bool same = false;
+    if (r->kind == FTOK_IDENT)
+    {
+        const char* text = NULL;
+        uint32_t length = 0;
+        if ((k == FTOK_KW_WHILE || k == FTOK_KW_FOR) && (cc->td[o] & BUSTER_FTOK_PLACED) != 0)
+        {
+            text = k == FTOK_KW_WHILE ? "while" : "for";
+            length = k == FTOK_KW_WHILE ? 5u : 3u;
+        }
+        else if (k == FTOK_IDENT || (k >= FTOK_KW_AUTO && k <= FTOK_KW_FUNC))
+        {
+            text = fast_cc_ident_str(cc, cc->td[o], &length);
+        }
+        same = text != NULL && length == r->length && memcmp(text, r->at, length) == 0;
+    }
+    else if (r->kind == FTOK_INT_LIT)
+    {
+        same = k == FTOK_INT_LIT || k == FTOK_FLOAT_LIT || (k >= FTOK_INT_U32 && k <= FTOK_FLOAT80);
+    }
+    else
+    {
+        same = k == r->kind;
+    }
+    return same;
+}
+
+// The IdentId of the name `r` spells: the unit's, which the preprocessor has read (a new one only for a name in an
+// argument it skipped unread, which nothing else asks for). fast_ident_lookup reads eight bytes from the name's start.
+static __attribute__((cold)) uint32_t fast_cc_raw_name(FastCCState* cc, const FastRawTok* r, const uint8_t* end)
+{
+    uint8_t kind = FTOK_IDENT;
+    return end - r->at >= 8 ? fast_ident_lookup(&cc->pp->idents, r->at, r->length, &kind) : fast_ident_intern(&cc->pp->idents, r->at, r->length);
+}
+
+// The macros a loop header's names reach (BUSTER_FRAW_MACROS: its names' and the names in their bodies', a level at a
+// time) that a header's check reads before it leaves.
+#define BUSTER_FRAW_MACROS 64u
+
+// Whether every macro the header's names reach has a body whose parentheses match and that holds no `;`. An
+// argument's parentheses match in the text, so then each expansion's do, the header's tokens in the stream are at the
+// text's levels, and the stream's `)` that closes it and the `;` after it are the text's. The table is the unit's end's:
+// a macro redefined after the loop is read as its last definition.
+static __attribute__((cold)) bool fast_cc_raw_macros_balanced(FastCCState* cc, const FastRawTok* tokens, uint32_t count, const uint8_t* end)
+{
+    FastPP* const pp = cc->pp;
+    uint32_t pending[BUSTER_FRAW_MACROS];
+    uint32_t pending_count = 0;
+    bool balanced = true;
+    for (uint32_t i = 1; balanced && i < count; i += 1)
+    {
+        const uint32_t id = tokens[i].kind == FTOK_IDENT ? fast_cc_raw_name(cc, tokens + i, end) : 0u;
+        const uint32_t index = id != 0 && fast_ident_is_macro(&pp->idents, id) ? pp->idents.entries[id].macro_idx : 0u;
+        bool seen = false;
+        for (uint32_t j = 0; j < pending_count && !seen; j += 1)
+        {
+            seen = pending[j] == index;
+        }
+        balanced = index == 0 || seen || pending_count < BUSTER_FRAW_MACROS;
+        if (index != 0 && !seen && balanced)
+        {
+            pending[pending_count] = index;
+            pending_count += 1u;
+        }
+    }
+    for (uint32_t next = 0; balanced && next < pending_count; next += 1)
+    {
+        const FastMacro* const m = pp->macros + pending[next];
+        uint32_t level = 0;
+        for (uint32_t i = 0; balanced && i < m->body_count; i += 1)
+        {
+            const FastTok t = pp->macro_toks[m->body_start + i];
+            balanced = t.kind != FTOK_SEMI && (t.kind != FTOK_RPAREN || level != 0);
+            level += (uint32_t)(t.kind == FTOK_LPAREN);
+            level -= (uint32_t)(t.kind == FTOK_RPAREN && level != 0);
+            const bool name = t.kind == FTOK_IDENT || (t.kind >= FTOK_KW_AUTO && t.kind <= FTOK_KW_FUNC);
+            const uint32_t index = name && (m->is_func == 0 || t.extra == 0) && fast_ident_is_macro(&pp->idents, t.data) ?
+                                   pp->idents.entries[t.data].macro_idx : 0u;
+            bool seen = false;
+            for (uint32_t j = 0; j < pending_count && !seen; j += 1)
+            {
+                seen = pending[j] == index;
+            }
+            balanced = balanced && (index == 0 || seen || pending_count < BUSTER_FRAW_MACROS);
+            if (index != 0 && !seen && balanced)
+            {
+                pending[pending_count] = index;
+                pending_count += 1u;
+            }
+        }
+        balanced = balanced && level == 0;
+    }
+    return balanced;
+}
+
+// Whether the macro the name `r` spells gives a token where it is expanded: its body has a punctuator but `##`, a
+// literal, a number, or a name that is neither a parameter nor a macro (musl's `#define libc __libc`), or the macro's
+// own (painted, it stays). A parameter may take an empty argument and a macro may be empty, and so may an empty body.
+static __attribute__((cold)) bool fast_cc_raw_macro_gives(FastCCState* cc, const FastRawTok* r, const uint8_t* end)
+{
+    FastPP* const pp = cc->pp;
+    const uint32_t id = fast_cc_raw_name(cc, r, end);
+    const uint32_t index = id != 0 && fast_ident_is_macro(&pp->idents, id) ? pp->idents.entries[id].macro_idx : 0u;
+    bool gives = false;
+    if (index != 0)
+    {
+        const FastMacro* const m = pp->macros + index;
+        for (uint32_t i = 0; i < m->body_count && !gives; i += 1)
+        {
+            const FastTok t = pp->macro_toks[m->body_start + i];
+            const bool name = t.kind == FTOK_IDENT || (t.kind >= FTOK_KW_AUTO && t.kind <= FTOK_KW_FUNC);
+            gives = (t.kind >= FTOK_INT_LIT && t.kind <= FTOK_HASH) || (t.kind >= FTOK_INT_U32 && t.kind <= FTOK_FLOAT80) ||
+                    (name && (m->is_func == 0 || t.extra == 0) && (t.data == id || !fast_ident_is_macro(&pp->idents, t.data)));
+        }
+    }
+    return gives;
+}
+
+// The mappings the compile kept of the files the unit read, listed at its first loop that asks: the guard table's (its
+// used entries, which have a record, four to a 64-byte load) and those mapped for their push alone (fast_pp_release_files'
+// two lists). And whether they lie in one window of 2^30 bytes, where an address's low 30 bits name one address.
+static __attribute__((cold)) void fast_cc_list_texts(FastCCState* cc)
+{
+    FastPP* const pp = cc->pp;
+    const uint32_t capacity = BUSTER_FPP_MAX_GUARDS + pp->mapped_count;
+    cc->texts_listed = true;
+    cc->texts = (const uint8_t**)fast_arena_alloc(cc->arena, (uint64_t)capacity * sizeof(const uint8_t*), 8);
+    cc->text_sizes = (uint64_t*)fast_arena_alloc(cc->arena, (uint64_t)capacity * sizeof(uint64_t), 8);
+    const bool room = cc->texts != NULL && cc->text_sizes != NULL;
+    _Static_assert(sizeof(FastGuardEntry) == 16u && offsetof(FastGuardEntry, record) == 4u && BUSTER_FPP_MAX_GUARDS % 4u == 0,
+                   "four guard entries a 64-byte load, a record's offset in each one's second word");
+    uint32_t count = 0;
+    for (uint32_t i = 0; room && i < BUSTER_FPP_MAX_GUARDS; i += 4u)
+    {
+        const __m512i entries = _mm512_loadu_si512((const void*)(pp->guards + i));
+        uint32_t used = (uint32_t)_mm512_test_epi32_mask(entries, entries) & 0x2222u;
+        while (used != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(used);
+            used &= used - 1u;
+            const FastFileRecord* const record = fast_guard_record(pp, pp->guards + i + lane / 4u);
+            cc->texts[count] = record->bytes;
+            cc->text_sizes[count] = record->size;
+            count += (uint32_t)(record->bytes != NULL && record->size != 0);
+        }
+    }
+    for (uint32_t i = 0; room && i < pp->mapped_count; i += 1)
+    {
+        cc->texts[count] = pp->mapped_bases[i];
+        cc->text_sizes[count] = pp->mapped_sizes[i];
+        count += 1u;
+    }
+    uintptr_t low = UINTPTR_MAX;
+    uintptr_t high = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uintptr_t start = (uintptr_t)cc->texts[i];
+        low = start < low ? start : low;
+        high = start + cc->text_sizes[i] > high ? start + cc->text_sizes[i] : high;
+    }
+    cc->text_count = count;
+    cc->text_low = low;
+    cc->text_window = count != 0 && high - low <= (uintptr_t)BUSTER_FTOK_PLACED_ADDRESS + 1u;
+}
+
+// The place of a loop keyword whose data is `data` (BUSTER_FTOK_PLACED): the address, in a mapping the compile kept of
+// a file, whose low 30 bits it holds and where `word` stands as a name, with the mapping's first byte and end. NULL
+// where no mapping or more than one has one. Where the mappings lie in one window (fast_cc_list_texts) the bits name one
+// address, which no two mappings hold, and the mapping that held the last loop's is asked first.
+static __attribute__((cold)) const uint8_t* fast_cc_placed_text(FastCCState* cc, uint32_t data, const char* word, uint32_t length, const uint8_t** out_base,
+                                                                const uint8_t** out_end)
+{
+    if (!cc->texts_listed)
+    {
+        fast_cc_list_texts(cc);
+    }
+    const uint64_t window = (uint64_t)BUSTER_FTOK_PLACED_ADDRESS + 1u;
+    const uintptr_t named = cc->text_low + (((uintptr_t)(data & BUSTER_FTOK_PLACED_ADDRESS) - cc->text_low) & BUSTER_FTOK_PLACED_ADDRESS);
+    uint32_t first = 0;
+    uint32_t last = cc->text_count;
+    if (cc->text_window)
+    {
+        // The mapping that holds the one address: the last loop's, or else the one whose range does.
+        const uint32_t previous = cc->text_last;
+        const bool held = previous < cc->text_count && named >= (uintptr_t)cc->texts[previous] &&
+                          named - (uintptr_t)cc->texts[previous] < cc->text_sizes[previous];
+        uint32_t holder = held ? previous : UINT32_MAX;
+        for (uint32_t i = 0; !held && i < cc->text_count; i += 1)
+        {
+            holder = named >= (uintptr_t)cc->texts[i] && named - (uintptr_t)cc->texts[i] < cc->text_sizes[i] ? i : holder;
+        }
+        first = holder < cc->text_count ? holder : 0u;
+        last = holder < cc->text_count ? holder + 1u : 0u;
+        cc->text_last = holder < cc->text_count ? holder : previous;
+    }
+    const uint8_t* found = NULL;
+    uint32_t matches = 0;
+    for (uint32_t i = first; i < last; i += 1)
+    {
+        const uint8_t* const base = cc->texts[i];
+        const uint64_t size = cc->text_sizes[i];
+        // The first byte at or after the mapping's start whose address has the low bits, then each 2^30 bytes on.
+        for (uint64_t offset = ((uint64_t)(data & BUSTER_FTOK_PLACED_ADDRESS) - (uint64_t)(uintptr_t)base) & BUSTER_FTOK_PLACED_ADDRESS;
+             offset + length <= size; offset += window)
+        {
+            const uint8_t* const at = base + offset;
+            if (memcmp(at, word, length) == 0 && (offset == 0 || (fast_char_class[at[-1]] & 1u) == 0) &&
+                (offset + length == size || (fast_char_class[at[length]] & 1u) == 0))
+            {
+                found = at;
+                *out_base = base;
+                *out_end = base + size;
+                matches += 1u;
+            }
+        }
+    }
+    return matches == 1u ? found : NULL;
+}
+
+// The rule that refuses the loop whose `)` is at `rparen` (the full pipeline's warning, or a text this can't place), or
+// NULL where the full pipeline is quiet: the `;` on another line than the `)`, or the next statement's first token at
+// or before the keyword's column.
+static __attribute__((cold)) const char* fast_cc_empty_body_verdict(FastCCState* cc, uint32_t keyword, uint32_t rparen)
+{
+    const char* reason = "a loop's empty body this path can't place";
+    const bool is_for = cc->tk[keyword] == FTOK_KW_FOR;
+    const char* const word = is_for ? "for" : "while";
+    const uint32_t word_length = is_for ? 3u : 5u;
+    const uint32_t data = cc->td[keyword];
+    const uint8_t* base = NULL;
+    const uint8_t* end = NULL;
+    const uint8_t* const at = (data & BUSTER_FTOK_PLACED) != 0 ? fast_cc_placed_text(cc, data, word, word_length, &base, &end) : NULL;
+    // The keyword's line starts after the newline before it; a carriage return alone ends a line too, which this leaves.
+    const uint8_t* line_start = at;
+    bool plain = at != NULL;
+    while (plain && line_start > base && line_start[-1] != '\n')
+    {
+        plain = line_start[-1] != '\r';
+        line_start -= 1;
+    }
+    FastRawTok tokens[BUSTER_FRAW_HEADER_TOKENS];
+    uint32_t count = 0;
+    FastRawTok semi = { 0 };
+    FastRawTok next = { 0 };
+    if (plain && fast_cc_raw_loop(at, word_length, line_start, end, is_for, tokens, &count, &semi, &next) &&
+        fast_cc_raw_macros_balanced(cc, tokens, count, end))
+    {
+        const FastRawTok* const close = tokens + (count - 1u);
+        const uint32_t following = rparen + 2u;
+        // The next statement's first token: the stream's, or a macro's name whose expansion starts it.
+        const bool same = fast_cc_raw_same(cc, &next, following);
+        const bool expanded = !same && next.kind == FTOK_IDENT && fast_cc_raw_macro_gives(cc, &next, end);
+        const bool compound = same && cc->tk[following] == FTOK_LBRACE;
+        if (semi.line != close->line)
+        {
+            reason = NULL;
+        }
+        else if ((same || expanded) && !compound && next.column <= tokens[0].column)
+        {
+            reason = NULL;
+        }
+        else if (same || expanded)
+        {
+            reason = "a loop's empty body the full pipeline's -Wempty-body questions";
+        }
+    }
+    return reason;
+}
+
+// A `for` or `while` whose `)` is followed by the lone `;` at cc->pos, which `owner`'s frame (a FastStmtKind) has for
+// its statement: the unit leaves where the full pipeline may warn -Wempty-body (fast_cc_empty_body_verdict).
+static __attribute__((cold, noinline)) void fast_cc_empty_loop_body(FastCCState* cc, uint32_t owner)
+{
+    const uint32_t rparen = cc->pos - 1u;
+    // The `(` the `)` closes; the keyword is before it.
+    uint32_t open = rparen;
+    uint32_t level = 1u;
+    while (level != 0 && open > 0)
+    {
+        open -= 1u;
+        level += (uint32_t)(cc->tk[open] == FTOK_RPAREN);
+        level -= (uint32_t)(cc->tk[open] == FTOK_LPAREN);
+    }
+    const uint32_t keyword = open - 1u;
+    const bool loop = level == 0 && open > 0 && (cc->tk[keyword] == FTOK_KW_WHILE || cc->tk[keyword] == FTOK_KW_FOR);
+    // A label's, case's or default's statement, the block's last one, -w and a system header's are quiet (an expansion's
+    // keyword has an IdentId, without BUSTER_FTOK_PLACED_SYSTEM's bit).
+    const bool quiet = loop && (cc->quiet || owner != FSTK_BLOCK || (keyword > 0 && cc->tk[keyword - 1u] == FTOK_COLON) ||
+                                cc->tk[rparen + 2u] == FTOK_RBRACE || (cc->td[keyword] & BUSTER_FTOK_PLACED_SYSTEM) != 0);
+    const char* const reason = !loop ? "a loop's empty body this path can't place" : quiet ? NULL : fast_cc_empty_body_verdict(cc, keyword, rparen);
+    if (reason != NULL)
+    {
+        fast_cc_bail(cc, reason);
+    }
+}
 
 typedef struct FastSwitchCase FastSwitchCase;
 struct FastSwitchCase
@@ -12078,6 +12828,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             fast_cc_reset_tmps(cc);
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) after while cond"); break; }
             cc->pos += 1u;
+            // #3667: a lone `;` body, which the full pipeline's -Wempty-body may question. The stream ends in FTOK_EOF.
+            if (cc->tk[cc->pos] == FTOK_SEMI) { fast_cc_empty_loop_body(cc, top->kind); }
             break_frame[break_sp] = (uint8_t)ssp;
             cont_frame[cont_sp] = (uint8_t)ssp;
             break_stack[break_sp++] = brk_lbl;
@@ -12214,6 +12966,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             }
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) in for"); break; }
             cc->pos += 1u;
+            // #3667: a lone `;` body, as a while's.
+            if (cc->tk[cc->pos] == FTOK_SEMI) { fast_cc_empty_loop_body(cc, top->kind); }
             break_frame[break_sp] = (uint8_t)ssp;
             cont_frame[cont_sp] = (uint8_t)ssp;
             break_stack[break_sp++] = brk_lbl;
