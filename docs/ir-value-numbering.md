@@ -54,8 +54,8 @@ instructions still waiting at the end are exactly those that reach a cycle.
 Only they are refined in rounds, their numbered operands' classes held fixed,
 and their classes are numbered after the acyclic ones so the two never
 collide. In reachable SSA code every operand except a phi's input along a back
-edge dominates its use, so it is numbered first. The use lists are walked only
-from the few values such a phi waits for. Impure and undef-tainted
+edge dominates its use, so it is numbered first. When every block is reachable and the function has no phi, the pass numbers instructions directly.
+It builds use lists for undef propagation or for graphs that can require wakeups. Impure and undef-tainted
 instructions are unique leaves and never wait.
 
 Numbering one value is a dependent chain: its key needs its operands' classes,
@@ -66,8 +66,7 @@ representative's key (payload, meta word and operand classes) occupies four of
 the eight field words of its own index; the existing hash, link and bucket
 columns hold the rest, so the table needs no scratch of its own. The waiting
 counts, the awaited flags and the list of members to refine add nine bytes per
-instruction, allocated on every path so that `scratch_bytes` doesn't depend on
-which one ran. Its probes share
+instruction, reserved in the same scratch allocation as the keys and ordering columns. Its probes share
 the grouping's budget, `IrGvnOptions.probes` key comparisons per instruction
 (8). If the budget runs out, the numbering is abandoned and every instruction
 is refined in rounds instead, which counts as a collision-budget completion.
@@ -121,14 +120,23 @@ completions, separately from the existing sweep-limit `fallback` flag. A forced
 sorted round is not a collision fallback. These counters describe work, not
 elapsed time or generated program performance.
 
-A dominator-tree walk chooses a previously executed representative from each
-class. Bucket insertions are undone when leaving a dominator subtree. Equal
-expressions in sibling blocks therefore remain separate. The scalar oracle
-instead hashes available expressions by their already canonical operand IDs
-while walking that tree. It does not share partition refinement, and does not
-recognize cyclic phi congruences. Its output is semantically equivalent but
-need not have the same instruction count. The vector fixed-point solver with
-forced scalar hashing does produce the exact same output.
+The partition solver visits blocks in dominator preorder. Each dense class stores
+its representative and the preorder position at which that representative's
+subtree ends. A later instruction in the interval can reuse the representative.
+After the interval ends, the next occurrence starts a new interval. Equal
+expressions in sibling blocks therefore stay separate. Under the pressure policy,
+a truth value's interval ends with its defining block.
+
+The scalar walk hashes available expressions by their canonical operand IDs and
+undoes insertions when it leaves the scope. The full-refinement oracle checks the
+partition solver's cyclic phi results and its class count.
+
+The shared IR rewrite remaps operands and side-table references with the GVN
+forwarding map. Debug bindings additionally follow the representative of their
+original anchor. Verification rebuilds the output graph and checks its rows and
+joins. If its block numbers and successor lists match the input graph, the input's
+dominator intervals also apply to the output. Every output operand is checked
+against its new instruction positions.
 
 The whitelist includes integer operations, exact bit conversions, floating
 sign negation, address calculations, parameters, constants and phis. Replacing
