@@ -51,10 +51,15 @@ have classes is numbered at once; otherwise it waits, counting its unnumbered
 operands. Each unresolved input registers its user directly against the input’s copy root.
 Numbering the root wakes only those users. The
 instructions still waiting at the end are exactly those that reach a cycle.
-Only they are refined in rounds, their numbered operands' classes held fixed,
-and their classes are numbered after the acyclic ones so the two never
-collide. In reachable SSA code every operand except a phi's input along a back
-edge dominates its use, so it is numbered first. When every block is reachable and the function has no phi, the pass numbers instructions directly.
+Within a block, a pending phi with a unique fingerprint of its static key and
+known incoming classes is already distinct from every other pending phi. The
+pass takes the fingerprints of the entire phi prefix before assigning these
+singletons final classes and waking their users. A collision leaves both phis
+for refinement. The cycle census still counts the instructions that reached a
+cycle before this step. The remaining unresolved values are refined in rounds
+with the final classes held fixed. In reachable SSA, every ordinary operand
+dominates its use. A phi-free function can therefore number instructions and
+check availability in one dominator-preorder traversal.
 The pass builds complete use lists only when it finds an undef. Impure and undef-tainted
 instructions are unique leaves and never wait.
 
@@ -71,6 +76,12 @@ the grouping's budget, `IrGvnOptions.probes` key comparisons per instruction
 (8). If the budget runs out, the numbering is abandoned and every instruction
 is refined in rounds instead, which counts as a collision-budget completion.
 The partition is the same either way; only class labels differ.
+
+After the initial partition, membership in the previous class already proves
+equality of opcode, flags, type and static payload. Subsequent rounds compare
+the parent class, dynamic operand classes and predecessor-ordered phi inputs.
+The complete-refinement oracle retains the full keys. The availability pass
+can skip acyclic singletons, since only a repeated class can remove a value.
 
 Eight contiguous `uint64_t` key columns feed two eight-lane hash groups per
 16-instruction batch. Every column has its exact logical length, partial
