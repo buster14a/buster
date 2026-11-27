@@ -187,6 +187,17 @@ typedef enum FastTokKind
 // # and ## spell it as written); an integer with a base or a suffix always does.
 #define BUSTER_FTOK_SPELLED     BUSTER_FTOK_HEX
 
+// #3667: the data of a `for` or `while` the preprocessor read from a file's text, in place of its IdentId, which the
+// statement compiler reads where the loop's body is a lone `;` (fast_cc_empty_statement, -Wempty-body) and nothing else
+// does: this mark, and in the main file (never a system header) BUSTER_FTOK_PLACED_MAIN and its first byte's offset;
+// in another file the file's system-header bit then and its first byte's address's low 29 bits, by which the statement
+// compiler finds the mapping the compile kept of the file. One an expansion gives keeps its IdentId.
+#define BUSTER_FTOK_PLACED          0x80000000u
+#define BUSTER_FTOK_PLACED_MAIN     0x40000000u
+#define BUSTER_FTOK_PLACED_OFFSET   0x3fffffffu
+#define BUSTER_FTOK_PLACED_SYSTEM   0x20000000u
+#define BUSTER_FTOK_PLACED_ADDRESS  0x1fffffffu
+
 // Compact 8-byte token
 typedef struct FastTok FastTok;
 struct FastTok
@@ -299,6 +310,9 @@ static void* fast_arena_alloc(FastArena* a, uint64_t size, uint64_t align)
 #define BUSTER_FIDENT_SMALL_GROUPS    64u
 #define BUSTER_FIDENT_RESERVED_GROUPS 512u
 #define BUSTER_FIDENT_MAX_IDS         49152u
+// A bit set's words, one bit an IdentId. FastIdentTable.macro_bits holds two sets: the macros', then the window
+// emitter's stop set (#3667), the macros' bits and `for` and `while`, whose places it records (BUSTER_FTOK_PLACED).
+#define BUSTER_FIDENT_BIT_WORDS       (BUSTER_FIDENT_MAX_IDS / 64u + 1u)
 #define BUSTER_FIDENT_CACHE_BITS      14u
 // Small units start with 64 hash groups (20 KiB touched on demand) and 2,048 cache slots (16 KiB).
 // #3592 measured a unit with six standard headers on the 9700X. Starting with 64 groups saved two
@@ -697,7 +711,7 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
     t->ctrl = (uint8_t*)fast_arena_alloc(arena, slot_count, 64);
     t->slots = (uint32_t*)fast_arena_alloc(arena, slot_count * sizeof(uint32_t), 64);
     t->entries = (FastIdentEntry*)fast_arena_alloc(arena, (uint64_t)t->capacity * sizeof(FastIdentEntry), 64);
-    t->macro_bits = (uint64_t*)fast_arena_alloc(arena, ((uint64_t)t->capacity / 64u + 1u) * sizeof(uint64_t), 64);
+    t->macro_bits = (uint64_t*)fast_arena_alloc(arena, 2u * BUSTER_FIDENT_BIT_WORDS * sizeof(uint64_t), 64);
     // A short cached spelling can be compared with one masked eight-byte word, even at the end.
     t->strings = (char*)fast_arena_alloc(arena, t->str_cap + 7u, 64);
     const uint32_t cache_bits = small ? BUSTER_FIDENT_SMALL_CACHE_BITS : BUSTER_FIDENT_CACHE_BITS;
@@ -891,6 +905,11 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
             if (seeds[i].pp >= FPP_KW_LINE_MACRO && seeds[i].pp <= BUSTER_FPP_KW_LAST_BUILTIN)
             {
                 t->macro_bits[id >> 6] |= (UINT64_C(1) << (id & 63u));
+                t->macro_bits[BUSTER_FIDENT_BIT_WORDS + (id >> 6)] |= (UINT64_C(1) << (id & 63u));
+            }
+            if (seeds[i].kw == FTOK_KW_WHILE || seeds[i].kw == FTOK_KW_FOR)
+            {
+                t->macro_bits[BUSTER_FIDENT_BIT_WORDS + (id >> 6)] |= (UINT64_C(1) << (id & 63u));
             }
         }
         // t->cache comes from zero-filled anonymous mmap and fast_ident_intern_cstr does not populate it.
@@ -983,10 +1002,17 @@ static inline void fast_ident_set_macro_bit(FastIdentTable* t, uint32_t id, bool
     if (active)
     {
         t->macro_bits[id >> 6] |= mask;
+        t->macro_bits[BUSTER_FIDENT_BIT_WORDS + (id >> 6)] |= mask;
     }
     else
     {
         t->macro_bits[id >> 6] &= ~mask;
+        // An #undef of `for` or `while` leaves it in the window emitter's stop set (#3667).
+        const uint8_t kw = t->entries[id].kw_kind;
+        if (kw != FTOK_KW_WHILE && kw != FTOK_KW_FOR)
+        {
+            t->macro_bits[BUSTER_FIDENT_BIT_WORDS + (id >> 6)] &= ~mask;
+        }
     }
 }
 
@@ -1511,6 +1537,9 @@ struct FastPP
     // The main file's push, or 0 before it: #pragma once and GCC system_header there are the full pipeline's warnings
     // (#3577), which leave the direct path.
     uint32_t main_serial;
+    // The main file's text (#3667: where a loop keyword's BUSTER_FTOK_PLACED_MAIN offset is), or NULL before its push.
+    const uint8_t* main_text;
+    const uint8_t* main_text_end;
 
     // Current source state
     uint32_t counter_val;
@@ -7330,6 +7359,21 @@ static inline bool fast_window_decimal(const uint8_t* s, uint32_t length, uint32
 }
 
 // One token of f's text by fast_lex_one, and what the drain does with it: the file's end, a directive, a macro's name.
+// The data of the `for` or `while` whose first byte is f's text at `at` (BUSTER_FTOK_PLACED, #3667). Out of line: the
+// window's emitter calls it from the branch its macro names take, as it calls fast_pp_window_macro.
+static __attribute__((cold, noinline)) uint32_t fast_pp_placed(const FastPP* pp, const FastIncludeFile* f, const uint8_t* at)
+{
+    const uint32_t other = BUSTER_FTOK_PLACED | ((uint32_t)f->is_system * BUSTER_FTOK_PLACED_SYSTEM) | ((uint32_t)(uintptr_t)at & BUSTER_FTOK_PLACED_ADDRESS);
+    const uint32_t main = BUSTER_FTOK_PLACED | BUSTER_FTOK_PLACED_MAIN | ((uint32_t)(at - f->base) & BUSTER_FTOK_PLACED_OFFSET);
+    return f->serial == pp->main_serial ? main : other;
+}
+
+// The data of the window's token `t`, a `for` or a `while` of f's text (fast_pp_placed).
+static __attribute__((cold, noinline)) uint32_t fast_pp_window_placed(const FastPP* pp, const FastIncludeFile* f, uint32_t t)
+{
+    return fast_pp_placed(pp, f, f->base + pp->win.origin + pp->win.starts[t]);
+}
+
 static void fast_pp_single_token(FastPP* pp, FastIncludeFile* f)
 {
     FastTok tok = { 0 };
@@ -7360,6 +7404,11 @@ static void fast_pp_single_token(FastPP* pp, FastIncludeFile* f)
         }
         if (!expanded)
         {
+            // `for` or `while`: its place, as the window's emitter records it (#3667). fast_lex_one has lexed it whole.
+            if (__builtin_expect(tok.kind == FTOK_KW_WHILE || tok.kind == FTOK_KW_FOR, 0))
+            {
+                tok.data = fast_pp_placed(pp, f, f->ptr - (tok.kind == FTOK_KW_WHILE ? 5u : 3u));
+            }
             fast_pp_emit_soa(pp, tok);
         }
     }
@@ -7463,7 +7512,9 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
     uint8_t* const out_kind = pp->out_kind;
     uint32_t* const out_data = pp->out_data;
     const uint32_t out_limit = pp->out_cap - 64u;
-    const uint64_t* const macro_bits = pp->idents.macro_bits;
+    // The stop set: the macros' bits, and `for` and `while`, whose places this records (#3667). An identifier's bit is
+    // its macro bit.
+    const uint64_t* const stop_bits = pp->idents.macro_bits + BUSTER_FIDENT_BIT_WORDS;
     const __m512i v_work_max = _mm512_set1_epi8(FTOK_STR_LIT);
     uint32_t out_count = pp->out_count;
     uint32_t i = w->pos;
@@ -7504,7 +7555,7 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                 }
                 out_data[out_count + k] = id;
                 out_kind[out_count + k] = ident_kind;
-                if (__builtin_expect((macro_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0, 0))
+                if (__builtin_expect((stop_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0, 0))
                 {
                     // A one-token object macro (SQLITE_OK, OP_*) is replaced where it stands.
                     const uint32_t midx = pp->idents.entries[id].macro_idx;
@@ -7513,12 +7564,19 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                         const FastMacro* fm = pp->macros + midx;
                         if (fm->fast_mode == 1u &&
                             (fm->fast_kind != FTOK_IDENT ||
-                             (macro_bits[fm->fast_data >> 6] & (UINT64_C(1) << (fm->fast_data & 63u))) == 0))
+                             (stop_bits[fm->fast_data >> 6] & (UINT64_C(1) << (fm->fast_data & 63u))) == 0))
                         {
                             out_kind[out_count + k] = fm->fast_kind;
                             out_data[out_count + k] = fm->fast_data;
                             continue;
                         }
+                    }
+                    else if (ident_kind != FTOK_IDENT)
+                    {
+                        // `for` or `while`, which no #define names: the builtins are identifiers. Its place (#3667), from
+                        // the window again: `s` kept for this rare branch would cost every name a register.
+                        out_data[out_count + k] = fast_pp_window_placed(pp, f, i + k);
+                        continue;
                     }
                     out_count += k;
                     w->pos = t;
@@ -7808,6 +7866,8 @@ static bool fast_pp_run_file(FastPP* pp, const char* path, bool is_main, bool is
     {
         // The main file's push, and -MD's record of it (#3592), which a guard of an -include file may have skipped.
         pp->main_serial = pp->file_depth != 0 ? pp->files[pp->file_depth - 1u].serial : 0u;
+        pp->main_text = pp->file_depth != 0 ? pp->files[pp->file_depth - 1u].base : NULL;
+        pp->main_text_end = pp->file_depth != 0 ? pp->files[pp->file_depth - 1u].end : NULL;
         pp->dependency_main = pp->dependency_last;
     }
     if (ok)

@@ -396,6 +396,7 @@ struct CDirectTestMode
     bool trigraphs;
     uint8_t raw_strings;
     const char* predefines_path; // a predefines file (--predefines) instead of the minimal text
+    bool warnings;               // the warnings' checks on, as without -w (#3667); -w otherwise
 };
 
 static bool c_direct_test_compile_source_with(const char* source, const char* obj_path, int expected_status, const char* const* directories,
@@ -469,7 +470,7 @@ static bool c_direct_test_compile_source_with(const char* source, const char* ob
         .no_gnu_keywords = mode.no_gnu_keywords,
         .trigraphs = mode.trigraphs,
         .raw_strings = mode.raw_strings,
-        .quiet = true,
+        .quiet = !mode.warnings,
         .release = true,
     };
     const int st = c_direct_try_compile(&req);
@@ -4794,6 +4795,95 @@ static int c_direct_differential(int argc, char** argv)
     return ok && differ == 0 && floor_met ? 0 : 1;
 }
 
+// A case's tail that puts its tokens before a file's last 80 bytes, which fast_lex_one lexes, not a window.
+#define BUSTER_DIRECT_TEST_TAIL "/* A window lexes the tokens before this comment: more than eighty bytes of the file follow them. */\n"
+
+// A for's or a while's lone `;` body that the full pipeline's -Wempty-body leaves quiet compiles on the direct path with
+// the warnings' checks on (#3667; the forms it warns are bail_cases'): a `;` on another line than the `)`; a loop that
+// is a label's, a case's, an else's, an if's or another loop's statement, or its block's last; a next statement at or
+// before the keyword's column, in bytes (tabs, a two-byte character in a comment before the keyword, code before it,
+// a header over lines, a #line); a macro's call in the header, a compound literal, a statement a macro starts, an
+// assert reduced to its `;` (fast_pp_window_macro), a #define, #else or #endif between; a short text's (fast_lex_one's)
+// and carriage returns before newlines; character constants and a string with a header's marks, a header past 64 bytes,
+// a comment in one (fast_cc_raw_loop's), a division, macros in one. The forms it warns compile under -w, and from a
+// system header; a user header's leave.
+static bool c_direct_test_empty_loop_bodies(const char* obj_path)
+{
+    static const char* const quiet[] = {
+        "int f(int x)\n{\n    while (x--);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x--)\n        ;\n        x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x--) /* a\n */ ;\n        x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\nL:  while (x--);\n        x += 1;\n    if (x) goto L;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    switch (x) {\n    case 1:\n        while (x--);\n            x += 1;\n    }\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x, int y)\n{\n    if (y) x = 1;\n    else while (x--);\n        x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x, int y)\n{\n    if (y) while (x--); x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x, int y)\n{\n    while (y--) while (x--);\n        x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "void f(int x)\n{\n    x += 2;\n    while (x--);\n        }\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    if (x) {\n        for (; x; x--);\n    return x;\n    }\n    return 0;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n\twhile (x--);\n\treturn x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n  while (x--);\n\treturn x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n/* \xc3\xa9 */ while (x--);\n         return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    x = 1; while (x--);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x, int y)\n{\n    while (x-- &&\n           y);\n    x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#line 100\nint f(int x)\n{\n    while (x--);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define N(a) ((a) + 1)\nint f(int x)\n{\n    for (int i = 0; i < N(x); i++);\n    x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    for (int i = 0; i < (int[]){ 3 }[0]; i++);\n    x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define INC(v) ((v) += 1)\nint f(int x)\n{\n    while (x--);\n    INC(x);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define value v_\nint v_;\nint f(int x)\n{\n    while (x--);\n    value = x;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define check(x) ((void)0)\nint f(int x)\n{\n    while (x--);\n    check(x);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x--);\n#define Y 1\n    return x + Y;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n#ifndef NOPE\n    while (x--);\n#else\n    x = 2;\n#endif\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n#ifndef NOPE\n    while (x--);\n#endif\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\r\n{\r\n    while (x--);\r\n    return x;\r\n}\r\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    for (; x; x--);\n    return x;\n}\n",
+        "int f(const char* s)\n{\n    for (; *s && *s != ';'; s++);\n    return *s;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(const char* s)\n{\n    while (*s && *s != ')' && *s++ != '\\'');\n    return *s;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int g(const char*);\nint f(int x)\n{\n    while (x-- && g(\"a(b;c\"));\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int a_quite_long_name_for_a_counter, int another_long_name_to_cross_a_step)\n{\n    for (; a_quite_long_name_for_a_counter < "
+        "another_long_name_to_cross_a_step; a_quite_long_name_for_a_counter++);\n    return a_quite_long_name_for_a_counter;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x-- /* ) ; */ > 0);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    for (; x / 2 > 0; x--);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define LIM(v) ((v) * 2)\n#define ONE 1\nint f(int x, int y)\n{\n    for (x = ONE; x < LIM(y); x++);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+    };
+    bool ok = true;
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(quiet) / sizeof(quiet[0])); i += 1)
+    {
+        const bool taken = c_direct_test_compile_mode(quiet[i], obj_path, 0, NULL, NULL, (CDirectTestMode){ .warnings = true });
+        if (!taken)
+        {
+            fprintf(stderr, "test-direct: a loop's empty body -Wempty-body leaves quiet left the direct path: case %u\n", i);
+        }
+        ok = ok && taken;
+    }
+    static const char warned[] = "int f(int x)\n{\n    while (x--);\n        x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL;
+    const bool under_w = c_direct_test_compile_mode(warned, obj_path, 0, NULL, NULL, (CDirectTestMode){ 0 });
+    // A system header's warning is quiet; a user header's is the full pipeline's.
+    char directory[] = "/tmp/buster-direct-loops.XXXXXX";
+    const bool made = mkdtemp(directory) != NULL;
+    char header[300];
+    snprintf(header, sizeof(header), "%s/h.h", directory);
+    FILE* const file = made ? fopen(header, "wb") : NULL;
+    bool written = file != NULL && fputs("static inline int h(int x)\n{\n    while (x--);\n        x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL, file) >= 0;
+    written = (file == NULL || fclose(file) == 0) && written;
+    char user[512];
+    snprintf(user, sizeof(user), "#include \"%s\"\nint f(int x) { return h(x); }\n", header);
+    const char* const directories[] = { directory };
+    const bool system_quiet = written && c_direct_test_compile_source_with("#include <h.h>\nint f(int x) { return h(x); }\n", obj_path, 0, directories, 1, false,
+                                                                           NULL, NULL, NULL, NULL, NULL, 0, (CDirectTestMode){ .warnings = true });
+    const bool user_left = written && c_direct_test_compile_mode(user, obj_path, 1, NULL, NULL, (CDirectTestMode){ .warnings = true });
+    unlink(header);
+    if (made)
+    {
+        rmdir(directory);
+    }
+    if (!under_w || !system_quiet || !user_left)
+    {
+        fprintf(stderr, "test-direct: a loop's empty body left the direct path under -w (%d) or from a system header (%d), or stayed from a user's (%d)\n",
+                !under_w, !system_quiet, !user_left);
+    }
+    return ok && under_w && system_quiet && user_left;
+}
+
 static int c_direct_unit_tests(void)
 {
     char obj_path[256];
@@ -5056,8 +5146,6 @@ static int c_direct_unit_tests(void)
     }
 
     // Soundness bailout cases: MUST return 1 and write NOTHING!
-    // A case's tail that puts its tokens before a file's last 80 bytes, which fast_lex_one lexes, not a window.
-#define BUSTER_DIRECT_TEST_TAIL "/* A window lexes the tokens before this comment: more than eighty bytes of the file follow them. */\n"
     static const char* const bail_cases[] = {
         "#pragma push_macro(\"X\")\nint f(void) { return 0; }\n",
         "#error forced error\n",
@@ -5187,6 +5275,44 @@ static int c_direct_unit_tests(void)
         // -Wempty-body: an if's empty statement on its condition's line, and a switch's.
         "int f(int x) { if (x); return x; }\n",
         "int f(int x) { switch (x); return x; }\n",
+        // ... and a for's or a while's (#3667), on its `)`'s line, of a loop that is a block's own statement with a
+        // statement after it that is a compound one or starts past the keyword's column, in bytes: on one line, in a short
+        // text that fast_lex_one lexes as in a window's; indented deeper (a tab is a column, one column is enough); after
+        // a block; a block, a declaration, a label, an empty statement, a case; a header over two lines; a `)` a macro
+        // gives, an empty macro before the `;`; a dead branch's; past an #else; a conditional whose group the text doesn't
+        // say; a statement an empty macro starts, or an empty function-like one's `;`.
+        "int f(int x) { while (x--); return x; }\n",
+        "int f(int x) { for (; x; x--); return x; }\n",
+        "int f(int x) { while (x--); return x; }\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    for (int i = 0; i < x; i++);\n        x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n\twhile (x--);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x--);\n     x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x--);\n    {\n        x += 1;\n    }\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x, int y)\n{\n    if (y) { y = 2; }\n    while (x--);\n        x += y;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x--);\n        int y = x;\n    return y;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x--);\n      L: x += 1;\n    if (x < 3) goto L;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x--);\n        ;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    switch (x) {\n    case 0: x = 3;\n    while (x--);\n      case 1: x += 1;\n    }\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x, int y)\n{\n    while (x-- &&\n           y);\n        x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define LOOP(v) while ((v)--)\nint f(int x)\n{\n    LOOP(x);\n        x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define EMPTY\nint f(int x)\n{\n    while (x--) EMPTY;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    if (0) {\n        while (x--);\n            x += 1;\n    }\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n#ifndef NOPE\n    while (x--);\n#else\n    x = 2;\n#endif\n        return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x--);\n#ifdef NOPE\n    x += 2;\n#else\n        x += 1;\n#endif\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define EMPTY\nint f(int x)\n{\n    while (x--);\n    EMPTY x += 1;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define testcase(X)\nint f(int x)\n{\n    while (x--);\n    testcase(x);\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        // ... and as the header's text reads 64 bytes a step (fast_cc_raw_header) or a token at a time: a character
+        // constant's `;`, a string's `(`, a header past a step, a comment in it.
+        "int f(const char* s)\n{\n    for (; *s && *s != ';'; s++);\n        return *s;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int g(const char*);\nint f(int x)\n{\n    while (x-- && g(\"a(b;c\"));\n        return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int a_quite_long_name_for_a_counter, int another_long_name_to_cross_a_step)\n{\n    for (; a_quite_long_name_for_a_counter < "
+        "another_long_name_to_cross_a_step; a_quite_long_name_for_a_counter++);\n        return a_quite_long_name_for_a_counter;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        "int f(int x)\n{\n    while (x-- /* ) ; */ > 0);\n        return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
+        // ... and where macros give a for's `;`s and `)` (the text's `)` is another's, a later `(`'s macro its match), the
+        // loop's `;` on the line its `)` is expanded on, the next statement after it there, and the line after the text's
+        // `;` starting as it does (fast_cc_raw_macros_balanced).
+        "#define SEP ;\n#define RP )\n#define LP (\nint f(int x)\n{\n    int i;\n    for (i = 0 SEP i < x SEP i++ RP ; x++ ; LP x++ ) ;\n"
+        "    x++;\n    return x;\n}\n" BUSTER_DIRECT_TEST_TAIL,
         // -Wsizeof-array-decay: sizeof of an array under + and a comma.
         "int f(void) { int a[3] = { 0 }; return (int)sizeof(a + 0); }\n",
         "int f(void) { int a[3] = { 0 }; return (int)sizeof((0, a)); }\n",
@@ -5327,9 +5453,10 @@ static int c_direct_unit_tests(void)
         "#define __LINE__ 1\nint f(void) { return 0; }\n",
         "#define defined 1\nint f(void) { return 0; }\n",
     };
+    // With the warnings' checks on (without -w): -w only takes a check's refusal away, so each case leaves either way.
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
-        if (c_direct_test_compile_source(bail_cases[i], obj_path, 1, NULL, NULL))
+        if (c_direct_test_compile_mode(bail_cases[i], obj_path, 1, NULL, NULL, (CDirectTestMode){ .warnings = true }))
         {
             passed += 1u;
         }
@@ -5607,6 +5734,16 @@ static int c_direct_unit_tests(void)
     else
     {
         fprintf(stderr, "test-direct: FAIL glibc's assert\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_empty_loop_bodies(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL a loop's empty body\n");
         failed += 1u;
     }
 
