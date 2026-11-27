@@ -1231,6 +1231,62 @@ static void refine_test_report_fault(int signal_number)
     _exit(1);
 }
 
+// Place the first and last tokens at the edges of readable memory. Wide groups cross both the signed-index boundary
+// and inaccessible pages between token clusters. The expected bits are chosen while writing the source bytes.
+static bool refine_check_newline_positions(void)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t extent = UINT64_C(1) << 32;
+    uint8_t* mapping = mmap(0, extent + 2 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool passed = mapping != MAP_FAILED;
+    uint32_t checked = 0;
+    if (passed)
+    {
+        uint8_t* source = mapping + page;
+        passed = mprotect(source, page, PROT_READ | PROT_WRITE) == 0 &&
+                 mprotect(source + extent / 2 - page, 2 * page, PROT_READ | PROT_WRITE) == 0 &&
+                 mprotect(source + extent - page, page, PROT_READ | PROT_WRITE) == 0;
+        const uint32_t spans[] = { 63, 64, 65, 127, 128, 129, UINT32_MAX };
+        for (uint32_t test = 0; passed && test < BUSTER_ARRAY_LENGTH(spans); test += 1)
+        {
+            const uint32_t last = spans[test];
+            const bool wide = last == UINT32_MAX;
+            uint8_t* bytes = wide ? source : source + page - last;
+            for (uint32_t lanes = 1; passed && lanes <= 16; lanes += 1)
+            {
+                const uint32_t valid = (1u << lanes) - 1;
+                for (uint32_t first = 0; passed && first <= 4; first += 1)
+                {
+                    uint32_t starts[16] = { first };
+                    uint32_t expected = 0;
+                    for (uint32_t lane = 0; lane < lanes; lane += 1)
+                    {
+                        if (lane != 0)
+                        {
+                            starts[lane] = wide ? (UINT32_C(1) << 31) - 8 + lane : first + (last - first) * lane / (lanes - 1);
+                            if (lane + 1 == lanes)
+                            {
+                                starts[lane] = last;
+                            }
+                        }
+                        if (starts[lane] != 0)
+                        {
+                            const uint8_t value = (lane + first) % 3;
+                            bytes[starts[lane] - 1] = value == 0 ? '\n' : value == 1 ? '\r' : 'x';
+                            expected |= (uint32_t)(value < 2) << lane;
+                        }
+                    }
+                    checked += 1;
+                    passed = refine_newlines_before(bytes, last, _mm512_loadu_si512(starts), starts, valid) == expected;
+                }
+            }
+        }
+        munmap(mapping, extent + 2 * page);
+    }
+    printf("newline positions: %u guarded masks, %s\n", checked, passed ? "pass" : "fail");
+    return passed;
+}
+
 static bool refine_check_page_edges(RefineTestState* state, uint64_t* random)
 {
     static uint8_t template[BUSTER_REFINE_TEST_PAGE_EDGE_LENGTHS + BUSTER_REFINE_TEST_INPUT_BYTES];
@@ -1568,6 +1624,7 @@ static int run_refinement_tests(int argument_count, char** arguments)
         passed &= refine_check_fixtures(&state);
         passed &= refine_check_spellings(&state, random % 64);
         passed &= refine_check_random(&state, &random, count);
+        passed &= refine_check_newline_positions();
         passed &= refine_check_page_edges(&state, &random);
         uint64_t files = 0;
         uint64_t bytes = 0;

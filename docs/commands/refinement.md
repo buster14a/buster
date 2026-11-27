@@ -56,6 +56,7 @@ identifier must get the same id and every token the same leading-space bit, on:
   inputs;
 - 20,000 random inputs (`--count N`) of identifiers, splices, comments,
   digraphs, pp-numbers and other tokens, one in 16 with trigraphs;
+- 560 predecessor-byte masks at window boundaries and across the signed 32-bit gather boundary, using guard pages and one to sixteen active lanes;
 - 9,600 prefixes and suffixes of random inputs that end exactly at a readable
   page's end, before a `PROT_NONE` page, or start at a page's start: a read
   outside the source faults, and the test names the input and exits with 1;

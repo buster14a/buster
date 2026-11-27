@@ -289,9 +289,8 @@ struct RefineIdentifiers
     uint32_t count;
 };
 
-// The 16 tokens' lanes of `starts` (`valid` of them) whose previous byte is a newline ('\n' or '\r'). The bytes come
-// from a 128-byte window from the first start's previous byte, with one vpermi2b; 16 starts that span more than that
-// (long tokens or comments between them) read their bytes one at a time.
+// The active token lanes whose preceding byte is a newline. Gather from a compact byte window when the starts fit,
+// otherwise read the scattered positions at the width of the active lanes. A token at offset zero has no predecessor.
 BUSTER_INLINE uint32_t refine_newlines_before(const uint8_t* source, uint64_t length, __m512i starts, const uint32_t* start_values, uint32_t valid)
 {
     uint32_t result = 0;
@@ -299,27 +298,56 @@ BUSTER_INLINE uint32_t refine_newlines_before(const uint8_t* source, uint64_t le
     // A start of 0 has no previous byte; the window then starts at 0 and that lane's index wraps, so it is masked out.
     const uint32_t first = start_values[0];
     const uint64_t base = first != 0 ? (uint64_t)first - 1 : 0;
-    const uint64_t span = (uint64_t)start_values[lanes - 1] - 1 - base;
-    if (BUSTER_LIKELY(span < BUSTER_REFINE_WINDOW_BYTES))
+    const uint32_t last = start_values[lanes - 1];
+    const uint64_t span = (uint64_t)last - base;
+    if (BUSTER_LIKELY(span <= BUSTER_REFINE_WINDOW_BYTES))
     {
-        const uint64_t available = length - base;
-        const __mmask64 low_mask = available >= 64 ? ~0ull : _bzhi_u64(~0ull, (uint32_t)available);
-        const __mmask64 high_mask = available >= 128 ? ~0ull : available <= 64 ? 0 : _bzhi_u64(~0ull, (uint32_t)(available - 64));
-        const __m512i low = _mm512_maskz_loadu_epi8(low_mask, source + base);
-        const __m512i high = _mm512_maskz_loadu_epi8(high_mask, source + base + 64);
+        const __m512i low = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, (uint32_t)span), source + base);
+        __m512i high = _mm512_setzero_si512();
+        if (span > 64)
+        {
+            high = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, (uint32_t)(span - 64)), source + base + 64);
+        }
         const __m512i offsets = _mm512_sub_epi32(starts, _mm512_set1_epi32((int)(base + 1)));
         const __m512i indices = _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(offsets));
         const __m128i before = _mm512_castsi512_si128(_mm512_permutex2var_epi8(low, indices, high));
         result = (uint32_t)(_mm_cmpeq_epi8_mask(before, _mm_set1_epi8('\n')) | _mm_cmpeq_epi8_mask(before, _mm_set1_epi8('\r')));
     }
+    else if (valid == 0x3)
+    {
+        // Two distant positions fit in one register with two byte loads.
+        const __m128i before = _mm_insert_epi8(_mm_cvtsi32_si128(source[base]), source[last - 1], 1);
+        result = (uint32_t)(_mm_cmpeq_epi8_mask(before, _mm_set1_epi8('\n')) | _mm_cmpeq_epi8_mask(before, _mm_set1_epi8('\r')));
+    }
     else
     {
-        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        // Read a dword ending at each start. For starts below four, use the first dword and move the requested byte
+        // into its top position. A wide span guarantees that this first dword exists. The midpoint lets a signed
+        // 32-bit gather index address either half of a source with unsigned 32-bit token offsets.
+        const __m512i four = _mm512_set1_epi32(4);
+        const uint32_t pivot = length > INT32_MAX ? UINT32_C(0x80000000) : 0;
+        const __m512i address = _mm512_sub_epi32(_mm512_max_epu32(starts, four), _mm512_set1_epi32((int)(pivot + 4)));
+        const uint8_t* origin = source + pivot;
+        __m512i bytes;
+        if (valid <= 0xF)
         {
-            const uint32_t start = start_values[lane];
-            const uint8_t c = start != 0 ? source[start - 1] : 0;
-            result |= (uint32_t)(c == '\n' || c == '\r') << lane;
+            bytes = _mm512_zextsi128_si512(_mm_mmask_i32gather_epi32(_mm_setzero_si128(), (__mmask8)valid, _mm512_castsi512_si128(address), origin, 1));
         }
+        else if (valid <= 0xFF)
+        {
+            bytes = _mm512_zextsi256_si512(_mm256_mmask_i32gather_epi32(_mm256_setzero_si256(), (__mmask8)valid, _mm512_castsi512_si256(address), origin, 1));
+        }
+        else
+        {
+            bytes = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), (__mmask16)valid, address, origin, 1);
+        }
+        if (first < 4)
+        {
+            const __m512i shift = _mm512_slli_epi32(_mm512_sub_epi32(four, _mm512_min_epu32(starts, four)), 3);
+            bytes = _mm512_sllv_epi32(bytes, shift);
+        }
+        bytes = _mm512_srli_epi32(bytes, 24);
+        result = (uint32_t)(_mm512_cmpeq_epi32_mask(bytes, _mm512_set1_epi32('\n')) | _mm512_cmpeq_epi32_mask(bytes, _mm512_set1_epi32('\r')));
     }
     return result & valid & ~(uint32_t)(first == 0);
 }
