@@ -16,7 +16,7 @@
 // (pp_test_line_ends, #441): a "\r\n" counts at its '\n', so a query that ends at the '\n' counts no line end there.
 //
 // Layout: the random sources, the preparations and their comparison, the line pages, lines in units, the windows' cut
-// (pp_window_cut) against a byte-at-a-time one and on windows made by hand, the directives' places (pp_directive_places) against their twin, line
+// (pp_window_cut) against a byte-at-a-time one and on windows made by hand, the directives' places (pp_directive_places) against their source bits, line
 // ends at a query's end, and pp_test_windows.
 
 #include <stdint.h>
@@ -733,38 +733,52 @@ static uint64_t pp_window_test_cut_fixtures(uint64_t* checks)
     return failures;
 }
 
-// pp_directive_places against its twin: 0 to 300 words of every density (none, sparse, runs, more than 16 bits, all
-// ones), each output ending at a PROT_NONE page exactly where its places end, so that a store past them faults. Returns
-// the differences and adds the checks to `checks`.
+// The output must enumerate every set bit in order. Check each density from 0 to 64 in a noninitial word and mixtures
+// of words across group boundaries. Both the input and output end at guard pages so a loose load or store faults.
 static uint64_t pp_window_test_places(uint64_t* random, uint64_t* checks)
 {
     const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
-    // Room for 300 words of 64 places each, and a guard page.
-    const uint64_t room = (300 * 64 * sizeof(uint32_t) + page_bytes - 1) / page_bytes * page_bytes;
+    const uint64_t word_room = (300 * sizeof(uint64_t) + page_bytes - 1) / page_bytes * page_bytes;
+    const uint64_t place_room = (300 * 64 * sizeof(uint32_t) + page_bytes - 1) / page_bytes * page_bytes;
+    const uint64_t room = word_room + page_bytes + place_room;
     uint8_t* mapping = mmap(0, room + page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint64_t failures = mapping == MAP_FAILED || mprotect(mapping + room, page_bytes, PROT_NONE) != 0;
-    static uint64_t words[300];
-    static uint32_t expected[300 * 64];
+    uint64_t failures = mapping == MAP_FAILED || mprotect(mapping + word_room, page_bytes, PROT_NONE) != 0 || mprotect(mapping + room, page_bytes, PROT_NONE) != 0;
     for (uint32_t word_count = 0; failures == 0 && word_count <= 300; word_count += word_count < 40 ? 1 : 13)
     {
-        for (uint32_t trial = 0; trial < 16; trial += 1)
+        uint64_t* words = (uint64_t*)(mapping + word_room) - word_count;
+        const uint32_t trials = word_count == 9 ? 16 + 65 : 16;
+        for (uint32_t trial = 0; trial < trials; trial += 1)
         {
             const uint32_t density = (uint32_t)(pp_window_test_random(random) % 6);
+            uint32_t count = 0;
             for (uint32_t w = 0; w < word_count; w += 1)
             {
                 const uint64_t r = pp_window_test_random(random);
                 const uint64_t s = pp_window_test_random(random);
                 words[w] = density == 0 ? 0 : density == 1 ? (r % 8 == 0 ? 1ull << (s % 64) : 0) : density == 2 ? r & s & pp_window_test_random(random)
                          : density == 3 ? r : density == 4 ? (r % 4 == 0 ? ~0ull : r % 4 == 1 ? 0 : r) : ~0ull >> (s % 64);
+                if (trial >= 16 && w == 8)
+                {
+                    words[w] = __builtin_rotateleft64(_bzhi_u64(UINT64_MAX, trial - 16), (unsigned)s);
+                }
+                count += (uint32_t)__builtin_popcountll(words[w]);
             }
-            const uint32_t count = pp_directive_places_scalar(words, word_count, expected);
             uint32_t* places = (uint32_t*)(mapping + room) - count;
+            if (count != 0)
+            {
+                memset(places, 0xFF, (size_t)count * sizeof(*places));
+            }
             const uint32_t vector = pp_directive_places(words, word_count, places);
-            const bool same = vector == count && memcmp(places, expected, (uint64_t)count * sizeof(uint32_t)) == 0;
+            bool same = vector == count;
+            for (uint32_t i = 0; same && i < count; i += 1)
+            {
+                const uint32_t place = places[i];
+                same = place / 64 < word_count && ((words[place / 64] >> (place % 64)) & 1) != 0 && (i == 0 || places[i - 1] < place);
+            }
             *checks += 1;
             if (!same && failures < 4 && !pp_test_quiet)
             {
-                printf("windows: the places of %u words of density %u: %u places, %u a bit at a time, or they differ\n", word_count, density, vector, count);
+                printf("windows: %u words, trial %u, density %u: returned %u places for %u set bits, or places differ\n", word_count, trial, density, vector, count);
             }
             failures += !same;
         }
