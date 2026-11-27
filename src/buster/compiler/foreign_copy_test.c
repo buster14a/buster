@@ -542,11 +542,60 @@ static void foreign_copy_test_case(ForeignTestTally* tally, const char* director
     arena_pop_to(arena, saved);
 }
 
+// A low target seen before the first high target must survive promotion. A call to
+// an imported function goes through the PLT; the same relocation to data needs a copy.
+static void foreign_copy_test_marks(ForeignTestTally* tally)
+{
+    uint8_t kinds[145] __attribute__((aligned(64))) = { 0 };
+    SymbolId targets[145] = { 0 };
+    uint8_t sources[130] = { [3] = BUSTER_LINK_SOURCE_FOREIGN_SHARED, [32] = BUSTER_LINK_SOURCE_FOREIGN_SHARED,
+                             [63] = BUSTER_LINK_SOURCE_FOREIGN_SHARED, [64] = BUSTER_LINK_SOURCE_FOREIGN_SHARED,
+                             [129] = BUSTER_LINK_SOURCE_FOREIGN_SHARED };
+    uint8_t flags[130] = { [32] = BUSTER_LINK_SYMBOL_FUNCTION };
+    uint32_t copied[8];
+    for (uint32_t shift = 0; shift < 64; shift += 1)
+    {
+        uint8_t* kind = kinds + shift;
+        SymbolId* target = targets + shift;
+        memset(kind, BUSTER_LINK_FIXUP_NONE, 74);
+        kind[1] = BUSTER_LINK_FIXUP_PC32;
+        target[1] = 3;
+        kind[2] = BUSTER_LINK_FIXUP_CALL;
+        target[2] = 32;
+        kind[3] = BUSTER_LINK_FIXUP_CALL | BUSTER_LINK_FIXUP_WIDE;
+        target[3] = 63;
+        kind[4] = BUSTER_LINK_FIXUP_PC64;
+        target[4] = 3;
+        kind[17] = BUSTER_LINK_FIXUP_ABS64;
+        target[17] = 129;
+        kind[62] = BUSTER_LINK_FIXUP_ABS32;
+        target[62] = 62;
+        kind[64] = BUSTER_LINK_FIXUP_CALL;
+        target[64] = 64;
+        kind[73] = BUSTER_LINK_FIXUP_ABS32S | BUSTER_LINK_FIXUP_WIDE;
+        target[73] = 129;
+        Link link = { .symbols = { .count = 64, .flags = flags, .source = sources },
+                      .fixups = { .count = 16, .kind = kind, .target = target } };
+        memset(copied, 0xa5, sizeof(copied));
+        const uint64_t low = foreign_link_mark_copies(&link, copied);
+        foreign_test_expect(tally, low == 2 && copied[0] == 8 && copied[1] == 0x80000000u && copied[2] == 0xa5a5a5a5u,
+                            "copy bitmap in a single word", 0);
+        link.symbols.count = BUSTER_ARRAY_LENGTH(sources);
+        link.fixups.count = 74;
+        memset(copied, 0xa5, sizeof(copied));
+        const uint64_t all = foreign_link_mark_copies(&link, copied);
+        const uint32_t expected[] = { 8, 0x80000000u, 1, 0, 2, 0, 0xa5a5a5a5u, 0xa5a5a5a5u };
+        foreign_test_expect(tally, all == 4 && memcmp(copied, expected, sizeof(expected)) == 0,
+                            "copy bitmap keeps early targets and the last partial group", 0);
+    }
+}
+
 static bool foreign_copy_test(const char* directory, Arena* arena, bool cross_check, ForeignTestSystem* system)
 {
     ForeignTestTally tally = {
         .check = "foreign copy relocations",
     };
+    foreign_copy_test_marks(&tally);
     Runtime runtime;
     const bool found = runtime_import(&runtime) == RUNTIME_ERROR_NONE && runtime.loader_path.length != 0;
     foreign_test_expect(&tally, found, "find system dynamic loader", 0);
