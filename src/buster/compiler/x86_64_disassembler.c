@@ -1166,7 +1166,6 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
         const __m512i row = _mm512_srli_epi32(entries[3], 16);
         // A lane out of candidates is UNSUPPORTED.
         const uint16_t candidates = pending & _mm512_cmpneq_epi32_mask(row, zero);
-        refused |= pending & ~candidates;
         pending = candidates;
         const __m512i form = entries[0];
         const __m512i check_registers = entries[1];
@@ -1313,7 +1312,6 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
     done_registers = _mm512_mask_mov_epi32(done_registers, wait, zero);
     done_address32 &= ~wait;
     decoded |= wait;
-    refused &= ~wait;
     truncated &= ~wait;
     // In order: the lanes before the first failure, and none after a lane whose length isn't its hint.
     const __m512i hint = x86_decode_lane_field(lane_starts, _mm512_loadu_si512(lengths));
