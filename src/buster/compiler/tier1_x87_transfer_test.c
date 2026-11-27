@@ -147,6 +147,22 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
                                shifted[first + 3].form == X86_FORM_FST_ST && shifted[first + 4].form == X86_FORM_FXCH_ST,
                                "shifted and final boundaries retain exactly one proven pair");
     }
+    for (uint32_t count = 255; count <= 321; count += 1)
+    {
+        X86Instruction stream[321] = { 0 };
+        uint32_t names[321];
+        uint8_t tags[321] = { 0 };
+        uint8_t cuts[322] = { 0 };
+        memset(names, 0xff, sizeof(names));
+        memcpy(stream, original, 6 * sizeof(*original));
+        names[3] = names[4] = 3;
+        tags[3] = BUSTER_X87_TRANSFER_STORE;
+        tags[4] = BUSTER_X87_TRANSFER_RELOAD;
+        cuts[0] = cuts[4] = cuts[6] = cuts[count] = BUSTER_X87_TRANSFER_BOUNDARY;
+        const X87TransferStats result = x87_transfer_records(stream, count, names, tags, cuts);
+        tier1_wide_test_expect(test, result.pairs == 1 && stream[3].form == X86_FORM_FST_ST && stream[4].form == X86_FORM_FXCH_ST,
+                               "the first boundary word stays full beyond 255 remaining records");
+    }
     // The integer staging store before FILD may touch the edge of the private ten-byte slot.
     original[6] = original[5];
     original[5] = original[4];

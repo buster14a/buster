@@ -405,7 +405,7 @@ static X87TransferStats x87_transfer_records(X86Instruction* records, uint32_t c
     for (uint64_t start = 1; start <= count; start += 64)
     {
         const uint32_t left = (uint32_t)(count - start + 1);
-        const __mmask64 lanes = _bzhi_u64(UINT64_MAX, left);
+        const __mmask64 lanes = left >= 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, left);
         const __m512i bytes = _mm512_maskz_loadu_epi8(lanes, boundaries + start);
         uint64_t ends = _mm512_test_epi8_mask(bytes, bytes);
         if (left <= 64)
