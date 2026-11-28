@@ -135,6 +135,7 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_FLOAT_STORE,
     TIER1_BURS_OP_FLOAT_BINARY_RIGHT,
     TIER1_BURS_OP_FLOAT_BINARY_LEFT,
+    TIER1_BURS_OP_X87,
     TIER1_BURS_OPERATORS,
 } Tier1BursOperator;
 
@@ -191,6 +192,7 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_FCMP_EQ,
     TIER1_BURS_FAMILY_CBR_ADJ,
     TIER1_BURS_FAMILY_SELECT,
+    TIER1_BURS_FAMILY_X87,
     TIER1_BURS_FAMILY_SIGN_LOAD,
     TIER1_BURS_FAMILY_FLOAT_LOAD,
     TIER1_BURS_FAMILY_FLOAT_STORE,
@@ -296,6 +298,8 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     // Shifts, by a constant count below their width, or by a register's (cl).
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SHIFT, 0, { TIER1_BURS_REG, TIER1_BURS_SHAMT }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_IMMEDIATE },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SHIFT, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 4, TIER1_BURS_ACTION_KIND, TIER1_RULE_SHIFT },
+    // The x87 operations read and write their own frame objects. Their data operands are materialized by the pattern.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_X87, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_X87 },
     // A signed widening reads a scalar load directly when its single use can fold
     // without crossing a memory barrier. Otherwise only the register extension remains.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGN_LOAD, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_NONE },
@@ -528,6 +532,9 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
         break;
     case TIER1_BURS_FAMILY_SHL:
         member = op == TIER1_BURS_OP_SHL;
+        break;
+    case TIER1_BURS_FAMILY_X87:
+        member = op == TIER1_BURS_OP_X87;
         break;
     case TIER1_BURS_FAMILY_SIGN_LOAD:
         member = op == TIER1_BURS_OP_SIGN_LOAD;
@@ -1366,6 +1373,24 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
             const __mmask16 entry = object & _mm512_cmpeq_epi32_mask(block, zero);
             result = _mm512_mask_mov_epi32(result, object, _mm512_set1_epi32(TIER1_BURS_OP_SLOT));
             result = _mm512_mask_mov_epi32(result, entry, _mm512_set1_epi32(TIER1_BURS_OP_SLOT_X));
+        }
+        const __mmask16 f80 = _mm512_mask_cmpeq_epi32_mask(active, type, _mm512_set1_epi32(IR_F80));
+        const __mmask16 a80 = _mm512_mask_cmpeq_epi32_mask(a_valid, a_type, _mm512_set1_epi32(IR_F80));
+        const __mmask16 b80 = _mm512_mask_cmpeq_epi32_mask(b_valid, b_type, _mm512_set1_epi32(IR_F80));
+        if ((f80 | a80 | b80) != 0)
+        {
+            const uint32_t values = (1u << IR_CONST) | (1u << IR_UNDEF) | (1u << IR_COPY) | (1u << IR_FNEG) |
+                                    (1u << IR_FADD) | (1u << IR_FSUB) | (1u << IR_FMUL) | (1u << IR_FDIV);
+            __mmask16 x87 = tier1_burs_types(f80, op, values) | _mm512_mask_cmpeq_epi32_mask(f80, op, _mm512_set1_epi32(IR_LOAD)) |
+                            _mm512_mask_cmpeq_epi32_mask(b80, op, _mm512_set1_epi32(IR_STORE)) | _mm512_mask_cmpeq_epi32_mask(a80, op, _mm512_set1_epi32(IR_FCMP));
+            x87 |= _mm512_mask_cmpeq_epi32_mask(f80 & tier1_burs_types(a_valid, a_type, floats), op, _mm512_set1_epi32(IR_FEXT));
+            x87 |= _mm512_mask_cmpeq_epi32_mask(a80 & floating, op, _mm512_set1_epi32(IR_FTRUNC));
+            x87 |= f80 & tier1_burs_types(a_valid, a_type, memory) &
+                   (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SITOFP)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_UITOFP)));
+            x87 |= a80 & tier1_burs_types(active, type, memory) &
+                   (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FPTOSI)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FPTOUI)));
+            result = _mm512_mask_mov_epi32(result, x87, _mm512_set1_epi32(TIER1_BURS_OP_X87));
+            result = _mm512_mask_mov_epi32(result, _mm512_mask_cmpeq_epi32_mask(f80, op, _mm512_set1_epi32(IR_PHI)), _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
         }
         _mm512_mask_storeu_epi32(classes + first, active, result);
         // A floating == or != (#2922): tier1_burs_equality's, whose select's recurrence is tier1_select_recurrent's

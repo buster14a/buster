@@ -277,6 +277,15 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
             {
                 check->mismatches += candidates.count == 0 || munched || chosen != tier1_select_munch(&candidates);
             }
+            if (tier1_select_x87_node(function, node) && candidates.count != 0 && candidates.patterns[0].rule == TIER1_RULE_X87)
+            {
+                check->mismatches += class != TIER1_BURS_OP_X87;
+            }
+            if (class == TIER1_BURS_OP_X87)
+            {
+                check->mismatches += munched || candidates.count != 1 || candidates.patterns[0].rule != TIER1_RULE_X87 ||
+                                     tier1_burs_rules[columns[3][node]].kind != TIER1_RULE_X87;
+            }
             if (class >= TIER1_BURS_OP_CALL && class <= TIER1_BURS_OP_CALL_ROW)
             {
                 const Tier1BursRule* rule = &tier1_burs_rules[columns[3][node]];
