@@ -1031,6 +1031,56 @@ static bool pp_test_line_ends(void)
 // BUSTER_PP_WINDOW_TEST_SOURCES sources from `seed`, each in one of five language modes (with C's raw strings and
 // without, digit separators or not, without "//" comments and digraphs, and with literal prefixes to split), prepared
 // whole by both kernels and in windows of several sizes, each window's line pages against a count a byte at a time.
+// Whole files and lexer windows now publish the same table. Check its columns against fixed token positions.
+static uint64_t pp_window_test_whole_directives(uint64_t* checks)
+{
+    static const uint32_t lengths[] = { 0, 66, 127, 128, 129, 511, 512, 513, 1024, 1025 };
+    Arena arena = arena_reserve(1024 * 1024);
+    if (arena.base == NULL)
+    {
+        return 1;
+    }
+    uint64_t failures = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(lengths); i += 1)
+    {
+        const uint32_t n = lengths[i];
+        uint8_t kinds[1025] = { 0 };
+        uint32_t values[1025] = { 0 };
+        PPFileData data = { .kinds = kinds, .values = values, .token_count = n };
+        const uint32_t positions[] = { 0, 31, n >= 2 ? n - 2 : 0 };
+        const uint32_t names[] = { C_NAME_IF, C_NAME_ELSE, C_NAME_ENDIF };
+        const uint8_t directives[] = { PP_DIRECTIVE_IF, PP_DIRECTIVE_ELSE, PP_DIRECTIVE_ENDIF };
+        const uint32_t ends[] = { 15, positions[2], n };
+        const uint32_t next[] = { 1, 2, BUSTER_PP_NONE };
+        if (n != 0)
+        {
+            kinds[15] = C_TOKEN_NUMERIC_CONSTANT | BUSTER_C_TOKEN_START_OF_LINE;
+            kinds[16] = C_TOKEN_HASH;
+            for (uint32_t d = 0; d < 3; d += 1)
+            {
+                kinds[positions[d]] = C_TOKEN_HASH | BUSTER_C_TOKEN_START_OF_LINE;
+                kinds[positions[d] + 1] = C_TOKEN_RAW_IDENTIFIER;
+                values[positions[d] + 1] = names[d];
+            }
+        }
+        arena.length = 0;
+        bool valid = pp_directive_table(&arena, &data) && data.directive_count == (n == 0 ? 0 : 3) && data.note_count == 0 && data.guard == 0;
+        for (uint32_t d = 0; valid && d < data.directive_count; d += 1)
+        {
+            valid = data.directive_hash[d] == positions[d] && data.directive_end[d] == ends[d] &&
+                    data.directive_kind[d] == directives[d] && data.directive_next[d] == next[d];
+        }
+        *checks += 1;
+        if (!valid)
+        {
+            fprintf(stderr, "whole-file directive table differs at %u tokens\n", n);
+            failures += 1;
+        }
+    }
+    arena_release(&arena);
+    return failures;
+}
+
 static bool pp_test_windows(uint64_t seed)
 {
     static const uint32_t windows[] = { 1, 7, 64, 100, 333, 1024, 4096, 8192 };
@@ -1052,7 +1102,7 @@ static bool pp_test_windows(uint64_t seed)
     uint64_t line_end_checks = 0;
     const uint64_t line_end_failures = pp_window_test_line_ends(&random, &line_end_checks) + pp_window_test_cut_fixtures(&line_end_checks);
     uint64_t place_checks = 0;
-    const uint64_t place_failures = pp_window_test_places(&random, &place_checks);
+    const uint64_t place_failures = pp_window_test_places(&random, &place_checks) + pp_window_test_whole_directives(&place_checks);
     uint64_t failures = 0;
     uint64_t windowed = 0;
     uint64_t tokens = 0;
