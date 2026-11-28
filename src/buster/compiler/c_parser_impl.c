@@ -8095,6 +8095,11 @@ static bool parse_basic_asm_item(const ParseInput* input, uint32_t begin, uint32
     return true;
 }
 
+BUSTER_INLINE __mmask64 parse_equal8(__m512i x, uint8_t value)
+{
+    return _mm512_cmpeq_epi8_mask(x, _mm512_set1_epi8((char)value));
+}
+
 // A comma-separated list of string constraints on plain identifiers or their dereferences.
 // All masks are relative to the first token after the colon. Empty operand lists are valid.
 static bool parse_asm_operands(__m512i kinds, uint32_t first, uint32_t count)
@@ -8113,6 +8118,42 @@ static bool parse_asm_operands(__m512i kinds, uint32_t first, uint32_t count)
     return (strings | opens | stars | names | closes | commas) == live &&
            strings == (1 | (commas << 1)) && opens == (strings << 1) && (stars & ~(opens << 1)) == 0 &&
            names == (((opens << 1) & ~stars) | (stars << 1)) && closes == (names << 1) && commas == ((closes << 1) & live);
+}
+
+// A memory operand can dereference a pointer cast, as in "m"(*(void *volatile *)p).
+// Remove only complete pointer type names. The same operand check then validates every
+// identifier, dereference, constraint and separator left in the field.
+static bool parse_asm_cast_operands(__m512i kinds, uint32_t first, uint32_t count)
+{
+    const uint64_t field = _bzhi_u64(UINT64_MAX, count) << first;
+    const uint64_t stars = parse_equal8(kinds, PARSE_KIND_STAR) & field;
+    uint64_t casts = parse_equal8(kinds, PARSE_KIND_L_PAREN) & (stars << 1) & field;
+    if (casts == 0)
+    {
+        return false;
+    }
+    const uint64_t closes = parse_equal8(kinds, PARSE_KIND_R_PAREN) & field;
+    const uint64_t types = parse_equal8(kinds, PARSE_KIND_TYPE) & field;
+    const uint64_t qualifiers = parse_equal8(kinds, PARSE_KIND_QUALIFIER) & field;
+    uint64_t keep = field;
+    do
+    {
+        const uint64_t open = casts & -casts;
+        casts ^= open;
+        const uint64_t after = closes & -(open << 1);
+        if (after == 0 || (types & (open << 1)) == 0 || (stars & (open << 2)) == 0)
+        {
+            return false;
+        }
+        const uint64_t close = after & -after;
+        const uint64_t interior = (close - 1) & -(open << 2);
+        if ((interior & ~(stars | qualifiers)) != 0)
+        {
+            return false;
+        }
+        keep &= ~(open | (open << 1) | interior | close);
+    } while (casts != 0);
+    return parse_asm_operands(_mm512_maskz_compress_epi8(keep, kinds), 0, (uint32_t)__builtin_popcountll(keep));
 }
 
 // Return the end of a complete asm statement whose syntax and tree the kernels have already resolved.
@@ -8167,7 +8208,7 @@ static uint32_t parse_inline_asm_close(const ParseKernels* kernels, const ParseI
         const uint32_t count = next - first;
         if (field < 2)
         {
-            if (!parse_asm_operands(kinds, first, count))
+            if (!parse_asm_operands(kinds, first, count) && !parse_asm_cast_operands(kinds, first, count))
             {
                 return BUSTER_PARSE_NONE;
             }
@@ -8188,9 +8229,44 @@ static uint32_t parse_inline_asm_close(const ParseKernels* kernels, const ParseI
     return close;
 }
 
-// Every flagged token must belong to a validated statement. A flag before its keyword or
-// after its closing parenthesis still sends the enclosing top-level declaration to the fallback.
-static bool parse_resolved_asm_item(const ParseKernels* kernels, const ParseInput* input, uint32_t begin, uint32_t end)
+// K6 checks an array bound as an expression and flags its initial static and first operand.
+// Recognize a named parameter's minimum bound when each operand is a number or sizeof of one
+// built-in type. Other flagged tokens still require the enclosing declaration to be reparsed.
+static bool parse_static_parameter_bound(const ParseKernels* kernels, const ParseInput* input, uint32_t token, uint32_t end)
+{
+    if (token < 3 || token >= end || input->names[token] != C_NAME_STATIC || input->kinds[token] != PARSE_KIND_STORAGE ||
+        kernels->roles[token] != PARSE_ROLE_SPECIFIER || kernels->roles[token - 1] != PARSE_ROLE_OPEN_SUBSCRIPT ||
+        kernels->roles[token - 2] != PARSE_ROLE_OPERAND || input->kinds[token - 2] != PARSE_KIND_IDENTIFIER)
+    {
+        return false;
+    }
+    const uint32_t open = token - 1;
+    const uint32_t parameters = kernels->enclosing[open];
+    const uint32_t close = kernels->parents[open];
+    if (parameters >= open || kernels->roles[parameters] != PARSE_ROLE_OPEN_FUNCTION || kernels->enclosing[token - 2] != parameters ||
+        kernels->enclosing[token] != open || close <= token + 1 || close > end || close - token - 1 > 64 ||
+        kernels->roles[close] != PARSE_ROLE_CLOSE_SUBSCRIPT || kernels->enclosing[close] != open)
+    {
+        return false;
+    }
+    const uint32_t first = token + 1;
+    const uint64_t live = _bzhi_u64(UINT64_MAX, close - first);
+    const __m512i kinds = _mm512_maskz_loadu_epi8(live, kernels->vkinds + first);
+    const __m512i roles = _mm512_maskz_loadu_epi8(live, kernels->roles + first);
+    const uint64_t numbers = parse_equal8(kinds, PARSE_KIND_NUMBER) & parse_equal8(roles, PARSE_ROLE_OPERAND);
+    const uint64_t sizes = parse_equal8(kinds, PARSE_KIND_SIZEOF) & parse_equal8(roles, PARSE_ROLE_PREFIX);
+    const uint64_t opens = parse_equal8(roles, PARSE_ROLE_OPEN_SIZEOF);
+    const uint64_t types = parse_equal8(kinds, PARSE_KIND_TYPE) & parse_equal8(roles, PARSE_ROLE_SPECIFIER);
+    const uint64_t closes = parse_equal8(roles, PARSE_ROLE_CLOSE_SIZEOF);
+    const uint64_t binary = _mm512_cmpge_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_MULTIPLICATIVE)) &
+                            _mm512_cmple_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LOGICAL_OR));
+    return (numbers & 1) != 0 && (((numbers | closes) >> (close - first - 1)) & 1) != 0 && (numbers | sizes | opens | types | closes | binary) == live &&
+           opens == (sizes << 1) && types == (opens << 1) && closes == (types << 1) &&
+           binary == (((numbers | closes) << 1) & live) && (numbers | sizes) == ((binary << 1) | 1);
+}
+
+// Each flag must belong to a validated asm statement or parameter bound.
+static bool parse_resolved_item(const ParseKernels* kernels, const ParseInput* input, uint32_t begin, uint32_t end)
 {
     if (parse_basic_asm_item(input, begin, end))
     {
@@ -8213,7 +8289,13 @@ static bool parse_resolved_asm_item(const ParseKernels* kernels, const ParseInpu
         }
         else
         {
-            const uint32_t close = parse_inline_asm_close(kernels, input, first + (uint32_t)__builtin_ctzll(marked), end);
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(marked);
+            if (parse_static_parameter_bound(kernels, input, token, end))
+            {
+                first = token + 2;
+                continue;
+            }
+            const uint32_t close = parse_inline_asm_close(kernels, input, token, end);
             if (close == BUSTER_PARSE_NONE)
             {
                 return false;
@@ -8268,7 +8350,7 @@ static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* inp
                     const uint64_t through = lane == 63 ? ~(uint64_t)0 : (((uint64_t)1 << (lane + 1)) - 1);
                     flagged |= (flags & through) != 0;
                     flags &= ~through;
-                    if (flagged && !parse_resolved_asm_item(kernels, input, begin, block + lane))
+                    if (flagged && !parse_resolved_item(kernels, input, begin, block + lane))
                     {
                         parse_fallback_item(kernels, input, begin, block + lane, earlier, &visible, &result);
                     }
@@ -8952,11 +9034,6 @@ static ParseGroupWindows parse_group_windows_load(const ParseRoleCarry* carry, u
 BUSTER_INLINE __m512i parse_table8(const uint8_t* table, __m512i index)
 {
     return _mm512_permutex2var_epi8(_mm512_loadu_si512(table), index, _mm512_loadu_si512(table + 64));
-}
-
-BUSTER_INLINE __mmask64 parse_equal8(__m512i x, uint8_t value)
-{
-    return _mm512_cmpeq_epi8_mask(x, _mm512_set1_epi8((char)value));
 }
 
 // What a round reads of each lane's role: its features, with the pred class fixed by the lane's kind, as parse_pred_of
