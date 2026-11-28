@@ -3934,7 +3934,6 @@ typedef struct Tier1SelectCandidates Tier1SelectCandidates;
 struct Tier1SelectCandidates
 {
     Tier1SelectPattern patterns[BUSTER_TIER1_SELECT_MAX_CANDIDATES];
-    uint32_t costs[BUSTER_TIER1_SELECT_MAX_CANDIDATES];
     uint32_t count;
 };
 
@@ -5455,22 +5454,27 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_pattern_cost(
     return cost;
 }
 
-static inline __attribute__((always_inline)) void tier1_select_add_candidate(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
+// Rule matching reads the candidate's form, folded-node count and whether an index exists.
+// Canonical value IDs and subtree costs are needed only for the pattern that reaches the plan.
+static inline __attribute__((always_inline)) uint32_t tier1_select_finish_pattern(const Tier1SelectForest* forest, uint32_t node, Tier1SelectPattern* pattern)
 {
-    assert(candidates->count < BUSTER_TIER1_SELECT_MAX_CANDIDATES);
-    pattern.intrinsic_cost += pattern.sign_result;
+    pattern->intrinsic_cost += pattern->sign_result;
     // A symbol's address or an extension the pattern reads is its block's first of the same (#2601): the lowering makes
     // one for every access, and an indexed access, which needs its base and index in registers, would make each one's
     // lea and move. An extension whose operand's register holds its value is that operand (#2843), whose register the
     // pattern reads rather than its copy's.
     for (uint32_t k = 0; forest->symbol_first != 0 && k < BUSTER_TIER1_SELECT_VALUES; k += 1)
     {
-        const uint32_t value = pattern.values[k];
-        pattern.values[k] = value < forest->function->instruction_count && forest->symbol_first[value] != 0 ? forest->symbol_first[value] - 1 : value;
+        const uint32_t value = pattern->values[k];
+        pattern->values[k] = value < forest->function->instruction_count && forest->symbol_first[value] != 0 ? forest->symbol_first[value] - 1 : value;
     }
-    candidates->patterns[candidates->count] = pattern;
-    candidates->costs[candidates->count] = tier1_select_pattern_cost(forest, node, &pattern);
-    candidates->count += 1;
+    return tier1_select_pattern_cost(forest, node, pattern);
+}
+
+static inline __attribute__((always_inline)) void tier1_select_add_candidate(Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
+{
+    assert(candidates->count < BUSTER_TIER1_SELECT_MAX_CANDIDATES);
+    candidates->patterns[candidates->count++] = pattern;
 }
 
 static bool tier1_select_constant(const IrFunction* function, uint32_t value, uint64_t* bits)
@@ -5643,7 +5647,7 @@ static inline __attribute__((always_inline)) void tier1_select_add_comparison(co
     }
     pattern.source_width = select_width != 0 ? pattern.width : pattern.source_width;
     pattern.width = select_width != 0 ? (uint8_t)select_width : pattern.width;
-    tier1_select_add_candidate(forest, node, candidates, pattern);
+    tier1_select_add_candidate(candidates, pattern);
 }
 
 // Whether a select's values recur through it by an operation (#2922): a walk back from its two values, through their
@@ -6170,6 +6174,22 @@ static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier
     return address.folds != 0;
 }
 
+// A verified call has at most one machine pattern. The classifier and independent candidate walk
+// use the same ABI checks. The bottom-up production carries the checked kind to the pattern builder.
+static Tier1SelectRule tier1_select_call_rule(const IrFunction* function, uint32_t node)
+{
+    const IrCall* call = &function->calls[function->b[node]];
+    if (function->op[node] == IR_CALL && call->body != 0 && tier1_select_asm_supported(function, node))
+    {
+        return TIER1_RULE_ASM;
+    }
+    if (function->op[node] == IR_CALL && call->row != 0 && tier1_select_row_supported(function, node))
+    {
+        return TIER1_RULE_ROW;
+    }
+    return tier1_select_call_supported(function, node) ? TIER1_RULE_CALL : TIER1_RULE_NONE;
+}
+
 // Inlined at each of its two calls, the test reference's batch (tier1_select_cover_munch) and the bottom-up path's pattern
 // (tier1_select_burs_pattern), and so are its helpers (tier1_select_add_candidate, tier1_select_memory,
 // tier1_select_load_folds), whose inlining clang decided by their callers. With a second caller, clang outlined it, its
@@ -6177,7 +6197,7 @@ static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier
 // per IR instruction on the frozen sqlite3.c and 841 instructions, against 274 and 747 before the second caller and 276
 // and 752 inlined by force, in tier1_select_cover_munch (benchmark-tier1-select-source, the 9700X). One copy out of line
 // for both calls took 300 and 815.
-static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* forest, uint32_t node)
+static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* forest, uint32_t node, Tier1SelectRule call_rule)
 {
     const IrFunction* function = forest->function;
     const uint32_t op = function->op[node];
@@ -6189,7 +6209,9 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const bool sign_storage = type == IR_I32 && forest->canonical != 0 &&
                               (forest->canonical[node] & (BUSTER_TIER1_STORAGE_ZERO | BUSTER_TIER1_STORAGE_SIGN)) == BUSTER_TIER1_STORAGE_SIGN;
     const bool sign_result = sign_storage && (op == IR_PARAM || tier1_select_sign_birth(function, node));
-    Tier1SelectCandidates candidates = {0};
+    // Only the populated prefix is examined during rule matching.
+    Tier1SelectCandidates candidates;
+    candidates.count = 0;
     Tier1SelectPattern base =
     {
         .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
@@ -6199,6 +6221,65 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         .storage_width = type == IR_I32 && forest->canonical != 0 && (forest->canonical[node] & BUSTER_TIER1_STORAGE_WIDE) != 0 ? 8 : 0,
         .sign_result = sign_result,
     };
+    switch (op)
+    {
+    case IR_BR:
+    {
+        base.rule = TIER1_RULE_JUMP;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(&candidates, base);
+        return candidates;
+    }
+    case IR_BR_INDIRECT:
+    {
+        base.rule = TIER1_RULE_JUMP_INDIRECT;
+        base.values[0] = a;
+        base.width = 8;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(&candidates, base);
+        return candidates;
+    }
+    case IR_CALL:
+    case IR_CALL_INDIRECT:
+    {
+        const Tier1SelectRule kind = call_rule == TIER1_RULE_NONE ? tier1_select_call_rule(function, node) : call_rule;
+        if (kind == TIER1_RULE_ASM)
+        {
+            // An asm body (#1839): its records in the node's place, its operand block the frame object its argument addresses.
+            base.rule = TIER1_RULE_ASM;
+            base.immediate = function->calls[b].body - 1;
+            base.intrinsic_cost = (uint8_t)(function->asm_bodies[function->calls[b].body - 1].count < 254 ? 1 + function->asm_bodies[function->calls[b].body - 1].count : 255);
+            tier1_select_add_candidate(&candidates, base);
+        }
+        else if (kind == TIER1_RULE_ROW)
+        {
+            // A machine row (#141): its records, its operands' moves and its result's.
+            base.rule = TIER1_RULE_ROW;
+            base.immediate = function->calls[b].row - 1;
+            base.intrinsic_cost = (uint8_t)(1 + function->rows[function->calls[b].row - 1].record_count);
+            tier1_select_add_candidate(&candidates, base);
+        }
+        else if (kind == TIER1_RULE_CALL)
+        {
+            base.rule = TIER1_RULE_CALL;
+            base.immediate = a;
+            // A floating result's width too (#141), which the consumer moves from xmm0.
+            base.width = (uint8_t)(width | tier1_select_float_width(type));
+            // Structural lowering estimate: call plus possible argument/result copies; preservation is emitter-owned.
+            base.intrinsic_cost = (uint8_t)(1 + function->calls[b].argument_count + (type != IR_VOID));
+            tier1_select_add_candidate(&candidates, base);
+        }
+        return candidates;
+    }
+    case IR_UNREACHABLE:
+    {
+        base.rule = TIER1_RULE_UNREACHABLE;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(&candidates, base);
+        return candidates;
+    }
+    default: break;
+    }
     const bool integer = type == IR_I32 || type == IR_I64;
     // A narrow value's and, or and xor (#2677): their 32-bit operations, as each narrow value's storage is (tier1_select_width).
     // Zero-extended operands give a zero-extended result (tier1_select_canonical), and an I1's 0 or 1 another 0 or 1; a
@@ -6251,7 +6332,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.scale = (uint8_t)(zero ? BUSTER_TIER1_VECTOR_ZERO : ones ? BUSTER_TIER1_VECTOR_ONES : splat ? BUSTER_TIER1_VECTOR_SPLAT : BUSTER_TIER1_VECTOR_CONSTANT);
             base.immediate = zero || ones ? 0 : splat ? first : a;
             base.intrinsic_cost = zero || ones ? 1 : 2;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_SPLAT)
         {
@@ -6261,7 +6342,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.source_width = function->type[a];
             base.values[0] = a;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_INSERT)
         {
@@ -6281,7 +6362,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 base.values[1] = b;
             }
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c >= BUSTER_IR_INTRINSIC_PERMUTE && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
         {
@@ -6304,12 +6385,12 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 immediate.operation = BUSTER_TIER1_PERMUTE_SHUFFLE_IMMEDIATE;
                 immediate.condition = (uint8_t)shuffle;
                 immediate.immediate = shuffle_immediate;
-                tier1_select_add_candidate(forest, node, &candidates, immediate);
+                tier1_select_add_candidate(&candidates, immediate);
             }
             base.values[1] = b;
             if (tier1_select_permute_form(c - BUSTER_IR_INTRINSIC_PERMUTE, function->flags[node], vector_width) != X86_FORM_NONE)
             {
-                tier1_select_add_candidate(forest, node, &candidates, base);
+                tier1_select_add_candidate(&candidates, base);
             }
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE))
@@ -6325,7 +6406,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.intrinsic_cost = 1;
             if (tier1_select_convert_form(c - BUSTER_IR_INTRINSIC_EXTEND, function->flags[node], vector_width, base.source_width) != X86_FORM_NONE)
             {
-                tier1_select_add_candidate(forest, node, &candidates, base);
+                tier1_select_add_candidate(&candidates, base);
             }
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && (ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_COMPRESS || ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_EXPAND) &&
@@ -6341,7 +6422,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[1] = b;
             base.values[2] = ir_intrinsic_third(function, node);
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_LANE_INSERT)
         {
@@ -6353,7 +6434,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_REDUCE && a < function->instruction_count)
         {
@@ -6365,7 +6446,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.immediate = function->flags[node];
             base.values[0] = a;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_LANE_UNARY)
         {
@@ -6376,7 +6457,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.immediate = function->flags[node];
             base.values[0] = a;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width == 64 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_FROUND)
         {
@@ -6388,7 +6469,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_FUNNEL && ir_intrinsic_ternary(c))
         {
@@ -6408,11 +6489,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 Tier1SelectPattern rotate = base;
                 rotate.condition = 1;
                 rotate.immediate = count;
-                tier1_select_add_candidate(forest, node, &candidates, rotate);
+                tier1_select_add_candidate(&candidates, rotate);
             }
             base.values[1] = b;
             base.values[2] = third;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_QUADWORD_OP)
         {
@@ -6424,7 +6505,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_PAIRWISE)
         {
@@ -6436,7 +6517,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_DOT && ir_intrinsic_ternary(c))
         {
@@ -6449,7 +6530,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[1] = b;
             base.values[2] = ir_intrinsic_third(function, node);
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_AES)
         {
@@ -6461,7 +6542,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_TERNLOG && ir_intrinsic_ternary(c))
         {
@@ -6474,7 +6555,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[1] = b;
             base.values[2] = ir_intrinsic_third(function, node);
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_PERMUTE2 && ir_intrinsic_ternary(c))
         {
@@ -6487,7 +6568,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[1] = b;
             base.values[2] = ir_intrinsic_third(function, node);
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_LANE_OP)
         {
@@ -6502,7 +6583,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.intrinsic_cost = 1;
             if (ir_simd_lane_op_forms[(flags >> 2) & 7][flags & 3][vector_width == 16 ? 0 : vector_width == 32 ? 1 : 2] != X86_FORM_NONE)
             {
-                tier1_select_add_candidate(forest, node, &candidates, base);
+                tier1_select_add_candidate(&candidates, base);
             }
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_SHIFT)
@@ -6522,11 +6603,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 immediate.condition = 1;
                 immediate.immediate = count < 255 ? count : 255;
                 immediate.intrinsic_cost = 1;
-                tier1_select_add_candidate(forest, node, &candidates, immediate);
+                tier1_select_add_candidate(&candidates, immediate);
             }
             base.values[1] = b;
             base.intrinsic_cost = 2;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && (op == IR_COPY || op == IR_NOT))
         {
@@ -6535,7 +6616,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.scale = op == IR_COPY ? BUSTER_TIER1_VECTOR_COPY : BUSTER_TIER1_VECTOR_NOT;
             base.values[0] = a;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && (op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR ||
                                        op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV)))
@@ -6557,7 +6638,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.intrinsic_cost = 1;
             if (tier1_select_lane_form(operation, lane, vector_width, false) != X86_FORM_NONE)
             {
-                tier1_select_add_candidate(forest, node, &candidates, base);
+                tier1_select_add_candidate(&candidates, base);
             }
         }
         else if (vector_width != 0 && op == IR_FMA)
@@ -6574,7 +6655,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 base.values[1] = b;
                 base.values[2] = c;
                 base.intrinsic_cost = 4;
-                tier1_select_add_candidate(forest, node, &candidates, base);
+                tier1_select_add_candidate(&candidates, base);
             }
         }
         else if (vector_width != 0 && (op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI))
@@ -6591,7 +6672,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 base.source_width = (uint8_t)lane;
                 base.values[0] = a;
                 base.intrinsic_cost = 1;
-                tier1_select_add_candidate(forest, node, &candidates, base);
+                tier1_select_add_candidate(&candidates, base);
             }
         }
         else if (compare_width != 0 && mask_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_BITSHUFFLE)
@@ -6603,7 +6684,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (compare_width != 0 && mask_width != 0 && op == IR_VCMP && c < IR_PREDICATE_COUNT)
         {
@@ -6618,7 +6699,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 sign.source_width = function->flags[node];
                 sign.values[0] = a;
                 sign.intrinsic_cost = 1;
-                tier1_select_add_candidate(forest, node, &candidates, sign);
+                tier1_select_add_candidate(&candidates, sign);
             }
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)compare_width;
@@ -6628,7 +6709,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (vector_width != 0 && op == IR_VSELECT)
         {
@@ -6643,7 +6724,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 expand.source_width = function->flags[node];
                 expand.values[0] = a;
                 expand.intrinsic_cost = 1;
-                tier1_select_add_candidate(forest, node, &candidates, expand);
+                tier1_select_add_candidate(&candidates, expand);
             }
             // A select under a comparison of a vector's lanes less than zero whose only use it is (#2780): vpblendvb,
             // vblendvps or vblendvpd at 16 or 32 bytes, of bytes, doublewords or quadwords, the comparison folded.
@@ -6662,7 +6743,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 blend.values[2] = function->a[a];
                 blend.intrinsic_cost = 1;
                 tier1_select_fold(forest, node, a, &blend);
-                tier1_select_add_candidate(forest, node, &candidates, blend);
+                tier1_select_add_candidate(&candidates, blend);
             }
             // A select of a gather whose only use it is, under the gather's own mask at its lanes (#1840): the gather merged
             // into w, or into zeros where w is a zero vector.
@@ -6673,7 +6754,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 if (merged.rule == TIER1_RULE_VECTOR)
                 {
                     tier1_select_fold(forest, node, b, &merged);
-                    tier1_select_add_candidate(forest, node, &candidates, merged);
+                    tier1_select_add_candidate(&candidates, merged);
                 }
             }
             // A select of an operation whose only use it is (#1840, BUSTER_TIER1_VECTOR_MASKED_BINARY): a BINARY's but the
@@ -6707,7 +6788,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 masked.values[3] = zeroing ? BUSTER_IR_NONE : c;
                 masked.intrinsic_cost = 1;
                 tier1_select_fold(forest, node, b, &masked);
-                tier1_select_add_candidate(forest, node, &candidates, masked);
+                tier1_select_add_candidate(&candidates, masked);
             }
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)vector_width;
@@ -6717,7 +6798,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[1] = b;
             base.values[2] = c;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
     }
     else if (mask_width != 0 && (op == IR_CONST || op == IR_UNDEF))
@@ -6728,7 +6809,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.immediate = op == IR_CONST ? function->constants[a].low & (mask_width < 8 ? (UINT64_C(1) << (mask_width * 8)) - 1 : UINT64_MAX) : 0;
         const uint64_t every = mask_width < 8 ? (UINT64_C(1) << (mask_width * 8)) - 1 : UINT64_MAX;
         base.intrinsic_cost = base.immediate == 0 || base.immediate == every ? 1 : 2;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (mask_width != 0 && (op == IR_COPY || (op == IR_BITCAST && function->type[a] == type)))
     {
@@ -6736,7 +6817,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)mask_width;
         base.values[0] = a;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (mask_width != 0 && (op == IR_AND || op == IR_OR || op == IR_XOR))
     {
@@ -6745,7 +6826,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[0] = a;
         base.values[1] = b;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         // A comparison into a mask ANDed with another mask (#1847: the IR's form of a masked comparison's row,
         // ir_simd_typed_compare_mask, whose writemask isn't every lane, ir_typed_unmasked): the comparison under that mask
         // as its writemask, `{k}`, which leaves 0 in the lanes the writemask doesn't have, one vpcmp or vcmpps as the
@@ -6765,7 +6846,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             masked.values[1] = function->b[compared];
             masked.values[2] = compared == a ? b : a;
             tier1_select_fold(forest, node, compared, &masked);
-            tier1_select_add_candidate(forest, node, &candidates, masked);
+            tier1_select_add_candidate(&candidates, masked);
         }
     }
     else if (mask_width != 0 && op == IR_NOT)
@@ -6774,7 +6855,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)mask_width;
         base.values[0] = a;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (mask_width != 0 && op == IR_BITCAST && ir_integer(function->type[a]))
     {
@@ -6783,7 +6864,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)mask_width;
         base.values[0] = a;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_BITCAST && ir_integer(type) && tier1_select_mask_width(function->type[a]) != 0)
     {
@@ -6791,7 +6872,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)tier1_select_mask_width(function->type[a]);
         base.values[0] = a;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (mask_width != 0 && (op == IR_LOAD || op == IR_STORE))
     {
@@ -6807,19 +6888,19 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         // Through a frame object the folded address stands alone, as an integer's does.
         if (!walked || folded.stack_object == BUSTER_IR_NONE)
         {
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         if (walked)
         {
             folded.rule = store ? TIER1_RULE_MASK_STORE_ADDRESS : TIER1_RULE_MASK_LOAD_ADDRESS;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
     }
     else if (mask_width != 0 && op == IR_PHI)
     {
         base.rule = TIER1_RULE_PHI;
         base.width = (uint8_t)mask_width;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     // Long double (#141): each value a frame object of its own, which the CFG consumer's x87 records read and write
     // (TIER1_RULE_X87); a phi of them its edges' copies, and a call's result and a return's operand st0.
@@ -6846,7 +6927,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                                ((op == IR_FPTOSI || op == IR_FPTOUI) && base.width != 0);
         if (supported)
         {
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
     }
     // Floating values (#141): an undefined one is any value, zero's xorps.
@@ -6856,7 +6937,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)float_width;
         base.immediate = op == IR_CONST ? function->constants[a].low & (float_width == 4 ? UINT32_MAX : UINT64_MAX) : 0;
         base.intrinsic_cost = base.immediate == 0 ? 1 : 2;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (float_width != 0 && op == IR_COPY)
     {
@@ -6864,7 +6945,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)float_width;
         base.values[0] = a;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (float_width != 0 && (op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV))
     {
@@ -6874,7 +6955,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[0] = a;
         base.values[1] = b;
         base.intrinsic_cost = 3;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         // The right operand's load as the memory operand, or for add and multiply the left's where the right isn't a load,
         // as an integer's (TIER1_RULE_LOAD_OPERAND).
         const bool commutative = op == IR_FADD || op == IR_FMUL;
@@ -6888,7 +6969,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.values[2] = BUSTER_IR_NONE;
             tier1_select_fold(forest, node, load, &folded);
             tier1_select_memory(forest, node, function->a[load], &folded, 1);
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
     }
     else if (float_width != 0 && op == IR_FMA)
@@ -6899,7 +6980,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[1] = b;
         base.values[2] = c;
         base.intrinsic_cost = 4;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         // Prefer the existing second multiplicand and addend folds. A first multiplicand can
         // occupy r/m too when exchanging the two factors cannot change which NaN is propagated.
         uint32_t load = BUSTER_IR_NONE;
@@ -6928,7 +7009,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.values[1] = load == c ? b : c;
             tier1_select_fold(forest, node, load, &folded);
             tier1_select_memory(forest, node, function->a[load], &folded, 2);
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
     }
     else if (float_width != 0 && op == IR_FNEG)
@@ -6937,7 +7018,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)float_width;
         base.values[0] = a;
         base.intrinsic_cost = 3;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     // A select of floating values (#2842): their blend by its condition, and by the lane mask of a floating comparison of
     // their width that only it reads, through C's truth values (tier1_select_float_lanes).
@@ -6949,7 +7030,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[1] = b;
         base.values[2] = c;
         base.intrinsic_cost = 4;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         Tier1SelectPattern folded = base;
         bool negated = false;
         const uint32_t tested = tier1_select_truth(forest, node, a, &folded, &negated);
@@ -6958,7 +7039,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.rule = TIER1_RULE_FLOAT_BLEND_COMPARE;
             folded.values[2] = b;
             folded.values[3] = c;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
     }
     else if (forest->vectors && (op == IR_MASKED_LOAD || op == IR_MASKED_STORE || op == IR_COMPRESS_STORE))
@@ -6978,7 +7059,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         if (base.width != 0 && function->flags[node] < 4)
         {
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         // A masked store of a truncation whose only use it is (#1840): the truncation's memory form of its source, under
         // the mask (`operation` 2), one vpmov* [p]{k} as the truncating store's row was.
@@ -7013,7 +7094,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             if (tier1_select_convert_form(1, function->flags[b], base.width, narrowed.source_width) != X86_FORM_NONE)
             {
                 tier1_select_fold(forest, node, b, &narrowed);
-                tier1_select_add_candidate(forest, node, &candidates, narrowed);
+                tier1_select_add_candidate(&candidates, narrowed);
             }
         }
     }
@@ -7041,7 +7122,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[2] = ir_extra_value(function, node, 1);
             base.values[3] = stored;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
     }
     else if (forest->vectors && op == IR_GATHER)
@@ -7050,7 +7131,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         tier1_select_gather_pattern(function, node, BUSTER_IR_NONE, &base);
         if (base.rule == TIER1_RULE_VECTOR)
         {
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
     }
     else if (class_width != 0 && (op == IR_LOAD || op == IR_STORE))
@@ -7069,25 +7150,25 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         // Through a frame object the folded address stands alone, as an integer's does.
         if (!walked || folded.stack_object == BUSTER_IR_NONE)
         {
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         if (walked)
         {
             folded.rule = store ? TIER1_RULE_FLOAT_STORE_ADDRESS : TIER1_RULE_FLOAT_LOAD_ADDRESS;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
     }
     else if (class_width != 0 && op == IR_PHI)
     {
         base.rule = TIER1_RULE_PHI;
         base.width = (uint8_t)class_width;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (float_width != 0 && op == IR_PARAM && a < BUSTER_TIER1_SELECT_MAX_ARGUMENTS)
     {
         base.rule = TIER1_RULE_LEAF;
         base.width = (uint8_t)float_width;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_FCMP && operand_float != 0)
     {
@@ -7097,7 +7178,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[1] = b;
         base.condition = (uint8_t)c;
         base.intrinsic_cost = c == IR_EQ || c == IR_NE ? 5 : 3;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     // Conversions (BUSTER_TIER1_FLOAT_FROM_SIGNED and the others): from an I8 to I64 signed, and an I1 to I64 unsigned, to
     // a floating value; from one to an I8 to I64, signed or unsigned; between the two precisions; and the bits of an F32
@@ -7123,7 +7204,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.source_width = 8;
         }
         base.intrinsic_cost = op == IR_BITCAST ? 1 : wide ? 10 : 2;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         const bool from_integer = (op == IR_SITOFP && (source == IR_I32 || source == IR_I64)) || (op == IR_UITOFP && source == IR_I32);
         const bool to_integer = (op == IR_FPTOSI && (type == IR_I32 || type == IR_I64)) || (op == IR_FPTOUI && type == IR_I32);
         if ((from_integer || to_integer) && tier1_select_load_folds(forest, node, a))
@@ -7134,7 +7215,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.condition = base.scale;
             tier1_select_fold(forest, node, a, &folded);
             tier1_select_memory(forest, node, function->a[a], &folded, 0);
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
         // An integer constant's conversion is the floating constant it converts to, rounded as cvtsi2s* rounds under the
         // default rounding mode, to nearest: C's conversion on this host computes it so.
@@ -7163,7 +7244,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             }
             folded.intrinsic_cost = folded.immediate == 0 ? 1 : 2;
             tier1_select_fold(forest, node, a, &folded);
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
     }
     else if (op == IR_RET && a != BUSTER_IR_NONE && operand_float != 0)
@@ -7172,7 +7253,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[0] = a;
         base.width = (uint8_t)operand_float;
         base.intrinsic_cost = 2;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_CONST && width != 0)
     {
@@ -7180,7 +7261,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         const uint32_t bits = ir_type_bits[type];
         base.immediate = function->constants[a].low & (bits < 64 ? (UINT64_C(1) << bits) - 1 : UINT64_MAX);
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_UNDEF && width != 0)
     {
@@ -7188,7 +7269,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.rule = TIER1_RULE_CONSTANT;
         base.immediate = 0;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     // A by-value aggregate parameter (#789): its copy's address, a frame object's past the IR's slots (or its stack slots'
     // in the incoming area, tier1_emit_cfg.c), as a frame object's is (TIER1_RULE_STACK_ADDRESS).
@@ -7197,12 +7278,12 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.rule = TIER1_RULE_STACK_ADDRESS;
         base.immediate = (uint64_t)function->slot_count + a;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_PARAM && (integer || type == IR_PTR || type == IR_I1 || type == IR_I8 || type == IR_I16) && a < BUSTER_TIER1_SELECT_MAX_ARGUMENTS)
     {
         base.rule = TIER1_RULE_LEAF;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if ((op == IR_COPY && width != 0) || (op == IR_INTTOPTR && function->type[a] == IR_I64) || (op == IR_PTRTOINT && type == IR_I64) || (op == IR_BITCAST && width != 0 && tier1_select_width(function->type[a]) == width && ir_type_bits[function->type[a]] == ir_type_bits[type]))
     {
@@ -7223,7 +7304,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         // walk's block (a cross-block read costs nothing), and the paths would cover the object apart.
         if (address.folds == 0 || address.object == BUSTER_IR_NONE)
         {
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         if (address.folds != 0)
         {
@@ -7239,7 +7320,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             walked.displacement = (int32_t)address.displacement;
             walked.fold_count = address.folds;
             walked.source_width = 0;
-            tier1_select_add_candidate(forest, node, &candidates, walked);
+            tier1_select_add_candidate(&candidates, walked);
         }
     }
     else if ((op == IR_TRUNC && (type == IR_I8 || type == IR_I16 || type == IR_I32) && tier1_select_memory_width(function->type[a]) != 0 && function->type[a] != IR_PTR) ||
@@ -7273,7 +7354,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.source_width = function->type[a] == IR_I1 ? 4 : (uint8_t)tier1_select_memory_width(function->type[a]);
             base.intrinsic_cost = op == IR_SEXT && type == IR_I16 ? 2 : 1;
         }
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         // A narrow ALU write preserves an already-zero upper part while wrapping only the result's byte or word.
         // Copying its left input at 32 bits first (when needed) keeps that certificate. Both inputs must fit and have
         // physical zero storage, since the commutative register pattern may exchange them when the destination aliases.
@@ -7299,7 +7380,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 narrow.operation = (uint8_t)tier1_select_operation(operation);
                 narrow.intrinsic_cost = 2;
                 tier1_select_fold(forest, node, a, &narrow);
-                tier1_select_add_candidate(forest, node, &candidates, narrow);
+                tier1_select_add_candidate(&candidates, narrow);
             }
         }
         // Undo a truncation of an already sign-extended value without manufacturing the intermediate masked value.
@@ -7317,7 +7398,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.source_width = 0;
             folded.intrinsic_cost = 1;
             tier1_select_fold(forest, node, a, &folded);
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
         else if (original < function->instruction_count && base.rule == TIER1_RULE_SIGN_EXTEND && tier1_select_tree_child(forest, node, a))
         {
@@ -7326,7 +7407,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             Tier1SelectPattern projected = base;
             projected.values[0] = original;
             tier1_select_fold(forest, node, a, &projected);
-            tier1_select_add_candidate(forest, node, &candidates, projected);
+            tier1_select_add_candidate(&candidates, projected);
         }
         // A bounded signed offset can be computed at 64 bits directly. Every skipped I32 add/sub must be proven not
         // to overflow; the remaining base must have a physical signed-64 representation, including after spills.
@@ -7372,7 +7453,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 affine.values[1] = BUSTER_IR_NONE;
                 affine.displacement = (int32_t)addend;
                 affine.intrinsic_cost = 1;
-                tier1_select_add_candidate(forest, node, &candidates, affine);
+                tier1_select_add_candidate(&candidates, affine);
             }
             // Two bounded signed fields add without I32 overflow. Their actual sign-preserving storage lets one
             // 64-bit LEA compute the sum and the walked constants, without materializing a narrowed intermediate.
@@ -7392,7 +7473,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                     affine.displacement = (int32_t)addend;
                     affine.intrinsic_cost = 1;
                     tier1_select_fold(forest, node, value, &affine);
-                    tier1_select_add_candidate(forest, node, &candidates, affine);
+                    tier1_select_add_candidate(&candidates, affine);
                 }
             }
         }
@@ -7478,7 +7559,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             {
                 tier1_select_fold(forest, node, a, &folded);
                 tier1_select_fold(forest, node, constant, &folded);
-                tier1_select_add_candidate(forest, node, &candidates, folded);
+                tier1_select_add_candidate(&candidates, folded);
             }
         }
         // Signed widening is transitive: sext64(sext32(i8)) needs only the final extension. Following single-use
@@ -7496,7 +7577,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         }
         if (signed_source != a)
         {
-            tier1_select_add_candidate(forest, node, &candidates, widened);
+            tier1_select_add_candidate(&candidates, widened);
         }
         // Read and extend once. The existing load-fold proof preserves exact access width and ordering and excludes
         // volatile/atomic accesses, including when pure sign extensions separated the load from this consumer.
@@ -7512,7 +7593,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.intrinsic_cost = 1;
             tier1_select_fold(forest, node, signed_source, &folded);
             tier1_select_memory(forest, node, function->a[signed_source], &folded, 0);
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
         // A truth value as an integer: the comparison it is, through C's truth values, right before the extension, its
         // canonical truth result already holds the extension's 32 (or 64) bits.
@@ -7532,7 +7613,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.rule = TIER1_RULE_UNARY;
         base.values[0] = a;
         base.intrinsic_cost = 2;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (((op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR) && integer) || narrow_bitwise)
     {
@@ -7540,7 +7621,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[0] = a;
         base.values[1] = b;
         base.intrinsic_cost = 3;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         if (op == IR_ADD)
         {
             Tier1SelectPattern lea = base;
@@ -7550,7 +7631,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             {
                 tier1_select_product_index(forest, node, &lea);
             }
-            tier1_select_add_candidate(forest, node, &candidates, lea);
+            tier1_select_add_candidate(&candidates, lea);
         }
         uint32_t constant = b;
         uint32_t other = a;
@@ -7574,13 +7655,13 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             // shift and 3/5/9 lea candidates win. Keep the BURS grammar's two immediate-multiply costs equal.
             folded.intrinsic_cost = op == IR_MUL ? 3 : 2;
             tier1_select_fold(forest, node, constant, &folded);
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
             if (op == IR_ADD)
             {
                 folded.rule = TIER1_RULE_LEA_ADD;
                 folded.displacement = (int32_t)immediate;
                 folded.intrinsic_cost = 1;
-                tier1_select_add_candidate(forest, node, &candidates, folded);
+                tier1_select_add_candidate(&candidates, folded);
             }
         }
         if (op == IR_MUL && have_constant)
@@ -7595,7 +7676,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 folded.rule = TIER1_RULE_MULTIPLY_SHIFT;
                 folded.scale = (uint8_t)shift;
                 folded.intrinsic_cost = 2;
-                tier1_select_add_candidate(forest, node, &candidates, folded);
+                tier1_select_add_candidate(&candidates, folded);
             }
             if (immediate == 3 || immediate == 5 || immediate == 9)
             {
@@ -7603,7 +7684,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 folded.values[1] = other;
                 folded.scale = (uint8_t)tier1_select_log2(immediate - 1);
                 folded.intrinsic_cost = 1;
-                tier1_select_add_candidate(forest, node, &candidates, folded);
+                tier1_select_add_candidate(&candidates, folded);
             }
         }
         if (op == IR_ADD)
@@ -7621,7 +7702,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 folded.intrinsic_cost = 1;
                 tier1_select_fold(forest, node, shift_node, &folded);
                 tier1_select_fold(forest, node, function->b[shift_node], &folded);
-                tier1_select_add_candidate(forest, node, &candidates, folded);
+                tier1_select_add_candidate(&candidates, folded);
             }
         }
         // The load the memory operand takes: the right operand's, or for a commutative operation the left's where the
@@ -7641,7 +7722,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             // Two records at most for an addition, and, or or xor (tier1_select_expand), as the grammar prices them (#2602);
             // a subtraction's three, and a multiplication's #1217's imul penalty.
             folded.intrinsic_cost = op == IR_SUB || op == IR_MUL ? 3 : 2;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
     }
     else if ((op == IR_SHL || op == IR_LSHR || op == IR_ASHR) && integer)
@@ -7654,7 +7735,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.immediate = immediate;
             base.intrinsic_cost = 2;
             tier1_select_fold(forest, node, b, &base);
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else
         {
@@ -7662,7 +7743,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 4;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
     }
     else if ((op == IR_SDIV || op == IR_UDIV || op == IR_SREM || op == IR_UREM) && integer)
@@ -7672,7 +7753,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[1] = b;
         base.immediate = (op == IR_SDIV || op == IR_SREM ? 1u : 0u) | (op == IR_SREM || op == IR_UREM ? 2u : 0u);
         base.intrinsic_cost = 8;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         // By a power of two 2^k: unsigned, a shift right by k or a mask of k bits (a copy and zero for 2^0), and signed,
         // TIER1_RULE_DIVIDE_POWER's sequence, for a positive divisor (k at most the width's bits less 2).
         const uint32_t bits = width * 8;
@@ -7692,7 +7773,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         {
             folded.rule = TIER1_RULE_COPY;
             folded.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
         else if (unsigned_power && !remainder)
         {
@@ -7700,7 +7781,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.operation = X86_OPERATION_SHR;
             folded.immediate = shift;
             folded.intrinsic_cost = 2;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
         else if (unsigned_power && mask)
         {
@@ -7708,14 +7789,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.operation = X86_OPERATION_AND;
             folded.immediate = divisor - 1;
             folded.intrinsic_cost = 2;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
         else if (signed_power && (!remainder || mask))
         {
             folded.rule = TIER1_RULE_DIVIDE_POWER;
             folded.scale = (uint8_t)shift;
             folded.intrinsic_cost = 5;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
         // By any other constant but those div and idiv keep (tier1_select_reciprocal_divisor): its reciprocal. Its cost is
         // below TIER1_RULE_DIVIDE's though its records may outnumber div's: div's latency, which a count of records
@@ -7726,7 +7807,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.immediate = divisor;
             folded.scale = (uint8_t)base.immediate;
             folded.intrinsic_cost = 7;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
     }
     else if (op == IR_ADDRESS)
@@ -7761,7 +7842,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             {
                 tier1_select_fold(forest, node, b, &base);
             }
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         else if (constant_index && operand.offset == (int64_t)(int32_t)operand.offset)
         {
@@ -7778,7 +7859,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.scale = (uint8_t)tier1_select_log2(operand.scale);
             base.fold_count = 0;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
     }
     else if ((op == IR_LOAD && tier1_select_memory_width(type) != 0) || (op == IR_STORE && tier1_select_memory_width(function->type[b]) != 0))
@@ -7811,12 +7892,12 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         // Through a frame object the folded address stands alone, as above.
         if (!walked || folded.stack_object == BUSTER_IR_NONE)
         {
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
         if (walked)
         {
             folded.rule = store ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_LOAD_ADDRESS;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
         // A constant stored (#2554): `mov $imm, mem` at the access's width, its immediate the constant's low bytes (an
         // 8-byte store's sign-extends, where the constant fits), for each form above. The constant's node then computes
@@ -7832,7 +7913,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_fold(forest, node, b, &immediate);
             if (!walked || folded.stack_object == BUSTER_IR_NONE)
             {
-                tier1_select_add_candidate(forest, node, &candidates, immediate);
+                tier1_select_add_candidate(&candidates, immediate);
             }
             if (walked)
             {
@@ -7841,7 +7922,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 both.immediate = stored;
                 both.compare_immediate = true;
                 tier1_select_fold(forest, node, b, &both);
-                tier1_select_add_candidate(forest, node, &candidates, both);
+                tier1_select_add_candidate(&candidates, both);
             }
         }
     }
@@ -7887,14 +7968,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             logic.values[1] = conjunction ? b : c;
             logic.intrinsic_cost = 2;
             tier1_select_fold(forest, node, conjunction ? c : b, &logic);
-            tier1_select_add_candidate(forest, node, &candidates, logic);
+            tier1_select_add_candidate(&candidates, logic);
         }
         base.rule = TIER1_RULE_SELECT;
         base.values[0] = a;
         base.values[1] = b;
         base.values[2] = c;
         base.intrinsic_cost = 3;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         // The comparison the condition is, through C's truth values, where only the select reads it in its block (#2676):
         // its cmp, then the select's mov and cmovCC, which test no truth value. Its operands' lives reach the select,
         // where the truth value's would have: the lowering's selects, `if`'s converted arms, put other nodes between.
@@ -7920,22 +8001,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.values[2] = b;
             folded.values[3] = c;
             folded.intrinsic_cost = folded.condition == IR_EQ || folded.condition == IR_NE ? 4 : 3;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
-    }
-    else if (op == IR_BR)
-    {
-        base.rule = TIER1_RULE_JUMP;
-        base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
-    }
-    else if (op == IR_BR_INDIRECT)
-    {
-        base.rule = TIER1_RULE_JUMP_INDIRECT;
-        base.values[0] = a;
-        base.width = 8;
-        base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (op == IR_ALLOCA && function->type[a] == IR_I64)
     {
@@ -7945,7 +8012,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = 8;
         base.scale = 4;
         base.intrinsic_cost = 4;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         uint64_t size = 0;
         if (tier1_select_constant(function, a, &size) && size <= BUSTER_TIER1_SELECT_MAX_ALLOCA_IMMEDIATE)
         {
@@ -7954,7 +8021,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.immediate = size;
             base.intrinsic_cost = 2;
             tier1_select_fold(forest, node, a, &base);
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
     }
     else if (op == IR_STACK_SAVE)
@@ -7962,7 +8029,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.rule = function->flags[node] == BUSTER_IR_STACK_SAVE_FRAME ? TIER1_RULE_FRAME_ADDRESS : TIER1_RULE_STACK_SAVE;
         base.width = 8;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_STACK_RESTORE && function->type[a] == IR_I64)
     {
@@ -7970,14 +8037,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[0] = a;
         base.width = 8;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_CBR)
     {
         base.rule = TIER1_RULE_BRANCH;
         base.values[0] = a;
         base.intrinsic_cost = 3;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
         // The comparison the condition tests, through C's truth values, right before the branch: its jcc.
         Tier1SelectPattern folded = base;
         bool negated = false;
@@ -7990,41 +8057,15 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         else if (tested != BUSTER_IR_NONE && tier1_select_float_comparison(forest, node, tested, negated, false, &folded))
         {
             folded.rule = TIER1_RULE_FLOAT_BRANCH_COMPARE;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_candidate(&candidates, folded);
         }
-    }
-    else if (op == IR_CALL && function->calls[b].body != 0 && tier1_select_asm_supported(function, node))
-    {
-        // An asm body (#1839): its records in the node's place, its operand block the frame object its argument addresses.
-        base.rule = TIER1_RULE_ASM;
-        base.immediate = function->calls[b].body - 1;
-        base.intrinsic_cost = (uint8_t)(function->asm_bodies[function->calls[b].body - 1].count < 254 ? 1 + function->asm_bodies[function->calls[b].body - 1].count : 255);
-        tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (op == IR_ASM_RESULT && tier1_select_asm_supported(function, a))
     {
         base.rule = TIER1_RULE_ASM_RESULT;
         base.immediate = b;
         base.intrinsic_cost = 0;
-        tier1_select_add_candidate(forest, node, &candidates, base);
-    }
-    else if (op == IR_CALL && function->calls[b].row != 0 && tier1_select_row_supported(function, node))
-    {
-        // A machine row (#141): its records, its operands' moves and its result's.
-        base.rule = TIER1_RULE_ROW;
-        base.immediate = function->calls[b].row - 1;
-        base.intrinsic_cost = (uint8_t)(1 + function->rows[function->calls[b].row - 1].record_count);
-        tier1_select_add_candidate(forest, node, &candidates, base);
-    }
-    else if ((op == IR_CALL || op == IR_CALL_INDIRECT) && tier1_select_call_supported(function, node))
-    {
-        base.rule = TIER1_RULE_CALL;
-        base.immediate = a;
-        // A floating result's width too (#141), which the consumer moves from xmm0.
-        base.width = (uint8_t)(width | float_width);
-        // Structural lowering estimate: call plus possible argument/result copies; preservation is emitter-owned.
-        base.intrinsic_cost = (uint8_t)(1 + function->calls[b].argument_count + (type != IR_VOID));
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     // A narrow result leaves in its canonical zero-extended 32 bits: a caller extends it by its own type, as clang's and
     // Tier 0's do, the psABI leaving the bits past its width unspecified. An aggregate result's address (#789) moves
@@ -8038,32 +8079,26 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[0] = a != BUSTER_IR_NONE && function->type[a] == IR_F80 ? BUSTER_IR_NONE : a;
         base.width = a == BUSTER_IR_NONE || function->result_size != 0 ? 0 : (uint8_t)tier1_select_width(function->type[a]);
         base.intrinsic_cost = a == BUSTER_IR_NONE ? 1 : 2;
-        tier1_select_add_candidate(forest, node, &candidates, base);
-    }
-    else if (op == IR_UNREACHABLE)
-    {
-        base.rule = TIER1_RULE_UNREACHABLE;
-        base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_PHI && (width != 0 || type == IR_F80))
     {
         base.rule = TIER1_RULE_PHI;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_STACK_ADDR && (tier1_select_stack_object(function, a) || tier1_select_overflow_area(function, a)))
     {
         base.rule = TIER1_RULE_STACK_ADDRESS;
         base.immediate = a;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_SYMBOL_ADDR)
     {
         base.rule = TIER1_RULE_SYMBOL_ADDRESS;
         base.immediate = a;
         base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (forest->vectors && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_CVTT && a < function->instruction_count)
     {
@@ -8076,7 +8111,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         if (base.width == 16)
         {
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
     }
     else if (forest->vectors && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK) && a < function->instruction_count)
@@ -8092,7 +8127,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         if (base.width != 0)
         {
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_candidate(&candidates, base);
         }
     }
     else if (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_MULHU ? type == IR_I64 : c <= BUSTER_IR_INTRINSIC_SMULO && integer))
@@ -8105,20 +8140,20 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[1] = b;
         base.immediate = high ? 0 : c;
         base.intrinsic_cost = high ? 4 : c >= BUSTER_IR_INTRINSIC_SADDO ? 3 : 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_LIFETIME)
     {
         base.rule = TIER1_RULE_LIFETIME;
         base.immediate = a;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_FENCE)
     {
         base.rule = TIER1_RULE_FENCE;
         base.immediate = a;
         base.intrinsic_cost = a == BUSTER_IR_FENCE_SEQ_CST ? 1 : 0;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     else if (op == IR_ATOMIC_RMW && tier1_select_memory_width(type) != 0)
     {
@@ -8131,7 +8166,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.immediate = function->flags[node] & BUSTER_IR_RMW_OPERATION;
         base.values[2] = base.immediate == BUSTER_IR_RMW_COMPARE ? c : BUSTER_IR_NONE;
         base.intrinsic_cost = 3;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_candidate(&candidates, base);
     }
     return candidates;
 }
@@ -8217,14 +8252,15 @@ static __attribute__((noinline)) bool tier1_select_burs_pattern(const Tier1Selec
     if (built[node] == 0)
     {
         built[node] = 1;
-        const Tier1SelectCandidates candidates = tier1_select_candidates(forest, node);
+        const Tier1BursRule* rule = &tier1_burs_rules[rules[node]];
+        const Tier1SelectCandidates candidates = tier1_select_candidates(forest, node, (Tier1SelectRule)rule->kind);
         bool munched = false;
         const uint32_t chosen = tier1_burs_pick(&candidates, rules[node], &munched);
         valid = chosen < candidates.count;
         if (valid)
         {
             plan->patterns[node] = candidates.patterns[chosen];
-            plan->costs[node] = candidates.costs[chosen];
+            plan->costs[node] = tier1_select_finish_pattern(forest, node, &plan->patterns[node]);
         }
     }
     return valid;
@@ -8244,27 +8280,28 @@ static __attribute__((noinline)) Tier1SelectError tier1_select_cover_munch(const
         {
             const uint32_t remaining = level_offsets[level + 1] - first;
             const uint32_t lanes = remaining < BUSTER_TIER1_SELECT_LANES ? remaining : BUSTER_TIER1_SELECT_LANES;
-            Tier1SelectCandidates batch[BUSTER_TIER1_SELECT_LANES];
-            uint32_t chosen[BUSTER_TIER1_SELECT_LANES] = {0};
+            Tier1SelectPattern selected[BUSTER_TIER1_SELECT_LANES];
+            uint32_t costs[BUSTER_TIER1_SELECT_LANES];
             for (uint32_t lane = 0; error == TIER1_SELECT_OK && lane < lanes; lane += 1)
             {
                 const uint32_t node = level_nodes[first + lane];
-                batch[lane] = tier1_select_candidates(forest, node);
-                if (batch[lane].count == 0)
+                const Tier1SelectCandidates candidates = tier1_select_candidates(forest, node, TIER1_RULE_NONE);
+                if (candidates.count == 0)
                 {
                     error = TIER1_SELECT_ERROR_UNSUPPORTED;
                     *failed_node = node;
                 }
                 else
                 {
-                    chosen[lane] = tier1_select_munch(&batch[lane]);
+                    selected[lane] = candidates.patterns[tier1_select_munch(&candidates)];
+                    costs[lane] = tier1_select_finish_pattern(forest, node, &selected[lane]);
                 }
             }
             for (uint32_t lane = 0; error == TIER1_SELECT_OK && lane < lanes; lane += 1)
             {
                 const uint32_t node = level_nodes[first + lane];
-                plan->patterns[node] = batch[lane].patterns[chosen[lane]];
-                plan->costs[node] = batch[lane].costs[chosen[lane]];
+                plan->patterns[node] = selected[lane];
+                plan->costs[node] = costs[lane];
             }
         }
     }
@@ -8681,7 +8718,10 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     for (uint32_t position = 0; burs && error == TIER1_SELECT_OK && position < count; position += 1)
     {
         const uint32_t node = level_nodes[position];
-        if (classes[node] == TIER1_BURS_OP_REG && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
+        // Check operations that previously used the generic register leaf in their original dependency order,
+        // including values later absorbed by a memory operand. Preserve the first unsupported node.
+        const uint32_t op = classes[node];
+        if ((op == TIER1_BURS_OP_REG || (op >= TIER1_BURS_OP_DIRECT && op <= TIER1_BURS_OP_CALL_ROW) || op >= TIER1_BURS_OP_SIGN_LOAD) && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;

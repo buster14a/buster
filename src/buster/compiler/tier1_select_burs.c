@@ -99,6 +99,11 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_REG,
     TIER1_BURS_OP_SLOT,
     TIER1_BURS_OP_SLOT_X,
+    // The node has one machine pattern, with all its operand and ABI details filled by the candidate generator.
+    TIER1_BURS_OP_DIRECT,
+    TIER1_BURS_OP_CALL,
+    TIER1_BURS_OP_CALL_ASM,
+    TIER1_BURS_OP_CALL_ROW,
     TIER1_BURS_OP_CONST,
     TIER1_BURS_OP_ALU = TIER1_BURS_OP_CONST + BUSTER_TIER1_BURS_CONSTANT_CLASSES,
     TIER1_BURS_OP_SHL = TIER1_BURS_OP_ALU + BUSTER_TIER1_BURS_ALUS * BUSTER_TIER1_BURS_KINDS,
@@ -124,6 +129,22 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_SELECT,
     // An I1 copy of the floating comparison right before it, a truth value's link (tier1_select_truth, #2791).
     TIER1_BURS_OP_COPY_TRUTH,
+    TIER1_BURS_OP_SIGN_LOAD,
+    TIER1_BURS_OP_FLOAT_LOAD_F,
+    TIER1_BURS_OP_FLOAT_LOAD_N,
+    TIER1_BURS_OP_FLOAT_STORE,
+    TIER1_BURS_OP_FLOAT_BINARY_RIGHT,
+    TIER1_BURS_OP_FLOAT_BINARY_LEFT,
+    TIER1_BURS_OP_X87,
+    TIER1_BURS_OP_NARROW_BINARY,
+    TIER1_BURS_OP_NARROW_UNARY,
+    TIER1_BURS_OP_SIGNED_PRODUCT,
+    TIER1_BURS_OP_SIGNED_BITS,
+    TIER1_BURS_OP_SIGNED_CHAIN,
+    TIER1_BURS_OP_SIGNED_PROJECTION,
+    TIER1_BURS_OP_FLOAT_CONVERT,
+    TIER1_BURS_OP_FLOAT_CONVERT_LOAD,
+    TIER1_BURS_OP_FLOAT_CONVERT_CONSTANT,
     TIER1_BURS_OPERATORS,
 } Tier1BursOperator;
 
@@ -148,6 +169,8 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_NONE,
     TIER1_BURS_FAMILY_CHAIN,
     TIER1_BURS_FAMILY_REG,
+    TIER1_BURS_FAMILY_DIRECT,
+    TIER1_BURS_FAMILY_CALL,
     TIER1_BURS_FAMILY_SLOT,
     TIER1_BURS_FAMILY_CONST,
     TIER1_BURS_FAMILY_ALU,
@@ -178,6 +201,15 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_FCMP_EQ,
     TIER1_BURS_FAMILY_CBR_ADJ,
     TIER1_BURS_FAMILY_SELECT,
+    TIER1_BURS_FAMILY_X87,
+    TIER1_BURS_FAMILY_NARROW,
+    TIER1_BURS_FAMILY_SIGNED_PRODUCT,
+    TIER1_BURS_FAMILY_SIGNED_WIDENING,
+    TIER1_BURS_FAMILY_FLOAT_CONVERT,
+    TIER1_BURS_FAMILY_SIGN_LOAD,
+    TIER1_BURS_FAMILY_FLOAT_LOAD,
+    TIER1_BURS_FAMILY_FLOAT_STORE,
+    TIER1_BURS_FAMILY_FLOAT_BINARY,
     TIER1_BURS_FAMILY_COPY_TRUTH,
 } Tier1BursFamily;
 
@@ -197,6 +229,12 @@ typedef enum Tier1BursAction
     TIER1_BURS_ACTION_STORE_IMMEDIATE,
     TIER1_BURS_ACTION_WALKED_COPY,
     TIER1_BURS_ACTION_FOLDED_COMPARE,
+    TIER1_BURS_ACTION_FLOAT_ADDRESS,
+    TIER1_BURS_ACTION_NARROW,
+    TIER1_BURS_ACTION_SIGNED_PRODUCT,
+    TIER1_BURS_ACTION_SIGNED_BITS,
+    TIER1_BURS_ACTION_SIGNED_CHAIN,
+    TIER1_BURS_ACTION_SIGNED_PROJECTION,
     TIER1_BURS_ACTION_PLAIN,
 } Tier1BursAction;
 
@@ -225,6 +263,12 @@ struct Tier1BursPattern
 static const Tier1BursPattern tier1_burs_patterns[] = {
     // A value computed elsewhere: its own root's.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_REG, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_MUNCH, TIER1_RULE_NONE },
+    // An operand of this leaf stays a separate root. Its only candidate supplies its own cost and machine operands.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_DIRECT, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_NONE },
+    // The candidate generator uses the selected call kind to build ABI-specific operands and costs.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_CALL, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_CALL },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_CALL, 1, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_ASM },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_CALL, 2, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_ROW },
     // A constant: its move, or what a consumer folds of it by its class.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_CONST, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_KIND, TIER1_RULE_CONSTANT },
     { TIER1_BURS_IMM, TIER1_BURS_FAMILY_CONST, BUSTER_TIER1_BURS_FIT, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
@@ -272,6 +316,37 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     // Shifts, by a constant count below their width, or by a register's (cl).
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SHIFT, 0, { TIER1_BURS_REG, TIER1_BURS_SHAMT }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_IMMEDIATE },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SHIFT, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 4, TIER1_BURS_ACTION_KIND, TIER1_RULE_SHIFT },
+    // A single-use integer constant converts at compile time. A shared constant keeps the register
+    // conversion. Only the conversions with a memory encoding consume a foldable load.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_CONVERT, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 2, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_NONE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_CONVERT, 1, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 2, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_NONE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_CONVERT, 1, { TIER1_BURS_LOADF, BUSTER_TIER1_BURS_NO_KID }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_CONVERT_LOAD },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_CONVERT, 2, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_CONSTANT },
+    // For a signed widening, the candidate walk proves which operand an operation can absorb.
+    // A nested extension can also bring a load into the widened access.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGNED_WIDENING, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_SIGNED_BITS, TIER1_RULE_NONE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGNED_WIDENING, 1, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_SIGNED_CHAIN, TIER1_RULE_NONE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGNED_WIDENING, 2, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_SIGNED_PROJECTION, TIER1_RULE_NONE },
+    // The widening multiply has a register extension and, when range and use proofs allow it,
+    // a signed 64-bit multiply with an immediate or register operand.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGNED_PRODUCT, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_SIGNED_PRODUCT, TIER1_RULE_NONE },
+    // A single-use I32 arithmetic producer can write the requested narrow result directly.
+    // The walk emits that alternative only when known bits and canonical storage permit it.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_NARROW, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_NARROW, TIER1_RULE_REGISTER },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_NARROW, 1, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_NARROW, TIER1_RULE_UNARY },
+    // The x87 operations read and write their own frame objects. Their data operands are materialized by the pattern.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_X87, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_X87 },
+    // A signed widening reads a scalar load directly when its single use can fold
+    // without crossing a memory barrier. Otherwise only the register extension remains.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGN_LOAD, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_NONE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGN_LOAD, 0, { TIER1_BURS_LOADF, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_KIND, TIER1_RULE_LOAD_ADDRESS },
+    // A floating binary operation reads a register or a foldable scalar load. When the right operand is a
+    // load it always has priority. Addition and multiplication can otherwise take the left memory operand.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_BINARY, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_BINARY },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_BINARY, 1, { TIER1_BURS_REG, TIER1_BURS_LOADF }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_LOAD_OPERAND },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_BINARY, 2, { TIER1_BURS_LOADF, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_LOAD_OPERAND },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_LOAD, 0, { TIER1_BURS_A1, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_FLOAT_ADDRESS, TIER1_RULE_FLOAT_LOAD },
+    { TIER1_BURS_STMT, TIER1_BURS_FAMILY_FLOAT_STORE, 0, { TIER1_BURS_A1, TIER1_BURS_REG }, 1, TIER1_BURS_ACTION_FLOAT_ADDRESS, TIER1_RULE_FLOAT_STORE },
     // The address walk (tier1_select_address): 64-bit additions of a displacement, conversions between a pointer and its
     // bits, addresses without an index or with a constant one, and one address with an index, whose own walk peels the
     // index's constant additions and subtractions (tier1_select_index).
@@ -356,7 +431,7 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
 // tier1_select_initialize fail and build.sh's bake with it. The tests compare every cover's cost with munch's.
 #define BUSTER_TIER1_BURS_BOUND 8u
 // The tables' bounds: the generator fails past them, which tier1_select_initialize reports.
-#define BUSTER_TIER1_BURS_MAX_STATES 1024u
+#define BUSTER_TIER1_BURS_MAX_STATES 1088u
 #define BUSTER_TIER1_BURS_MAX_REPRESENTERS 128u
 #define BUSTER_TIER1_BURS_MAX_RULES 512u
 // The pool of the operators' maps (state to representer) and transition tables, 16-bit entries, past its end the 16-bit
@@ -405,6 +480,7 @@ BUSTER_TIER1_SHARED BUSTER_BAKED uint8_t tier1_burs_arity[TIER1_BURS_OPERATORS +
 BUSTER_TIER1_SHARED BUSTER_BAKED uint32_t tier1_burs_map_base[2][TIER1_BURS_OPERATORS];
 BUSTER_TIER1_SHARED BUSTER_BAKED uint32_t tier1_burs_table_base[TIER1_BURS_OPERATORS];
 BUSTER_TIER1_SHARED BUSTER_BAKED uint32_t tier1_burs_table_width[TIER1_BURS_OPERATORS];
+BUSTER_TIER1_SHARED BUSTER_BAKED uint32_t tier1_burs_register_state[TIER1_BURS_OPERATORS];
 BUSTER_TIER1_SHARED BUSTER_BAKED uint16_t tier1_burs_pool[BUSTER_TIER1_BURS_POOL + 2];
 BUSTER_TIER1_SHARED BUSTER_BAKED uint32_t tier1_burs_pool_length;
 // Each operator's goal at a root: a statement's (a store and a branch) or a register's.
@@ -413,21 +489,6 @@ BUSTER_TIER1_SHARED BUSTER_BAKED uint8_t tier1_burs_goal[TIER1_BURS_OPERATORS + 
 BUSTER_TIER1_SHARED BUSTER_BAKED uint32_t tier1_burs_status;
 
 #ifndef BUSTER_TIER1_BURS_STORAGE_ONLY
-static uint8_t tier1_burs_operator_arity(uint32_t op)
-{
-    uint8_t arity = 1;
-    if (op < TIER1_BURS_OP_ALU)
-    {
-        arity = 0;
-    }
-    else if (op < TIER1_BURS_OP_SHL + 3 || op == TIER1_BURS_OP_STORE || op == TIER1_BURS_OP_ADDR_CIDX || op == TIER1_BURS_OP_ADDR_IDX || op == TIER1_BURS_OP_ICMP ||
-             op == TIER1_BURS_OP_ICMP_LINK || op == TIER1_BURS_OP_FCMP_ORD || op == TIER1_BURS_OP_FCMP_EQ)
-    {
-        arity = 2;
-    }
-    return arity;
-}
-
 // Whether a pattern of `family` (with `kinds`) derives from operator `op`.
 static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
 {
@@ -443,6 +504,12 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
     bool member = false;
     switch (family)
     {
+    case TIER1_BURS_FAMILY_CALL:
+        member = op == TIER1_BURS_OP_CALL + kinds;
+        break;
+    case TIER1_BURS_FAMILY_DIRECT:
+        member = op == TIER1_BURS_OP_DIRECT;
+        break;
     case TIER1_BURS_FAMILY_REG:
         member = op == TIER1_BURS_OP_REG;
         break;
@@ -488,11 +555,38 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
     case TIER1_BURS_FAMILY_SHL:
         member = op == TIER1_BURS_OP_SHL;
         break;
+    case TIER1_BURS_FAMILY_FLOAT_CONVERT:
+        member = op == TIER1_BURS_OP_FLOAT_CONVERT + kinds;
+        break;
+    case TIER1_BURS_FAMILY_SIGNED_WIDENING:
+        member = op == TIER1_BURS_OP_SIGNED_BITS + kinds;
+        break;
+    case TIER1_BURS_FAMILY_SIGNED_PRODUCT:
+        member = op == TIER1_BURS_OP_SIGNED_PRODUCT;
+        break;
+    case TIER1_BURS_FAMILY_NARROW:
+        member = op == TIER1_BURS_OP_NARROW_BINARY + kinds;
+        break;
+    case TIER1_BURS_FAMILY_X87:
+        member = op == TIER1_BURS_OP_X87;
+        break;
+    case TIER1_BURS_FAMILY_SIGN_LOAD:
+        member = op == TIER1_BURS_OP_SIGN_LOAD;
+        break;
+    case TIER1_BURS_FAMILY_FLOAT_BINARY:
+        member = (op == TIER1_BURS_OP_FLOAT_BINARY_RIGHT && kinds != 2) || (op == TIER1_BURS_OP_FLOAT_BINARY_LEFT && kinds != 1);
+        break;
+    case TIER1_BURS_FAMILY_FLOAT_LOAD:
+        member = op == TIER1_BURS_OP_FLOAT_LOAD_F || op == TIER1_BURS_OP_FLOAT_LOAD_N;
+        break;
+    case TIER1_BURS_FAMILY_FLOAT_STORE:
+        member = op == TIER1_BURS_OP_FLOAT_STORE;
+        break;
     case TIER1_BURS_FAMILY_LOAD:
         member = op == TIER1_BURS_OP_LOAD_F || op == TIER1_BURS_OP_LOAD_N;
         break;
     case TIER1_BURS_FAMILY_LOAD_F:
-        member = op == TIER1_BURS_OP_LOAD_F;
+        member = op == TIER1_BURS_OP_LOAD_F || op == TIER1_BURS_OP_FLOAT_LOAD_F;
         break;
     case TIER1_BURS_FAMILY_STORE:
         member = op == TIER1_BURS_OP_STORE;
@@ -709,8 +803,8 @@ static bool tier1_burs_build(uint8_t* working)
     memset(&tier1_burs_rules[0], 0, sizeof(tier1_burs_rules[0]));
     for (uint32_t op = 0; op < TIER1_BURS_OPERATORS; op += 1)
     {
-        tier1_burs_arity[op] = tier1_burs_operator_arity(op);
-        tier1_burs_goal[op] = op == TIER1_BURS_OP_STORE || op == TIER1_BURS_OP_CBR_ADJ ? TIER1_BURS_STMT : TIER1_BURS_REG;
+        tier1_burs_arity[op] = 0;
+        tier1_burs_goal[op] = op == TIER1_BURS_OP_STORE || op == TIER1_BURS_OP_FLOAT_STORE || op == TIER1_BURS_OP_CBR_ADJ ? TIER1_BURS_STMT : TIER1_BURS_REG;
     }
     for (uint32_t p = 0; builder.valid && p < BUSTER_TIER1_BURS_PATTERNS; p += 1)
     {
@@ -731,24 +825,35 @@ static bool tier1_burs_build(uint8_t* working)
                     .kind = pattern->kind,
                 };
                 tier1_burs_rule_count += builder.valid ? 1 : 0;
-                for (uint32_t k = 0; pattern->family != TIER1_BURS_FAMILY_CHAIN && k < tier1_burs_arity[op]; k += 1)
+                // A production names exactly the children it reads. The operator's arity is the
+                // maximum across its productions, including those with no node operands.
+                for (uint32_t k = 0; pattern->family != TIER1_BURS_FAMILY_CHAIN && k < 2; k += 1)
                 {
-                    builder.relevant[k][op] |= pattern->kids[k] < TIER1_BURS_NONTERMINALS ? 1u << pattern->kids[k] : 0u;
+                    if (pattern->kids[k] < TIER1_BURS_NONTERMINALS)
+                    {
+                        builder.relevant[k][op] |= 1u << pattern->kids[k];
+                        if (tier1_burs_arity[op] <= k)
+                        {
+                            tier1_burs_arity[op] = (uint8_t)(k + 1);
+                        }
+                    }
                 }
             }
         }
     }
     // The leaves' states, the REG leaf's first; then burg's fixpoint: each state's representers at every operator's
     // positions, and for each new representer, its table's pairs with the other position's representers.
-    for (uint32_t op = 0; builder.valid && op < TIER1_BURS_OP_ALU; op += 1)
+    for (uint32_t op = 0; builder.valid && op < TIER1_BURS_OPERATORS; op += 1)
     {
-        const uint32_t s = tier1_burs_derive(&builder, op, 0, 0);
-        tier1_burs_table_base[op] = s;
+        if (tier1_burs_arity[op] == 0)
+        {
+            tier1_burs_table_base[op] = tier1_burs_derive(&builder, op, 0, 0);
+        }
     }
     builder.valid &= builder.valid && tier1_burs_table_base[TIER1_BURS_OP_REG] == BUSTER_TIER1_BURS_REG_STATE;
     for (uint32_t s = 0; builder.valid && s < builder.state_count; s += 1)
     {
-        for (uint32_t op = TIER1_BURS_OP_ALU; builder.valid && op < TIER1_BURS_OPERATORS; op += 1)
+        for (uint32_t op = 0; builder.valid && op < TIER1_BURS_OPERATORS; op += 1)
         {
             for (uint32_t position = 0; builder.valid && position < tier1_burs_arity[op]; position += 1)
             {
@@ -813,6 +918,12 @@ static bool tier1_burs_build(uint8_t* working)
             {
                 tier1_burs_pool[length + row * width + column] = tier1_burs_arity[op] == 0 ? (uint16_t)tier1_burs_table_base[op] : *tier1_burs_transition(&builder, op, row, column);
             }
+        }
+        if (builder.valid)
+        {
+            const uint32_t left = tier1_burs_pool[tier1_burs_map_base[0][op] + BUSTER_TIER1_BURS_REG_STATE];
+            const uint32_t right = tier1_burs_pool[tier1_burs_map_base[1][op] + BUSTER_TIER1_BURS_REG_STATE];
+            tier1_burs_register_state[op] = tier1_burs_pool[length + left * width + right];
         }
         tier1_burs_table_base[op] = length;
         tier1_burs_table_width[op] = width;
@@ -902,12 +1013,24 @@ static __attribute__((noinline)) uint32_t tier1_burs_equality(const Tier1SelectF
     return select && tier1_select_recurrent(function, user) ? TIER1_BURS_OP_REG : TIER1_BURS_OP_FCMP_EQ;
 }
 
-// Per IR operation: an ALU operation's index (BUSTER_TIER1_BURS_ADD32 to XOR, 0xff for none), and a shift's operator.
-static uint32_t tier1_burs_alu_index(uint32_t op)
-{
-    return op == IR_ADD ? BUSTER_TIER1_BURS_ADD32 : op == IR_SUB ? BUSTER_TIER1_BURS_SUB32 : op == IR_MUL ? BUSTER_TIER1_BURS_MUL : op == IR_AND ? BUSTER_TIER1_BURS_AND :
-           op == IR_OR ? BUSTER_TIER1_BURS_OR : op == IR_XOR ? BUSTER_TIER1_BURS_XOR : 0xffu;
-}
+// Initial class by IR opcode. The low values encode ALU indices plus one; zero leaves an operation
+// for classification from its operands. Direct leaves have a sole candidate even when its concrete
+// rule depends on its parameter, phi or return type.
+#define BUSTER_TIER1_BURS_DIRECT 0x80u
+#define BUSTER_TIER1_BURS_FLOAT_CONVERSION 0x81u
+static const uint8_t tier1_burs_opcode_class[BUSTER_IR_OP_TABLE] = {
+    [IR_ADD] = 1 + BUSTER_TIER1_BURS_ADD32, [IR_SUB] = 1 + BUSTER_TIER1_BURS_SUB32,
+    [IR_MUL] = 1 + BUSTER_TIER1_BURS_MUL, [IR_AND] = 1 + BUSTER_TIER1_BURS_AND,
+    [IR_OR] = 1 + BUSTER_TIER1_BURS_OR, [IR_XOR] = 1 + BUSTER_TIER1_BURS_XOR,
+    [IR_BR] = BUSTER_TIER1_BURS_DIRECT, [IR_BR_INDIRECT] = BUSTER_TIER1_BURS_DIRECT,
+    [IR_SYMBOL_ADDR] = BUSTER_TIER1_BURS_DIRECT, [IR_LIFETIME] = BUSTER_TIER1_BURS_DIRECT,
+    [IR_UNREACHABLE] = BUSTER_TIER1_BURS_DIRECT, [IR_FENCE] = BUSTER_TIER1_BURS_DIRECT,
+    [IR_STACK_SAVE] = BUSTER_TIER1_BURS_DIRECT,
+    [IR_FTRUNC] = BUSTER_TIER1_BURS_FLOAT_CONVERSION, [IR_FEXT] = BUSTER_TIER1_BURS_FLOAT_CONVERSION,
+    [IR_SITOFP] = BUSTER_TIER1_BURS_FLOAT_CONVERSION, [IR_UITOFP] = BUSTER_TIER1_BURS_FLOAT_CONVERSION,
+    [IR_FPTOSI] = BUSTER_TIER1_BURS_FLOAT_CONVERSION, [IR_FPTOUI] = BUSTER_TIER1_BURS_FLOAT_CONVERSION,
+    [IR_BITCAST] = BUSTER_TIER1_BURS_FLOAT_CONVERSION,
+};
 
 // Whether each lane's type (32-bit lanes) is in the set `types`, a bit per IrType.
 static __mmask16 tier1_burs_types(__mmask16 active, __m512i type, uint32_t types)
@@ -987,11 +1110,8 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __m512i word = _mm512_or_si512(op, _mm512_or_si512(_mm512_slli_epi32(type, 8), _mm512_slli_epi32(flags, 16)));
         _mm512_mask_storeu_epi32(words + first, active, word);
     }
-    uint32_t alu_table[IR_OP_COUNT];
-    for (uint32_t op = 0; op < IR_OP_COUNT; op += 1)
-    {
-        alu_table[op] = tier1_burs_alu_index(op);
-    }
+    const __m512i class_low = _mm512_loadu_si512(tier1_burs_opcode_class);
+    const __m512i class_high = _mm512_loadu_si512(tier1_burs_opcode_class + 64);
     const __m512i none = _mm512_set1_epi32((int)BUSTER_IR_NONE);
     const __m512i byte = _mm512_set1_epi32(0xff);
     const __m512i positions = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -1015,6 +1135,14 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __m512i node = _mm512_add_epi32(_mm512_set1_epi32((int)first), positions);
         const __m512i word = _mm512_maskz_loadu_epi32(active, words + first);
         const __m512i op = _mm512_and_si512(word, byte);
+        const __m512i index = _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(op));
+        const __m512i initial = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(class_low, index, class_high)));
+        const __mmask16 direct = _mm512_mask_cmpeq_epi32_mask(active, initial, _mm512_set1_epi32(BUSTER_TIER1_BURS_DIRECT));
+        if (direct == active)
+        {
+            _mm512_mask_storeu_epi32(classes + first, active, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
+            continue;
+        }
         const __m512i type = _mm512_and_si512(_mm512_srli_epi32(word, 8), byte);
         const __m512i flags = _mm512_srli_epi32(word, 16);
         const __m512i a = _mm512_maskz_loadu_epi32(active, function->a + first);
@@ -1032,7 +1160,69 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __m512i b_type = _mm512_and_si512(_mm512_srli_epi32(b_word, 8), byte);
         const __mmask16 integer = tier1_burs_types(active, type, integers);
         const __mmask16 is_i64 = _mm512_mask_cmpeq_epi32_mask(active, type, _mm512_set1_epi32(IR_I64));
-        __m512i result = _mm512_set1_epi32(TIER1_BURS_OP_REG);
+        const uint32_t simple_types = width4 | width8 | floats;
+        const __mmask16 simple = tier1_burs_types(active, type, simple_types);
+        const __mmask16 parameters = _mm512_mask_cmpeq_epi32_mask(simple & _mm512_cmplt_epu32_mask(a, _mm512_set1_epi32(BUSTER_TIER1_SELECT_MAX_ARGUMENTS)), op, _mm512_set1_epi32(IR_PARAM));
+        const __mmask16 phis = _mm512_mask_cmpeq_epi32_mask(simple, op, _mm512_set1_epi32(IR_PHI));
+        const __mmask16 result_types = tier1_burs_types(a_valid, a_type, simple_types | (1u << IR_F80)) | _mm512_cmpeq_epi32_mask(a, none);
+        const __mmask16 returns = _mm512_mask_cmpeq_epi32_mask(result_types & active, op, _mm512_set1_epi32(IR_RET));
+        const __mmask16 copies = _mm512_mask_cmpeq_epi32_mask(simple, op, _mm512_set1_epi32(IR_COPY));
+        const __mmask16 unary = integer & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_NEG)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_NOT)));
+        const __mmask16 truncs = _mm512_mask_cmpeq_epi32_mask(a_valid, op, _mm512_set1_epi32(IR_TRUNC));
+        const __mmask16 sexts = _mm512_mask_cmpeq_epi32_mask(a_valid, op, _mm512_set1_epi32(IR_SEXT));
+        __mmask16 conversions = 0;
+        __mmask16 sign_loads = 0;
+        __mmask16 narrow_binary = 0;
+        __mmask16 narrow_unary = 0;
+        __mmask16 signed_products = 0;
+        __mmask16 signed_bits = 0;
+        __mmask16 signed_chains = 0;
+        __mmask16 signed_projections = 0;
+        if ((truncs | sexts) != 0)
+        {
+            const __m512i a_op = _mm512_and_si512(a_word, byte);
+            const uint32_t narrow_sources = (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32);
+            const __mmask16 narrow_results = tier1_burs_types(truncs, type, narrow_sources);
+            const __mmask16 trunc_inputs = tier1_burs_types(narrow_results, a_type, narrow_sources | (1u << IR_I64));
+            // A narrow write can absorb its I32 producer only for these four operations.
+            const __mmask16 changes_width = _mm512_cmpeq_epi32_mask(a_type, _mm512_set1_epi32(IR_I32)) &
+                                            _mm512_cmpneq_epi32_mask(type, _mm512_set1_epi32(IR_I32));
+            const __mmask16 can_fold = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_ADD)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_SUB)) |
+                                       _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_NEG)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_NOT));
+            conversions = trunc_inputs & ~(changes_width & can_fold);
+            const __mmask16 arithmetic = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_ADD)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_SUB));
+            narrow_binary = trunc_inputs & changes_width & arithmetic;
+            narrow_unary = trunc_inputs & changes_width & can_fold & ~arithmetic;
+            const __mmask16 signed_results = tier1_burs_types(sexts, type, integers | (1u << IR_I16));
+            const __mmask16 signed_inputs = tier1_burs_types(signed_results, a_type, narrow_sources);
+            const __mmask16 from_load = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_LOAD));
+            const __mmask16 wide_result = _mm512_mask_cmpeq_epi32_mask(signed_inputs, type, _mm512_set1_epi32(IR_I64));
+            const __mmask16 signed_arithmetic = _mm512_mask_cmpeq_epi32_mask(wide_result, a_type, _mm512_set1_epi32(IR_I32));
+            const __mmask16 chained = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_SEXT)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_TRUNC));
+            // These I32 producers have additional algebraic patterns when widened to I64.
+            const __mmask16 multiply = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_MUL));
+            const __mmask16 algebra = can_fold | multiply | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_AND)) |
+                                      _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_OR)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_XOR)) |
+                                      _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_ASHR));
+            conversions |= signed_inputs & ~(chained | from_load | (signed_arithmetic & algebra));
+            signed_products = signed_arithmetic & multiply;
+            signed_bits = signed_arithmetic & algebra & ~(arithmetic | multiply);
+            signed_chains = _mm512_mask_cmpeq_epi32_mask(signed_inputs, a_op, _mm512_set1_epi32(IR_SEXT));
+            signed_projections = _mm512_mask_cmpeq_epi32_mask(signed_inputs, a_op, _mm512_set1_epi32(IR_TRUNC));
+            sign_loads = signed_inputs & from_load & integer;
+            conversions |= signed_inputs & from_load & ~integer;
+        }
+        __m512i result = _mm512_mask_mov_epi32(_mm512_set1_epi32(TIER1_BURS_OP_REG), direct | parameters | phis | returns | copies | unary | conversions, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
+        result = _mm512_mask_mov_epi32(result, sign_loads, _mm512_set1_epi32(TIER1_BURS_OP_SIGN_LOAD));
+        result = _mm512_mask_mov_epi32(result, signed_bits, _mm512_set1_epi32(TIER1_BURS_OP_SIGNED_BITS));
+        result = _mm512_mask_mov_epi32(result, signed_chains, _mm512_set1_epi32(TIER1_BURS_OP_SIGNED_CHAIN));
+        result = _mm512_mask_mov_epi32(result, signed_projections, _mm512_set1_epi32(TIER1_BURS_OP_SIGNED_PROJECTION));
+        result = _mm512_mask_mov_epi32(result, signed_products, _mm512_set1_epi32(TIER1_BURS_OP_SIGNED_PRODUCT));
+        result = _mm512_mask_mov_epi32(result, narrow_binary, _mm512_set1_epi32(TIER1_BURS_OP_NARROW_BINARY));
+        result = _mm512_mask_mov_epi32(result, narrow_unary, _mm512_set1_epi32(TIER1_BURS_OP_NARROW_UNARY));
+        const __mmask16 divides = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SDIV)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_UDIV)) |
+                                  _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SREM)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_UREM));
+        result = _mm512_mask_mov_epi32(result, integer & b_valid & divides & _mm512_cmpneq_epi32_mask(b_op, _mm512_set1_epi32(IR_CONST)), _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
         // Constants: their class bits, 8 values at a time.
         const __mmask16 constant = _mm512_mask_cmpeq_epi32_mask(active & tier1_burs_types(active, type, width4 | width8), op, _mm512_set1_epi32(IR_CONST));
         if (constant != 0)
@@ -1048,11 +1238,11 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         }
         // ALU operations: the operation (a 64-bit addition or subtraction apart, and a narrow and, or or xor one of its
         // own), and the kind of the right operand.
-        const __m512i alu = _mm512_mask_i32gather_epi32(byte, active, op, alu_table, 4);
+        const __m512i alu = _mm512_sub_epi32(initial, _mm512_set1_epi32(1));
         const __mmask16 bitwise = _mm512_cmpeq_epi32_mask(alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_AND)) | _mm512_cmpeq_epi32_mask(alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_OR)) |
                                   _mm512_cmpeq_epi32_mask(alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_XOR));
         const __mmask16 narrow = tier1_burs_types(active, type, narrows) & bitwise;
-        const __mmask16 is_alu = _mm512_mask_cmpneq_epi32_mask((integer | narrow) & b_valid, alu, byte);
+        const __mmask16 is_alu = _mm512_mask_cmple_epu32_mask((integer | narrow) & b_valid, alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_XOR));
         if (is_alu != 0)
         {
             const __mmask16 wide = is_i64 & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ADD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SUB)));
@@ -1076,7 +1266,18 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         result = _mm512_mask_mov_epi32(result, ashr, _mm512_set1_epi32(TIER1_BURS_OP_ASHR));
         // Loads, foldable into their single user past no barrier but themselves (every load one: tier1_select_barrier);
         // stores.
-        const __mmask16 load = tier1_burs_types(active, type, memory) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD));
+        const __mmask16 floating = tier1_burs_types(active, type, floats);
+        const __mmask16 float_leaf = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CONST)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_UNDEF)) |
+                                     _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FNEG));
+        result = _mm512_mask_mov_epi32(result, floating & float_leaf, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
+        const __mmask16 binary = floating & _mm512_cmpge_epu32_mask(op, _mm512_set1_epi32(IR_FADD)) & _mm512_cmple_epu32_mask(op, _mm512_set1_epi32(IR_FDIV));
+        if (binary != 0)
+        {
+            const __mmask16 commute = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FADD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FMUL));
+            const __mmask16 left = commute & _mm512_cmpneq_epi32_mask(b_op, _mm512_set1_epi32(IR_LOAD));
+            result = _mm512_mask_mov_epi32(result, binary, _mm512_mask_blend_epi32(left, _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_BINARY_RIGHT), _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_BINARY_LEFT)));
+        }
+        const __mmask16 load = tier1_burs_types(active, type, memory | floats) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD));
         if (load != 0)
         {
             const __mmask16 placed = _mm512_mask_cmplt_epu32_mask(load, user, _mm512_set1_epi32((int)count)) & _mm512_cmplt_epu32_mask(node, user);
@@ -1085,11 +1286,13 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
             const __mmask16 foldable = placed & _mm512_testn_epi32_mask(flags, _mm512_set1_epi32(0xffu & ~BUSTER_IR_COPY_PIECE)) & _mm512_cmpeq_epi32_mask(uses, _mm512_set1_epi32(1)) &
                                        _mm512_cmpeq_epi32_mask(user_block, block) &
                                        _mm512_cmple_epu32_mask(barrier, _mm512_add_epi32(node, _mm512_set1_epi32(1)));
-            result = _mm512_mask_mov_epi32(result, load, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_N));
-            result = _mm512_mask_mov_epi32(result, foldable, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_F));
+            result = _mm512_mask_mov_epi32(result, load, _mm512_mask_blend_epi32(floating, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_N), _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_LOAD_N)));
+            result = _mm512_mask_mov_epi32(result, foldable, _mm512_mask_blend_epi32(floating, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_F), _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_LOAD_F)));
         }
         const __mmask16 store = b_valid & tier1_burs_types(active, b_type, memory) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE));
         result = _mm512_mask_mov_epi32(result, store, _mm512_set1_epi32(TIER1_BURS_OP_STORE));
+        const __mmask16 float_store = tier1_burs_types(b_valid, b_type, floats) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE));
+        result = _mm512_mask_mov_epi32(result, float_store, _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_STORE));
         // Addresses by their index, where their displacement fits (tier1_burs_displacement): the offset, which an index
         // that isn't a constant leaves alone, and a constant index's scaled value added. Where the constant or the offset
         // doesn't fit 32 bits, which may still sum to a displacement that does, the exact 64-bit arithmetic below decides.
@@ -1202,7 +1405,9 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         // Floating == and != (#2922): the scalar classifier's, which looks for the select that reads one.
         const __mmask16 equal = b_valid & tier1_burs_types(a_valid, a_type, floats) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FCMP)) &
                                 _mm512_cmple_epu32_mask(c, _mm512_set1_epi32(IR_NE));
-        const __mmask16 branch = active & adjacent & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CBR));
+        const __mmask16 conditional_branches = _mm512_mask_cmpeq_epi32_mask(active, op, _mm512_set1_epi32(IR_CBR));
+        const __mmask16 branch = conditional_branches & adjacent;
+        result = _mm512_mask_mov_epi32(result, conditional_branches & ~adjacent, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
         result = _mm512_mask_mov_epi32(result, branch, _mm512_set1_epi32(TIER1_BURS_OP_CBR_ADJ));
         // Integer selects (#2676), of any condition: the kids' pass decides whether it is visible.
         const __mmask16 select = tier1_burs_types(active, type, width4 | width8) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SELECT));
@@ -1245,10 +1450,76 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
             result = _mm512_mask_mov_epi32(result, object, _mm512_set1_epi32(TIER1_BURS_OP_SLOT));
             result = _mm512_mask_mov_epi32(result, entry, _mm512_set1_epi32(TIER1_BURS_OP_SLOT_X));
         }
+        const __mmask16 float_conversion = _mm512_mask_cmpeq_epi32_mask(a_valid, initial, _mm512_set1_epi32(BUSTER_TIER1_BURS_FLOAT_CONVERSION));
+        if (float_conversion != 0)
+        {
+            const __mmask16 float_input = tier1_burs_types(float_conversion, a_type, floats);
+            const __mmask16 signed_to_float = _mm512_mask_cmpeq_epi32_mask(floating, op, _mm512_set1_epi32(IR_SITOFP));
+            const __mmask16 unsigned_to_float = _mm512_mask_cmpeq_epi32_mask(floating, op, _mm512_set1_epi32(IR_UITOFP));
+            const __mmask16 float_to_signed = _mm512_mask_cmpeq_epi32_mask(float_input, op, _mm512_set1_epi32(IR_FPTOSI));
+            const __mmask16 float_to_unsigned = _mm512_mask_cmpeq_epi32_mask(float_input, op, _mm512_set1_epi32(IR_FPTOUI));
+            const uint32_t signed_types = memory & ~(1u << IR_PTR);
+            const __mmask16 from_int = tier1_burs_types(a_valid & signed_to_float, a_type, signed_types) |
+                                       tier1_burs_types(a_valid & unsigned_to_float, a_type, signed_types | (1u << IR_I1));
+            const __mmask16 to_int = tier1_burs_types(float_to_signed | float_to_unsigned, type, signed_types);
+            const __mmask16 resize = floating & float_input &
+                                     (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FEXT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FTRUNC)));
+            const __mmask16 bits = _mm512_mask_cmpeq_epi32_mask(a_valid, op, _mm512_set1_epi32(IR_BITCAST));
+            const __mmask16 same32 = (_mm512_cmpeq_epi32_mask(type, _mm512_set1_epi32(IR_F32)) & _mm512_cmpeq_epi32_mask(a_type, _mm512_set1_epi32(IR_I32))) |
+                                     (_mm512_cmpeq_epi32_mask(type, _mm512_set1_epi32(IR_I32)) & _mm512_cmpeq_epi32_mask(a_type, _mm512_set1_epi32(IR_F32)));
+            const __mmask16 same64 = (_mm512_cmpeq_epi32_mask(type, _mm512_set1_epi32(IR_F64)) & _mm512_cmpeq_epi32_mask(a_type, _mm512_set1_epi32(IR_I64))) |
+                                     (is_i64 & _mm512_cmpeq_epi32_mask(a_type, _mm512_set1_epi32(IR_F64)));
+            result = _mm512_mask_mov_epi32(result, from_int | to_int | resize | (bits & (same32 | same64)), _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_CONVERT));
+
+            const __mmask16 memory_form = tier1_burs_types(signed_to_float, a_type, integers) | tier1_burs_types(float_to_signed, type, integers) |
+                                          _mm512_mask_cmpeq_epi32_mask(unsigned_to_float, a_type, _mm512_set1_epi32(IR_I32)) |
+                                          _mm512_mask_cmpeq_epi32_mask(float_to_unsigned, type, _mm512_set1_epi32(IR_I32));
+            const __m512i source_op = _mm512_and_si512(a_word, byte);
+            const __mmask16 memory_input = _mm512_mask_cmpeq_epi32_mask(a_valid & memory_form, source_op, _mm512_set1_epi32(IR_LOAD));
+            result = _mm512_mask_mov_epi32(result, memory_input, _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_CONVERT_LOAD));
+            const __mmask16 literals = _mm512_mask_cmpeq_epi32_mask(from_int & _mm512_cmplt_epu32_mask(a, node), source_op, _mm512_set1_epi32(IR_CONST));
+            if (literals != 0)
+            {
+                const __m512i source_uses = _mm512_mask_i32gather_epi32(none, literals, a, forest->uses, 4);
+                const __m512i source_block = _mm512_mask_i32gather_epi32(none, literals, a, forest->blocks, 4);
+                const __mmask16 owned = literals & _mm512_cmpeq_epi32_mask(source_uses, _mm512_set1_epi32(1)) & _mm512_cmpeq_epi32_mask(source_block, block);
+                result = _mm512_mask_mov_epi32(result, owned, _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_CONVERT_CONSTANT));
+            }
+        }
+        const __mmask16 f80 = _mm512_mask_cmpeq_epi32_mask(active, type, _mm512_set1_epi32(IR_F80));
+        const __mmask16 a80 = _mm512_mask_cmpeq_epi32_mask(a_valid, a_type, _mm512_set1_epi32(IR_F80));
+        const __mmask16 b80 = _mm512_mask_cmpeq_epi32_mask(b_valid, b_type, _mm512_set1_epi32(IR_F80));
+        if ((f80 | a80 | b80) != 0)
+        {
+            const uint32_t values = (1u << IR_CONST) | (1u << IR_UNDEF) | (1u << IR_COPY) | (1u << IR_FNEG) |
+                                    (1u << IR_FADD) | (1u << IR_FSUB) | (1u << IR_FMUL) | (1u << IR_FDIV);
+            __mmask16 x87 = tier1_burs_types(f80, op, values) | _mm512_mask_cmpeq_epi32_mask(f80, op, _mm512_set1_epi32(IR_LOAD)) |
+                            _mm512_mask_cmpeq_epi32_mask(b80, op, _mm512_set1_epi32(IR_STORE)) | _mm512_mask_cmpeq_epi32_mask(a80, op, _mm512_set1_epi32(IR_FCMP));
+            x87 |= _mm512_mask_cmpeq_epi32_mask(f80 & tier1_burs_types(a_valid, a_type, floats), op, _mm512_set1_epi32(IR_FEXT));
+            x87 |= _mm512_mask_cmpeq_epi32_mask(a80 & floating, op, _mm512_set1_epi32(IR_FTRUNC));
+            x87 |= f80 & tier1_burs_types(a_valid, a_type, memory) &
+                   (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SITOFP)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_UITOFP)));
+            x87 |= a80 & tier1_burs_types(active, type, memory) &
+                   (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FPTOSI)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FPTOUI)));
+            result = _mm512_mask_mov_epi32(result, x87, _mm512_set1_epi32(TIER1_BURS_OP_X87));
+            result = _mm512_mask_mov_epi32(result, _mm512_mask_cmpeq_epi32_mask(f80, op, _mm512_set1_epi32(IR_PHI)), _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
+        }
         _mm512_mask_storeu_epi32(classes + first, active, result);
         // A floating == or != (#2922): tier1_burs_equality's, whose select's recurrence is tier1_select_recurrent's
         // bounded walk, which candidate generation shares (#3450's record has its census).
         uint32_t equalities = equal;
+        uint32_t calls = _mm512_mask_cmpeq_epi32_mask(active, op, _mm512_set1_epi32(IR_CALL)) |
+                         _mm512_mask_cmpeq_epi32_mask(active, op, _mm512_set1_epi32(IR_CALL_INDIRECT));
+        while (calls != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(calls);
+            const Tier1SelectRule kind = tier1_select_call_rule(function, first + lane);
+            if (kind != TIER1_RULE_NONE)
+            {
+                classes[first + lane] = kind == TIER1_RULE_ASM ? TIER1_BURS_OP_CALL_ASM : kind == TIER1_RULE_ROW ? TIER1_BURS_OP_CALL_ROW : TIER1_BURS_OP_CALL;
+            }
+            calls &= calls - 1;
+        }
         while (equalities != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(equalities);
@@ -1309,16 +1580,24 @@ static void tier1_burs_label_vector(uint32_t maximum_depth, const uint32_t* leve
             const __m512i right_kid = _mm512_mask_i32gather_epi32(none, active, nodes, kids + count, 4);
             const __mmask16 left_visible = _mm512_mask_cmpneq_epi32_mask(active, left_kid, none);
             const __mmask16 right_visible = _mm512_mask_cmpneq_epi32_mask(active, right_kid, none);
-            const __m512i left = _mm512_mask_i32gather_epi32(reg, left_visible, left_kid, states, 4);
-            const __m512i right = _mm512_mask_i32gather_epi32(reg, right_visible, right_kid, states, 4);
-            const __m512i left_map = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, op, tier1_burs_map_base[0], 4);
-            const __m512i right_map = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, op, tier1_burs_map_base[1], 4);
-            const __m512i base = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, op, tier1_burs_table_base, 4);
-            const __m512i width = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, op, tier1_burs_table_width, 4);
-            const __m512i row = tier1_burs_gather_pool(active, _mm512_add_epi32(left_map, left));
-            const __m512i column = tier1_burs_gather_pool(active, _mm512_add_epi32(right_map, right));
-            const __m512i entry = _mm512_add_epi32(_mm512_add_epi32(base, _mm512_mullo_epi32(row, width)), column);
-            const __m512i state = tier1_burs_gather_pool(active, entry);
+            __m512i state;
+            if ((left_visible | right_visible) == 0)
+            {
+                state = _mm512_mask_i32gather_epi32(reg, active, op, tier1_burs_register_state, 4);
+            }
+            else
+            {
+                const __m512i left = _mm512_mask_i32gather_epi32(reg, left_visible, left_kid, states, 4);
+                const __m512i right = _mm512_mask_i32gather_epi32(reg, right_visible, right_kid, states, 4);
+                const __m512i left_map = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, op, tier1_burs_map_base[0], 4);
+                const __m512i right_map = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, op, tier1_burs_map_base[1], 4);
+                const __m512i base = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, op, tier1_burs_table_base, 4);
+                const __m512i width = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, op, tier1_burs_table_width, 4);
+                const __m512i row = tier1_burs_gather_pool(active, _mm512_add_epi32(left_map, left));
+                const __m512i column = tier1_burs_gather_pool(active, _mm512_add_epi32(right_map, right));
+                const __m512i entry = _mm512_add_epi32(_mm512_add_epi32(base, _mm512_mullo_epi32(row, width)), column);
+                state = tier1_burs_gather_pool(active, entry);
+            }
 #if __has_feature(memory_sanitizer)
             // MSan checks a masked scatter's operands' shadow but writes none at its destinations: the elements it
             // writes keep their old poison, and a later read reports them uninitialized. Store the lanes scalar so
@@ -1364,6 +1643,11 @@ static void tier1_burs_rules_vector(uint32_t count, const uint32_t* classes, con
 static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_t rule_index, bool* munched)
 {
     const Tier1BursRule* rule = &tier1_burs_rules[rule_index < tier1_burs_rule_count ? rule_index : 0];
+    if (rule->action == TIER1_BURS_ACTION_PLAIN)
+    {
+        *munched = candidates->count == 0;
+        return candidates->count != 0 ? 0 : UINT32_MAX;
+    }
     uint32_t chosen = UINT32_MAX;
     for (uint32_t p = 0; p < candidates->count; p += 1)
     {
@@ -1380,6 +1664,30 @@ static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_
         case TIER1_BURS_ACTION_LEA_IMMEDIATE:
             match = pattern->rule == TIER1_RULE_LEA_ADD && pattern->values[1] == BUSTER_IR_NONE;
             break;
+        case TIER1_BURS_ACTION_SIGNED_BITS:
+            match = p == 0 ? (pattern->rule == TIER1_RULE_COPY || pattern->rule == TIER1_RULE_SIGN_EXTEND) :
+                    pattern->fold_count != 0 && (pattern->rule == TIER1_RULE_REGISTER || pattern->rule == TIER1_RULE_IMMEDIATE || pattern->rule == TIER1_RULE_UNARY || pattern->rule == TIER1_RULE_COPY);
+            break;
+        case TIER1_BURS_ACTION_SIGNED_CHAIN:
+            match = pattern->rule == TIER1_RULE_SIGN_EXTEND || pattern->rule == TIER1_RULE_LOAD_ADDRESS || (p == 0 && pattern->rule == TIER1_RULE_COPY);
+            break;
+        case TIER1_BURS_ACTION_SIGNED_PROJECTION:
+            // An already-shared truncation can expose a copy with no covered nodes. If the register
+            // pattern is already a copy, keep the original operand and the first equal-cost match.
+            match = (p == 0 || pattern->fold_count != 0 || (pattern->rule == TIER1_RULE_COPY && candidates->patterns[0].rule == TIER1_RULE_SIGN_EXTEND)) &&
+                    (pattern->rule == TIER1_RULE_SIGN_EXTEND || pattern->rule == TIER1_RULE_COPY);
+            break;
+        case TIER1_BURS_ACTION_SIGNED_PRODUCT:
+            match = (p == 0 && (pattern->rule == TIER1_RULE_COPY || pattern->rule == TIER1_RULE_SIGN_EXTEND)) ||
+                    (pattern->operation == X86_OPERATION_IMUL && pattern->fold_count != 0 && (pattern->rule == TIER1_RULE_IMMEDIATE || pattern->rule == TIER1_RULE_REGISTER));
+            break;
+        case TIER1_BURS_ACTION_NARROW:
+            match = pattern->rule == rule->kind || (p == 0 && (pattern->rule == TIER1_RULE_COPY || pattern->rule == TIER1_RULE_TRUNCATE));
+            break;
+        case TIER1_BURS_ACTION_FLOAT_ADDRESS:
+            match = pattern->rule == (rule->kind == TIER1_RULE_FLOAT_LOAD ? TIER1_RULE_FLOAT_LOAD_ADDRESS : TIER1_RULE_FLOAT_STORE_ADDRESS) ||
+                    (pattern->rule == rule->kind && chosen == UINT32_MAX);
+            break;
         case TIER1_BURS_ACTION_LOAD:
             match = pattern->rule == TIER1_RULE_LOAD_ADDRESS || (pattern->rule == TIER1_RULE_LOAD && chosen == UINT32_MAX);
             break;
@@ -1395,14 +1703,12 @@ static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_
         case TIER1_BURS_ACTION_FOLDED_COMPARE:
             match = pattern->rule == TIER1_RULE_COMPARE || pattern->rule == TIER1_RULE_COMPARE_IMMEDIATE;
             break;
-        case TIER1_BURS_ACTION_PLAIN:
-            match = p == 0;
-            break;
         default:
             break;
         }
         // The first match, or for a load, a store and a walked copy, a later walked one over an earlier plain one.
-        const bool walked = rule->action == TIER1_BURS_ACTION_LOAD || rule->action == TIER1_BURS_ACTION_STORE || rule->action == TIER1_BURS_ACTION_STORE_IMMEDIATE ||
+        const bool walked = (rule->action >= TIER1_BURS_ACTION_SIGNED_BITS && rule->action <= TIER1_BURS_ACTION_SIGNED_PROJECTION) ||
+                            rule->action == TIER1_BURS_ACTION_SIGNED_PRODUCT || rule->action == TIER1_BURS_ACTION_NARROW || rule->action == TIER1_BURS_ACTION_FLOAT_ADDRESS || rule->action == TIER1_BURS_ACTION_LOAD || rule->action == TIER1_BURS_ACTION_STORE || rule->action == TIER1_BURS_ACTION_STORE_IMMEDIATE ||
                             rule->action == TIER1_BURS_ACTION_WALKED_COPY;
         chosen = match && (chosen == UINT32_MAX || walked) ? p : chosen;
     }

@@ -153,6 +153,9 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
     columns[2] = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
     columns[3] = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
     valid = valid && columns[0] != 0 && columns[1] != 0 && columns[2] != 0 && columns[3] != 0;
+    check->mismatches += tier1_burs_arity[TIER1_BURS_OP_X87] != 0 || tier1_burs_arity[TIER1_BURS_OP_FLOAT_CONVERT_CONSTANT] != 0 ||
+                         tier1_burs_arity[TIER1_BURS_OP_FLOAT_CONVERT_LOAD] != 1 || tier1_burs_arity[TIER1_BURS_OP_NARROW_BINARY] != 1 ||
+                         tier1_burs_arity[TIER1_BURS_OP_FLOAT_BINARY_RIGHT] != 2;
     uint32_t maximum_depth = 0;
     valid = valid && tier1_burs_check_prepare(function, dominance, scratch, blocks, uses, users, barriers, canonical, known_bits, level_offsets, level_nodes, words, &maximum_depth);
     const Tier1SelectForest forest = {
@@ -173,23 +176,6 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         check->functions += 1;
         check->nodes += count;
     }
-    // The candidates need the costs column the plan keeps: zero, which the candidates' costs alone read.
-    uint32_t* costs = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
-    valid = valid && costs != 0;
-    if (valid)
-    {
-        memset(costs, 0, (uint64_t)count * sizeof(uint32_t));
-    }
-    const Tier1SelectForest costed = {
-        .function = function,
-        .blocks = blocks,
-        .uses = uses,
-        .costs = costs,
-        .barriers = barriers,
-        .canonical = canonical,
-        .known_bits = known_bits,
-        .vectors = ir_function_has_vectors(function),
-    };
     for (uint32_t node = 0; valid && node < count; node += 1)
     {
         // A visible child is the node's own operand, an earlier node; its state and rule are their equations' (tier1_burs_test_equations).
@@ -224,6 +210,40 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         // extension two nodes before it, of the I1 right before that, and of a zero right before it that it alone uses,
         // in its block.
         const uint32_t class = columns[0][node];
+        const uint32_t type = function->type[node];
+        const bool plain_type = (type >= IR_I1 && type <= IR_I64) || type == IR_PTR || type == IR_F32 || type == IR_F64;
+        const bool plain = op == IR_BR || op == IR_BR_INDIRECT || op == IR_SYMBOL_ADDR || op == IR_LIFETIME ||
+                           op == IR_UNREACHABLE || op == IR_FENCE || op == IR_STACK_SAVE ||
+                           (op == IR_PARAM && plain_type && function->a[node] < BUSTER_TIER1_SELECT_MAX_ARGUMENTS) ||
+                           (op == IR_PHI && plain_type) || (op == IR_COPY && plain_type && type != IR_I1) ||
+                           ((op == IR_NEG || op == IR_NOT) && (type == IR_I32 || type == IR_I64)) ||
+                           (op == IR_TRUNC && (type == IR_I8 || type == IR_I16 || type == IR_I32) && function->type[function->a[node]] == IR_I64) ||
+                           (op == IR_SEXT && (type == IR_I16 || type == IR_I32 || type == IR_I64) && function->op[function->a[node]] == IR_PARAM &&
+                            (function->type[function->a[node]] >= IR_I8 && function->type[function->a[node]] <= IR_I32)) || (op == IR_RET && function->a[node] == BUSTER_IR_NONE);
+        const bool floating = type == IR_F32 || type == IR_F64;
+        if (op == IR_SEXT && (type == IR_I32 || type == IR_I64) && function->op[function->a[node]] == IR_LOAD &&
+            function->type[function->a[node]] >= IR_I8 && function->type[function->a[node]] <= IR_I32)
+        {
+            check->mismatches += class != TIER1_BURS_OP_SIGN_LOAD;
+        }
+        if (op == IR_SEXT && type == IR_I64 && function->type[function->a[node]] == IR_I32 && function->op[function->a[node]] == IR_MUL)
+        {
+            check->mismatches += class != TIER1_BURS_OP_SIGNED_PRODUCT;
+        }
+        if (floating && op >= IR_FADD && op <= IR_FDIV)
+        {
+            const bool left = (op == IR_FADD || op == IR_FMUL) && function->op[function->b[node]] != IR_LOAD;
+            check->mismatches += class != (left ? TIER1_BURS_OP_FLOAT_BINARY_LEFT : TIER1_BURS_OP_FLOAT_BINARY_RIGHT);
+        }
+        if (floating && op == IR_LOAD)
+        {
+            const bool folded = users[node] < count && tier1_select_load_folds(&forest, users[node], node);
+            check->mismatches += class != (folded ? TIER1_BURS_OP_FLOAT_LOAD_F : TIER1_BURS_OP_FLOAT_LOAD_N);
+        }
+        if (plain)
+        {
+            check->mismatches += class != TIER1_BURS_OP_DIRECT;
+        }
         if (class == TIER1_BURS_OP_ICMP || class == TIER1_BURS_OP_ICMP_LINK)
         {
             const uint32_t extended = function->a[node];
@@ -240,9 +260,46 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         }
         if (columns[0][node] != TIER1_BURS_OP_REG)
         {
-            const Tier1SelectCandidates candidates = tier1_select_candidates(&costed, node);
+            const Tier1SelectCandidates candidates = tier1_select_candidates(&forest, node, TIER1_RULE_NONE);
             bool munched = false;
-            tier1_burs_pick(&candidates, columns[3][node], &munched);
+            const uint32_t chosen = tier1_burs_pick(&candidates, columns[3][node], &munched);
+            if (class >= TIER1_BURS_OP_SIGN_LOAD && class <= TIER1_BURS_OP_FLOAT_BINARY_LEFT)
+            {
+                check->mismatches += candidates.count == 0 || munched || chosen != tier1_select_munch(&candidates);
+            }
+            if (tier1_select_x87_node(function, node) && candidates.count != 0 && candidates.patterns[0].rule == TIER1_RULE_X87)
+            {
+                check->mismatches += class != TIER1_BURS_OP_X87;
+            }
+            if (class >= TIER1_BURS_OP_FLOAT_CONVERT && class <= TIER1_BURS_OP_FLOAT_CONVERT_CONSTANT)
+            {
+                check->mismatches += munched || candidates.count == 0 || candidates.count > 2 || chosen != tier1_select_munch(&candidates);
+            }
+            if (class == TIER1_BURS_OP_NARROW_BINARY || class == TIER1_BURS_OP_NARROW_UNARY || class == TIER1_BURS_OP_SIGNED_PRODUCT)
+            {
+                check->mismatches += munched || candidates.count == 0 || candidates.count > 2 || chosen != tier1_select_munch(&candidates);
+            }
+            if (class >= TIER1_BURS_OP_SIGNED_BITS && class <= TIER1_BURS_OP_SIGNED_PROJECTION)
+            {
+                check->mismatches += munched || candidates.count == 0 || candidates.count > (class == TIER1_BURS_OP_SIGNED_CHAIN ? 3 : 2) ||
+                                     chosen != tier1_select_munch(&candidates);
+            }
+            if (class == TIER1_BURS_OP_X87)
+            {
+                check->mismatches += munched || candidates.count != 1 || candidates.patterns[0].rule != TIER1_RULE_X87 ||
+                                     tier1_burs_rules[columns[3][node]].kind != TIER1_RULE_X87;
+            }
+            if (class >= TIER1_BURS_OP_CALL && class <= TIER1_BURS_OP_CALL_ROW)
+            {
+                const Tier1BursRule* rule = &tier1_burs_rules[columns[3][node]];
+                check->mismatches += candidates.count != 1 || munched || rule->action != TIER1_BURS_ACTION_PLAIN ||
+                                     rule->kind != candidates.patterns[0].rule;
+            }
+            if (class == TIER1_BURS_OP_DIRECT)
+            {
+                // A second pattern requires a grammar choice. Catch it here even if both emit the same code today.
+                check->mismatches += candidates.count != 1 || munched || tier1_burs_rules[columns[3][node]].action != TIER1_BURS_ACTION_PLAIN;
+            }
             if (candidates.count == 0 && check->uncovered < 8)
             {
                 fprintf(stderr, "  burs class %u without a candidate at node %u (%s, type %u, a %u, b %u, uses %u)\n", columns[0][node], node, ir_op_names[function->op[node]], function->type[node],
@@ -647,6 +704,62 @@ static void tier1_select_test_burs_links(Tier1SelectTest* test)
     arena_release(&text);
 }
 
+// SQLite widens bounded I32 multiplies to I64. The same multiply may wrap at I32, or another
+// consumer may still need the narrow result. Check the selected operations and their actual operands.
+static void tier1_select_test_burs_signed_products(Tier1SelectTest* test)
+{
+    static const char source[] = "function (i8, i8, i32) -> i64 {\n"
+                                 "b0:\n"
+                                 "  %0 = param.i8 0\n"
+                                 "  %1 = param.i8 1\n"
+                                 "  %2 = param.i32 2\n"
+                                 "  %3 = sext.i32 %0\n"
+                                 "  %4 = sext.i32 %1\n"
+                                 "  %5 = const.i32 0x00000007\n"
+                                 "  %6 = mul.i32 %3, %5\n"
+                                 "  %7 = sext.i64 %6\n"
+                                 "  %8 = mul.i32 %3, %4\n"
+                                 "  %9 = sext.i64 %8\n"
+                                 "  %10 = mul.i32 %2, %5\n"
+                                 "  %11 = sext.i64 %10\n"
+                                 "  %12 = mul.i32 %3, %5\n"
+                                 "  %13 = sext.i64 %12\n"
+                                 "  %14 = sext.i64 %12\n"
+                                 "  %15 = add.i64 %7, %9\n"
+                                 "  %16 = add.i64 %11, %13\n"
+                                 "  %17 = add.i64 %15, %16\n"
+                                 "  %18 = add.i64 %14, %17\n"
+                                 "  %19 = ret.void %18\n"
+                                 "}\n";
+    Arena input = arena_reserve(UINT64_C(1) << 24);
+    Arena output = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 26);
+    IrFunction function = { 0 };
+    Tier1SelectPlan plan = { 0 };
+    uint32_t failed = BUSTER_IR_NONE;
+    const bool valid = input.base && output.base && scratch.base &&
+                       ir_parse((String8){ .pointer = (char*)source, .length = sizeof(source) - 1 }, &input, &scratch, &function).error == IR_PARSE_OK &&
+                       tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed) == TIER1_SELECT_OK;
+    tier1_select_test_expect(test, valid, "signed product fixture produces a plan");
+    if (valid)
+    {
+        const Tier1SelectPattern* patterns = plan.patterns;
+        tier1_select_test_expect(test, plan.covered[6] && patterns[7].rule == TIER1_RULE_IMMEDIATE && patterns[7].operation == X86_OPERATION_IMUL &&
+                                       patterns[7].width == 8 && patterns[7].values[0] == 3 && patterns[7].immediate == 7,
+                                 "bounded signed product with an immediate folds into its extension");
+        tier1_select_test_expect(test, plan.covered[8] && patterns[9].rule == TIER1_RULE_REGISTER && patterns[9].operation == X86_OPERATION_IMUL &&
+                                       patterns[9].width == 8 && patterns[9].values[0] == 3 && patterns[9].values[1] == 4,
+                                 "bounded signed product with two register operands folds into its extension");
+        tier1_select_test_expect(test, !plan.covered[10] && patterns[10].width == 4 && patterns[11].rule == TIER1_RULE_SIGN_EXTEND && patterns[11].values[0] == 10,
+                                 "wrapping I32 product finishes before its signed extension");
+        tier1_select_test_expect(test, !plan.covered[12] && patterns[12].width == 4 && patterns[13].rule == TIER1_RULE_SIGN_EXTEND && patterns[13].values[0] == 12,
+                                 "shared I32 product keeps the narrow result");
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static void tier1_select_test_burs(Tier1SelectTest* test)
 {
     tier1_select_test_burs_tables(test);
@@ -659,5 +772,6 @@ static void tier1_select_test_burs(Tier1SelectTest* test)
     }
     tier1_select_test_burs_edges(test);
     tier1_select_test_burs_links(test);
+    tier1_select_test_burs_signed_products(test);
 }
 #endif
