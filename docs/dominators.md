@@ -127,8 +127,8 @@ membership/parents to group reducible loops, and retain RPO in flagged regions.
 
 ## Algorithms and bounded storage
 
-An iterative DFS from entry produces RPO, DFS ancestry intervals, and each
-preorder number's block and DFS parent. SEMI-NCA works in preorder numbers. It
+An iterative DFS from entry records preorder, reverse postorder and the DFS
+parent of each reachable block. SEMI-NCA works in preorder numbers. It
 computes semidominators in decreasing order: a predecessor numbered below the
 block is a candidate itself, and one above contributes the least semidominator
 on its path through the forest of already-processed vertices, which an
@@ -174,9 +174,14 @@ loop cost the bodies' total size, quadratic in nesting depth, and the parent
 scan was quadratic in the number of loops. Depths follow the loop forest top
 down. There is no recursion and no stack grows past the block count.
 
-A reverse DFS walk assigns SCCs. A DFS retreating edge whose target does not
-dominate its source proves irreducibility; the module conservatively flags
-every block of that edge's full SCC, and every natural loop touching it.
+When loop output is requested, DFS marks sources of edges to unfinished
+ancestors in a one-bit-per-block table. Only these sources need a second
+look at their outgoing edges. A target is an ancestor when its DFS preorder
+and reverse postorder are both at most the source’s. If its
+target dominates its source, it identifies a natural-loop header. Otherwise
+the source witnesses irreducibility. Only graphs with such a witness need the
+reverse DFS walk to assign SCCs. Every block in a witness’s SCC and every
+natural loop touching it receives the conservative irreducibility flag.
 This deliberately excludes some legal motion in reducible subloops of such
 an SCC. It is a safe optimization boundary, not a minimal irreducible-cycle
 decomposition. Unreachable SCCs and acyclic exits remain unflagged.
