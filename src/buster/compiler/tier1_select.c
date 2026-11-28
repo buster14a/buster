@@ -8681,7 +8681,8 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     for (uint32_t position = 0; burs && error == TIER1_SELECT_OK && position < count; position += 1)
     {
         const uint32_t node = level_nodes[position];
-        if (classes[node] == TIER1_BURS_OP_REG && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
+        // Both leaf classes require a supported machine pattern, even if a later cover absorbs the value.
+        if ((classes[node] == TIER1_BURS_OP_REG || classes[node] == TIER1_BURS_OP_DIRECT) && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;

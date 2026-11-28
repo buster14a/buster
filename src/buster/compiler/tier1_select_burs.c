@@ -99,6 +99,8 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_REG,
     TIER1_BURS_OP_SLOT,
     TIER1_BURS_OP_SLOT_X,
+    // The node has one machine pattern, with all its operand and ABI details filled by the candidate generator.
+    TIER1_BURS_OP_DIRECT,
     TIER1_BURS_OP_CONST,
     TIER1_BURS_OP_ALU = TIER1_BURS_OP_CONST + BUSTER_TIER1_BURS_CONSTANT_CLASSES,
     TIER1_BURS_OP_SHL = TIER1_BURS_OP_ALU + BUSTER_TIER1_BURS_ALUS * BUSTER_TIER1_BURS_KINDS,
@@ -148,6 +150,7 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_NONE,
     TIER1_BURS_FAMILY_CHAIN,
     TIER1_BURS_FAMILY_REG,
+    TIER1_BURS_FAMILY_DIRECT,
     TIER1_BURS_FAMILY_SLOT,
     TIER1_BURS_FAMILY_CONST,
     TIER1_BURS_FAMILY_ALU,
@@ -225,6 +228,8 @@ struct Tier1BursPattern
 static const Tier1BursPattern tier1_burs_patterns[] = {
     // A value computed elsewhere: its own root's.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_REG, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_MUNCH, TIER1_RULE_NONE },
+    // An operand of this leaf stays a separate root. Its only candidate supplies its own cost and machine operands.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_DIRECT, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_NONE },
     // A constant: its move, or what a consumer folds of it by its class.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_CONST, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_KIND, TIER1_RULE_CONSTANT },
     { TIER1_BURS_IMM, TIER1_BURS_FAMILY_CONST, BUSTER_TIER1_BURS_FIT, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
@@ -443,6 +448,9 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
     bool member = false;
     switch (family)
     {
+    case TIER1_BURS_FAMILY_DIRECT:
+        member = op == TIER1_BURS_OP_DIRECT;
+        break;
     case TIER1_BURS_FAMILY_REG:
         member = op == TIER1_BURS_OP_REG;
         break;
@@ -902,12 +910,19 @@ static __attribute__((noinline)) uint32_t tier1_burs_equality(const Tier1SelectF
     return select && tier1_select_recurrent(function, user) ? TIER1_BURS_OP_REG : TIER1_BURS_OP_FCMP_EQ;
 }
 
-// Per IR operation: an ALU operation's index (BUSTER_TIER1_BURS_ADD32 to XOR, 0xff for none), and a shift's operator.
-static uint32_t tier1_burs_alu_index(uint32_t op)
-{
-    return op == IR_ADD ? BUSTER_TIER1_BURS_ADD32 : op == IR_SUB ? BUSTER_TIER1_BURS_SUB32 : op == IR_MUL ? BUSTER_TIER1_BURS_MUL : op == IR_AND ? BUSTER_TIER1_BURS_AND :
-           op == IR_OR ? BUSTER_TIER1_BURS_OR : op == IR_XOR ? BUSTER_TIER1_BURS_XOR : 0xffu;
-}
+// Initial class by IR opcode. The low values encode ALU indices plus one; zero leaves an operation
+// for classification from its operands. Direct leaves have a sole candidate even when its concrete
+// rule depends on its parameter, phi or return type.
+#define BUSTER_TIER1_BURS_DIRECT 0x80u
+static const uint8_t tier1_burs_opcode_class[BUSTER_IR_OP_TABLE] = {
+    [IR_ADD] = 1 + BUSTER_TIER1_BURS_ADD32, [IR_SUB] = 1 + BUSTER_TIER1_BURS_SUB32,
+    [IR_MUL] = 1 + BUSTER_TIER1_BURS_MUL, [IR_AND] = 1 + BUSTER_TIER1_BURS_AND,
+    [IR_OR] = 1 + BUSTER_TIER1_BURS_OR, [IR_XOR] = 1 + BUSTER_TIER1_BURS_XOR,
+    [IR_BR] = BUSTER_TIER1_BURS_DIRECT, [IR_BR_INDIRECT] = BUSTER_TIER1_BURS_DIRECT,
+    [IR_SYMBOL_ADDR] = BUSTER_TIER1_BURS_DIRECT, [IR_LIFETIME] = BUSTER_TIER1_BURS_DIRECT,
+    [IR_UNREACHABLE] = BUSTER_TIER1_BURS_DIRECT, [IR_FENCE] = BUSTER_TIER1_BURS_DIRECT,
+    [IR_STACK_SAVE] = BUSTER_TIER1_BURS_DIRECT,
+};
 
 // Whether each lane's type (32-bit lanes) is in the set `types`, a bit per IrType.
 static __mmask16 tier1_burs_types(__mmask16 active, __m512i type, uint32_t types)
@@ -987,11 +1002,8 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __m512i word = _mm512_or_si512(op, _mm512_or_si512(_mm512_slli_epi32(type, 8), _mm512_slli_epi32(flags, 16)));
         _mm512_mask_storeu_epi32(words + first, active, word);
     }
-    uint32_t alu_table[IR_OP_COUNT];
-    for (uint32_t op = 0; op < IR_OP_COUNT; op += 1)
-    {
-        alu_table[op] = tier1_burs_alu_index(op);
-    }
+    const __m512i class_low = _mm512_loadu_si512(tier1_burs_opcode_class);
+    const __m512i class_high = _mm512_loadu_si512(tier1_burs_opcode_class + 64);
     const __m512i none = _mm512_set1_epi32((int)BUSTER_IR_NONE);
     const __m512i byte = _mm512_set1_epi32(0xff);
     const __m512i positions = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -1015,6 +1027,14 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __m512i node = _mm512_add_epi32(_mm512_set1_epi32((int)first), positions);
         const __m512i word = _mm512_maskz_loadu_epi32(active, words + first);
         const __m512i op = _mm512_and_si512(word, byte);
+        const __m512i index = _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(op));
+        const __m512i initial = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(class_low, index, class_high)));
+        const __mmask16 direct = _mm512_mask_cmpeq_epi32_mask(active, initial, _mm512_set1_epi32(BUSTER_TIER1_BURS_DIRECT));
+        if (direct == active)
+        {
+            _mm512_mask_storeu_epi32(classes + first, active, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
+            continue;
+        }
         const __m512i type = _mm512_and_si512(_mm512_srli_epi32(word, 8), byte);
         const __m512i flags = _mm512_srli_epi32(word, 16);
         const __m512i a = _mm512_maskz_loadu_epi32(active, function->a + first);
@@ -1032,7 +1052,13 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __m512i b_type = _mm512_and_si512(_mm512_srli_epi32(b_word, 8), byte);
         const __mmask16 integer = tier1_burs_types(active, type, integers);
         const __mmask16 is_i64 = _mm512_mask_cmpeq_epi32_mask(active, type, _mm512_set1_epi32(IR_I64));
-        __m512i result = _mm512_set1_epi32(TIER1_BURS_OP_REG);
+        const uint32_t simple_types = width4 | width8 | floats;
+        const __mmask16 simple = tier1_burs_types(active, type, simple_types);
+        const __mmask16 parameters = _mm512_mask_cmpeq_epi32_mask(simple & _mm512_cmplt_epu32_mask(a, _mm512_set1_epi32(BUSTER_TIER1_SELECT_MAX_ARGUMENTS)), op, _mm512_set1_epi32(IR_PARAM));
+        const __mmask16 phis = _mm512_mask_cmpeq_epi32_mask(simple, op, _mm512_set1_epi32(IR_PHI));
+        const __mmask16 result_types = tier1_burs_types(a_valid, a_type, simple_types | (1u << IR_F80)) | _mm512_cmpeq_epi32_mask(a, none);
+        const __mmask16 returns = _mm512_mask_cmpeq_epi32_mask(result_types & active, op, _mm512_set1_epi32(IR_RET));
+        __m512i result = _mm512_mask_mov_epi32(_mm512_set1_epi32(TIER1_BURS_OP_REG), direct | parameters | phis | returns, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
         // Constants: their class bits, 8 values at a time.
         const __mmask16 constant = _mm512_mask_cmpeq_epi32_mask(active & tier1_burs_types(active, type, width4 | width8), op, _mm512_set1_epi32(IR_CONST));
         if (constant != 0)
@@ -1048,11 +1074,11 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         }
         // ALU operations: the operation (a 64-bit addition or subtraction apart, and a narrow and, or or xor one of its
         // own), and the kind of the right operand.
-        const __m512i alu = _mm512_mask_i32gather_epi32(byte, active, op, alu_table, 4);
+        const __m512i alu = _mm512_sub_epi32(initial, _mm512_set1_epi32(1));
         const __mmask16 bitwise = _mm512_cmpeq_epi32_mask(alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_AND)) | _mm512_cmpeq_epi32_mask(alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_OR)) |
                                   _mm512_cmpeq_epi32_mask(alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_XOR));
         const __mmask16 narrow = tier1_burs_types(active, type, narrows) & bitwise;
-        const __mmask16 is_alu = _mm512_mask_cmpneq_epi32_mask((integer | narrow) & b_valid, alu, byte);
+        const __mmask16 is_alu = _mm512_mask_cmple_epu32_mask((integer | narrow) & b_valid, alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_XOR));
         if (is_alu != 0)
         {
             const __mmask16 wide = is_i64 & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ADD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SUB)));
@@ -1364,6 +1390,11 @@ static void tier1_burs_rules_vector(uint32_t count, const uint32_t* classes, con
 static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_t rule_index, bool* munched)
 {
     const Tier1BursRule* rule = &tier1_burs_rules[rule_index < tier1_burs_rule_count ? rule_index : 0];
+    if (rule->action == TIER1_BURS_ACTION_PLAIN)
+    {
+        *munched = candidates->count == 0;
+        return candidates->count != 0 ? 0 : UINT32_MAX;
+    }
     uint32_t chosen = UINT32_MAX;
     for (uint32_t p = 0; p < candidates->count; p += 1)
     {
@@ -1394,9 +1425,6 @@ static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_
             break;
         case TIER1_BURS_ACTION_FOLDED_COMPARE:
             match = pattern->rule == TIER1_RULE_COMPARE || pattern->rule == TIER1_RULE_COMPARE_IMMEDIATE;
-            break;
-        case TIER1_BURS_ACTION_PLAIN:
-            match = p == 0;
             break;
         default:
             break;

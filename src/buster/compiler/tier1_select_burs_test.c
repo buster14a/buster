@@ -224,6 +224,16 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         // extension two nodes before it, of the I1 right before that, and of a zero right before it that it alone uses,
         // in its block.
         const uint32_t class = columns[0][node];
+        const uint32_t type = function->type[node];
+        const bool plain_type = (type >= IR_I1 && type <= IR_I64) || type == IR_PTR || type == IR_F32 || type == IR_F64;
+        const bool plain = op == IR_BR || op == IR_BR_INDIRECT || op == IR_SYMBOL_ADDR || op == IR_LIFETIME ||
+                           op == IR_UNREACHABLE || op == IR_FENCE || op == IR_STACK_SAVE ||
+                           (op == IR_PARAM && plain_type && function->a[node] < BUSTER_TIER1_SELECT_MAX_ARGUMENTS) ||
+                           (op == IR_PHI && plain_type) || (op == IR_RET && function->a[node] == BUSTER_IR_NONE);
+        if (plain)
+        {
+            check->mismatches += class != TIER1_BURS_OP_DIRECT;
+        }
         if (class == TIER1_BURS_OP_ICMP || class == TIER1_BURS_OP_ICMP_LINK)
         {
             const uint32_t extended = function->a[node];
@@ -243,6 +253,11 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
             const Tier1SelectCandidates candidates = tier1_select_candidates(&costed, node);
             bool munched = false;
             tier1_burs_pick(&candidates, columns[3][node], &munched);
+            if (class == TIER1_BURS_OP_DIRECT)
+            {
+                // A second pattern requires a grammar choice. Catch it here even if both emit the same code today.
+                check->mismatches += candidates.count != 1 || munched || tier1_burs_rules[columns[3][node]].action != TIER1_BURS_ACTION_PLAIN;
+            }
             if (candidates.count == 0 && check->uncovered < 8)
             {
                 fprintf(stderr, "  burs class %u without a candidate at node %u (%s, type %u, a %u, b %u, uses %u)\n", columns[0][node], node, ir_op_names[function->op[node]], function->type[node],
