@@ -6170,6 +6170,13 @@ static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier
     return address.folds != 0;
 }
 
+// Inlined at each of its two calls, the test reference's batch (tier1_select_cover_munch) and the bottom-up path's pattern
+// (tier1_select_burs_pattern), and so are its helpers (tier1_select_add_candidate, tier1_select_memory,
+// tier1_select_load_folds), whose inlining clang decided by their callers. With a second caller, clang outlined it, its
+// 356 bytes returned through memory, and inlined fewer of its helpers: the former scalar maximal-munch path took 304 core cycles
+// per IR instruction on the frozen sqlite3.c and 841 instructions, against 274 and 747 before the second caller and 276
+// and 752 inlined by force, in tier1_select_cover_munch (benchmark-tier1-select-source, the 9700X). One copy out of line
+// for both calls took 300 and 815.
 // A verified call has at most one machine pattern. The classifier and independent candidate walk
 // use the same ABI checks. The bottom-up production carries the checked kind to the pattern builder.
 static Tier1SelectRule tier1_select_call_rule(const IrFunction* function, uint32_t node)
@@ -6186,13 +6193,6 @@ static Tier1SelectRule tier1_select_call_rule(const IrFunction* function, uint32
     return tier1_select_call_supported(function, node) ? TIER1_RULE_CALL : TIER1_RULE_NONE;
 }
 
-// Inlined at each of its two calls, the test reference's batch (tier1_select_cover_munch) and the bottom-up path's pattern
-// (tier1_select_burs_pattern), and so are its helpers (tier1_select_add_candidate, tier1_select_memory,
-// tier1_select_load_folds), whose inlining clang decided by their callers. With a second caller, clang outlined it, its
-// 356 bytes returned through memory, and inlined fewer of its helpers: the former scalar maximal-munch path took 304 core cycles
-// per IR instruction on the frozen sqlite3.c and 841 instructions, against 274 and 747 before the second caller and 276
-// and 752 inlined by force, in tier1_select_cover_munch (benchmark-tier1-select-source, the 9700X). One copy out of line
-// for both calls took 300 and 815.
 static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* forest, uint32_t node, Tier1SelectRule call_rule)
 {
     const IrFunction* function = forest->function;
@@ -8702,8 +8702,10 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     for (uint32_t position = 0; burs && error == TIER1_SELECT_OK && position < count; position += 1)
     {
         const uint32_t node = level_nodes[position];
-        // The fallback, direct and call leaves require a supported machine pattern, even if a later cover absorbs the value.
-        if ((classes[node] == TIER1_BURS_OP_REG || (classes[node] >= TIER1_BURS_OP_DIRECT && classes[node] <= TIER1_BURS_OP_CALL_ROW)) && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
+        // Check operations that previously used the generic register leaf in their original dependency order,
+        // including values later absorbed by a memory operand. Preserve the first unsupported node.
+        const uint32_t op = classes[node];
+        if ((op == TIER1_BURS_OP_REG || (op >= TIER1_BURS_OP_DIRECT && op <= TIER1_BURS_OP_CALL_ROW) || op >= TIER1_BURS_OP_FLOAT_LOAD_F) && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;

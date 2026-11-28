@@ -129,6 +129,11 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_SELECT,
     // An I1 copy of the floating comparison right before it, a truth value's link (tier1_select_truth, #2791).
     TIER1_BURS_OP_COPY_TRUTH,
+    TIER1_BURS_OP_FLOAT_LOAD_F,
+    TIER1_BURS_OP_FLOAT_LOAD_N,
+    TIER1_BURS_OP_FLOAT_STORE,
+    TIER1_BURS_OP_FLOAT_BINARY_RIGHT,
+    TIER1_BURS_OP_FLOAT_BINARY_LEFT,
     TIER1_BURS_OPERATORS,
 } Tier1BursOperator;
 
@@ -185,6 +190,9 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_FCMP_EQ,
     TIER1_BURS_FAMILY_CBR_ADJ,
     TIER1_BURS_FAMILY_SELECT,
+    TIER1_BURS_FAMILY_FLOAT_LOAD,
+    TIER1_BURS_FAMILY_FLOAT_STORE,
+    TIER1_BURS_FAMILY_FLOAT_BINARY,
     TIER1_BURS_FAMILY_COPY_TRUTH,
 } Tier1BursFamily;
 
@@ -204,6 +212,7 @@ typedef enum Tier1BursAction
     TIER1_BURS_ACTION_STORE_IMMEDIATE,
     TIER1_BURS_ACTION_WALKED_COPY,
     TIER1_BURS_ACTION_FOLDED_COMPARE,
+    TIER1_BURS_ACTION_FLOAT_ADDRESS,
     TIER1_BURS_ACTION_PLAIN,
 } Tier1BursAction;
 
@@ -285,6 +294,13 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     // Shifts, by a constant count below their width, or by a register's (cl).
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SHIFT, 0, { TIER1_BURS_REG, TIER1_BURS_SHAMT }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_IMMEDIATE },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SHIFT, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 4, TIER1_BURS_ACTION_KIND, TIER1_RULE_SHIFT },
+    // A floating binary operation reads a register or a foldable scalar load. When the right operand is a
+    // load it always has priority. Addition and multiplication can otherwise take the left memory operand.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_BINARY, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_BINARY },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_BINARY, 1, { TIER1_BURS_REG, TIER1_BURS_LOADF }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_LOAD_OPERAND },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_BINARY, 2, { TIER1_BURS_LOADF, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_LOAD_OPERAND },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_LOAD, 0, { TIER1_BURS_A1, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_FLOAT_ADDRESS, TIER1_RULE_FLOAT_LOAD },
+    { TIER1_BURS_STMT, TIER1_BURS_FAMILY_FLOAT_STORE, 0, { TIER1_BURS_A1, TIER1_BURS_REG }, 1, TIER1_BURS_ACTION_FLOAT_ADDRESS, TIER1_RULE_FLOAT_STORE },
     // The address walk (tier1_select_address): 64-bit additions of a displacement, conversions between a pointer and its
     // bits, addresses without an index or with a constant one, and one address with an index, whose own walk peels the
     // index's constant additions and subtractions (tier1_select_index).
@@ -369,7 +385,7 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
 // tier1_select_initialize fail and build.sh's bake with it. The tests compare every cover's cost with munch's.
 #define BUSTER_TIER1_BURS_BOUND 8u
 // The tables' bounds: the generator fails past them, which tier1_select_initialize reports.
-#define BUSTER_TIER1_BURS_MAX_STATES 1024u
+#define BUSTER_TIER1_BURS_MAX_STATES 1088u
 #define BUSTER_TIER1_BURS_MAX_REPRESENTERS 128u
 #define BUSTER_TIER1_BURS_MAX_RULES 512u
 // The pool of the operators' maps (state to representer) and transition tables, 16-bit entries, past its end the 16-bit
@@ -433,7 +449,7 @@ static uint8_t tier1_burs_operator_arity(uint32_t op)
     {
         arity = 0;
     }
-    else if (op < TIER1_BURS_OP_SHL + 3 || op == TIER1_BURS_OP_STORE || op == TIER1_BURS_OP_ADDR_CIDX || op == TIER1_BURS_OP_ADDR_IDX || op == TIER1_BURS_OP_ICMP ||
+    else if (op < TIER1_BURS_OP_SHL + 3 || op == TIER1_BURS_OP_STORE || op >= TIER1_BURS_OP_FLOAT_STORE || op == TIER1_BURS_OP_ADDR_CIDX || op == TIER1_BURS_OP_ADDR_IDX || op == TIER1_BURS_OP_ICMP ||
              op == TIER1_BURS_OP_ICMP_LINK || op == TIER1_BURS_OP_FCMP_ORD || op == TIER1_BURS_OP_FCMP_EQ)
     {
         arity = 2;
@@ -507,11 +523,20 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
     case TIER1_BURS_FAMILY_SHL:
         member = op == TIER1_BURS_OP_SHL;
         break;
+    case TIER1_BURS_FAMILY_FLOAT_BINARY:
+        member = (op == TIER1_BURS_OP_FLOAT_BINARY_RIGHT && kinds != 2) || (op == TIER1_BURS_OP_FLOAT_BINARY_LEFT && kinds != 1);
+        break;
+    case TIER1_BURS_FAMILY_FLOAT_LOAD:
+        member = op == TIER1_BURS_OP_FLOAT_LOAD_F || op == TIER1_BURS_OP_FLOAT_LOAD_N;
+        break;
+    case TIER1_BURS_FAMILY_FLOAT_STORE:
+        member = op == TIER1_BURS_OP_FLOAT_STORE;
+        break;
     case TIER1_BURS_FAMILY_LOAD:
         member = op == TIER1_BURS_OP_LOAD_F || op == TIER1_BURS_OP_LOAD_N;
         break;
     case TIER1_BURS_FAMILY_LOAD_F:
-        member = op == TIER1_BURS_OP_LOAD_F;
+        member = op == TIER1_BURS_OP_LOAD_F || op == TIER1_BURS_OP_FLOAT_LOAD_F;
         break;
     case TIER1_BURS_FAMILY_STORE:
         member = op == TIER1_BURS_OP_STORE;
@@ -729,7 +754,7 @@ static bool tier1_burs_build(uint8_t* working)
     for (uint32_t op = 0; op < TIER1_BURS_OPERATORS; op += 1)
     {
         tier1_burs_arity[op] = tier1_burs_operator_arity(op);
-        tier1_burs_goal[op] = op == TIER1_BURS_OP_STORE || op == TIER1_BURS_OP_CBR_ADJ ? TIER1_BURS_STMT : TIER1_BURS_REG;
+        tier1_burs_goal[op] = op == TIER1_BURS_OP_STORE || op == TIER1_BURS_OP_FLOAT_STORE || op == TIER1_BURS_OP_CBR_ADJ ? TIER1_BURS_STMT : TIER1_BURS_REG;
     }
     for (uint32_t p = 0; builder.valid && p < BUSTER_TIER1_BURS_PATTERNS; p += 1)
     {
@@ -1138,7 +1163,18 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         result = _mm512_mask_mov_epi32(result, ashr, _mm512_set1_epi32(TIER1_BURS_OP_ASHR));
         // Loads, foldable into their single user past no barrier but themselves (every load one: tier1_select_barrier);
         // stores.
-        const __mmask16 load = tier1_burs_types(active, type, memory) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD));
+        const __mmask16 floating = tier1_burs_types(active, type, floats);
+        const __mmask16 float_leaf = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CONST)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_UNDEF)) |
+                                     _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FNEG));
+        result = _mm512_mask_mov_epi32(result, floating & float_leaf, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
+        const __mmask16 binary = floating & _mm512_cmpge_epu32_mask(op, _mm512_set1_epi32(IR_FADD)) & _mm512_cmple_epu32_mask(op, _mm512_set1_epi32(IR_FDIV));
+        if (binary != 0)
+        {
+            const __mmask16 commute = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FADD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FMUL));
+            const __mmask16 left = commute & _mm512_cmpneq_epi32_mask(b_op, _mm512_set1_epi32(IR_LOAD));
+            result = _mm512_mask_mov_epi32(result, binary, _mm512_mask_blend_epi32(left, _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_BINARY_RIGHT), _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_BINARY_LEFT)));
+        }
+        const __mmask16 load = tier1_burs_types(active, type, memory | floats) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD));
         if (load != 0)
         {
             const __mmask16 placed = _mm512_mask_cmplt_epu32_mask(load, user, _mm512_set1_epi32((int)count)) & _mm512_cmplt_epu32_mask(node, user);
@@ -1147,11 +1183,13 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
             const __mmask16 foldable = placed & _mm512_testn_epi32_mask(flags, _mm512_set1_epi32(0xffu & ~BUSTER_IR_COPY_PIECE)) & _mm512_cmpeq_epi32_mask(uses, _mm512_set1_epi32(1)) &
                                        _mm512_cmpeq_epi32_mask(user_block, block) &
                                        _mm512_cmple_epu32_mask(barrier, _mm512_add_epi32(node, _mm512_set1_epi32(1)));
-            result = _mm512_mask_mov_epi32(result, load, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_N));
-            result = _mm512_mask_mov_epi32(result, foldable, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_F));
+            result = _mm512_mask_mov_epi32(result, load, _mm512_mask_blend_epi32(floating, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_N), _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_LOAD_N)));
+            result = _mm512_mask_mov_epi32(result, foldable, _mm512_mask_blend_epi32(floating, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_F), _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_LOAD_F)));
         }
         const __mmask16 store = b_valid & tier1_burs_types(active, b_type, memory) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE));
         result = _mm512_mask_mov_epi32(result, store, _mm512_set1_epi32(TIER1_BURS_OP_STORE));
+        const __mmask16 float_store = tier1_burs_types(b_valid, b_type, floats) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE));
+        result = _mm512_mask_mov_epi32(result, float_store, _mm512_set1_epi32(TIER1_BURS_OP_FLOAT_STORE));
         // Addresses by their index, where their displacement fits (tier1_burs_displacement): the offset, which an index
         // that isn't a constant leaves alone, and a constant index's scaled value added. Where the constant or the offset
         // doesn't fit 32 bits, which may still sum to a displacement that does, the exact 64-bit arithmetic below decides.
@@ -1459,6 +1497,10 @@ static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_
         case TIER1_BURS_ACTION_LEA_IMMEDIATE:
             match = pattern->rule == TIER1_RULE_LEA_ADD && pattern->values[1] == BUSTER_IR_NONE;
             break;
+        case TIER1_BURS_ACTION_FLOAT_ADDRESS:
+            match = pattern->rule == (rule->kind == TIER1_RULE_FLOAT_LOAD ? TIER1_RULE_FLOAT_LOAD_ADDRESS : TIER1_RULE_FLOAT_STORE_ADDRESS) ||
+                    (pattern->rule == rule->kind && chosen == UINT32_MAX);
+            break;
         case TIER1_BURS_ACTION_LOAD:
             match = pattern->rule == TIER1_RULE_LOAD_ADDRESS || (pattern->rule == TIER1_RULE_LOAD && chosen == UINT32_MAX);
             break;
@@ -1478,7 +1520,7 @@ static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_
             break;
         }
         // The first match, or for a load, a store and a walked copy, a later walked one over an earlier plain one.
-        const bool walked = rule->action == TIER1_BURS_ACTION_LOAD || rule->action == TIER1_BURS_ACTION_STORE || rule->action == TIER1_BURS_ACTION_STORE_IMMEDIATE ||
+        const bool walked = rule->action == TIER1_BURS_ACTION_FLOAT_ADDRESS || rule->action == TIER1_BURS_ACTION_LOAD || rule->action == TIER1_BURS_ACTION_STORE || rule->action == TIER1_BURS_ACTION_STORE_IMMEDIATE ||
                             rule->action == TIER1_BURS_ACTION_WALKED_COPY;
         chosen = match && (chosen == UINT32_MAX || walked) ? p : chosen;
     }

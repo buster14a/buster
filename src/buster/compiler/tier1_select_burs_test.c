@@ -234,6 +234,17 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
                            (op == IR_TRUNC && (type == IR_I8 || type == IR_I16 || type == IR_I32) && function->type[function->a[node]] == IR_I64) ||
                            (op == IR_SEXT && (type == IR_I16 || type == IR_I32 || type == IR_I64) && function->op[function->a[node]] == IR_PARAM &&
                             (function->type[function->a[node]] >= IR_I8 && function->type[function->a[node]] <= IR_I32)) || (op == IR_RET && function->a[node] == BUSTER_IR_NONE);
+        const bool floating = type == IR_F32 || type == IR_F64;
+        if (floating && op >= IR_FADD && op <= IR_FDIV)
+        {
+            const bool left = (op == IR_FADD || op == IR_FMUL) && function->op[function->b[node]] != IR_LOAD;
+            check->mismatches += class != (left ? TIER1_BURS_OP_FLOAT_BINARY_LEFT : TIER1_BURS_OP_FLOAT_BINARY_RIGHT);
+        }
+        if (floating && op == IR_LOAD)
+        {
+            const bool folded = users[node] < count && tier1_select_load_folds(&forest, users[node], node);
+            check->mismatches += class != (folded ? TIER1_BURS_OP_FLOAT_LOAD_F : TIER1_BURS_OP_FLOAT_LOAD_N);
+        }
         if (plain)
         {
             check->mismatches += class != TIER1_BURS_OP_DIRECT;
@@ -256,7 +267,11 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         {
             const Tier1SelectCandidates candidates = tier1_select_candidates(&costed, node, TIER1_RULE_NONE);
             bool munched = false;
-            tier1_burs_pick(&candidates, columns[3][node], &munched);
+            const uint32_t chosen = tier1_burs_pick(&candidates, columns[3][node], &munched);
+            if (class >= TIER1_BURS_OP_FLOAT_LOAD_F && class <= TIER1_BURS_OP_FLOAT_BINARY_LEFT)
+            {
+                check->mismatches += candidates.count == 0 || munched || chosen != tier1_select_munch(&candidates);
+            }
             if (class >= TIER1_BURS_OP_CALL && class <= TIER1_BURS_OP_CALL_ROW)
             {
                 const Tier1BursRule* rule = &tier1_burs_rules[columns[3][node]];
