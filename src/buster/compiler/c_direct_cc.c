@@ -5710,7 +5710,11 @@ static __attribute__((noinline)) void fval_emit_builtin_call(FastExprCtx* ex, ui
     }
     if (id == cc->id_builtin_constant_p)
     {
-        const bool is_c = argc >= 1u && (args[0].kind == FVAL_IMM || args[0].kind == FVAL_FIMM);
+        // #3592: an operand with a side effect, compiled without code since the callee's name (its imm, which OUT is), is
+        // no constant.
+        const uint32_t unevaluated = (uint32_t)out->imm;
+        ex->eval_only = (uint8_t)(ex->eval_only - unevaluated);
+        const bool is_c = unevaluated == 0 && argc >= 1u && (args[0].kind == FVAL_IMM || args[0].kind == FVAL_FIMM);
         for (uint32_t i = 0; i < argc; i += 1) { fval_release(ex, &args[i]); }
         *out = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = is_c ? 1 : 0 };
         return;
@@ -7107,7 +7111,7 @@ struct FastExprOp
     uint16_t op;
     uint16_t extra;        // the commas so far (CALL), elem_idx (COMPOUND_LIT), the then value's marks (TERNARY_C)
     uint32_t lbl0;         // false/true/else_lbl, or the first argument's place on the value stack (CALL), or end_pos (GENERIC_SEL)
-    uint32_t lbl1;         // then_tail_lbl (TERNARY_C), or 1 where the call is compiled without code (CALL, #3592)
+    uint32_t lbl1;         // then_tail_lbl (TERNARY_C)
     uint32_t lbl2;         // end_lbl (TERNARY_C), or a binary operator's token (#3577: ex->cmp_pos)
     FastType type;         // cast target, then_type (TERNARY_C), compound lit type
     int32_t slot;          // tern_slot or compound lit stack slot
@@ -8094,15 +8098,16 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
 // Whether the operand, the tokens after the call's `(` at OPEN to its `)`, may have a side effect: an increment, a
 // decrement, an assignment, a brace (a statement expression's, a compound literal's) or a call, which is a `(` after a
 // name, a `]` or a `)` that doesn't close a cast's type name. Such an operand is compiled without code and the builtin's
-// value is 0 (fast_cc_constant_p_unevaluated); any other is compiled as before, its value and its code unchanged. It is
-// no unevaluated operand of sizeof's: the full pipeline gives no -Wunevaluated-expression for a side effect there.
+// value is 0 (fval_emit_builtin_call); any other is compiled as before, its value and its code unchanged. It is no
+// unevaluated operand of sizeof's: the full pipeline gives no -Wunevaluated-expression for a side effect there. Read
+// where the builtin's name is (no other call pays for it); a name with no `(` after it has no operand here.
 static __attribute__((cold, noinline)) uint32_t fast_cc_constant_p_effects(const FastCCState* cc, uint32_t open)
 {
     uint32_t opens[32];
     uint32_t depth = 0;
     uint32_t closed = open;
     uint32_t effects = 0;
-    bool done = false;
+    bool done = open >= cc->tcount || cc->tk[open] != FTOK_LPAREN;
     for (uint32_t i = open + 1u; i < cc->tcount && !done && effects == 0; i += 1)
     {
         const uint8_t k = cc->tk[i];
@@ -8128,13 +8133,6 @@ static __attribute__((cold, noinline)) uint32_t fast_cc_constant_p_effects(const
         }
     }
     return effects;
-}
-
-// The end of such a call, compiled without code: its value, at FIRST_ARG - 1 on the value stack, is 0.
-static __attribute__((cold, noinline)) void fast_cc_constant_p_unevaluated(FastExprCtx* ex, uint32_t first_arg)
-{
-    ex->eval_only = (uint8_t)(ex->eval_only - 1u);
-    ex->vstack[first_arg - 1u] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = 0 };
 }
 
 // glibc's assert in GNU's modes (#3592) is a statement expression:
@@ -8603,7 +8601,11 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                     id == cc->id_builtin_memcmp || id == cc->id_builtin_strlen ||
                     id == cc->id_sync_synchronize || id == cc->id_atomic_load_n || id == cc->id_atomic_store_n)
                 {
-                    if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_BUILTIN, .sym_idx = id }; }
+                    // #3592: __builtin_constant_p's operand with a side effect is compiled without code from here to the
+                    // call's end (fast_cc_constant_p_effects; fval_emit_builtin_call ends it), marked in the callee's imm.
+                    const uint32_t unevaluated = id == cc->id_builtin_constant_p ? fast_cc_constant_p_effects(cc, cc->pos) : 0u;
+                    ex.eval_only = (uint8_t)(ex.eval_only + unevaluated);
+                    if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_BUILTIN, .imm = unevaluated, .sym_idx = id }; }
                     expect_val = false;
                     continue;
                 }
@@ -8891,7 +8893,6 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 if (cop.lbl0 == 0u || ex.vsp != cop.lbl0) { fast_cc_bail(cc, "call arg stack"); break; }
                 ex.call_open = cop.lbl2;
                 fast_expr_finish_call(&ex, cop.lbl0, 0u);
-                if (cop.lbl1 != 0) { fast_cc_constant_p_unevaluated(&ex, cop.lbl0); }
                 expect_val = false;
                 continue;
             }
@@ -9007,15 +9008,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
         if (k == FTOK_LPAREN)
         {
             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-            // #3592: __builtin_constant_p's operand with a side effect, compiled without code (fast_cc_constant_p_effects).
-            const FastVal* const callee = ex.vstack + (ex.vsp - (uint32_t)(ex.vsp != 0));
-            uint32_t unevaluated = 0;
-            if (__builtin_expect(((uint32_t)(callee->kind == FVAL_BUILTIN) & (uint32_t)(callee->sym_idx == cc->id_builtin_constant_p)) != 0, 0))
-            {
-                unevaluated = fast_cc_constant_p_effects(cc, cc->pos);
-            }
-            ex.eval_only = (uint8_t)(ex.eval_only + unevaluated);
-            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.vsp, .lbl1 = unevaluated, .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
+            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.vsp, .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -9187,7 +9180,6 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 if (cop.lbl0 == 0u || ex.vsp != cop.lbl0 + argc) { fast_cc_bail(cc, "call arg stack"); break; }
                 ex.call_open = cop.lbl2;
                 fast_expr_finish_call(&ex, cop.lbl0, argc);
-                if (cop.lbl1 != 0) { fast_cc_constant_p_unevaluated(&ex, cop.lbl0); }
                 continue;
             }
             if (top == FEOP_VA_END)

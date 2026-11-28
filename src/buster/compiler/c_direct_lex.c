@@ -5512,13 +5512,13 @@ static uint32_t fast_pp_tobody_parameter(const char* word)
 }
 
 // The body of a macro named __tobody that is glibc's, token for token, made the conditional expression above in place;
-// its new count, or body_count for any other. Read where a definition has four parameters and 80 tokens (each
-// <ctype.h> of a compile, once).
-static __attribute__((cold, noinline)) uint32_t fast_pp_tobody_body(const FastPP* pp, uint32_t name_id, FastTok* body, uint32_t body_count)
+// its new count, or body_count for any other. FOUR_PARAMETERS: a function-like macro's of four, not variadic. Read where
+// a definition has 80 tokens (each <ctype.h> of a compile, once).
+static __attribute__((cold, noinline)) uint32_t fast_pp_tobody_body(const FastPP* pp, uint32_t name_id, bool four_parameters, FastTok* body, uint32_t body_count)
 {
     enum { conditional_count = sizeof(buster_fpp_tobody_conditional) / sizeof(buster_fpp_tobody_conditional[0]) };
     const FastIdentEntry* const name = pp->idents.entries + name_id;
-    bool same = body_count == BUSTER_FPP_TOBODY_TOKENS && name->length == 8u && memcmp(pp->idents.strings + name->str_offset, "__tobody", 8) == 0;
+    bool same = four_parameters && body_count == BUSTER_FPP_TOBODY_TOKENS && name->length == 8u && memcmp(pp->idents.strings + name->str_offset, "__tobody", 8) == 0;
     for (uint32_t i = 0; same && i < BUSTER_FPP_TOBODY_TOKENS; i += 1)
     {
         const char* const word = buster_fpp_tobody_glibc[i];
@@ -5802,10 +5802,10 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
             return;
         }
     }
-    // glibc's __tobody (#3592) is looked at by its shape alone: four parameters and as many tokens as its body.
-    if (((uint32_t)is_func & (uint32_t)!is_variadic & (uint32_t)(param_count == 4u) & (uint32_t)(body_count == BUSTER_FPP_TOBODY_TOKENS)) != 0)
+    // glibc's __tobody (#3592) is looked at where a body has as many tokens as its: one test a definition.
+    if (__builtin_expect(body_count == BUSTER_FPP_TOBODY_TOKENS, 0))
     {
-        body_count = fast_pp_tobody_body(pp, name_id, body, body_count);
+        body_count = fast_pp_tobody_body(pp, name_id, is_func && !is_variadic && param_count == 4u, body, body_count);
         pp->macro_tok_count = body_start + body_count;
     }
 
