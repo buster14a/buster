@@ -7986,24 +7986,55 @@ static void parse_check_end(ParseKernels* kernels, uint32_t count, const ParseCh
     }
 }
 
-// A function's body follows a declaration's only declarator, and only one that its first derivation makes a
-// function's (parse_scalar_complete_declarator). The tables can't tell `int (*p)(int) {` from `int (*f(void))[3] {`,
-// nor see a comma before the declarator, so a body whose declaration has a declarator group or a comma at the body's
-// depth is flagged, for the scalar parser to decide. Bodies are few: each one's declaration is read back from it, to
-// the end of the item before it.
+// A grouped identifier with an immediately following parameter list still derives a function first.
+// A pointer, array or second group inside the declarator needs the full declarator parser.
+static bool parse_body_grouped_name(const ParseKernels* kernels, uint32_t close, uint32_t body)
+{
+    return close >= 2 && body - close >= 3 && kernels->check_groups[body - 1] == PARSE_GROUP_PARAMETERS &&
+           kernels->enclosing[body - 1] == close + 1 && kernels->roles[close + 1] == PARSE_ROLE_OPEN_CALL &&
+           kernels->check_groups[close] == PARSE_GROUP_DECLARATOR && kernels->enclosing[close] == close - 2 && kernels->roles[close - 2] == PARSE_ROLE_OPEN_GROUP &&
+           kernels->vkinds[close - 1] == PARSE_KIND_IDENTIFIER && kernels->roles[close - 1] == PARSE_ROLE_OPERAND;
+}
+
+// A function body follows just one declarator. Read back to the previous item boundary or the first
+// same-depth token that requires full declarator parsing. Both sides of a simple name group are one declarator.
 static void parse_check_body(ParseKernels* kernels, uint32_t body, uint8_t* reasons)
 {
     const uint32_t depth = kernels->node_depths[body];
-    bool done = false;
+    const __m512i wanted = _mm512_set1_epi32((int32_t)depth);
     bool fails = false;
-    for (uint32_t j = body; j-- > 0 && !done;)
+    for (uint32_t end = body; end != 0;)
     {
-        const uint32_t at = kernels->node_depths[j];
-        const uint8_t role = kernels->roles[j];
-        done = at < depth || (at == depth && (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_BODY));
-        fails = !done && at == depth && (role == PARSE_ROLE_OPEN_GROUP || role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_COMMA ||
-                                         (role == PARSE_ROLE_SPECIFIER && kernels->vkinds[j] == PARSE_KIND_TYPEDEF));
-        done |= fails;
+        const uint32_t first = end >= 16 ? end - 16 : 0;
+        const __mmask16 live = (__mmask16)_bzhi_u32(UINT16_MAX, end - first);
+        const __m512i depths = _mm512_maskz_loadu_epi32(live, kernels->node_depths + first);
+        const __m128i roles = _mm_maskz_loadu_epi8(live, kernels->roles + first);
+        const __m128i kinds = _mm_maskz_loadu_epi8(live, kernels->vkinds + first);
+        const __mmask16 same = _mm512_mask_cmpeq_epi32_mask(live, depths, wanted);
+        const __mmask16 stops = _mm512_mask_cmplt_epu32_mask(live, depths, wanted) |
+            (same & (_mm_cmpeq_epi8_mask(roles, _mm_set1_epi8(PARSE_ROLE_TERMINATOR)) |
+                     _mm_cmpeq_epi8_mask(roles, _mm_set1_epi8(PARSE_ROLE_CLOSE_BODY))));
+        const __mmask16 closes = _mm_cmpeq_epi8_mask(roles, _mm_set1_epi8(PARSE_ROLE_CLOSE_GROUP));
+        const __mmask16 flagged = same & (closes | _mm_cmpeq_epi8_mask(roles, _mm_set1_epi8(PARSE_ROLE_OPEN_GROUP)) |
+            _mm_cmpeq_epi8_mask(roles, _mm_set1_epi8(PARSE_ROLE_COMMA)) |
+            (_mm_cmpeq_epi8_mask(roles, _mm_set1_epi8(PARSE_ROLE_SPECIFIER)) & _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(PARSE_KIND_TYPEDEF))));
+        const uint32_t events = stops | flagged;
+        end = first;
+        if (events != 0)
+        {
+            const uint32_t lane = 31u - (uint32_t)__builtin_clz(events);
+            const uint32_t bit = 1u << lane;
+            const uint32_t token = first + lane;
+            if ((flagged & closes & bit) != 0 && parse_body_grouped_name(kernels, token, body))
+            {
+                end = token - 2;
+            }
+            else
+            {
+                fails = (flagged & bit) != 0;
+                break;
+            }
+        }
     }
     kernels->flags[body] |= fails;
     if (reasons != 0)
