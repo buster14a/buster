@@ -525,7 +525,7 @@ static uint32_t check_wide_restore_divisor(CheckWideDigit* remainder, const Chec
 }
 
 // Unsigned division of count limbs with a nonzero divisor. Take one base-2^32 quotient digit per step.
-static void check_wide_divide(uint64_t* quotient, uint64_t* remainder, const uint64_t* a, const uint64_t* b, uint32_t count)
+static __attribute__((noinline, cold)) void check_wide_divide(uint64_t* quotient, uint64_t* remainder, const uint64_t* a, const uint64_t* b, uint32_t count)
 {
     const CheckWideDigit* dividend = (const CheckWideDigit*)a;
     const CheckWideDigit* divisor = (const CheckWideDigit*)b;
