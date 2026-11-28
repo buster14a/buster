@@ -6,7 +6,7 @@
 // out-of-range shift. Unknown analysis state and an IR undef are different: undef must enter as overdefined.
 // The 16-item fold boundary uses bounded columns; it has no padding, alignment or inactive-lane read contract.
 //
-// The passes are scalar, the worklists SCCP and dead-code removal fill, since #2924. The vector passes beside them
+// SCCP and dead-code removal use worklists. DCE classifies roots in 16-instruction packets (#3445). The old vector sweeps
 // (rounds over every instruction with sixteen-lane folds and marks, pointer jumping for the threads, sixteen-lane ranks
 // and identity candidates) took 1.02 to 1.44 times their ticks when forced, more with size (#2924's 6987893038).
 // #860's AUTO bound kept SCCP and DCE's sweeps off below 8,192 instructions, but every rewrite (LICM's, GVN's, SROA's)
@@ -14,8 +14,7 @@
 // the deletion's whole-compile run measured their replacement (1,372 of 1,372 objects identical, sqlite3.c's and
 // Lua's Tier 1 compiles 0.4 to 1.2% fewer user cycles). #860 had measured the vector passes 9 to 11% ahead at 16K+
 // instructions in a near-single-block shape, which no corpus function reaches; the owner's decision (7112387760) was
-// asked without it, corrected in 7122231079. #3445 is a vectorized form that would have to win at every size, that
-// shape included.
+// asked without it, corrected in 7122231079. #3445 measures the replacement on that shape and on the real pipeline.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -641,7 +640,7 @@ static bool ir_optimize_simd_float_encode(uint64_t sign, unsigned __int128 m, in
 
 // Scalar floating operations (#2720) fold as a one-lane vector of ir_optimize_simd_float, where every floating
 // environment gives the same bits, and further only where the operation raises no exception flag: a folded scalar row
-// is no root (ir_optimize_roots' kind 2), so nothing is left to raise one. So no operand is a NaN (a signaling one
+// is no root (IROPT_MAY_TRAP), so nothing is left to raise one. So no operand is a NaN (a signaling one
 // raises invalid, and two quiet ones' payload would depend on the operands' order in the emitted instruction), the
 // result isn't one (an invalid operation's default NaN) and no division is by zero. f80 stays with the x87 at run time.
 static bool ir_optimize_float_binary(uint32_t op, uint32_t width, uint32_t predicate, uint64_t a, uint64_t b, uint64_t* value)
@@ -905,6 +904,59 @@ static bool ir_optimize_publish(IrOptimizeWork* work, uint32_t i, uint8_t state,
     return changed;
 }
 
+// Loads have no dereferenceability proof. A potentially trapping scalar row survives unless folded.
+// Floating SIMD rows keep their original operands and effects for every MXCSR, even when their values fold.
+enum
+{
+    IROPT_ROOT = 1,
+    IROPT_MAY_TRAP = 2,
+    IROPT_SIMD_EFFECT = 4,
+};
+_Static_assert(BUSTER_IR_OP_TABLE == 128, "two 64-byte lookup tables cover all IR opcodes");
+static const uint8_t ir_optimize_effects[BUSTER_IR_OP_TABLE] = {
+    [IR_LOAD] = IROPT_ROOT,
+    [IR_STORE] = IROPT_ROOT,
+    [IR_CALL] = IROPT_ROOT,
+    [IR_CALL_INDIRECT] = IROPT_ROOT,
+    [IR_ALLOCA] = IROPT_ROOT,
+    [IR_STACK_SAVE] = IROPT_ROOT,
+    [IR_STACK_RESTORE] = IROPT_ROOT,
+    [IR_LIFETIME] = IROPT_ROOT,
+    [IR_FENCE] = IROPT_ROOT,
+    [IR_ATOMIC_RMW] = IROPT_ROOT,
+    [IR_MASKED_LOAD] = IROPT_ROOT,
+    [IR_MASKED_STORE] = IROPT_ROOT,
+    [IR_COMPRESS_STORE] = IROPT_ROOT,
+    [IR_GATHER] = IROPT_ROOT,
+    [IR_SCATTER] = IROPT_ROOT,
+    [IR_BR] = IROPT_ROOT,
+    [IR_CBR] = IROPT_ROOT,
+    [IR_SWITCH] = IROPT_ROOT,
+    [IR_BR_INDIRECT] = IROPT_ROOT,
+    [IR_RET] = IROPT_ROOT,
+    [IR_UNREACHABLE] = IROPT_ROOT,
+    [IR_SDIV] = IROPT_MAY_TRAP,
+    [IR_UDIV] = IROPT_MAY_TRAP,
+    [IR_SREM] = IROPT_MAY_TRAP,
+    [IR_UREM] = IROPT_MAY_TRAP,
+    [IR_SHL] = IROPT_MAY_TRAP,
+    [IR_LSHR] = IROPT_MAY_TRAP,
+    [IR_ASHR] = IROPT_MAY_TRAP,
+    [IR_FADD] = IROPT_MAY_TRAP | IROPT_SIMD_EFFECT,
+    [IR_FSUB] = IROPT_MAY_TRAP | IROPT_SIMD_EFFECT,
+    [IR_FMUL] = IROPT_MAY_TRAP | IROPT_SIMD_EFFECT,
+    [IR_FDIV] = IROPT_MAY_TRAP | IROPT_SIMD_EFFECT,
+    [IR_FMA] = IROPT_MAY_TRAP | IROPT_SIMD_EFFECT,
+    [IR_FCMP] = IROPT_MAY_TRAP,
+    [IR_FTRUNC] = IROPT_MAY_TRAP,
+    [IR_FEXT] = IROPT_MAY_TRAP,
+    [IR_SITOFP] = IROPT_MAY_TRAP | IROPT_SIMD_EFFECT,
+    [IR_UITOFP] = IROPT_MAY_TRAP | IROPT_SIMD_EFFECT,
+    [IR_FPTOSI] = IROPT_MAY_TRAP | IROPT_SIMD_EFFECT,
+    [IR_FPTOUI] = IROPT_MAY_TRAP | IROPT_SIMD_EFFECT,
+    [IR_VCMP] = IROPT_SIMD_EFFECT,
+};
+
 #include "ir_optimize_simd.c"
 
 static bool ir_optimize_mark_edge(IrOptimizeWork* work, uint32_t edge, bool queue)
@@ -1077,63 +1129,6 @@ static uint32_t ir_optimize_single_successor(const IrOptimizeWork* work, uint32_
 
 #include "ir_optimize_layout.c"
 
-// 1 is an unconditional effect; 2 is a potential fault or floating-environment effect, discharged only by
-// a successful constant transfer. Loads remain roots even when nonvolatile: there is no dereferenceability proof. 3 is a
-// vector comparison (#141's element types). SIMD floating arithmetic and comparisons are roots whatever SCCP learns:
-// it folds a value only where every MXCSR gives it (ir_optimize_simd.c), and the rewrite keeps the original row, with
-// its operands live, for its flags and traps.
-// An integer comparison has no such effect and goes where its mask is unused.
-static const uint8_t ir_optimize_roots[BUSTER_IR_OP_TABLE] = {
-        [IR_LOAD] = 1,
-        [IR_STORE] = 1,
-        [IR_CALL] = 1,
-        [IR_CALL_INDIRECT] = 1,
-        [IR_ALLOCA] = 1,
-        [IR_STACK_SAVE] = 1,
-        [IR_STACK_RESTORE] = 1,
-        [IR_LIFETIME] = 1,
-        [IR_FENCE] = 1,
-        [IR_ATOMIC_RMW] = 1,
-        [IR_MASKED_LOAD] = 1,
-        [IR_MASKED_STORE] = 1,
-        [IR_COMPRESS_STORE] = 1,
-        [IR_GATHER] = 1,
-        [IR_SCATTER] = 1,
-        [IR_BR] = 1,
-        [IR_CBR] = 1,
-        [IR_SWITCH] = 1,
-        [IR_BR_INDIRECT] = 1,
-        [IR_RET] = 1,
-        [IR_UNREACHABLE] = 1,
-        [IR_SDIV] = 2,
-        [IR_UDIV] = 2,
-        [IR_SREM] = 2,
-        [IR_UREM] = 2,
-        [IR_SHL] = 2,
-        [IR_LSHR] = 2,
-        [IR_ASHR] = 2,
-        [IR_FADD] = 2,
-        [IR_FSUB] = 2,
-        [IR_FMUL] = 2,
-        [IR_FDIV] = 2,
-        [IR_FMA] = 2,
-        [IR_FCMP] = 2,
-        [IR_FTRUNC] = 2,
-        [IR_FEXT] = 2,
-        [IR_SITOFP] = 2,
-        [IR_UITOFP] = 2,
-        [IR_FPTOSI] = 2,
-        [IR_FPTOUI] = 2,
-        [IR_VCMP] = 3,
-};
-
-static bool ir_optimize_root(const IrOptimizeWork* work, uint32_t i)
-{
-    const uint32_t kind = ir_optimize_roots[work->function->op[i]];
-    const bool result = kind == 1 || (kind == 2 && work->states[i] != IROPT_CONSTANT) || ir_optimize_simd_effect(work->function, i);
-    return result;
-}
-
 // The identities' operations (#2554, ir_optimize_identities), by the operand whose known value makes them return the
 // other one: the right's zero (x + 0, x - 0, x | 0, x ^ 0 and a shift by zero) or the left's (0 + x, 0 | x, 0 ^ x),
 // the right's one (x * 1 and a division by one) or the left's (1 * x), and the right's all-ones or the left's (x & -1).
@@ -1298,20 +1293,18 @@ static uint32_t ir_optimize_forwarded(const IrOptimizeWork* work, uint32_t value
     return result;
 }
 
-static __attribute__((aligned(64))) bool ir_optimize_mark_operands(IrOptimizeWork* work, uint32_t i, bool queue)
+static __attribute__((aligned(64))) void ir_optimize_mark_operands(IrOptimizeWork* work, uint32_t i, uint32_t* queued)
 {
     const IrFunction* f = work->function;
-    bool changed = false;
     const bool collapsed_branch = (f->op[i] == IR_CBR || f->op[i] == IR_SWITCH) && ir_optimize_single_successor(work, work->cfg.instruction_blocks[i]) != BUSTER_IR_NONE;
     const uint32_t forwarded = ir_optimize_forwarded(work, i);
     if (forwarded != i)
     {
         // An identity (#2554): what its users read is its operand alone.
-        changed = work->live[forwarded] == 0;
-        work->live[forwarded] = 1;
-        if (changed && queue)
+        if (work->live[forwarded] == 0)
         {
-            ir_optimize_enqueue(work, forwarded);
+            work->live[forwarded] = 1;
+            work->queue[(*queued)++] = forwarded;
         }
     }
     else if ((work->states[i] != IROPT_CONSTANT || ir_optimize_simd_effect(f, i)) && !collapsed_branch)
@@ -1324,63 +1317,62 @@ static __attribute__((aligned(64))) bool ir_optimize_mark_operands(IrOptimizeWor
             if (executable && work->live[operand.value] == 0)
             {
                 work->live[operand.value] = 1;
-                changed = true;
-                if (queue)
-                {
-                    ir_optimize_enqueue(work, operand.value);
-                }
+                work->queue[(*queued)++] = operand.value;
             }
         }
     }
     work->statistics.dce_visits += 1;
-    return changed;
-}
-
-static __attribute__((aligned(64))) void ir_optimize_dce_worklist(IrOptimizeWork* work)
-{
-    for (uint32_t i = 0; i < work->function->instruction_count; i += 1)
-    {
-        if (work->live[i] != 0)
-        {
-            ir_optimize_enqueue(work, i);
-        }
-    }
-    while (work->queued_count != 0)
-    {
-        ir_optimize_mark_operands(work, ir_optimize_dequeue(work), true);
-    }
 }
 
 static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, IrOptimizeOptions options)
 {
     const IrFunction* f = work->function;
+    // Each root starts live. Compress its instruction number into the same worklist the operand walk extends.
+    const __m512i low = _mm512_loadu_si512(ir_optimize_effects);
+    const __m512i high = _mm512_loadu_si512(ir_optimize_effects + 64);
+    const __m512i lane_ids = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    uint32_t queued = 0;
     for (uint32_t block = 0; block < f->block_count; block += 1)
     {
-        if (work->blocks[block] != 0)
+        if (work->blocks[block] == 0)
         {
-            const uint32_t first = f->block_offsets[block];
-            const uint32_t end = f->block_offsets[(uint64_t)block + 1];
-            if ((options.passes & BUSTER_IR_OPTIMIZE_DCE) == 0)
+            continue;
+        }
+        const uint32_t first = f->block_offsets[block];
+        const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+        if ((options.passes & BUSTER_IR_OPTIMIZE_DCE) == 0)
+        {
+            memset(work->live + first, 1, end - first);
+            continue;
+        }
+        for (uint32_t i = first; i < end;)
+        {
+            const uint32_t count = end - i < 16 ? end - i : 16;
+            const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT16_MAX, count);
+            const __m128i ops = _mm_maskz_loadu_epi8(lanes, f->op + i);
+            const __m128i kinds = _mm512_castsi512_si128(_mm512_permutex2var_epi8(low, _mm512_castsi128_si512(ops), high));
+            const __m128i states = _mm_maskz_loadu_epi8(lanes, work->states + i);
+            const __m128i flags = _mm_maskz_loadu_epi8(lanes, f->flags + i);
+            const __mmask16 may_trap = _mm_test_epi8_mask(kinds, _mm_set1_epi8(IROPT_MAY_TRAP));
+            const __mmask16 simd = _mm_test_epi8_mask(kinds, _mm_set1_epi8(IROPT_SIMD_EFFECT));
+            __mmask16 roots = lanes & (_mm_test_epi8_mask(kinds, _mm_set1_epi8(IROPT_ROOT)) |
+                                      _mm_mask_cmpneq_epi8_mask(may_trap, states, _mm_set1_epi8(IROPT_CONSTANT)) |
+                                      _mm_mask_cmpge_epu8_mask(simd, flags, _mm_set1_epi8(IR_SIMD_LANE_F32)));
+            if (work->forward != NULL)
             {
-                memset(work->live + first, 1, end - first);
+                const __m512i forwarded = _mm512_maskz_loadu_epi32(lanes, work->forward + i);
+                roots = _mm512_mask_cmpeq_epi32_mask(roots, forwarded, _mm512_set1_epi32(-1));
             }
-            else
-            {
-                for (uint32_t i = first; i < end; i += 1)
-                {
-                    work->live[i] = ir_optimize_root(work, i);
-                }
-            }
+            _mm_mask_storeu_epi8(work->live + i, lanes, _mm_maskz_set1_epi8(roots, 1));
+            _mm512_mask_compressstoreu_epi32(work->queue + queued, roots, _mm512_add_epi32(lane_ids, _mm512_set1_epi32((int32_t)i)));
+            queued += (uint32_t)__builtin_popcount(roots);
+            i += count;
         }
     }
-    // An identity is no root (a shift is one, #2554): only its users keep its operand.
-    for (uint32_t i = 0; work->forward != 0 && (options.passes & BUSTER_IR_OPTIMIZE_DCE) != 0 && i < f->instruction_count; i += 1)
+    // Liveness only changes once. The queue therefore holds at most one entry per instruction, including roots.
+    for (uint32_t next = 0; next < queued; next += 1)
     {
-        work->live[i] = work->forward[i] != BUSTER_IR_NONE ? 0 : work->live[i];
-    }
-    if ((options.passes & BUSTER_IR_OPTIMIZE_DCE) != 0)
-    {
-        ir_optimize_dce_worklist(work);
+        ir_optimize_mark_operands(work, work->queue[next], &queued);
     }
 }
 
