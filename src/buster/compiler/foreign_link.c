@@ -139,7 +139,7 @@ static bool foreign_link_add_capacity(LinkCapacity* total, LinkCapacity added)
 
 // The resolver has already validated these tables. Count only local symbol records here: globals are represented
 // once per resolved name, so sizing by every input's full symbol table would reserve that handoff a second time.
-static bool foreign_link_capacity(const Foreign* foreign, uint64_t bound_groups, uint64_t bound_relocations, LinkCapacity* capacity)
+static bool foreign_link_capacity(const Foreign* foreign, uint64_t bound_groups, uint64_t bound_relocations, LinkCapacity* capacity, bool* has_shared_names)
 {
     *capacity = (LinkCapacity){ 0 };
     capacity->names = foreign->names.count;
@@ -166,6 +166,7 @@ static bool foreign_link_capacity(const Foreign* foreign, uint64_t bound_groups,
             }
         }
     }
+    *has_shared_names = shared != 0;
     // And _DYNAMIC (foreign_link_dynamic_symbol).
     const uint64_t aliases = shared * BUSTER_FOREIGN_LINK_COPY_ALIASES + 1;
     // And a merged atom for each __start_ and __stop_ group, with its sections' relocations again (foreign_link_bounds_merge).
@@ -837,87 +838,106 @@ static ForeignLinkError foreign_link_libraries(ForeignLink* output, const Foreig
 // as the largest of its names. A function reached that way would need a canonical PLT entry, and a definition of no
 // size can't be copied: both are refused, naming the symbol.
 //
-// The imports are a bitset, 64 symbols' sources at a time; the fixups' kinds and targets are tested 16 at a time against
-// it (a gather of its words) on the vector path, one at a time on the exact path. Only the hits, a few in a program,
-// and the copies' aliases (the library's export addresses compared eight at a time) are handled one at a time.
-
-#define BUSTER_FOREIGN_LINK_DIRECT_KINDS                                                                                                                \
-    ((1u << BUSTER_LINK_FIXUP_PC32) | (1u << BUSTER_LINK_FIXUP_PC64) | (1u << BUSTER_LINK_FIXUP_ABS32) | (1u << BUSTER_LINK_FIXUP_ABS32S) |         \
-     (1u << BUSTER_LINK_FIXUP_CALL))
-
-static bool foreign_link_bit32(const uint32_t* bits, uint32_t index)
+// Classify 64 relocation kinds at a time, including the final partial block. A call
+// to an imported function uses its PLT entry. Other direct uses of imports need copies.
+// The returned count is the population of the output bitmap, which is used only when nonzero.
+static uint64_t foreign_link_mark_copies(const Link* link, uint32_t* copied)
 {
-    return (bits[index / 32] >> (index % 32) & 1) != 0;
-}
-
-// Whether a fixup of `kind` (without the wide flag) to an import needs a copy of it: a kind that reaches a library's
-// symbol neither through the GOT nor by an ABS64 nor, for a function, by a call (link_check_target's rule).
-static bool foreign_link_needs_copy(const Link* link, uint8_t kind, SymbolId target)
-{
-    const bool function = (link->symbols.flags[target] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
-    return (BUSTER_FOREIGN_LINK_DIRECT_KINDS >> kind & 1) != 0 && !(kind == BUSTER_LINK_FIXUP_CALL && function);
-}
-
-// The link's imports as a bitset of 32-bit words, 64 symbols' sources at a time; their count.
-static uint64_t foreign_link_imports(const Link* link, uint32_t* imports, ForeignPath path)
-{
-    const LinkSymbols* symbols = &link->symbols;
-    uint64_t total = 0;
-    for (uint32_t first = 0; first < symbols->count; first += 64)
+    if (link->fixups.count <= 1)
     {
-        const uint32_t n = symbols->count - first < 64 ? symbols->count - first : 64;
-        uint64_t mask = 0;
-        if (path == FOREIGN_PATH_VECTOR)
+        return 0;
+    }
+    const uint32_t symbol_count = link->symbols.count;
+    bool expanded = false;
+    uint64_t word_bits = 0;
+    const LinkFixups* fixups = &link->fixups;
+    const uintptr_t base = (uintptr_t)fixups->kind;
+    const uintptr_t start = base + 1;
+    const uintptr_t end = base + fixups->count;
+    static const uint8_t direct[16] = {
+        [BUSTER_LINK_FIXUP_CALL] = 0x80, [BUSTER_LINK_FIXUP_PC32] = 0x80, [BUSTER_LINK_FIXUP_PC64] = 0x80,
+        [BUSTER_LINK_FIXUP_ABS32] = 0x80, [BUSTER_LINK_FIXUP_ABS32S] = 0x80,
+    };
+    const __m512i lookup = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i*)direct));
+    for (uintptr_t addr = start & ~(uintptr_t)63; addr < end; addr += 64)
+    {
+        const uintptr_t left = end - addr;
+        const __mmask64 high = _bzhi_u64(UINT64_MAX, left < 64 ? (unsigned)left : 64);
+        const __mmask64 live = addr < start ? high & (UINT64_MAX << (start - addr)) : high;
+        const __m512i raw = _mm512_maskz_loadu_epi8(live, (const void*)addr);
+        const __m512i kind = _mm512_and_si512(raw, _mm512_set1_epi8(BUSTER_LINK_FIXUP_KIND));
+        const __mmask64 known = _mm512_cmplt_epu8_mask(kind, _mm512_set1_epi8(16));
+        uint64_t hits = known & _mm512_movepi8_mask(_mm512_shuffle_epi8(lookup, kind));
+        if (!expanded)
         {
-            const __mmask64 lanes = _bzhi_u64(~0ull, n);
-            mask = _mm512_mask_cmpeq_epi8_mask(lanes, _mm512_maskz_loadu_epi8(lanes, symbols->source + first), _mm512_set1_epi8(BUSTER_LINK_SOURCE_FOREIGN_SHARED));
-        }
-        else
-        {
-            for (uint32_t i = 0; i < n; i += 1)
+            while (hits != 0)
             {
-                mask |= (uint64_t)(symbols->source[first + i] == BUSTER_LINK_SOURCE_FOREIGN_SHARED) << i;
+                const FixupId i = (FixupId)(addr + (unsigned)__builtin_ctzll(hits) - base);
+                const SymbolId target = fixups->target[i];
+                if (target >= 64)
+                {
+                    // A target beyond the register word needs the complete bitmap.
+                    // Seed its first word and include this fixup in the block below.
+                    memset(copied, 0, 2 * (((uint64_t)symbol_count + 63) / 64) * sizeof(*copied));
+                    memcpy(copied, &word_bits, sizeof(word_bits));
+                    expanded = true;
+                    break;
+                }
+                const bool call = (fixups->kind[i] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_CALL;
+                if (!call || (link->symbols.flags[target] & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_FUNCTION)
+                {
+                    word_bits |= UINT64_C(1) << target;
+                }
+                hits &= hits - 1;
             }
         }
-        imports[first / 32] = (uint32_t)mask;
-        imports[first / 32 + 1] = (uint32_t)(mask >> 32);
-        total += (uint64_t)__builtin_popcountll(mask);
+        if (hits != 0 && _mm512_mask_cmpeq_epi8_mask(hits, kind, _mm512_set1_epi8(BUSTER_LINK_FIXUP_CALL)) == 0)
+        {
+            for (; hits != 0; hits &= hits - 1)
+            {
+                const FixupId i = (FixupId)(addr + (unsigned)__builtin_ctzll(hits) - base);
+                const SymbolId target = fixups->target[i];
+                copied[target / 32] |= UINT32_C(1) << (target % 32);
+            }
+        }
+        while (hits != 0)
+        {
+            const FixupId i = (FixupId)(addr + (unsigned)__builtin_ctzll(hits) - base);
+            const SymbolId target = fixups->target[i];
+            const bool call = (fixups->kind[i] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_CALL;
+            if (!call || (link->symbols.flags[target] & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_FUNCTION)
+            {
+                copied[target / 32] |= UINT32_C(1) << (target % 32);
+            }
+            hits &= hits - 1;
+        }
+    }
+    uint64_t total = 0;
+    for (uint64_t first = 0; expanded && first < symbol_count; first += 64)
+    {
+        const uint32_t left = symbol_count - (uint32_t)first;
+        const __mmask64 live = _bzhi_u64(UINT64_MAX, left < 64 ? left : 64);
+        const __m512i source = _mm512_maskz_loadu_epi8(live, link->symbols.source + first);
+        const __mmask64 imported = _mm512_cmpeq_epi8_mask(source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_FOREIGN_SHARED));
+        uint64_t seen;
+        memcpy(&seen, copied + first / 32, sizeof(seen));
+        const uint64_t bits = seen & imported;
+        memcpy(copied + first / 32, &bits, sizeof(bits));
+        total += (uint64_t)__builtin_popcountll(bits);
+    }
+    if (!expanded && word_bits != 0)
+    {
+        const __mmask64 live = symbol_count >= 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, symbol_count);
+        const __m512i source = _mm512_maskz_loadu_epi8(live, link->symbols.source);
+        const uint64_t bits = word_bits & _mm512_cmpeq_epi8_mask(source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_FOREIGN_SHARED));
+        if (symbol_count > 64)
+        {
+            memset(copied, 0, 2 * (((uint64_t)symbol_count + 63) / 64) * sizeof(*copied));
+        }
+        memcpy(copied, &bits, sizeof(bits));
+        total += (uint64_t)__builtin_popcountll(bits);
     }
     return total;
-}
-
-// The imports that some fixup needs a copy of, into the bitset `copied`.
-static void foreign_link_mark_copies(const Link* link, const uint32_t* imports, uint32_t* copied, ForeignPath path)
-{
-    const LinkFixups* fixups = &link->fixups;
-    FixupId first = 1;
-    if (path == FOREIGN_PATH_VECTOR)
-    {
-        const __m512i direct = _mm512_set1_epi32((int)BUSTER_FOREIGN_LINK_DIRECT_KINDS);
-        for (; first + 16 <= fixups->count; first += 16)
-        {
-            const __m512i kinds = _mm512_and_si512(_mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i*)(fixups->kind + first))), _mm512_set1_epi32(BUSTER_LINK_FIXUP_KIND));
-            const __mmask16 candidates = _mm512_test_epi32_mask(_mm512_srlv_epi32(direct, kinds), _mm512_set1_epi32(1));
-            if (candidates != 0)
-            {
-                const __m512i targets = _mm512_loadu_si512(fixups->target + first);
-                const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(targets, 5), imports, 4);
-                const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(targets, _mm512_set1_epi32(31)));
-                for (uint32_t hits = _mm512_mask_test_epi32_mask(candidates, bits, _mm512_set1_epi32(1)); hits != 0; hits &= hits - 1)
-                {
-                    const FixupId fixup = first + (FixupId)__builtin_ctz(hits);
-                    const SymbolId target = fixups->target[fixup];
-                    copied[target / 32] |= foreign_link_needs_copy(link, fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND, target) ? 1u << (target % 32) : 0;
-                }
-            }
-        }
-    }
-    for (; first < fixups->count; first += 1)
-    {
-        const SymbolId target = fixups->target[first];
-        const bool copy = foreign_link_bit32(imports, target) && foreign_link_needs_copy(link, fixups->kind[first] & BUSTER_LINK_FIXUP_KIND, target);
-        copied[target / 32] |= copy ? 1u << (target % 32) : 0;
-    }
 }
 
 // A copy's alignment (log2), as lld takes it: the largest power of two that divides the definition's address, at most
@@ -998,23 +1018,21 @@ static bool foreign_link_define_copy(Link* link, SymbolId symbol, AtomId atom, u
     return result;
 }
 
-static ForeignLinkResult foreign_link_copies(ForeignLink* output, const Foreign* foreign, Arena* arena)
+static ForeignLinkResult foreign_link_copies(ForeignLink* output, const Foreign* foreign, Arena* arena, bool has_shared_names)
 {
     ForeignLinkResult result = { 0 };
     Link* link = &output->link;
-    const uint32_t words = 2 * ((link->symbols.count + 63) / 64);
+    const uint64_t words = 2 * (((uint64_t)link->symbols.count + 63) / 64);
     Scratch scratch = scratch_begin(arena);
-    uint32_t* imports = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, words);
-    uint32_t* copied = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, words);
-    result.error = imports != 0 && copied != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
+    uint32_t* copied = NULL;
     uint64_t marked = 0;
-    if (result.error == FOREIGN_LINK_ERROR_NONE && foreign_link_imports(link, imports, foreign->path) != 0)
+    if (has_shared_names)
     {
-        memset(copied, 0, (uint64_t)words * sizeof(uint32_t));
-        foreign_link_mark_copies(link, imports, copied, foreign->path);
-        for (uint32_t w = 0; w < words; w += 1)
+        copied = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, words);
+        result.error = copied != NULL ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
+        if (result.error == FOREIGN_LINK_ERROR_NONE)
         {
-            marked += (uint64_t)__builtin_popcount(copied[w]);
+            marked = foreign_link_mark_copies(link, copied);
         }
     }
     ForeignLinkCopy* copies = marked != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ForeignLinkCopy, marked) : 0;
@@ -1705,6 +1723,7 @@ static ForeignLinkError foreign_link_dynamic_finish(ForeignLink* output, const F
 typedef struct ForeignLinkBuild ForeignLinkBuild;
 struct ForeignLinkBuild
 {
+    bool has_shared_names;
     ForeignLink* output;
     const Foreign* foreign;
     Arena* arena;
@@ -1759,7 +1778,7 @@ static void foreign_link_build_begin(ForeignLinkBuild* build)
     {
         result.error = order != 0 ? foreign_link_bounds_plan(foreign, order, &build->bounds, build->scratch.arena) : FOREIGN_LINK_ERROR_MEMORY;
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && !foreign_link_capacity(foreign, build->bounds.group_count, build->bounds.relocations, &capacity))
+    if (result.error == FOREIGN_LINK_ERROR_NONE && !foreign_link_capacity(foreign, build->bounds.group_count, build->bounds.relocations, &capacity, &build->has_shared_names))
     {
         result.error = FOREIGN_LINK_ERROR_CAPACITY;
     }
@@ -1967,7 +1986,7 @@ static void foreign_link_build_end(ForeignLinkBuild* build)
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE && runtime_kind_is_dynamic_executable(build->kind))
     {
-        result = foreign_link_copies(output, foreign, build->arena);
+        result = foreign_link_copies(output, foreign, build->arena, build->has_shared_names);
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE && build->kind != RUNTIME_KIND_STATIC)
     {
