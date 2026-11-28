@@ -127,21 +127,22 @@ membership/parents to group reducible loops, and retain RPO in flagged regions.
 
 ## Algorithms and bounded storage
 
-An iterative DFS from entry produces RPO, DFS ancestry intervals, and each
-preorder number's block and DFS parent. SEMI-NCA works in preorder numbers. It
-computes semidominators in decreasing order: a predecessor numbered below the
-block is a candidate itself, and one above contributes the least semidominator
-on its path through the forest of already-processed vertices, which an
-explicit stack compresses toward that forest's unprocessed root. Each immediate
-dominator is then, in increasing order, the nearest common dominator-tree
-ancestor of the DFS parent and the semidominator, found by walking up the
-finished part of the tree from the parent. Compression bounds
-the semidominators by O(E log B). The walk costs the depth between the parent
-and the immediate dominator: a step or two on goto ladders, nested ifs and `?:`
-chains, but O(B²) in total when a deep block has many DFS
-children each also reachable from far above it, which Cooper–Harvey–Kennedy's
-intersection walks too. Its scratch is two u32 columns from the DFS plus
-12 bytes per reachable block.
+An iterative DFS from entry builds preorder and reverse postorder, assigns
+each tree edge as the provisional immediate dominator, and records the
+preorder numbers of vertices with multiple incoming edges. If every
+non-tree edge returns to an unfinished ancestor, the DFS parents already
+give the dominator tree. Otherwise the solver initializes eight parent and
+least-label pairs at a time and visits joins in decreasing preorder. A
+predecessor with a smaller number contributes that number. A later
+predecessor contributes the minimum semidominator on its compressed path
+through the processed forest.
+
+In increasing preorder, each join takes the nearest common dominator-tree
+ancestor of its DFS parent and semidominator. Four ordinary parent hops
+handle short climbs. Longer queries build jump links along the finalized
+part of the tree. Two adjacent jumps of equal length coalesce, and each
+queried ancestor receives its cached link once. The implementation reuses
+semidominator scratch for these links.
 
 Counting, prefix sums and filling produce the children CSR. An explicit tree
 stack assigns intervals for constant-time dominance queries. Frontier
