@@ -1900,3 +1900,12 @@ windows/windows: unit 9, window 1000	0a9c0a4c5da785ac
 windows/windows: unit 9, window 10000	0a9c0a4c5da785ac
 windows/windows: unit 9, window 4096	0a9c0a4c5da785ac
 windows/windows: unit 9, window 4097	0a9c0a4c5da785ac
+case/adjacent definitions across output, argument collection and a skipped group #a2767f945b8af2b1	f03b3db0f2b906c8
+case/poisoned and invalid paste operands on consecutive definition lines #c3dcdf24b9a7e9e9	25f874b2697d1df2
+case/unterminated comment on the last of three definition lines #6fc9f2bf46be8891	9dbe8c2540b5731e
+compile/adjacent definitions across output, argument collection and a skipped group #a2767f945b8af2b1	fc51388dc2d42388
+compile/poisoned and invalid paste operands on consecutive definition lines #c3dcdf24b9a7e9e9	680b386ac06080b2
+compile/unterminated comment on the last of three definition lines #6fc9f2bf46be8891	9dbe8c2540b5731e
+print/adjacent definitions across output, argument collection and a skipped group #a2767f945b8af2b1	c17559711c0e1c1a
+print/poisoned and invalid paste operands on consecutive definition lines #c3dcdf24b9a7e9e9	98839df14767fe29
+print/unterminated comment on the last of three definition lines #6fc9f2bf46be8891	cbf29ce484222325

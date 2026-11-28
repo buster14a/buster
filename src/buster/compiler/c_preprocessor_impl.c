@@ -13,7 +13,7 @@ static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, ui
 static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name);
 static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start, bool trigraphs);
 static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end);
-static void pp_directive(Preprocessor* pp, PPContext* context);
+static void pp_directive(Preprocessor* pp, PPContext* context, bool file_run);
 static void pp_finish_invocation(Preprocessor* pp);
 static void pp_close_builtin(Preprocessor* pp, bool closed);
 static void pp_start_stream(Preprocessor* pp);
@@ -5632,7 +5632,7 @@ static void pp_collect_step(Preprocessor* pp)
             else
             {
                 // Undefined behavior that clang allows, and warns about only with -pedantic (-Wembedded-directive).
-                pp_directive(pp, context);
+                pp_directive(pp, context, false);
             }
         }
         else if (pp->context_count > 1)
@@ -9026,7 +9026,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
             pp->keywords_resolved = pp->output.count;
         }
-        pp_directive(pp, context);
+        pp_directive(pp, context, true);
     }
     else
     {
@@ -11882,7 +11882,6 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
 {
     const uint32_t d = context->next_directive;
     const PPFileData* data = &pp->datas[context->data];
-    const uint32_t data_index = context->data;
     const uint32_t hash = data->directive_hash[d];
     const uint32_t end = data->directive_end[d];
     const uint8_t kind = data->directive_kind[d];
@@ -11915,9 +11914,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
     switch (kind)
     {
         case PP_DIRECTIVE_NULL:
-            break;
-        case PP_DIRECTIVE_DEFINE:
-            pp_define(pp, data_index, base, hash + 2, end);
+        case PP_DIRECTIVE_DEFINE: // Already handled by pp_directive.
             break;
         case PP_DIRECTIVE_UNDEF:
             // As clang: the name, then the line's end, then whether it undefines a builtin.
@@ -12024,11 +12021,41 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
 
 // Only a directive the main loop is executing can establish an active opaque message. Skipped lines retain their
 // original lexing; a recovery failure is fatal and never dispatches the incomplete prepared directive.
-static void pp_directive(Preprocessor* pp, PPContext* context)
+static void pp_directive(Preprocessor* pp, PPContext* context, bool file_run)
 {
     const uint32_t directive = context->next_directive;
     const PPFileData* data = &pp->datas[context->data];
     const uint8_t kind = data->directive_kind[directive];
+    if (kind == PP_DIRECTIVE_DEFINE)
+    {
+        const uint32_t base = pp->ranges[context->range].base;
+        // Definitions emit no ordinary tokens and leave this file active. Argument collection still needs to
+        // visit each directive separately to enforce the rules for embedded directives.
+        const bool uninterrupted = file_run && (pp->stream_count | pp->limit_count | pp->capture_count) == 0;
+        const bool inspect = (data->raw_error_count | data->unterminated_comment | pp->poison_count) != 0;
+        uint32_t d = directive;
+        do
+        {
+            const uint32_t hash = data->directive_hash[d];
+            const uint32_t end = data->directive_end[d];
+            if (inspect)
+            {
+                pp_read_directive_comment(pp, context, d);
+                pp_read_raw_errors(pp, context, hash, end);
+            }
+            context->position = end;
+            d += 1;
+            context->next_directive = d;
+            pp->statistics.directives += pp->options.timing;
+            if (inspect && pp->poison_count != 0)
+            {
+                pp_check_poison_range(pp, data, base, 0, hash + 1, end, BUSTER_PP_NONE, true);
+            }
+            pp_define(pp, context->data, base, hash + 2, end);
+        } while (uninterrupted && !pp->fatal && d < data->directive_count && context->position == data->directive_hash[d] &&
+                 data->directive_kind[d] == PP_DIRECTIVE_DEFINE);
+        return;
+    }
     const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
     // Only a header name's line can need the raw or comment repairs (pp_recover_direct_raw and
     // pp_recover_direct_header_comment test the kind first themselves).
