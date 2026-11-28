@@ -23,11 +23,7 @@
 
 static bool ir_optimize_simd_effect(const IrFunction* f, uint32_t i)
 {
-    const uint32_t op = f->op[i];
-    const bool result = f->flags[i] >= IR_SIMD_LANE_F32 &&
-                        (op == IR_VCMP || op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV ||
-                         op == IR_FMA || op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI);
-    return result;
+    return f->flags[i] >= IR_SIMD_LANE_F32 && (ir_optimize_effects[f->op[i]] & IROPT_SIMD_EFFECT) != 0;
 }
 
 static bool ir_optimize_simd_storage(IrOptimizeWork* work)
