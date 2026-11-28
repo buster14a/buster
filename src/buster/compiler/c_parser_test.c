@@ -915,6 +915,10 @@ static const ParseTestSnippet parse_test_snippets[] =
     // labels names, which nothing continues; an asm label is string literals, and a top-level asm block its template.
     { "int x asm(\"a\" \"b\"), y __asm__(\"c\") = 1; void f(int z) { asm(\"a\" \"b\" : \"=r\" \"m\"(z), [b] \"=r\"(z) : \"r\"(z) : \"memory\", \"cc\"); }\n", "", 0 },
     { "void f(void) { asm(\"\" + 1); }\n", "1:23: expected ')'", 0 },
+    { "void f(int p){asm(\"\" : \"=r\"(p) : \"r\"(p)];}\n", "1:40: expected ')'", 0 },
+    { "void f(void *p){asm volatile(\"\"::\"m\"(*(void *volatile *)p):\"memory\"};}\n", "1:68: expected ')'", 0 },
+    { "int f(int x){return _Generic(x, int:2, default:1];}\n", "1:49: expected ')'", 0 },
+    { "int f(int x){return _Generic(0, int:(int]x, default:2);}\n", "1:41: expected ')'", 0 },
     { "void f(void) { asm(\"a\", \"b\"); }\n", "1:23: expected ')'", 0 },
     { "void f(int x) { asm(\"\" : \"=r\"(x) + 1); }\n", "1:34: expected ')'", 0 },
     { "void f(void) { asm(\"\" ::: \"memory\" + 1); }\n", "1:36: expected ')'", 0 },
@@ -1222,6 +1226,16 @@ static const ParseTestFixture parse_test_fixtures[] =
     { "void g(int a, int b, int c, int x, int y, int z) { if (a) x = b * c; else y = -z; }\n", 39,
       { 38, 20, 20, 5, 3, 8, 5, 6, 11, 8, 9, 14, 11, 12, 17, 14, 15, 20, 17, 18, 0, 38, 25, 25, 25, 38, 27, 31, 29, 27, 29, 25, 25, 34, 37, 34, 35,
         32, -1 } },
+    { "void f(int a[__restrict__]);\n", 10, { 9, 8, 8, 8, 7, 7, 7, 3, 0, -1 }, true },
+    { "void f(char *p){ g(&(char *){p}); }\n", 21, { 20, 6, 6, 6, 3, 4, 0, 20, 18, 18, 18, 14, 14, 12, 17, 17, 17, 10, 19, 20, -1 }, true },
+    { "void (*f(int sig,void (*handler)(int)))(int){return handler;}\n", 26, { 25, 17, 17, 16, 16, 7, 5, 16, 7, 12, 12, 10, 15, 15, 15, 8, 2, 20, 20, 20, 0, 25, 24, 22, 25, -1 }, true },
+    { "int f(int x){return _Generic(x, int: 4, default: x+1);}\n", 24, { 23, 5, 5, 5, 3, 0, 23, 22, 21, 21, 11, 15, 13, 11, 13, 21, 17, 15, 19, 17, 19, 7, 23, -1 }, true },
+    { "int f(int x){return _Generic(0?(&x):(void*)1, const void*:3, default:4);}\n", 35, { 34, 5, 5, 5, 3, 0, 34, 33, 32, 32, 16, 16, 15, 15, 13, 16, 22, 20, 20, 18, 16, 20, 28, 26, 23, 24, 22, 26, 32, 30, 28, 30, 7, 34, -1 }, true },
+    { "void f(int a[static 3 + sizeof(int)]);\n", 16, { 15, 14, 14, 14, 13, 13, 13, 8, 6, 8, 12, 12, 9, 3, 0, -1 }, true },
+    { "void g(void *p){ __asm__(\"\" : \"=m\"(*(void *volatile *)p)); }\n", 26, { 25, 6, 6, 6, 3, 4, 0, 25, 23, 23, 11, 23, 22, 22, 22, 20, 20, 16, 17, 17, 14, 20, 11, 24, 25, -1 }, true },
+    { "void f(void){ __asm__ volatile (\"\" : : : \"memory\"); }\n", 17, { 16, 4, 4, 4, 0, 16, 14, 14, 14, 10, 11, 12, 14, 12, 15, 16, -1 }, true },
+    { "__asm__(\"\" \"two\");\n", 6, { 4, 4, 4, 2, 5, -1 }, true },
+    { "int (f)(void) { return 1; }\n", 12, { 11, 3, 3, 6, 6, 6, 0, 11, 10, 8, 11, -1 }, true },
     { "int (*a[3])(double);\n", 12, { 11, 7, 7, 6, 6, 6, 2, 10, 10, 10, 0, -1 } },
     { "void f(void *p) { goto *p ? p : p; goto *p + 0; goto *p, p; }\n", 29,
       { 28, 6, 6, 6, 3, 4, 0, 28, 15, 8, 13, 13, 13, 9, 13, 28, 21, 16, 19, 17, 19, 28, 27, 22, 25, 23, 25, 28, -1 }, true },
@@ -1273,6 +1287,62 @@ static uint32_t parse_test_check_fixtures(const char* directory)
         remove(path);
     }
     printf("fixtures: %u trees checked by hand, %u failures\n", count, failures);
+    return failures;
+}
+
+// Exercise expression carries, discarded type tokens and joined string literals across packet boundaries.
+static uint32_t parse_test_check_long_declarations(const char* directory)
+{
+    static const char* const sources[] = {
+        "#define FOUR + 1 + 1 + 1 + 1\n"
+        "#define SIXTEEN FOUR FOUR FOUR FOUR\n"
+        "#define TERMS SIXTEEN SIXTEEN SIXTEEN SIXTEEN\n"
+        "#define WORDS \"a\" \"b\" \"c\" \"d\"\n"
+        "#define STRINGS WORDS WORDS WORDS WORDS\n"
+        "int select_type(int x) { return _Generic(x TERMS, struct S *: 2, default: x TERMS); }\n"
+        "void literal(char *p) { use(&(char *){p TERMS}); use(&(char *){STRINGS STRINGS STRINGS STRINGS WORDS}); }\n"
+        "void bound(int a[static 1 TERMS + sizeof(int)]) {}\n",
+        "#define FOUR + 1 + 1 + 1 + 1\n"
+        "#define SIXTEEN FOUR FOUR FOUR FOUR\n"
+        "int f(int x) { return _Generic(x SIXTEEN SIXTEEN, struct S *: 2, default: x + ); }\n",
+    };
+    uint32_t failures = 0;
+    char path[4096];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/long_declaration_%u.c", directory, i);
+        const ParseTestSnippet snippet = { .source = sources[i], .error = "", .std = 0 };
+        const PPOptions options = parse_test_snippet_options(&snippet);
+        const ParseOptions parse_options = { 0 };
+        static InternTable table;
+        static Preprocessor pp;
+        static Parser parser;
+        bool ok = parse_test_write(path, sources[i], strlen(sources[i])) && intern_initialize(&table) && pp_initialize(&pp, &options, &table) &&
+                  parse_initialize(&parser, &parse_options, options.language) && pp_run(&pp, path);
+        if (ok)
+        {
+            parse_translation_unit(&parser, &pp);
+            if (i == 0)
+            {
+                ok = parser.tokens.count == 653 && parser.errors == 0 && parser.fatal == PARSE_MESSAGE_NONE &&
+                     parser.statistics.fallback_items == 0 && !parser.statistics.whole;
+            }
+            else
+            {
+                ok = parser.errors == 1 && parser.diagnostic_count == 1 && parser.diagnostics[0].token == 86 &&
+                     parser.diagnostics[0].message == PARSE_MESSAGE_EXPECTED_EXPRESSION;
+            }
+        }
+        if (!ok)
+        {
+            printf("long declaration %u failed\n", i);
+            failures += 1;
+        }
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&table);
+        remove(path);
+    }
     return failures;
 }
 
@@ -5152,6 +5222,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             failures += parse_test_check_snippets(directory, clang);
             failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
             failures += parse_test_check_fixtures(directory);
+            failures += parse_test_check_long_declarations(directory);
             failures += parse_test_check_resumed(directory);
         }
         if (input_count == 0)
