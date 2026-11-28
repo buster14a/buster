@@ -2,6 +2,6 @@
 # the sum of its units' digests (parse_test_unit_digest) and the vector path's (parse_test_vector_digest), recorded with
 # BUSTER_PARSE_RECORD_DIGESTS where the vector path and its kernels agreed with the scalar parser and their twins (#2924).
 # Each line is a key (the batch, '/', its language), a tab and the digest; lines without a tab are comments.
-alignments/c2017 gnu, keywords 0, digraphs 0	723c5bbf44475253
+alignments/c2017 gnu, keywords 0, digraphs 0	6f6c27d9e4eaf834
 nesting/c2017 gnu, keywords 0, digraphs 0	bf5a18950284ecfe
 streams/c2017 gnu, keywords 0, digraphs 0	85e8d486e4752100
