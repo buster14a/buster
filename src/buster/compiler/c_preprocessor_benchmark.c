@@ -5,14 +5,13 @@
 
 //
 // The preprocessor benchmark: preprocesses translation units from scratch, as `-E` does without printing, with the
-// vectorized kernels, and again with pp_define's body scan by its scalar arm (pp_scan_body_scalar, the one scalar twin
-// the preprocessor keeps: #2924), and reports per token what each costs.
+// vectorized preprocessor. Explicit cost controls run the same preprocessor with one option changed.
 //
 // Usage: build/compiler benchmark-preprocessor [--clang] [--markers] [--history-cost | --guard-cost | --spelling-cost]
-//        [--only vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] [-E's options] file...
+//        [--only vectorized|control] [--read-limit N,...] [--listing-misses N,...] [-E's options] file...
 //        build/compiler benchmark-preprocessor --embed bytes
 //
-// Each pass preprocesses every file once with each implementation in turn, each run from nothing: a new intern table
+// Each pass preprocesses every file with the selected options, each run from nothing: a new intern table
 // and preprocessor, so that every file it includes is read, lexed, refined and given its directive table, as a
 // compile of one translation unit does. After a warm-up pass come BUSTER_PP_BENCHMARK_PASSES passes; it reports the
 // medians of wall time and of user-space cycles and instructions (perf_event_open; zero when unavailable), per input
@@ -26,11 +25,8 @@
 // failures; these exclude directory enumeration's libc-internal calls and the benchmark harness's I/O, not process-wide
 // syscall totals. With --clang it also times `clang -E -P` with the same options (but --predefines and
 // --location-limit, which are ours; --buster-headers becomes ours' search) writing to /dev/null, a process per file, the median of as many runs, for scale.
-// --history-cost and --guard-cost replace the scalar body scan with the vectorized kernels with their macro expansion
-// history deferred (PPOptions.defer_history, as -E and `parse` run them: a unit without diagnostics records none), or
-// without skipping the inclusions of guarded files (#120), whose output must be the same. --spelling-cost replaces them
-// with the vectorized kernels whose printer gives every chunk's spellings by its general loop, token by token, as
-// before #649's pp_print_spellings (PPOptions.print_per_token). Every run's printed bytes must be the same, whatever the
+// Cost controls can defer history, disable guarded include skipping, or use the printer's general spelling loop.
+// Every run's printed bytes must be the same, whatever the
 // implementation and the read limit: a digest of each one's warm-up print, into memory. --markers runs and prints as -E
 // without -P does: with the expansion starts its line markers read and the history deferred (PPOptions.expansion_starts
 // and defer_history, as the -E driver sets them), the printing timed with its line markers; of the controls it takes
@@ -604,8 +600,7 @@ static int pp_benchmark_tables(char** paths, int path_count)
 
 // What a pass of one implementation measured (#121), file by file: its #defines defined in order (pp_define), its
 // macros so defined compiled (pp_compile_macro), and its identifiers looked up as the main loop's test looks one up
-// (pp_is_macro), each in user-space cycles; the counts, and a digest of the macros, which both implementations (the
-// vectorized kernels, and pp_define's body scan by its scalar arm) must make alike.
+// (pp_is_macro), each in user-space cycles; the counts, and a digest of the macros, which repeated passes must reproduce.
 typedef struct PPBenchmarkDefinesSample PPBenchmarkDefinesSample;
 struct PPBenchmarkDefinesSample
 {
@@ -619,10 +614,9 @@ struct PPBenchmarkDefinesSample
     uint64_t digest;
 };
 
-static bool pp_benchmark_defines_pass(PPBenchmarkTables* tables, uint32_t first_data, bool vectorized, int cycles_fd, PPBenchmarkDefinesSample* sample)
+static bool pp_benchmark_defines_pass(PPBenchmarkTables* tables, uint32_t first_data, int cycles_fd, PPBenchmarkDefinesSample* sample)
 {
     Preprocessor* pp = &tables->pp;
-    pp->vectorized = vectorized;
     const uint32_t macros = pp->macro_count;
     const uint32_t items = pp->item_count;
     const uint32_t parameters = pp->parameter_count;
@@ -687,9 +681,9 @@ static bool pp_benchmark_defines_pass(PPBenchmarkTables* tables, uint32_t first_
 }
 
 // --defines PATH...: each .c and .h file under the paths defines its #defines, compiles its macros and looks up its
-// identifiers, by each implementation in turn, 21 passes after a warm-up, and it reports the medians per #define, per macro
+// identifiers in 21 passes after a warm-up and reports the medians per #define, per macro
 // compiled and per lookup (#121).
-static int pp_benchmark_defines(char** paths, int path_count, uint32_t only)
+static int pp_benchmark_defines(char** paths, int path_count)
 {
     static PPBenchmarkTables tables;
     FILE* null_stream = fopen("/dev/null", "w");
@@ -711,61 +705,47 @@ static int pp_benchmark_defines(char** paths, int path_count, uint32_t only)
     }
     tables.pp.data_count += ran ? tables.count : 0;
     const int cycles_fd = pp_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
-    static PPBenchmarkDefinesSample samples[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS][BUSTER_PP_BENCHMARK_PASSES];
+    static PPBenchmarkDefinesSample samples[BUSTER_PP_BENCHMARK_PASSES];
     uint64_t digest = 0;
     bool have_digest = false;
     for (uint32_t pass = 0; ran && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
     {
-        for (uint32_t order = 0; ran && order < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; order += 1)
+        PPBenchmarkDefinesSample sample;
+        ran = pp_benchmark_defines_pass(&tables, first_data, cycles_fd, &sample);
+        ran = ran && (!have_digest || sample.digest == digest);
+        digest = sample.digest;
+        have_digest = true;
+        if (pass > 0)
         {
-            const uint32_t implementation = order ^ (pass & 1);
-            PPBenchmarkDefinesSample sample;
-            if (((only >> implementation) & 1) != 0)
-            {
-                ran = pp_benchmark_defines_pass(&tables, first_data, implementation == 0, cycles_fd, &sample);
-                ran = ran && (!have_digest || sample.digest == digest);
-                digest = sample.digest;
-                have_digest = true;
-                if (pass > 0)
-                {
-                    samples[implementation][pass - 1] = sample;
-                }
-            }
+            samples[pass - 1] = sample;
         }
     }
     if (!ran)
     {
-        fprintf(stderr, "a file can't be read or prepared, or the implementations' macros differ\n");
+        fprintf(stderr, "a file can't be read or prepared, or a repeated pass produced different macros\n");
     }
     else
     {
-        static const char* const names[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { "vectorized", "scalar" };
-        const PPBenchmarkDefinesSample* counts = &samples[only == 2 ? 1 : 0][0];
+        const PPBenchmarkDefinesSample* counts = &samples[0];
         printf("definitions: %u files, %lu #define directives, %lu macros defined, %lu identifiers looked up (%.1f%% macros); %d passes, medians:\n",
                tables.count, (unsigned long)counts->defines, (unsigned long)counts->macros, (unsigned long)counts->lookups,
                counts->lookups != 0 ? 100.0 * (double)counts->found / (double)counts->lookups : 0.0, BUSTER_PP_BENCHMARK_PASSES);
-        for (uint32_t implementation = 0; implementation < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; implementation += 1)
+        uint64_t defines[BUSTER_PP_BENCHMARK_PASSES];
+        uint64_t compiles[BUSTER_PP_BENCHMARK_PASSES];
+        uint64_t lookups[BUSTER_PP_BENCHMARK_PASSES];
+        for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
         {
-            uint64_t defines[BUSTER_PP_BENCHMARK_PASSES];
-            uint64_t compiles[BUSTER_PP_BENCHMARK_PASSES];
-            uint64_t lookups[BUSTER_PP_BENCHMARK_PASSES];
-            for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
-            {
-                defines[pass] = samples[implementation][pass].define_cycles;
-                compiles[pass] = samples[implementation][pass].compile_cycles;
-                lookups[pass] = samples[implementation][pass].lookup_cycles;
-            }
-            pp_benchmark_sort(defines, BUSTER_PP_BENCHMARK_PASSES);
-            pp_benchmark_sort(compiles, BUSTER_PP_BENCHMARK_PASSES);
-            pp_benchmark_sort(lookups, BUSTER_PP_BENCHMARK_PASSES);
-            if (((only >> implementation) & 1) != 0)
-            {
-                printf("  %-10s %7.1f cycles per #define  %7.1f cycles per macro compiled  %5.2f cycles per lookup\n", names[implementation],
-                       (double)defines[BUSTER_PP_BENCHMARK_PASSES / 2] / (double)(counts->defines != 0 ? counts->defines : 1),
-                       (double)compiles[BUSTER_PP_BENCHMARK_PASSES / 2] / (double)(counts->macros != 0 ? counts->macros : 1),
-                       (double)lookups[BUSTER_PP_BENCHMARK_PASSES / 2] / (double)(counts->lookups != 0 ? counts->lookups : 1));
-            }
+            defines[pass] = samples[pass].define_cycles;
+            compiles[pass] = samples[pass].compile_cycles;
+            lookups[pass] = samples[pass].lookup_cycles;
         }
+        pp_benchmark_sort(defines, BUSTER_PP_BENCHMARK_PASSES);
+        pp_benchmark_sort(compiles, BUSTER_PP_BENCHMARK_PASSES);
+        pp_benchmark_sort(lookups, BUSTER_PP_BENCHMARK_PASSES);
+        printf("  %-10s %7.1f cycles per #define  %7.1f cycles per macro compiled  %5.2f cycles per lookup\n", "vectorized",
+               (double)defines[BUSTER_PP_BENCHMARK_PASSES / 2] / (double)(counts->defines != 0 ? counts->defines : 1),
+               (double)compiles[BUSTER_PP_BENCHMARK_PASSES / 2] / (double)(counts->macros != 0 ? counts->macros : 1),
+               (double)lookups[BUSTER_PP_BENCHMARK_PASSES / 2] / (double)(counts->lookups != 0 ? counts->lookups : 1));
     }
     if (cycles_fd >= 0)
     {
@@ -855,7 +835,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--only") == 0 && i + 1 < argc)
         {
             i += 1;
-            only = strcmp(argv[i], "vectorized") == 0 ? 1 : strcmp(argv[i], "scalar") == 0 ? 2 : 0;
+            only = strcmp(argv[i], "vectorized") == 0 ? 1 : (strcmp(argv[i], "control") == 0 || strcmp(argv[i], "scalar") == 0) ? 2 : 0;
         }
         else if (strcmp(argument, "--read-limit") == 0 && i + 1 < argc)
         {
@@ -938,9 +918,9 @@ int run_preprocessor_benchmark(int argc, char** argv)
         result = pp_benchmark_tables(files, file_count);
         file_count = 0;
     }
-    else if (defines && file_count != 0 && only != 0)
+    else if (defines && file_count != 0 && (only & 1) != 0)
     {
-        result = pp_benchmark_defines(files, file_count, only);
+        result = pp_benchmark_defines(files, file_count);
         file_count = 0;
     }
     Arena arena = arena_reserve(1ull << 30);
@@ -959,6 +939,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
     // markers print, and --clang times `clang -E -P`, without line markers.
     valid = valid && (uint32_t)history_cost + (uint32_t)guard_cost + (uint32_t)spelling_cost <= 1 &&
             !(with_markers && (history_cost || guard_cost || with_clang));
+    if (!(history_cost || guard_cost || spelling_cost))
+    {
+        only &= 1;
+    }
     const bool parsed = !tables && !defines && embed == 0 && valid && file_count != 0 && with_input != 0 && only != 0 &&
                         pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers);
     // clang's arguments (pp_clang_arguments): ours but --predefines, with ours' search for --buster-headers, whose links
@@ -980,9 +964,9 @@ int run_preprocessor_benchmark(int argc, char** argv)
     }
     else if (!parsed || (with_clang && clang_arguments == 0))
     {
-        fprintf(stderr, "usage: %s [--clang] [--markers] [--history-cost | --guard-cost | --spelling-cost] [--only vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] "
+        fprintf(stderr, "usage: %s [--clang] [--markers] [--history-cost | --guard-cost | --spelling-cost] [--only vectorized|control] [--read-limit N,...] [--listing-misses N,...] "
                         "[-E's options] file...\n"
-                        "       %s --tables path... | --defines [--only vectorized|scalar] path... | --embed bytes\n", argv[0], argv[0]);
+                        "       %s --tables path... | --defines [--only vectorized] path... | --embed bytes\n", argv[0], argv[0]);
     }
     else
     {
@@ -1021,13 +1005,9 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 {
                     continue;
                 }
-                // The second implementation: pp_define's body scan by its scalar arm, or with --history-cost, --guard-cost and --spelling-cost
-                // the vectorized kernels with their history deferred, without skipping guarded files, or with the
-                // printer's spellings token by token. With --markers, every run is -E's with its line markers.
+                // An explicitly requested control changes one history, guard or spelling option.
                 PPBenchmarkSample sample;
                 PPOptions run = options;
-                const bool control = history_cost || guard_cost || spelling_cost;
-                run.scalar = !control && implementation == 1;
                 run.defer_history = with_markers || (history_cost && implementation == 1);
                 run.expansion_starts = with_markers;
                 run.no_guard_skip = guard_cost && implementation == 1;
@@ -1083,7 +1063,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
         }
         else
         {
-            static const char* const names[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { "vectorized", "scalar" };
+            static const char* const names[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { "vectorized", "control" };
             static const char* const phase_names[PP_PHASE_COUNT + 1] = { "read", "lex", "refine", "directives", "main loop/setup" };
             printf("%d files, %lu input tokens, %lu output tokens; %d passes, medians:\n", file_count, (unsigned long)input_tokens, (unsigned long)output_tokens,
                    BUSTER_PP_BENCHMARK_PASSES);

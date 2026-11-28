@@ -2794,7 +2794,6 @@ static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
     static Preprocessor pp;
     static Parser parser;
     memset(&pp, 0, sizeof(pp));
-    pp.vectorized = true;
     for (uint32_t id = 0; id < BUSTER_PP_KEYWORD_TABLE; id += 1)
     {
         pp.keyword_kinds[id] = id < C_NAME_COUNT && c_name_is_keyword(id, language) ? (uint8_t)(BUSTER_PP_KIND_KEYWORD + id - 1) : C_TOKEN_RAW_IDENTIFIER;

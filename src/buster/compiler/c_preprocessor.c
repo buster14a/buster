@@ -50,7 +50,6 @@
 // whole token ranges (pp_append_file_tokens, pp_append_stack_tokens: a function-like macro's arguments, a body's runs
 // of tokens, an object-like macro's body), identifier pastes interned without lexing (pp_paste), line counts
 // (pp_count_lines), the keyword pass over the output (pp_resolve_keywords_range) and -E's printer (pp_print). Only
-// pp_define's body scan keeps a scalar twin (pp_scan_body_scalar), which PPOptions.scalar selects.
 // docs/c-preprocessor.md ("Data-parallel design, piece by piece") has each one's 9700X comparison.
 //
 // main.c includes this file after c_lexer.c, lane.c, c_intern.c and c_refine.c; every function is static, but for the
@@ -344,7 +343,7 @@ struct PPOptions
     // The target's and the other options' predefined macros (c_predefines.c): -march, the -m feature flags, -O, -f...,
     // -g. All zero is clang's defaults with no option.
     PredefinesOptions predefines;
-    // pp_define's body scan by its scalar twin (pp_scan_body_scalar), the one the preprocessor keeps (#2924).
+    // The driver still accepts the shared --scalar option.
     bool scalar;
     bool no_standard_includes;
     // In-memory consumers can refuse every external include/embed lookup,
@@ -1690,8 +1689,6 @@ struct Preprocessor
     uint32_t capacity_shift;
     PPOptions options;
     InternTable* table;
-    // pp_define's body scan by its vectorized arm (pp_scan_body_vector), else by its scalar twin (PPOptions.scalar).
-    bool vectorized;
     // -C without -CC (#1380): its files' comments are tokens, which a macro's arguments drop, as clang's
     // ReadMacroCallArgumentList does; they are collected a token at a time (pp_collect_step) to drop them.
     bool drop_argument_comments;

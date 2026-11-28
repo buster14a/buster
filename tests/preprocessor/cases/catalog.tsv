@@ -636,3 +636,6 @@ buster-fixtures v1 preprocessor-cases
 0417	gnu17	other,markers,files=dumped-includes	-dI -I%d/first -I%d/second	-dI (#1380): each include before what it enters, a guarded one, a computed one and #include_next
 0418	gnu17	other,markers	-E -dD -dI -CC -undef	-dD -dI -CC (#1380): directives, comments and the replacement lists' comments together
 0419	gnu17	warnings=1	-dN	-dN (#1380): taken, and reported unused, as clang's driver does
+0420	c23	warnings=1	-	adjacent definitions across output, argument collection and a skipped group
+0421	c23	fails,errors=2	-	poisoned and invalid paste operands on consecutive definition lines
+0422	c23	fails,errors=1	-	unterminated comment on the last of three definition lines

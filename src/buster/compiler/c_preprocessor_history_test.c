@@ -214,14 +214,13 @@ static bool pp_test_history_runs(void)
 static bool pp_test_history_copies(void)
 {
     uint32_t source_origins[96];
-    uint32_t copied[2][96];
+    uint32_t copied[96];
     const PPTokens source =
     {
         .origins = source_origins,
     };
-    static Preprocessor runs[2];
-    runs[0] = (Preprocessor){ .vectorized = true };
-    runs[1] = (Preprocessor){ 0 };
+    static Preprocessor pp;
+    pp = (Preprocessor){ 0 };
     bool result = true;
     for (uint32_t length = 0; result && length <= 65; length += 1)
     {
@@ -233,27 +232,22 @@ static bool pp_test_history_copies(void)
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(source_origins); i += 1)
             {
                 source_origins[i] = 1 + 37 * i;
-                copied[0][i] = 2 + 71 * i;
-                copied[1][i] = 2 + 71 * i;
+                copied[i] = 2 + 71 * i;
             }
-            for (uint32_t k = 0; k < 2; k += 1)
+            pp.captures = (PPTokens)
             {
-                Preprocessor* pp = &runs[k];
-                pp->captures = (PPTokens)
-                {
-                    .origins = copied[k],
-                    .origin_capacity = BUSTER_ARRAY_LENGTH(copied[k]),
-                };
-                pp->origin_peak[1] = 0;
-                pp_history_copy(pp, &pp->captures, at, kind == 0 ? &source : &pp->captures, begin, begin + length);
-                result = result && !pp->fatal && pp->origin_peak[1] == (length != 0 ? at + length : 0);
-            }
+                .origins = copied,
+                .origin_capacity = BUSTER_ARRAY_LENGTH(copied),
+            };
+            pp.origin_peak[1] = 0;
+            pp_history_copy(&pp, &pp.captures, at, kind == 0 ? &source : &pp.captures, begin, begin + length);
+            result = result && !pp.fatal && pp.origin_peak[1] == (length != 0 ? at + length : 0);
             for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(source_origins); i += 1)
             {
                 const bool changed = i >= at && i < at + length;
                 const uint32_t from = changed ? begin + i - at : i;
                 const uint32_t expected = !changed ? 2 + 71 * i : kind == 0 ? 1 + 37 * from : 2 + 71 * from;
-                result = copied[0][i] == expected && copied[1][i] == expected && source_origins[i] == 1 + 37 * i;
+                result = copied[i] == expected && source_origins[i] == 1 + 37 * i;
             }
             if (!result)
             {
