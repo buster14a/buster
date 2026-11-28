@@ -1069,7 +1069,32 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __mmask16 phis = _mm512_mask_cmpeq_epi32_mask(simple, op, _mm512_set1_epi32(IR_PHI));
         const __mmask16 result_types = tier1_burs_types(a_valid, a_type, simple_types | (1u << IR_F80)) | _mm512_cmpeq_epi32_mask(a, none);
         const __mmask16 returns = _mm512_mask_cmpeq_epi32_mask(result_types & active, op, _mm512_set1_epi32(IR_RET));
-        __m512i result = _mm512_mask_mov_epi32(_mm512_set1_epi32(TIER1_BURS_OP_REG), direct | parameters | phis | returns, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
+        const __mmask16 copies = _mm512_mask_cmpeq_epi32_mask(simple, op, _mm512_set1_epi32(IR_COPY));
+        const __mmask16 unary = integer & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_NEG)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_NOT)));
+        const __mmask16 truncs = _mm512_mask_cmpeq_epi32_mask(a_valid, op, _mm512_set1_epi32(IR_TRUNC));
+        const __mmask16 sexts = _mm512_mask_cmpeq_epi32_mask(a_valid, op, _mm512_set1_epi32(IR_SEXT));
+        __mmask16 conversions = 0;
+        if ((truncs | sexts) != 0)
+        {
+            const __m512i a_op = _mm512_and_si512(a_word, byte);
+            const uint32_t narrow_sources = (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32);
+            const __mmask16 narrow_results = tier1_burs_types(truncs, type, narrow_sources);
+            const __mmask16 trunc_inputs = tier1_burs_types(narrow_results, a_type, narrow_sources | (1u << IR_I64));
+            // A narrow write can absorb its I32 producer only for these four operations.
+            const __mmask16 changes_width = _mm512_cmpeq_epi32_mask(a_type, _mm512_set1_epi32(IR_I32)) &
+                                            _mm512_cmpneq_epi32_mask(type, _mm512_set1_epi32(IR_I32));
+            const __mmask16 can_fold = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_ADD)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_SUB)) |
+                                       _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_NEG)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_NOT));
+            conversions = trunc_inputs & ~(changes_width & can_fold);
+            const __mmask16 signed_results = tier1_burs_types(sexts, type, integers | (1u << IR_I16));
+            const __mmask16 signed_inputs = tier1_burs_types(signed_results, a_type, narrow_sources);
+            // A constant, parameter, phi or call is never a folded load, truncation or signed arithmetic tree.
+            const __mmask16 terminal = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_CONST)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_PARAM)) |
+                                       _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_PHI)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_CALL)) |
+                                       _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_CALL_INDIRECT));
+            conversions |= signed_inputs & terminal;
+        }
+        __m512i result = _mm512_mask_mov_epi32(_mm512_set1_epi32(TIER1_BURS_OP_REG), direct | parameters | phis | returns | copies | unary | conversions, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
         // Constants: their class bits, 8 values at a time.
         const __mmask16 constant = _mm512_mask_cmpeq_epi32_mask(active & tier1_burs_types(active, type, width4 | width8), op, _mm512_set1_epi32(IR_CONST));
         if (constant != 0)

@@ -229,7 +229,11 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         const bool plain = op == IR_BR || op == IR_BR_INDIRECT || op == IR_SYMBOL_ADDR || op == IR_LIFETIME ||
                            op == IR_UNREACHABLE || op == IR_FENCE || op == IR_STACK_SAVE ||
                            (op == IR_PARAM && plain_type && function->a[node] < BUSTER_TIER1_SELECT_MAX_ARGUMENTS) ||
-                           (op == IR_PHI && plain_type) || (op == IR_RET && function->a[node] == BUSTER_IR_NONE);
+                           (op == IR_PHI && plain_type) || (op == IR_COPY && plain_type && type != IR_I1) ||
+                           ((op == IR_NEG || op == IR_NOT) && (type == IR_I32 || type == IR_I64)) ||
+                           (op == IR_TRUNC && (type == IR_I8 || type == IR_I16 || type == IR_I32) && function->type[function->a[node]] == IR_I64) ||
+                           (op == IR_SEXT && (type == IR_I16 || type == IR_I32 || type == IR_I64) && function->op[function->a[node]] == IR_PARAM &&
+                            (function->type[function->a[node]] >= IR_I8 && function->type[function->a[node]] <= IR_I32)) || (op == IR_RET && function->a[node] == BUSTER_IR_NONE);
         if (plain)
         {
             check->mismatches += class != TIER1_BURS_OP_DIRECT;
