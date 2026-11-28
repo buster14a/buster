@@ -5526,6 +5526,13 @@ static void pp_collect_step(Preprocessor* pp)
             const uint32_t d = context->next_directive;
             const bool embedded = !invocation->builtin && pp->in_macro_arguments;
             const char* rejected = embedded ? pp_embedded_directive_name(data->directive_kind[d]) : NULL;
+            if (embedded && rejected == NULL && (pp->conditional_count == context->conditional_base || !pp->conditionals[pp->conditional_count - 1].skipping))
+            {
+                // Clang diagnoses at the name, or at the end of the line for a null directive.
+                const uint32_t name = data->directive_hash[d] + 1;
+                const uint32_t location = name < data->directive_end[d] ? base + data->starts[name] : pp_line_end_location(pp, data, base, name - 1);
+                pp_diagnose_group(pp, PP_WARNING_EMBEDDED_DIRECTIVE, location, "embedding a directive within macro arguments has undefined behavior");
+            }
             if (rejected != 0)
             {
                 // At the directive's name, as clang reports it.
@@ -5536,14 +5543,7 @@ static void pp_collect_step(Preprocessor* pp)
             }
             else
             {
-                const bool skipped = pp->conditional_count > context->conditional_base && pp->conditionals[pp->conditional_count - 1].skipping;
-                if (embedded && !skipped)
-                {
-                    // Clang diagnoses at the name, or at the end of the line for a null directive.
-                    const uint32_t name = data->directive_hash[d] + 1;
-                    const uint32_t location = name < data->directive_end[d] ? base + data->starts[name] : pp_line_end_location(pp, data, base, name - 1);
-                    pp_diagnose_group(pp, PP_WARNING_EMBEDDED_DIRECTIVE, location, "embedding a directive within macro arguments has undefined behavior");
-                }
+                // Undefined behavior that clang allows, and warns about only with -pedantic (-Wembedded-directive).
                 pp_directive(pp, context);
             }
         }
