@@ -7986,14 +7986,28 @@ static void parse_check_end(ParseKernels* kernels, uint32_t count, const ParseCh
     }
 }
 
-// A grouped identifier with an immediately following parameter list still derives a function first.
-// A pointer, array or second group inside the declarator needs the full declarator parser.
-static bool parse_body_grouped_name(const ParseKernels* kernels, uint32_t close, uint32_t body)
+// A top-level group before a parameter list can still derive a function first. In (name) the
+// outside list applies to the name. In (*name(parameters)) the inner list already makes
+// name a function, and the outer list describes the pointed-to function. K6 checks both lists.
+static uint32_t parse_body_function_group(const ParseKernels* kernels, uint32_t close, uint32_t body)
 {
-    return close >= 2 && body - close >= 3 && kernels->check_groups[body - 1] == PARSE_GROUP_PARAMETERS &&
-           kernels->enclosing[body - 1] == close + 1 && kernels->roles[close + 1] == PARSE_ROLE_OPEN_CALL &&
-           kernels->check_groups[close] == PARSE_GROUP_DECLARATOR && kernels->enclosing[close] == close - 2 && kernels->roles[close - 2] == PARSE_ROLE_OPEN_GROUP &&
-           kernels->vkinds[close - 1] == PARSE_KIND_IDENTIFIER && kernels->roles[close - 1] == PARSE_ROLE_OPERAND;
+    if (close < 2 || body - close < 3 || kernels->check_groups[body - 1] != PARSE_GROUP_PARAMETERS ||
+        kernels->enclosing[body - 1] != close + 1 || kernels->roles[close + 1] != PARSE_ROLE_OPEN_CALL ||
+        kernels->check_groups[close] != PARSE_GROUP_DECLARATOR)
+    {
+        return BUSTER_PARSE_NONE;
+    }
+    const uint32_t open = kernels->enclosing[close];
+    if (open >= close || kernels->roles[open] != PARSE_ROLE_OPEN_GROUP)
+    {
+        return BUSTER_PARSE_NONE;
+    }
+    const bool pointer = close - open >= 5 && kernels->vkinds[open + 1] == PARSE_KIND_STAR && kernels->roles[open + 1] == PARSE_ROLE_PREFIX &&
+                         kernels->check_groups[close - 1] == PARSE_GROUP_PARAMETERS && kernels->enclosing[close - 1] == open + 3 &&
+                         kernels->roles[open + 3] == PARSE_ROLE_OPEN_CALL;
+    const uint32_t name = open + 1 + pointer;
+    return (close - open == 2 || pointer) && kernels->vkinds[name] == PARSE_KIND_IDENTIFIER &&
+           kernels->roles[name] == PARSE_ROLE_OPERAND ? open : BUSTER_PARSE_NONE;
 }
 
 // A function body follows just one declarator. Read back to the previous item boundary or the first
@@ -8025,9 +8039,10 @@ static void parse_check_body(ParseKernels* kernels, uint32_t body, uint8_t* reas
             const uint32_t lane = 31u - (uint32_t)__builtin_clz(events);
             const uint32_t bit = 1u << lane;
             const uint32_t token = first + lane;
-            if ((flagged & closes & bit) != 0 && parse_body_grouped_name(kernels, token, body))
+            const uint32_t group = (flagged & closes & bit) != 0 ? parse_body_function_group(kernels, token, body) : BUSTER_PARSE_NONE;
+            if (group != BUSTER_PARSE_NONE)
             {
-                end = token - 2;
+                end = group;
             }
             else
             {
@@ -8230,14 +8245,23 @@ static uint32_t parse_inline_asm_close(const ParseKernels* kernels, const ParseI
     return close;
 }
 
-// K6 checks an array bound as an expression and flags its initial static and first operand.
-// Recognize a named parameter's minimum bound when each operand is a number or sizeof of one
-// built-in type. Other flagged tokens still require the enclosing declaration to be reparsed.
-static bool parse_static_parameter_bound(const ParseKernels* kernels, const ParseInput* input, uint32_t token, uint32_t end)
+// K6 reads a parameter's array bound as an expression. It flags the leading storage or
+// qualifier token even for a valid minimum bound or an otherwise empty qualified array.
+static bool parse_resolved_parameter_bound(const ParseKernels* kernels, const ParseInput* input, uint32_t token, uint32_t end)
 {
-    if (token < 3 || token >= end || input->names[token] != C_NAME_STATIC || input->kinds[token] != PARSE_KIND_STORAGE ||
-        kernels->roles[token] != PARSE_ROLE_SPECIFIER || kernels->roles[token - 1] != PARSE_ROLE_OPEN_SUBSCRIPT ||
-        kernels->roles[token - 2] != PARSE_ROLE_OPERAND || input->kinds[token - 2] != PARSE_KIND_IDENTIFIER)
+    if (token < 3 || token >= end || kernels->roles[token] != PARSE_ROLE_SPECIFIER ||
+        kernels->roles[token - 1] != PARSE_ROLE_OPEN_SUBSCRIPT || kernels->roles[token - 2] != PARSE_ROLE_OPERAND ||
+        input->kinds[token - 2] != PARSE_KIND_IDENTIFIER)
+    {
+        return false;
+    }
+    const uint32_t name = input->names[token];
+    const bool minimum = name == C_NAME_STATIC && input->kinds[token] == PARSE_KIND_STORAGE;
+    const bool qualified = input->kinds[token] == PARSE_KIND_QUALIFIER &&
+        (name == C_NAME_RESTRICT || name == C_NAME_GNU_RESTRICT || name == C_NAME_GNU_RESTRICT2 ||
+         name == C_NAME_CONST || name == C_NAME_GNU_CONST || name == C_NAME_GNU_CONST2 ||
+         name == C_NAME_VOLATILE || name == C_NAME_GNU_VOLATILE || name == C_NAME_GNU_VOLATILE2);
+    if (!minimum && !qualified)
     {
         return false;
     }
@@ -8245,10 +8269,14 @@ static bool parse_static_parameter_bound(const ParseKernels* kernels, const Pars
     const uint32_t parameters = kernels->enclosing[open];
     const uint32_t close = kernels->parents[open];
     if (parameters >= open || kernels->roles[parameters] != PARSE_ROLE_OPEN_FUNCTION || kernels->enclosing[token - 2] != parameters ||
-        kernels->enclosing[token] != open || close <= token + 1 || close > end || close - token - 1 > 64 ||
+        kernels->enclosing[token] != open || close <= token || close > end || close - token - 1 > 64 ||
         input->kinds[close] != PARSE_KIND_R_SQUARE || kernels->roles[close] != PARSE_ROLE_CLOSE_SUBSCRIPT || kernels->enclosing[close] != open)
     {
         return false;
+    }
+    if (qualified || close == token + 1)
+    {
+        return qualified && close == token + 1;
     }
     const uint32_t first = token + 1;
     const uint64_t live = _bzhi_u64(UINT64_MAX, close - first);
@@ -8266,7 +8294,47 @@ static bool parse_static_parameter_bound(const ParseKernels* kernels, const Pars
            binary == (((numbers | closes) << 1) & live) && (numbers | sizes) == ((binary << 1) | 1);
 }
 
-// Each flag must belong to a validated asm statement or parameter bound.
+// K6 flags the closing parenthesis when a pointer compound literal is the operand of '&'.
+// Check its complete type and initializer inside the paired delimiters. The initializer
+// consists of operands separated by binary operators. Adjacent strings form one operand.
+static bool parse_addressed_pointer_literal(const ParseKernels* kernels, const ParseInput* input, uint32_t token, uint32_t end)
+{
+    if (input->kinds[token] != PARSE_KIND_R_PAREN || kernels->roles[token] != PARSE_ROLE_CLOSE_COMPOUND || end - token < 3 ||
+        kernels->roles[token + 1] != PARSE_ROLE_OPEN_COMPOUND_BODY)
+    {
+        return false;
+    }
+    const uint32_t open = kernels->enclosing[token];
+    const uint32_t body = token + 1;
+    const uint32_t close = kernels->parents[body];
+    if (open == 0 || open >= token || kernels->roles[open] != PARSE_ROLE_OPEN_COMPOUND || kernels->parents[open] != token ||
+        input->kinds[open - 1] != PARSE_KIND_AMP || kernels->roles[open - 1] != PARSE_ROLE_PREFIX ||
+        kernels->parents[token] != close || close <= body + 1 || close > end || close - body - 1 > 64 ||
+        input->kinds[close] != PARSE_KIND_R_BRACE || kernels->roles[close] != PARSE_ROLE_CLOSE_COMPOUND_BODY || kernels->enclosing[close] != body)
+    {
+        return false;
+    }
+    const uint32_t type = open + 1 + (input->kinds[open + 1] == PARSE_KIND_QUALIFIER &&
+        (input->names[open + 1] == C_NAME_CONST || input->names[open + 1] == C_NAME_VOLATILE));
+    if (token - type != 2 || (kernels->vkinds[type] != PARSE_KIND_TYPE && kernels->vkinds[type] != PARSE_VKIND_TYPE_NAME) ||
+        kernels->roles[type] != PARSE_ROLE_SPECIFIER || input->kinds[type + 1] != PARSE_KIND_STAR || kernels->roles[type + 1] != PARSE_ROLE_PREFIX)
+    {
+        return false;
+    }
+    const uint64_t live = _bzhi_u64(UINT64_MAX, close - body - 1);
+    const __m512i kinds = _mm512_maskz_loadu_epi8(live, kernels->vkinds + body + 1);
+    const __m512i roles = _mm512_maskz_loadu_epi8(live, kernels->roles + body + 1);
+    const uint64_t strings = parse_equal8(kinds, PARSE_KIND_STRING) & live;
+    const uint64_t operands = parse_equal8(roles, PARSE_ROLE_OPERAND) & (strings | parse_equal8(kinds, PARSE_KIND_IDENTIFIER) |
+                              parse_equal8(kinds, PARSE_KIND_NUMBER) | parse_equal8(kinds, PARSE_KIND_CHARACTER));
+    const uint64_t joined = parse_equal8(roles, PARSE_ROLE_STRING_NEXT) & strings & (strings << 1);
+    const uint64_t operators = _mm512_cmpge_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_MULTIPLICATIVE)) &
+                               _mm512_cmple_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LOGICAL_OR));
+    return (operands | joined | operators) == live && operands == (1 | (operators << 1)) &&
+           operators == (((operands | joined) << 1) & live & ~joined);
+}
+
+// Each skipped flag belongs to a complete syntax form checked against the vector tree.
 static bool parse_resolved_item(const ParseKernels* kernels, const ParseInput* input, uint32_t begin, uint32_t end)
 {
     if (parse_basic_asm_item(input, begin, end))
@@ -8291,7 +8359,12 @@ static bool parse_resolved_item(const ParseKernels* kernels, const ParseInput* i
         else
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(marked);
-            if (parse_static_parameter_bound(kernels, input, token, end))
+            if (parse_addressed_pointer_literal(kernels, input, token, end))
+            {
+                first = token + 1;
+                continue;
+            }
+            if (parse_resolved_parameter_bound(kernels, input, token, end))
             {
                 first = token + 2;
                 continue;
