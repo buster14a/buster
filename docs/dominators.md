@@ -174,7 +174,10 @@ loop cost the bodies' total size, quadratic in nesting depth, and the parent
 scan was quadratic in the number of loops. Depths follow the loop forest top
 down. There is no recursion and no stack grows past the block count.
 
-Each reachable edge to a DFS ancestor serves one of two purposes. If its
+When loop output is requested, DFS marks sources of edges to unfinished
+ancestors in a one-bit-per-block table. Only these sources need a second
+look at their outgoing edges. A target is an ancestor when its DFS preorder
+and reverse postorder are both at most the source’s. If its
 target dominates its source, it identifies a natural-loop header. Otherwise
 the source witnesses irreducibility. Only graphs with such a witness need the
 reverse DFS walk to assign SCCs. Every block in a witness’s SCC and every
