@@ -636,8 +636,8 @@ static void type_lookup_test_guarded(TypeTestTally* tally)
 {
     const char* check = "member lookup guarded scans";
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint8_t* mapping = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    const bool guarded = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    uint8_t* mapping = mmap(0, page * 4, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool guarded = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0 && mprotect(mapping + 3 * page, page, PROT_NONE) == 0;
     if (type_test_expect(tally, guarded, check, "no guard page"))
     {
         for (uint32_t count = 0; count <= BUSTER_TYPE_LOOKUP_SCAN; count += 1)
@@ -666,10 +666,39 @@ static void type_lookup_test_guarded(TypeTestTally* tally)
                 type_test_expect(tally, same, check, detail);
             }
         }
+
+        // Both the name and bit-field columns end at a guard. In declaration order the target can precede or
+        // follow the first anonymous record. Every earlier unnamed bit-field must be skipped.
+        TypeTable table = {0};
+        for (uint32_t count = 0; count <= 65; count += 1)
+        {
+            table.members.name = (uint32_t*)(mapping + page) - count;
+            table.members.flags = mapping + 3 * page - count;
+            for (uint32_t target = 0; target <= count; target += 1)
+            {
+                memset(table.members.name, 0, count * sizeof(*table.members.name));
+                memset(table.members.flags, BUSTER_TYPE_MEMBER_BIT_FIELD, count);
+                if (target < count)
+                {
+                    table.members.name[target] = 17;
+                }
+                const uint32_t direct = type_lookup_next_candidate(&table, 0, count, 17);
+                const uint32_t middle = count / 2;
+                if (middle < count)
+                {
+                    table.members.flags[middle] = 0;
+                }
+                const uint32_t first = type_lookup_next_candidate(&table, 0, count, 17);
+                const uint32_t expected = target < middle ? target : middle;
+                char detail[80];
+                snprintf(detail, sizeof(detail), "%u members, target %u, anonymous slot %u", count, target, middle);
+                type_test_expect(tally, direct == target && first == expected, check, detail);
+            }
+        }
     }
     if (mapping != MAP_FAILED)
     {
-        munmap(mapping, page * 2);
+        munmap(mapping, page * 4);
     }
 }
 
