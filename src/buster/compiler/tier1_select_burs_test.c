@@ -250,9 +250,15 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         }
         if (columns[0][node] != TIER1_BURS_OP_REG)
         {
-            const Tier1SelectCandidates candidates = tier1_select_candidates(&costed, node);
+            const Tier1SelectCandidates candidates = tier1_select_candidates(&costed, node, TIER1_RULE_NONE);
             bool munched = false;
             tier1_burs_pick(&candidates, columns[3][node], &munched);
+            if (class >= TIER1_BURS_OP_CALL && class <= TIER1_BURS_OP_CALL_ROW)
+            {
+                const Tier1BursRule* rule = &tier1_burs_rules[columns[3][node]];
+                check->mismatches += candidates.count != 1 || munched || rule->action != TIER1_BURS_ACTION_PLAIN ||
+                                     rule->kind != candidates.patterns[0].rule;
+            }
             if (class == TIER1_BURS_OP_DIRECT)
             {
                 // A second pattern requires a grammar choice. Catch it here even if both emit the same code today.

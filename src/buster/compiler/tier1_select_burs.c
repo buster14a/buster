@@ -101,6 +101,9 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_SLOT_X,
     // The node has one machine pattern, with all its operand and ABI details filled by the candidate generator.
     TIER1_BURS_OP_DIRECT,
+    TIER1_BURS_OP_CALL,
+    TIER1_BURS_OP_CALL_ASM,
+    TIER1_BURS_OP_CALL_ROW,
     TIER1_BURS_OP_CONST,
     TIER1_BURS_OP_ALU = TIER1_BURS_OP_CONST + BUSTER_TIER1_BURS_CONSTANT_CLASSES,
     TIER1_BURS_OP_SHL = TIER1_BURS_OP_ALU + BUSTER_TIER1_BURS_ALUS * BUSTER_TIER1_BURS_KINDS,
@@ -151,6 +154,7 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_CHAIN,
     TIER1_BURS_FAMILY_REG,
     TIER1_BURS_FAMILY_DIRECT,
+    TIER1_BURS_FAMILY_CALL,
     TIER1_BURS_FAMILY_SLOT,
     TIER1_BURS_FAMILY_CONST,
     TIER1_BURS_FAMILY_ALU,
@@ -230,6 +234,10 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_REG, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_MUNCH, TIER1_RULE_NONE },
     // An operand of this leaf stays a separate root. Its only candidate supplies its own cost and machine operands.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_DIRECT, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_NONE },
+    // The candidate generator uses the selected call kind to build ABI-specific operands and costs.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_CALL, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_CALL },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_CALL, 1, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_ASM },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_CALL, 2, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_ROW },
     // A constant: its move, or what a consumer folds of it by its class.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_CONST, 0, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_KIND, TIER1_RULE_CONSTANT },
     { TIER1_BURS_IMM, TIER1_BURS_FAMILY_CONST, BUSTER_TIER1_BURS_FIT, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
@@ -448,6 +456,9 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
     bool member = false;
     switch (family)
     {
+    case TIER1_BURS_FAMILY_CALL:
+        member = op == TIER1_BURS_OP_CALL + kinds;
+        break;
     case TIER1_BURS_FAMILY_DIRECT:
         member = op == TIER1_BURS_OP_DIRECT;
         break;
@@ -1275,6 +1286,18 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         // A floating == or != (#2922): tier1_burs_equality's, whose select's recurrence is tier1_select_recurrent's
         // bounded walk, which candidate generation shares (#3450's record has its census).
         uint32_t equalities = equal;
+        uint32_t calls = _mm512_mask_cmpeq_epi32_mask(active, op, _mm512_set1_epi32(IR_CALL)) |
+                         _mm512_mask_cmpeq_epi32_mask(active, op, _mm512_set1_epi32(IR_CALL_INDIRECT));
+        while (calls != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(calls);
+            const Tier1SelectRule kind = tier1_select_call_rule(function, first + lane);
+            if (kind != TIER1_RULE_NONE)
+            {
+                classes[first + lane] = kind == TIER1_RULE_ASM ? TIER1_BURS_OP_CALL_ASM : kind == TIER1_RULE_ROW ? TIER1_BURS_OP_CALL_ROW : TIER1_BURS_OP_CALL;
+            }
+            calls &= calls - 1;
+        }
         while (equalities != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(equalities);
