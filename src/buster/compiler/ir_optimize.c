@@ -283,66 +283,91 @@ static __attribute__((unused)) uint16_t ir_optimize_fold_batch(IrOptimizeFoldBat
 // blocks take that target, or the smallest block of the cycle found. Failure leaves targets and scratch.length unchanged.
 static __attribute__((unused, aligned(64))) bool ir_optimize_thread_targets(Arena* scratch, const uint32_t* direct, uint32_t count, uint32_t* targets)
 {
-    const uint64_t saved = scratch->length;
-    bool valid = count == 0 || (direct != 0 && targets != 0);
-    for (uint32_t block = 0; valid && block < count; block += 1)
+    if (count == 0) return true;
+    if (direct == NULL || targets == NULL) return false;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    bool unresolved = false;
+    for (uint64_t first = 0; first < count; first += 16)
     {
-        valid = direct[block] < count;
-    }
-    uint32_t* current = 0;
-    uint32_t* minimum = 0;
-    uint32_t* next = 0;
-    uint32_t* next_minimum = 0;
-    if (valid && count != 0)
-    {
-        current = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
-        minimum = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
-        next = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
-        next_minimum = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
-        valid = current != 0 && minimum != 0 && next != 0 && next_minimum != 0;
-    }
-    if (valid && count != 0)
-    {
-        for (uint32_t block = 0; block < count; block += 1)
+        const __mmask16 valid = (__mmask16)_bzhi_u32(UINT16_MAX, count - first < 16 ? (uint32_t)(count - first) : 16);
+        const __m512i successors = _mm512_maskz_loadu_epi32(valid, direct + first);
+        if (_mm512_mask_cmpge_epu32_mask(valid, successors, _mm512_set1_epi32((int32_t)count)) != 0) return false;
+        const __m512i ids = _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), lanes);
+        const __mmask16 moved = _mm512_mask_cmpneq_epi32_mask(valid, successors, ids);
+        if (moved != 0 && !unresolved)
         {
-            current[block] = UINT32_MAX;
-            minimum[block] = UINT32_MAX;
+            // Rebase the signed gather indices around the middle of the unsigned ID range.
+            const void* origin = (const void*)((uintptr_t)direct + (UINT64_C(1) << 33));
+            const __m512i indices = _mm512_xor_si512(successors, _mm512_set1_epi32(INT32_MIN));
+            const __m512i following = _mm512_mask_i32gather_epi32(successors, moved, indices, origin, sizeof(uint32_t));
+            unresolved = _mm512_cmpneq_epi32_mask(following, successors) != 0;
         }
-        for (uint32_t block = 0; block < count; block += 1)
+    }
+    if (!unresolved)
+    {
+        memmove(targets, direct, (uint64_t)count * sizeof(uint32_t));
+        return true;
+    }
+    const uint64_t saved = scratch->length;
+    uint32_t* current = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
+    if (current == NULL) return false;
+    for (uint64_t first = 0; first < count; first += 16)
+    {
+        const __mmask16 valid = (__mmask16)_bzhi_u32(UINT16_MAX, count - first < 16 ? (uint32_t)(count - first) : 16);
+        const __m512i successors = _mm512_maskz_loadu_epi32(valid, direct + first);
+        const void* origin = (const void*)((uintptr_t)direct + (UINT64_C(1) << 33));
+        const __m512i indices = _mm512_xor_si512(successors, _mm512_set1_epi32(INT32_MIN));
+        const __m512i following = _mm512_mask_i32gather_epi32(successors, valid, indices, origin, sizeof(uint32_t));
+        const __mmask16 ready = _mm512_cmpeq_epi32_mask(following, successors);
+        _mm512_mask_storeu_epi32(current + first, valid, _mm512_mask_mov_epi32(_mm512_set1_epi32(-1), ready, successors));
+    }
+    for (uint64_t first = 0; first < count; first += 16)
+    {
+        const __mmask16 valid = (__mmask16)_bzhi_u32(UINT16_MAX, count - first < 16 ? (uint32_t)(count - first) : 16);
+        const __m512i known = _mm512_maskz_loadu_epi32(valid, current + first);
+        uint32_t pending = _mm512_mask_cmpeq_epi32_mask(valid, known, _mm512_set1_epi32(-1));
+        while (pending != 0)
         {
+            const uint32_t block = (uint32_t)first + (uint32_t)__builtin_ctz(pending);
+            pending &= pending - 1;
+            // A previous component walk in this packet may have resolved this block.
+            if (current[block] != UINT32_MAX) continue;
+            const uint32_t successor = direct[block];
+            if (current[successor] != UINT32_MAX)
+            {
+                current[block] = current[successor];
+                continue;
+            }
+            // The start is unresolved, so it cannot already name a finished representative.
+            // Its own ID is a unique temporary mark for all vertices visited by this walk.
             uint32_t node = block;
             uint32_t length = 0;
-            while (current[node] == UINT32_MAX && minimum[node] != block)
+            do
             {
-                minimum[node] = block;
-                next_minimum[node] = length;
-                next[length++] = node;
+                current[node] = block;
+                length += 1;
                 node = direct[node];
-            }
+            } while (current[node] == UINT32_MAX);
             uint32_t representative = current[node];
-            if (representative == UINT32_MAX)
+            if (representative == block)
             {
                 representative = node;
-                for (uint32_t i = next_minimum[node]; i < length; i += 1)
+                for (uint32_t other = direct[node]; other != node; other = direct[other])
                 {
-                    if (next[i] < representative)
-                    {
-                        representative = next[i];
-                    }
+                    if (other < representative) representative = other;
                 }
             }
+            node = block;
             for (uint32_t i = 0; i < length; i += 1)
             {
-                current[next[i]] = representative;
+                current[node] = representative;
+                node = direct[node];
             }
         }
     }
-    if (valid && count != 0)
-    {
-        memcpy(targets, current, (uint64_t)count * sizeof(uint32_t));
-    }
+    memcpy(targets, current, (uint64_t)count * sizeof(uint32_t));
     arena_pop_to(scratch, saved);
-    return valid;
+    return true;
 }
 
 static bool ir_optimize_equal(IrConstant a, IrConstant b)

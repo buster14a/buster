@@ -35,14 +35,16 @@ struct IrOptimizeLayoutBatch
 // are initialized and never access a CFG or dominator column. Rank 1/2 is reserved for conditional edges.
 static void ir_optimize_layout_ranks(const IrOptimizeLayoutBatch* batch, uint32_t* ranks)
 {
-    const uint32_t count = batch->count;
-    const uint32_t active = batch->active;
-    for (uint32_t lane = 0; lane < count; lane += 1)
-    {
-        const bool back = batch->target_enter[lane] <= batch->source_enter[lane] && batch->source_enter[lane] < batch->target_leave[lane];
-        const bool adjacent = batch->target[lane] == batch->following[lane];
-        ranks[lane] = ((active >> lane) & 1) != 0 ? 3 + adjacent + 2 * back : 0;
-    }
+    const __mmask16 active = (__mmask16)batch->active;
+    const __m512i source = _mm512_loadu_si512(batch->source_enter);
+    const __mmask16 back = _mm512_mask_cmple_epu32_mask(active, _mm512_loadu_si512(batch->target_enter), source) &
+                           _mm512_cmplt_epu32_mask(source, _mm512_loadu_si512(batch->target_leave));
+    const __mmask16 adjacent = _mm512_mask_cmpeq_epi32_mask(active, _mm512_loadu_si512(batch->target), _mm512_loadu_si512(batch->following));
+    __m512i priority = _mm512_maskz_set1_epi32(active, 3);
+    priority = _mm512_mask_add_epi32(priority, back, priority, _mm512_set1_epi32(2));
+    priority = _mm512_mask_add_epi32(priority, adjacent, priority, _mm512_set1_epi32(1));
+    const __mmask16 valid = (__mmask16)_bzhi_u32(UINT16_MAX, batch->count);
+    _mm512_mask_storeu_epi32(ranks, valid, priority);
 }
 
 static IrError ir_optimize_layout_order(const IrOptimizeWork* work, const uint32_t* threads, Arena* scratch, uint32_t* order, uint32_t* order_count)
