@@ -242,6 +242,17 @@ static uint32_t dominators_order(const DominatorCfg* cfg, Dominators* result, Do
     }
     memset(result->idom, 0xff, (uint64_t)count * sizeof(uint32_t));
     result->idom[cfg->entry] = cfg->entry;
+    // Child offsets are free until tree construction. Classify predecessor counts in source order.
+    uint8_t* const is_join = (uint8_t*)result->tree_offsets;
+    for (uint64_t first = 0; first < count; first += 16)
+    {
+        const uint32_t width = count - first >= 16 ? 16 : (uint32_t)(count - first);
+        const __mmask16 active = (__mmask16)_bzhi_u32(UINT16_MAX, width);
+        const __m512i starts = _mm512_maskz_loadu_epi32(active, cfg->predecessor_offsets + first);
+        const __m512i ends = _mm512_maskz_loadu_epi32(active, cfg->predecessor_offsets + first + 1);
+        const __mmask16 multiple = _mm512_cmpgt_epu32_mask(_mm512_sub_epi32(ends, starts), _mm512_set1_epi32(1));
+        _mm_mask_storeu_epi8(is_join + first, active, _mm_maskz_set1_epi8(multiple, 1));
+    }
     uint32_t join_count = 0;
     bool has_alternate_entry = false;
     uint32_t entered = 1;
@@ -266,7 +277,7 @@ static uint32_t dominators_order(const DominatorCfg* cfg, Dominators* result, Do
                 // Its DFS parent is the immediate dominator if this is its only incoming edge.
                 result->idom[target] = frame->block;
                 joins[join_count] = entered;
-                join_count += cfg->predecessor_offsets[(uint64_t)target + 1] - cfg->predecessor_offsets[target] > 1;
+                join_count += is_join[target];
                 vertices[entered] = target;
                 parents[entered] = dfs_begin[frame->block];
                 dfs_begin[target] = entered;
