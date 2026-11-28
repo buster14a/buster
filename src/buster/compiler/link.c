@@ -528,6 +528,8 @@ struct Link
     Arena* name_arena;
     // The first failure, or LINK_ERROR_NONE.
     LinkError error;
+    // Set when an atom receives a nonempty section name. It may stay set after a rollback or a discarded group.
+    bool has_section_names;
 };
 
 // How many records of each table there is room for, besides record 0.
@@ -584,8 +586,8 @@ static __attribute__((unused)) bool link_set_atom_section(Link* link, AtomId ato
 // The suffix of `name` after __start_ or __stop_, and whether it is __stop_'s: an empty String8 for another name, or
 // one whose suffix isn't a C identifier, which no output section name in C can be.
 static __attribute__((unused)) String8 link_bound_suffix(const Link* link, NameId name, bool* stop);
-// Whether an atom's input section is `name`.
-static __attribute__((unused)) bool link_section_exists(const Link* link, String8 name);
+// The first atom in the named section, or zero if the section is absent.
+static __attribute__((unused)) AtomId link_section_atom(const Link* link, String8 name);
 // A symbol, defined in `atom` at `value` or (atom 0) defined later with link_define_symbol, elsewhere or nowhere: its id,
 // or 0. The linker's columns start at 0.
 static __attribute__((unused)) SymbolId link_add_symbol(Link* link, NameId name, AtomId atom, uint64_t value, uint64_t size, uint8_t flags, uint8_t source);
@@ -1010,6 +1012,10 @@ static bool link_set_atom_section(Link* link, AtomId atom, String8 section)
     if (result)
     {
         link->atoms.section[atom] = section;
+        if (section.length != 0)
+        {
+            link->has_section_names = true;
+        }
     }
     return result;
 }
@@ -1055,15 +1061,63 @@ static String8 link_bound_suffix(const Link* link, NameId name, bool* stop)
     return result;
 }
 
-static bool link_section_exists(const Link* link, String8 name)
+// A phase's index of section names. A slot is zero or the one-based id of its bounded spelling in names.
+typedef struct LinkSectionIndex LinkSectionIndex;
+struct LinkSectionIndex
 {
-    bool result = false;
-    for (AtomId atom = 1; !result && atom < link->atoms.count; atom += 1)
+    const String8* names;
+    uint32_t* slots;
+    uint64_t mask;
+};
+
+static __attribute__((unused)) LinkSectionIndex link_section_index(Arena* arena, const String8* names, uint32_t capacity)
+{
+    uint64_t slots = 2;
+    while (slots < 2 * (uint64_t)capacity)
     {
-        const String8 section = link->atoms.section[atom];
-        result = section.length == name.length && section.length != 0 && memcmp(section.pointer, name.pointer, name.length) == 0;
+        slots *= 2;
     }
-    return result;
+    LinkSectionIndex index = {
+        .names = names,
+        .slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .mask = slots - 1,
+    };
+    if (index.slots != NULL)
+    {
+        memset(index.slots, 0, slots * sizeof(*index.slots));
+    }
+    return index;
+}
+
+// The matching or first empty slot. At most half the slots are occupied.
+static __attribute__((unused)) uint32_t* link_section_slot(const LinkSectionIndex* index, String8 name)
+{
+    uint64_t slot = link_hash((const uint8_t*)name.pointer, name.length) & index->mask;
+    while (index->slots[slot] != 0)
+    {
+        const String8 key = index->names[index->slots[slot] - 1];
+        if (key.length == name.length && memcmp(key.pointer, name.pointer, name.length) == 0)
+        {
+            break;
+        }
+        slot = (slot + 1) & index->mask;
+    }
+    return &index->slots[slot];
+}
+
+static AtomId link_section_atom(const Link* link, String8 name)
+{
+    const LinkAtoms* atoms = &link->atoms;
+    AtomId found = 0;
+    for (AtomId atom = 1; found == 0 && atom < atoms->count; atom += 1)
+    {
+        const String8 section = atoms->section[atom];
+        if (section.length == name.length && section.length != 0 && memcmp(section.pointer, name.pointer, name.length) == 0)
+        {
+            found = atom;
+        }
+    }
+    return found;
 }
 
 // Flags whose type is one the representation has: each of its bindings exists.
