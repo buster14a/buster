@@ -1131,6 +1131,36 @@ static bool check_raw_strings(TokenArrays* vectorized, TokenArrays* scalar, uint
 // ---------------------------------------------------------------------------------------------------------------------
 // run_c_lexer_tests
 
+// Clang's C++ raw lexer ends an identifier, a pp-number and a standard literal suffix at '$' in this mode.
+static bool check_dollar_punctuation(TokenArrays* tokens)
+{
+    static const uint8_t text[] = "$a$1.5\n$L\"$\"$u8'x'\n\"x\"ms$tail";
+    static const uint8_t kinds[] = {
+        C_TOKEN_UNKNOWN | BUSTER_C_TOKEN_START_OF_LINE, C_TOKEN_RAW_IDENTIFIER, C_TOKEN_UNKNOWN, C_TOKEN_NUMERIC_CONSTANT,
+        C_TOKEN_UNKNOWN | BUSTER_C_TOKEN_START_OF_LINE, C_TOKEN_WIDE_STRING_LITERAL, C_TOKEN_UNKNOWN, C_TOKEN_UTF8_CHAR_CONSTANT,
+        C_TOKEN_STRING_LITERAL | BUSTER_C_TOKEN_START_OF_LINE, C_TOKEN_UNKNOWN, C_TOKEN_RAW_IDENTIFIER,
+    };
+    static const uint8_t starts[] = { 0, 1, 2, 3, 7, 8, 12, 13, 19, 24, 25 };
+    static const uint8_t ends[] = { 1, 2, 3, 6, 8, 12, 13, 18, 24, 25, 29 };
+    uint8_t source[512 + sizeof(text)];
+    memset(source, ' ', sizeof(source));
+    bool valid = true;
+    for (uint32_t offset = 448; offset <= 512; offset += 1)
+    {
+        memcpy(source + offset, text, sizeof(text) - 1);
+        const int64_t n = c_tokenize_vectorized(source, offset + sizeof(text) - 1, tokens->kinds, tokens->starts, tokens->ends,
+                                               C_TOKENIZER_CPLUSPLUS | C_TOKENIZER_NO_DOLLARS);
+        valid &= n == (int64_t)sizeof(kinds);
+        for (uint32_t i = 0; n == (int64_t)sizeof(kinds) && i < sizeof(kinds); i += 1)
+        {
+            valid &= tokens->kinds[i] == kinds[i] && tokens->starts[i] == offset + starts[i] && tokens->ends[i] == offset + ends[i];
+        }
+        source[offset] = ' ';
+    }
+    printf("dollar punctuation and literal suffix boundaries: %s\n", valid ? "correct" : "WRONG");
+    return valid;
+}
+
 // A BOM belongs to the file start, not to a token. A later line still uses offsets in the original file.
 static bool check_line_bom(TokenArrays* tokens, uint32_t flags)
 {
@@ -1328,10 +1358,11 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
         const bool comments = check_comments(&vectorized, &scalar, flags);
         const bool raw_strings = check_raw_strings(&vectorized, &scalar, flags) && check_raw_errors();
         const bool separators = check_separators(&vectorized, &scalar, flags) && check_separator_fixtures(&vectorized, &scalar, flags);
+        const bool dollars = check_dollar_punctuation(&vectorized);
         const bool line_bom = check_line_bom(&vectorized, flags) && check_unicode_names() && check_kept_comments(&vectorized, &scalar, flags);
         // Random inputs and cut templates are meant to need the scalar lexer at times, but the snippet is meant to stay
         // on the vectorized path.
-        result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments && raw_strings && separators && line_bom
+        result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments && raw_strings && separators && dollars && line_bom
                      ? 0
                      : 1;
     }

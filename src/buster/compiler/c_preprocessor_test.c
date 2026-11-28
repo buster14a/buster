@@ -600,8 +600,7 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
 static void pp_test_directive_lines(char* text, size_t length, FILE* listing, const char* predefines);
 
 // The lexer's flags a run's printed text lexes back with, and clang's text and a case's expected text: the mode's, without
-// trigraphs (no printer leaves one) and with C_TOKENIZER_NO_DOLLARS where '$' is punctuation (pp_dollar_punctuation, the
-// scalar lexer's, not the stream's pp_split_dollars).
+// trigraphs (no printer leaves one) and with C_TOKENIZER_NO_DOLLARS where '$' is punctuation (pp_dollar_punctuation).
 static uint32_t pp_test_lex_flags(const Preprocessor* pp)
 {
     // -C's and -CC's comments are tokens (#1380), in the stream as in the printed texts.
