@@ -206,6 +206,7 @@ typedef enum PPWarning
     PP_WARNING_UNUSED_MACROS,
     PP_WARNING_GNU_LINE_MARKER,
     PP_WARNING_FORTIFY_SOURCE,
+    PP_WARNING_EMBEDDED_DIRECTIVE,
     // A warning of no group (poisoning an existing macro, a character constant too long for its type), and an extension
     // of no group (a C90 macro name with no whitespace after it before a character outside its basic set): only -w,
     // -Wno-everything, -Werror and an extension's -pedantic-errors map it, its flag "[-Werror]" where promoted.
@@ -260,6 +261,7 @@ static const PPWarningKind pp_warnings[BUSTER_PP_WARNINGS] =
     { "unused-macros", NULL, NULL, false, false, false, false },
     { "gnu-line-marker", NULL, "gnu pedantic", true, false, false, false },
     { "fortify-source", NULL, NULL, false, true, true, false },
+    { "embedded-directive", NULL, "pedantic", true, false, false, false },
     { NULL, NULL, NULL, false, true, false, false },
     { NULL, NULL, NULL, true, true, false, false },
 };
@@ -5522,7 +5524,8 @@ static void pp_collect_step(Preprocessor* pp)
         else if (context->next_directive < data->directive_count)
         {
             const uint32_t d = context->next_directive;
-            const char* rejected = invocation->builtin || !pp->in_macro_arguments ? 0 : pp_embedded_directive_name(data->directive_kind[d]);
+            const bool embedded = !invocation->builtin && pp->in_macro_arguments;
+            const char* rejected = embedded ? pp_embedded_directive_name(data->directive_kind[d]) : NULL;
             if (rejected != 0)
             {
                 // At the directive's name, as clang reports it.
@@ -5533,7 +5536,14 @@ static void pp_collect_step(Preprocessor* pp)
             }
             else
             {
-                // Undefined behavior that clang allows, and warns about only with -pedantic (-Wembedded-directive).
+                const bool skipped = pp->conditional_count > context->conditional_base && pp->conditionals[pp->conditional_count - 1].skipping;
+                if (embedded && !skipped)
+                {
+                    // Clang diagnoses at the name, or at the end of the line for a null directive.
+                    const uint32_t name = data->directive_hash[d] + 1;
+                    const uint32_t location = name < data->directive_end[d] ? base + data->starts[name] : pp_line_end_location(pp, data, base, name - 1);
+                    pp_diagnose_group(pp, PP_WARNING_EMBEDDED_DIRECTIVE, location, "embedding a directive within macro arguments has undefined behavior");
+                }
                 pp_directive(pp, context);
             }
         }
