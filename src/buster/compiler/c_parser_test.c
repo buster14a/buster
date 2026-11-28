@@ -4411,6 +4411,9 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
     { PARSE_TEST_DRIVER_TEXT, "int x;\n", "--bogus", 1, "unknown argument: --bogus\nusage: compiler [-fsyntax-only] ", true },
     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-gnu-keywords", 0, "", false },
     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-asm", 0, "", false },
+    { PARSE_TEST_DRIVER_TEXT, "_BitInt value;\n", "-std=c23", 1, "%s:1:8: error: expected '('\n    1 | _BitInt value;\n      |        ^\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "_ExtInt /* ignored */\nvalue;\n", "-std=c23", 1, "%s:1:8: error: expected '('\n    1 | _ExtInt /* ignored */\n      |        ^\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "typeof\nvalue;\n", "-std=c23", 1, "%s:2:1: error: expected '(' after 'typeof'\n    2 | value;\n      | ^\n", false },
     // Errors after a macro's expansion, placed after the invocation by its expansion history, which the driver records
     // only for its diagnostics (PPOptions.defer_history).
     { PARSE_TEST_DRIVER_TEXT, "#define DECL int x\nDECL\n", 0, 1, "%s:2:5: error: expected ';' after top level declarator\n    2 | DECL\n      |     ^\n      |     ;\n", false },
