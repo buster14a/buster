@@ -45,12 +45,11 @@
 //
 // The vectorized kernels, each its piece's one implementation (#2924; test-preprocessor checks their outputs against
 // tests/preprocessor-kernels/digests.tsv, recorded where their scalar twins agreed, and against clang's): the directive
-// scan (pp_scan_directives_vector) and the conditionals' pairing (pp_pair_conditionals_vector), the file and buffer
+// scan (pp_scan_directives_vector) and the conditionals' pairing (pp_pair_conditionals), the file and buffer
 // runs (pp_copy_file_run_vector, pp_copy_buffer_run_vector), the argument scan (pp_collect_arguments) and the copies of
 // whole token ranges (pp_append_file_tokens, pp_append_stack_tokens: a function-like macro's arguments, a body's runs
 // of tokens, an object-like macro's body), identifier pastes interned without lexing (pp_paste), line counts
 // (pp_count_lines), the keyword pass over the output (pp_resolve_keywords_range) and -E's printer (pp_print). Only
-// pp_define's body scan keeps a scalar twin (pp_scan_body_scalar), which PPOptions.scalar selects.
 // docs/c-preprocessor.md ("Data-parallel design, piece by piece") has each one's 9700X comparison.
 //
 // main.c includes this file after c_lexer.c, lane.c, c_intern.c and c_refine.c; every function is static, but for the
@@ -344,7 +343,7 @@ struct PPOptions
     // The target's and the other options' predefined macros (c_predefines.c): -march, the -m feature flags, -O, -f...,
     // -g. All zero is clang's defaults with no option.
     PredefinesOptions predefines;
-    // pp_define's body scan by its scalar twin (pp_scan_body_scalar), the one the preprocessor keeps (#2924).
+    // The driver still accepts the shared --scalar option.
     bool scalar;
     bool no_standard_includes;
     // In-memory consumers can refuse every external include/embed lookup,
@@ -1690,8 +1689,6 @@ struct Preprocessor
     uint32_t capacity_shift;
     PPOptions options;
     InternTable* table;
-    // pp_define's body scan by its vectorized arm (pp_scan_body_vector), else by its scalar twin (PPOptions.scalar).
-    bool vectorized;
     // -C without -CC (#1380): its files' comments are tokens, which a macro's arguments drop, as clang's
     // ReadMacroCallArgumentList does; they are collected a token at a time (pp_collect_step) to drop them.
     bool drop_argument_comments;
@@ -2669,45 +2666,7 @@ static uint32_t pp_next_line(const uint64_t* lines, uint32_t count, uint32_t aft
     return result < count ? result : count;
 }
 
-// Pairs a file's conditional directives with an explicit stack of the open groups' last directives: each points to the
-// next directive of its group (#elif, #else or #endif). An #elif, #else or #endif without an open group is left
-// unpaired (the directive reports it). The pairing of the files pp_pair_conditionals_vector can't pair: their groups
-// nest deeper than its levels hold, or don't balance.
-static void pp_pair_conditionals_scalar(PPFileData* data, uint32_t* open)
-{
-    uint32_t open_count = 0;
-    for (uint32_t d = 0; d < data->directive_count; d += 1)
-    {
-        switch (data->directive_kind[d])
-        {
-            case PP_DIRECTIVE_IF:
-            case PP_DIRECTIVE_IFDEF:
-            case PP_DIRECTIVE_IFNDEF:
-                open[open_count] = d;
-                open_count += 1;
-                break;
-            case PP_DIRECTIVE_ELIF:
-            case PP_DIRECTIVE_ELIFDEF:
-            case PP_DIRECTIVE_ELIFNDEF:
-            case PP_DIRECTIVE_ELSE:
-                if (open_count != 0)
-                {
-                    data->directive_next[open[open_count - 1]] = d;
-                    open[open_count - 1] = d;
-                }
-                break;
-            case PP_DIRECTIVE_ENDIF:
-                if (open_count != 0)
-                {
-                    data->directive_next[open[open_count - 1]] = d;
-                    open_count -= 1;
-                }
-                break;
-        }
-    }
-}
-
-// The word indices 0 to 31, for pp_prefix_sum_words' permutes and pp_pair_conditionals_vector's lanes.
+// The word indices 0 to 31, for pp_prefix_sum_words' permutes.
 static const uint16_t pp_word_indices[32] __attribute__((aligned(64))) = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31 };
 
 // The inclusive prefix sums of 32 16-bit words, wrapping: five steps of a permute that moves the words up by 1, 2, 4, 8
@@ -2723,198 +2682,213 @@ BUSTER_INLINE __m512i pp_prefix_sum_words(__m512i x)
     return x;
 }
 
-// The most groups pp_pair_conditionals_vector's 16-bit levels hold open.
-#define BUSTER_PP_PAIR_MAX_DEPTH 30000
+static const uint8_t pp_pair_directive_lanes[64] __attribute__((aligned(64))) = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+};
 
-// Pairs a file's conditional directives without a stack walk, as pp_pair_conditionals_scalar does. A conditional's
-// level is the number of groups open before it, less one for a continuation (#elif, #elifdef, #elifndef, #else,
-// #endif), so that a group's directives share their level, and the directive after d in d's group is the nearest
-// continuation after d at d's level or lower (nearest smaller-or-equal values). The conditionals are compressed out of
-// the directives 16 at a time (vpcompressd); then, 32 at a time in 16-bit lanes, their levels are an exclusive prefix
-// sum of +1 at an opener and -1 at an #endif (pp_prefix_sum_words), and each lane finds its answer by pointer jumping
-// (vpermw: one uop on Zen 5) from the next lane: a lane whose candidate is an opener or is deeper takes over the
-// candidate's own pointer, which in a balanced file never passes its answer, so that about five rounds settle 32 lanes.
-// Lanes still unanswered at a block's end are its open groups (as many as the nesting depth); each later block answers
-// them with one compare of its levels against each one's. Returns false, having paired nothing, for a file with a
-// continuation that has no open group (an #endif or #else too many), which the stack then pairs. Sets *notable if a
-// group has a directive after its #else or no #endif, for pp_note_directives.
-static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indices, bool* notable)
+// Within a 64-directive packet each pending link is a bit at the directive's original position.
+// Only opens that survive the packet need an entry in the cross-packet stack.
+static uint32_t pp_pair_conditionals(PPFileData* data, uint32_t* open)
 {
-    const uint32_t count = data->directive_count;
-    Scratch scratch = scratch_begin(0);
-    // The conditionals: their directives, kinds and levels, with room for whole-vector stores past the last.
-    uint32_t* conditionals = scratch_indices;
-    uint8_t* kinds = arena_push(scratch.arena, (uint64_t)count + 64, 64);
-    int16_t* levels = arena_push_array(scratch.arena, (uint64_t)count + 32, sizeof(int16_t), 64);
-    uint32_t* answers = arena_push_array(scratch.arena, (uint64_t)count + 32, sizeof(uint32_t), 64);
-    uint32_t* carried = arena_push_array(scratch.arena, (uint64_t)count + 32, sizeof(uint32_t), 64);
-    bool result = kinds != 0 && levels != 0 && answers != 0 && carried != 0;
-    const __m512i lanes = _mm512_cvtepu16_epi32(_mm256_load_si256((const __m256i*)pp_word_indices));
-    uint32_t n = 0;
-    for (uint32_t d = 0; result && d < count; d += 16)
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    uint32_t depth = 0;
+    bool after_else = false;
+    for (uint64_t first = 0; first < data->directive_count; first += 64)
     {
-        const __mmask16 valid = (__mmask16)_bzhi_u32(~0u, count - d < 16 ? count - d : 16);
-        const __m512i kind = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(valid, data->directive_kind + d));
-        const __mmask16 conditional = _mm512_mask_cmple_epu32_mask(valid, _mm512_sub_epi32(kind, _mm512_set1_epi32(PP_DIRECTIVE_IF)),
-                                                                    _mm512_set1_epi32(PP_DIRECTIVE_ENDIF - PP_DIRECTIVE_IF));
-        _mm512_storeu_si512(conditionals + n, _mm512_maskz_compress_epi32(conditional, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)d))));
-        _mm_storeu_si128((__m128i*)(kinds + n), _mm512_cvtepi32_epi8(_mm512_maskz_compress_epi32(conditional, kind)));
-        n += (uint32_t)__builtin_popcount(conditional);
-    }
-    // Levels, 32 conditionals at a time; a continuation without an open group fails the file.
-    int32_t depth = 0;
-    for (uint32_t b = 0; result && b < n; b += 32)
-    {
-        const __mmask32 valid = _bzhi_u32(~0u, n - b < 32 ? n - b : 32);
-        const __m512i kind = _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(valid, kinds + b));
-        const __mmask32 opens = _mm512_mask_cmple_epu16_mask(valid, _mm512_sub_epi16(kind, _mm512_set1_epi16(PP_DIRECTIVE_IF)),
-                                                              _mm512_set1_epi16(PP_DIRECTIVE_IFNDEF - PP_DIRECTIVE_IF));
-        const __mmask32 endifs = _mm512_mask_cmpeq_epi16_mask(valid, kind, _mm512_set1_epi16(PP_DIRECTIVE_ENDIF));
-        const __mmask32 continues = valid & ~opens;
-        const __m512i steps = _mm512_mask_mov_epi16(_mm512_maskz_mov_epi16(opens, _mm512_set1_epi16(1)), endifs, _mm512_set1_epi16(-1));
-        const __m512i before = _mm512_add_epi16(_mm512_sub_epi16(pp_prefix_sum_words(steps), steps), _mm512_set1_epi16((short)depth));
-        result = _mm512_mask_cmple_epi16_mask(continues, before, _mm512_setzero_si512()) == 0;
-        _mm512_storeu_si512(levels + b, _mm512_mask_sub_epi16(before, continues, before, _mm512_set1_epi16(1)));
-        depth += __builtin_popcount(opens) - __builtin_popcount(endifs);
-        result = result && depth <= BUSTER_PP_PAIR_MAX_DEPTH;
-    }
-    // Answers (indices of conditionals), 32 conditionals at a time.
-    uint32_t carried_count = 0;
-    const __m512i words = _mm512_load_si512(pp_word_indices);
-    for (uint32_t b = 0; result && b < n; b += 32)
-    {
-        const uint32_t available = n - b < 32 ? n - b : 32;
-        const __mmask32 valid = _bzhi_u32(~0u, available);
-        const __m512i kind = _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(valid, kinds + b));
-        const __mmask32 opens = _mm512_mask_cmple_epu16_mask(valid, _mm512_sub_epi16(kind, _mm512_set1_epi16(PP_DIRECTIVE_IF)),
-                                                              _mm512_set1_epi16(PP_DIRECTIVE_IFNDEF - PP_DIRECTIVE_IF));
-        const __mmask32 continues = valid & ~opens;
-        const __mmask32 endifs = _mm512_mask_cmpeq_epi16_mask(valid, kind, _mm512_set1_epi16(PP_DIRECTIVE_ENDIF));
-        const __m512i level = _mm512_maskz_loadu_epi16(valid, levels + b);
-        // The open groups of earlier blocks: each one's answer is this block's first continuation at its level or lower.
-        uint32_t kept = 0;
-        for (uint32_t c = 0; c < carried_count; c += 1)
+        const uint32_t left = (uint32_t)(data->directive_count - first);
+        const __mmask64 valid = _bzhi_u64(UINT64_MAX, left < 64 ? left : 64);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, data->directive_kind + first);
+        const __m512i relative = _mm512_sub_epi8(kinds, _mm512_set1_epi8(PP_DIRECTIVE_IF));
+        uint64_t pending = _mm512_mask_cmple_epu8_mask(valid, relative, _mm512_set1_epi8(PP_DIRECTIVE_IFNDEF - PP_DIRECTIVE_IF));
+        if (pending == 0 && depth == 0)
         {
-            const uint32_t entry = carried[c];
-            const __mmask32 found = _mm512_mask_cmple_epi16_mask(continues, level, _mm512_set1_epi16(levels[entry]));
-            answers[entry] = found != 0 ? b + (uint32_t)__builtin_ctz(found) : BUSTER_PP_NONE;
-            carried[kept] = entry;
-            kept += found == 0;
+            continue;
         }
-        carried_count = kept;
-        // Pointer jumping from each lane's next lane; 32 is past the block.
-        const __m512i candidate = _mm512_maskz_mov_epi16(continues, _mm512_set1_epi16(1));
-        __m512i next = _mm512_add_epi16(words, _mm512_set1_epi16(1));
-        __mmask32 jump = 1;
-        for (uint32_t round = 0; jump != 0 && round < 32; round += 1)
+        const uint64_t ends = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PP_DIRECTIVE_ENDIF));
+        const uint64_t elses = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PP_DIRECTIVE_ELSE));
+        const __m512i from_elif = _mm512_sub_epi8(kinds, _mm512_set1_epi8(PP_DIRECTIVE_ELIF));
+        uint64_t continuations = _mm512_mask_cmple_epu8_mask(valid, from_elif, _mm512_set1_epi8(PP_DIRECTIVE_ENDIF - PP_DIRECTIVE_ELIF));
+        // An open group can carry a chain of middle directives across many packets. Link its
+        // first continuation here so the remaining local pairs use the same packed rank operation.
+        if (depth != 0 && continuations != 0)
         {
-            const __mmask32 inside = _mm512_cmplt_epu16_mask(next, _mm512_set1_epi16((short)available));
-            const __m512i next_level = _mm512_permutexvar_epi16(next, level);
-            const __m512i next_candidate = _mm512_permutexvar_epi16(next, candidate);
-            const __mmask32 good = inside & _mm512_test_epi16_mask(next_candidate, next_candidate) & _mm512_cmple_epi16_mask(next_level, level);
-            jump = valid & inside & ~good;
-            next = _mm512_mask_permutexvar_epi16(next, jump, next, next);
-        }
-        // Answered lanes; the others (not an #endif's, whose answer nothing reads) are open groups for the next blocks.
-        const __mmask32 answered = valid & _mm512_cmplt_epu16_mask(next, _mm512_set1_epi16((short)available));
-        const __m512i low = _mm512_add_epi32(_mm512_cvtepu16_epi32(_mm512_castsi512_si256(next)), _mm512_set1_epi32((int)b));
-        const __m512i high = _mm512_add_epi32(_mm512_cvtepu16_epi32(_mm512_extracti64x4_epi64(next, 1)), _mm512_set1_epi32((int)b));
-        const __m512i none = _mm512_set1_epi32((int)BUSTER_PP_NONE);
-        _mm512_storeu_si512(answers + b, _mm512_mask_mov_epi32(none, (__mmask16)answered, low));
-        _mm512_storeu_si512(answers + b + 16, _mm512_mask_mov_epi32(none, (__mmask16)(answered >> 16), high));
-        const __mmask32 open = valid & ~answered & ~endifs;
-        const __m512i entries = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)b));
-        _mm512_storeu_si512(carried + carried_count, _mm512_maskz_compress_epi32((__mmask16)open, entries));
-        carried_count += (uint32_t)__builtin_popcount(open & 0xFFFF);
-        _mm512_storeu_si512(carried + carried_count, _mm512_maskz_compress_epi32((__mmask16)(open >> 16), _mm512_add_epi32(entries, _mm512_set1_epi32(16))));
-        carried_count += (uint32_t)__builtin_popcount(open >> 16);
-    }
-    // Each opener's, #elif's and #else's answer, as directives; an unanswered one is in a group without #endif.
-    bool found = false;
-    for (uint32_t i = 0; result && i < n; i += 1)
-    {
-        if (kinds[i] != PP_DIRECTIVE_ENDIF)
-        {
-            const uint32_t answer = answers[i];
-            data->directive_next[conditionals[i]] = answer != BUSTER_PP_NONE ? conditionals[answer] : BUSTER_PP_NONE;
-            found |= answer == BUSTER_PP_NONE || (kinds[i] == PP_DIRECTIVE_ELSE && kinds[answer] != PP_DIRECTIVE_ENDIF);
-        }
-    }
-    *notable = found;
-    scratch_end(scratch);
-    return result;
-}
-
-// The file's notes (BUSTER_PP_NOTE_*), with an explicit stack of the open groups and whether each has had its #else,
-// which pairs the directives as pp_pair_conditionals_scalar does: the notes of a file whose pairing found a group with a
-// directive after its #else or without its #endif, or that has an #elifdef or #elifndef. Returns false if memory runs
-// out.
-static bool pp_note_directives(Arena* arena, PPFileData* data)
-{
-    const uint32_t count = data->directive_count;
-    Scratch scratch = scratch_begin(0);
-    uint8_t* notes = arena_push(scratch.arena, (uint64_t)count + 1, 1);
-    uint32_t* open = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint32_t), 4);
-    bool* seen_else = arena_push(scratch.arena, (uint64_t)count + 1, 1);
-    bool result = notes != 0 && open != 0 && seen_else != 0;
-    uint32_t open_count = 0;
-    for (uint32_t d = 0; result && d < count; d += 1)
-    {
-        const uint8_t kind = data->directive_kind[d];
-        uint8_t note = kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF ? BUSTER_PP_NOTE_ELIFDEF : 0;
-        switch (kind)
-        {
-            case PP_DIRECTIVE_IF:
-            case PP_DIRECTIVE_IFDEF:
-            case PP_DIRECTIVE_IFNDEF:
-                open[open_count] = d;
-                seen_else[open_count] = false;
-                open_count += 1;
-                break;
-            case PP_DIRECTIVE_ELIF:
-            case PP_DIRECTIVE_ELIFDEF:
-            case PP_DIRECTIVE_ELIFNDEF:
-            case PP_DIRECTIVE_ELSE:
-                if (open_count != 0)
+            const uint64_t first_continuation = _blsi_u64(continuations);
+            if ((pending & (first_continuation - 1)) == 0)
+            {
+                const uint32_t d = (uint32_t)first + (uint32_t)__builtin_ctzll(first_continuation);
+                depth -= 1;
+                const uint32_t previous = open[depth];
+                data->directive_next[previous] = d;
+                if ((ends & first_continuation) == 0)
                 {
-                    note |= seen_else[open_count - 1] ? BUSTER_PP_NOTE_AFTER_ELSE : 0;
-                    seen_else[open_count - 1] |= kind == PP_DIRECTIVE_ELSE;
+                    after_else |= data->directive_kind[previous] == PP_DIRECTIVE_ELSE;
+                    pending |= first_continuation;
                 }
-                break;
-            case PP_DIRECTIVE_ENDIF:
-                open_count -= open_count != 0;
-                break;
+                continuations ^= first_continuation;
+            }
         }
-        notes[d] = note;
-    }
-    for (uint32_t i = 0; result && i < open_count; i += 1)
-    {
-        notes[open[i]] |= BUSTER_PP_NOTE_UNTERMINATED;
-    }
-    uint32_t note_count = 0;
-    for (uint32_t d = 0; result && d < count; d += 1)
-    {
-        note_count += notes[d] != 0;
-    }
-    data->note_directives = result ? arena_push_array(arena, (uint64_t)note_count + 1, sizeof(uint32_t), 4) : 0;
-    data->note_kinds = result ? arena_push(arena, (uint64_t)note_count + 1, 1) : 0;
-    result = data->note_directives != 0 && data->note_kinds != 0;
-    data->note_count = 0;
-    for (uint32_t d = 0; result && d < count; d += 1)
-    {
-        if (notes[d] != 0)
+        // A carry starts at an opener, stops at an endif, and propagates through every other byte.
+        // Its carry-in at a continuation means the preceding structural directive is a local opener.
+        // Every such continuation links to the immediately preceding conditional in source order.
+        const uint64_t carry = (pending + ~ends) ^ pending ^ ~ends;
+        const uint64_t local = continuations & carry;
+        if (local != 0)
         {
-            data->note_directives[data->note_count] = d;
-            data->note_kinds[data->note_count] = notes[d];
-            data->note_count += 1;
+            const uint64_t conditionals = pending | continuations;
+            // Consecutive ranks in the conditional mask are a direct writer and its successor.
+            const uint64_t writers = _pdep_u64(_pext_u64(local, conditionals) >> 1, conditionals);
+            const uint64_t middle = local & ~ends;
+            if (elses != 0)
+            {
+                const uint64_t middle_after_else = (_pext_u64(elses & writers, conditionals) << 1) & _pext_u64(middle, conditionals);
+                after_else |= middle_after_else != 0;
+            }
+            const __m512i positions = _mm512_load_si512(pp_pair_directive_lanes);
+            const __m512i packed = _mm512_maskz_compress_epi8(local, positions);
+            uint8_t destinations[64] __attribute__((aligned(64)));
+            _mm512_store_si512(destinations, _mm512_maskz_expand_epi8(writers, packed));
+            uint64_t marks = writers;
+            for (uint32_t part = 0; marks != 0; part += 16)
+            {
+                const __mmask16 write = (__mmask16)marks;
+                if (write != 0)
+                {
+                    const __m512i next = _mm512_cvtepu8_epi32(_mm_load_si128((const __m128i*)(destinations + part)));
+                    _mm512_mask_storeu_epi32(data->directive_next + first + part, write, _mm512_add_epi32(next, _mm512_set1_epi32((int32_t)first)));
+                }
+                marks >>= 16;
+            }
+            // A middle becomes the pending writer of its opener's group. Only writers without a local
+            // successor and continuations following a close or the packet boundary can still need work.
+            pending = (pending | middle) & ~writers;
+            continuations &= ~local;
+        }
+        while (continuations != 0)
+        {
+            const uint64_t bit = _blsi_u64(continuations);
+            continuations &= continuations - 1;
+            const uint64_t available = pending & (bit - 1);
+            const uint32_t d = (uint32_t)first + (uint32_t)__builtin_ctzll(bit);
+            uint32_t prior;
+            bool was_else;
+            if (available != 0)
+            {
+                const uint32_t lane = 63u - (uint32_t)__builtin_clzll(available);
+                const uint64_t matched = UINT64_C(1) << lane;
+                pending ^= matched;
+                prior = (uint32_t)first + lane;
+                was_else = (elses & matched) != 0;
+            }
+            else if (depth != 0)
+            {
+                depth -= 1;
+                prior = open[depth];
+                was_else = data->directive_kind[prior] == PP_DIRECTIVE_ELSE;
+            }
+            else
+            {
+                continue;
+            }
+            data->directive_next[prior] = d;
+            if ((ends & bit) == 0)
+            {
+                after_else |= was_else;
+                pending |= bit;
+            }
+        }
+        // No later directive can read the last packet's surviving writers.
+        if (first + 64 >= data->directive_count)
+        {
+            depth += (uint32_t)__builtin_popcountll(pending);
+            break;
+        }
+        for (uint32_t lane = 0; pending != 0; lane += 16)
+        {
+            const __mmask16 keep = (__mmask16)pending;
+            const __m512i ids = _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)((uint32_t)first + lane)));
+            _mm512_mask_compressstoreu_epi32(open + depth, keep, ids);
+            depth += (uint32_t)__builtin_popcount(keep);
+            pending >>= 16;
         }
     }
-    scratch_end(scratch);
+    return (after_else ? BUSTER_PP_NOTE_AFTER_ELSE : 0) | (depth != 0 ? BUSTER_PP_NOTE_UNTERMINATED : 0);
+}
+
+// The pairing table links each group independently. An else reports every following middle
+// through the next else, which in turn covers the rest. A group without an endif reports its opener.
+static bool pp_note_directives(Arena* arena, PPFileData* data, uint32_t required, uint8_t* notes)
+{
+    uint32_t total = 0;
+    const uint32_t count = data->directive_count;
+    for (uint64_t first = 0; first < count; first += 64)
+    {
+        const __mmask64 valid = _bzhi_u64(UINT64_MAX, count - first < 64 ? (uint32_t)(count - first) : 64);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, data->directive_kind + first);
+        const __mmask64 elifdef = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PP_DIRECTIVE_ELIFDEF)) |
+                                  _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PP_DIRECTIVE_ELIFNDEF));
+        total += (uint32_t)__builtin_popcountll(elifdef);
+        _mm512_mask_storeu_epi8(notes + first, valid, _mm512_maskz_set1_epi8(elifdef, BUSTER_PP_NOTE_ELIFDEF));
+    }
+    for (uint64_t first = 0; required != 0 && first < count; first += 64)
+    {
+        const __mmask64 valid = _bzhi_u64(UINT64_MAX, count - first < 64 ? (uint32_t)(count - first) : 64);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, data->directive_kind + first);
+        uint64_t elses = (required & BUSTER_PP_NOTE_AFTER_ELSE) != 0 ? _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(PP_DIRECTIVE_ELSE)) : 0;
+        while (elses != 0)
+        {
+            const uint32_t last_else = (uint32_t)first + (uint32_t)__builtin_ctzll(elses);
+            elses &= elses - 1;
+            for (uint32_t d = data->directive_next[last_else]; d != BUSTER_PP_NONE && data->directive_kind[d] != PP_DIRECTIVE_ENDIF; d = data->directive_next[d])
+            {
+                total += notes[d] == 0;
+                notes[d] |= BUSTER_PP_NOTE_AFTER_ELSE;
+                if (data->directive_kind[d] == PP_DIRECTIVE_ELSE)
+                {
+                    break;
+                }
+            }
+        }
+        const __m512i relative = _mm512_sub_epi8(kinds, _mm512_set1_epi8(PP_DIRECTIVE_IF));
+        uint64_t opens = (required & BUSTER_PP_NOTE_UNTERMINATED) != 0 ? _mm512_mask_cmple_epu8_mask(valid, relative, _mm512_set1_epi8(PP_DIRECTIVE_IFNDEF - PP_DIRECTIVE_IF)) : 0;
+        while (opens != 0)
+        {
+            const uint32_t opener = (uint32_t)first + (uint32_t)__builtin_ctzll(opens);
+            opens &= opens - 1;
+            uint32_t d = data->directive_next[opener];
+            while (d != BUSTER_PP_NONE && data->directive_kind[d] != PP_DIRECTIVE_ENDIF)
+            {
+                d = data->directive_next[d];
+            }
+            if (d == BUSTER_PP_NONE)
+            {
+                total += 1;
+                notes[opener] |= BUSTER_PP_NOTE_UNTERMINATED;
+            }
+        }
+    }
+    const uint64_t capacity = (uint64_t)total + 1;
+    data->note_directives = arena_push_array(arena, capacity, sizeof(uint32_t) + sizeof(uint8_t), _Alignof(uint32_t));
+    const bool result = data->note_directives != 0;
+    data->note_kinds = result ? (uint8_t*)(data->note_directives + capacity) : 0;
+    data->note_count = 0;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint64_t first = 0; result && data->note_count < total; first += 16)
+    {
+        const __mmask16 valid = (__mmask16)_bzhi_u32(UINT16_MAX, count - first < 16 ? (uint32_t)(count - first) : 16);
+        const __m128i flags = _mm_maskz_loadu_epi8(valid, notes + first);
+        const __mmask16 keep = _mm_test_epi8_mask(flags, flags);
+        _mm_mask_compressstoreu_epi8(data->note_kinds + data->note_count, keep, flags);
+        _mm512_mask_compressstoreu_epi32(data->note_directives + data->note_count, keep, _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)first)));
+        data->note_count += (uint32_t)__builtin_popcount(keep);
+    }
     return result;
 }
 
-// Each directive's kind and line end, then the conditional groups' pairing (pp_pair_conditionals_vector, or
-// pp_pair_conditionals_scalar for the files it leaves), then the notes (pp_note_directives) where there can be any, in
+// Each directive's kind and line end, then the conditional groups' pairing (pp_pair_conditionals),
+// then the notes (pp_note_directives) where there can be any, in
 // `arena` with the rest of the table.
 static bool pp_finish_directives(Arena* arena, PPFileData* data, const uint64_t* lines)
 {
@@ -2943,18 +2917,20 @@ static bool pp_finish_directives(Arena* arena, PPFileData* data, const uint64_t*
         return true;
     }
     const bool elifdef = (kinds_seen & ((UINT32_C(1) << PP_DIRECTIVE_ELIFDEF) | (UINT32_C(1) << PP_DIRECTIVE_ELIFNDEF))) != 0;
-    Scratch scratch = scratch_begin(0);
+    Scratch scratch = scratch_begin(arena);
     uint32_t* indices = arena_push_array(scratch.arena, (uint64_t)data->directive_count + 32, sizeof(uint32_t), 64);
     bool result = indices != 0;
-    bool notable = true;
-    if (result && !pp_pair_conditionals_vector(data, indices, &notable))
+    data->note_count = 0;
+    if (result)
     {
-        pp_pair_conditionals_scalar(data, indices);
-        notable = true;
+        const uint32_t required = pp_pair_conditionals(data, indices);
+        if (required != 0 || elifdef)
+        {
+            // The pairing stack is dead. Its storage can hold a note byte for every directive.
+            result = pp_note_directives(arena, data, required, (uint8_t*)indices);
+        }
     }
     scratch_end(scratch);
-    data->note_count = 0;
-    result = result && (!(notable || elifdef) || pp_note_directives(arena, data));
     return result;
 }
 

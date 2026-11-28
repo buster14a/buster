@@ -91,3 +91,6 @@ fixits-warning-events	fixits-warning-events.c	-	-std=gnu17 -fsyntax-only -Wall -
 ranges-warning-events	ranges-warning-events.c	-	-std=gnu17 -fsyntax-only -Wall -Wextra -Wpedantic -Wmissing-variable-declarations	retained warning operand ranges
 fixits-string-plus	fixits-string-plus.c	-	-fsyntax-only	string addition suggestions insert indexing at the correct boundaries
 ranges-operands	ranges-operands.c	-	-fsyntax-only	invalid unary, binary, conditional, subscript and call operands
+embedded-directive-pedantic	embedded-directives.c	-	-E -o /dev/null -pedantic	active directives in macro arguments under -pedantic
+embedded-directive-promoted	embedded-directives.c	-	-E -o /dev/null -Werror=embedded-directive	embedded directives promoted, including pragma push and pop
+embedded-directive-ignored	embedded-directives.c	-	-E -o /dev/null -pedantic -Wno-embedded-directive	suppressed embedded directive diagnostics

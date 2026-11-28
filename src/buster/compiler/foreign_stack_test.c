@@ -475,7 +475,8 @@ static void foreign_stack_test_retry(ForeignTestTally* tally, const char* direct
                 };
                 LinkCapacity capacity = { 0 };
                 Arena names = arena_reserve(1ull << 24);
-                const bool allocated = foreign_link_capacity(&foreign, 0, 0, &capacity) && link_initialize(&converted.link, arena, &names, capacity);
+                bool has_shared_names = false;
+                const bool allocated = foreign_link_capacity(&foreign, 0, 0, &capacity, &has_shared_names) && !has_shared_names && link_initialize(&converted.link, arena, &names, capacity);
                 foreign_test_expect(tally, allocated, "allocate direct section handoff", detail);
                 if (allocated)
                 {

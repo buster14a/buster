@@ -11,10 +11,9 @@ static void pp_diagnostic_resolve_ranges(Preprocessor* pp, bool resolve);
 static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const PPDiagnosticSourceNote* placed_notes, uint32_t placed_note_count, const char* format, va_list arguments);
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name);
-static void pp_scan_body_scalar(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt);
 static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start, bool trigraphs);
 static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end);
-static void pp_directive(Preprocessor* pp, PPContext* context);
+static void pp_directive(Preprocessor* pp, PPContext* context, bool file_run);
 static void pp_finish_invocation(Preprocessor* pp);
 static void pp_close_builtin(Preprocessor* pp, bool closed);
 static void pp_start_stream(Preprocessor* pp);
@@ -206,6 +205,7 @@ typedef enum PPWarning
     PP_WARNING_UNUSED_MACROS,
     PP_WARNING_GNU_LINE_MARKER,
     PP_WARNING_FORTIFY_SOURCE,
+    PP_WARNING_EMBEDDED_DIRECTIVE,
     // A warning of no group (poisoning an existing macro, a character constant too long for its type), and an extension
     // of no group (a C90 macro name with no whitespace after it before a character outside its basic set): only -w,
     // -Wno-everything, -Werror and an extension's -pedantic-errors map it, its flag "[-Werror]" where promoted.
@@ -260,6 +260,7 @@ static const PPWarningKind pp_warnings[BUSTER_PP_WARNINGS] =
     { "unused-macros", NULL, NULL, false, false, false, false },
     { "gnu-line-marker", NULL, "gnu pedantic", true, false, false, false },
     { "fortify-source", NULL, NULL, false, true, true, false },
+    { "embedded-directive", NULL, "pedantic", true, false, false, false },
     { NULL, NULL, NULL, false, true, false, false },
     { NULL, NULL, NULL, true, true, false, false },
 };
@@ -1001,6 +1002,20 @@ static __attribute__((noinline, cold)) void pp_diagnostic_macro_change(Preproces
     }
 }
 
+// Publish the current definition and record visibility for the two names used by checker diagnostics.
+BUSTER_INLINE void pp_record_macro(Preprocessor* pp, IdentId name, PPMacroId id)
+{
+    pp->macro_of[name] = id;
+    pp->macro_epoch += 1;
+    const uint64_t bit = UINT64_C(1) << (name % 64);
+    uint64_t* word = &pp->is_macro[name / 64];
+    *word = id != 0 ? *word | bit : *word & ~bit;
+    if (!pp->options.no_history && (name == C_NAME_FALSE || intern_length(pp->table, name) == 4))
+    {
+        pp_diagnostic_macro_change(pp, name, id);
+    }
+}
+
 // Sets `name`'s macro (0 for none: a poisoned name then gets its own record back, as pp_poison makes it).
 static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
 {
@@ -1011,20 +1026,7 @@ static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
         pp->macros[id].flags = BUSTER_PP_MACRO_BUILTIN;
         pp->macros[id].builtin = (uint8_t)PP_BUILTIN_POISONED;
     }
-    pp->macro_of[name] = id;
-    pp->macro_epoch += 1;
-    if (id != 0)
-    {
-        pp->is_macro[name / 64] |= 1ull << (name % 64);
-    }
-    else
-    {
-        pp->is_macro[name / 64] &= ~(1ull << (name % 64));
-    }
-    if (!pp->options.no_history)
-    {
-        pp_diagnostic_macro_change(pp, name, id);
-    }
+    pp_record_macro(pp, name, id);
 }
 
 // Records a -dD or -dI directive (PPOutputEvent) before the next output token, after the include exits recorded so far,
@@ -1068,13 +1070,13 @@ static __attribute__((noinline, cold)) void pp_output_event(Preprocessor* pp, ui
 }
 
 // A new macro record (id from 1). Returns 0 and a fatal error if there are too many.
-static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name)
+BUSTER_INLINE PPMacroId pp_append_macro(Preprocessor* pp, const PPMacro* macro)
 {
     PPMacroId result = 0;
     if (pp->macro_count < (BUSTER_PP_MAX_MACROS >> pp->capacity_shift))
     {
         result = pp->macro_count;
-        pp->macros[result] = (PPMacro){ .name = name };
+        pp->macros[result] = *macro;
         pp->macro_count += 1;
     }
     else
@@ -1082,6 +1084,12 @@ static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name)
         pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many macro definitions");
     }
     return result;
+}
+
+static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name)
+{
+    const PPMacro macro = { .name = name };
+    return pp_append_macro(pp, &macro);
 }
 
 static void pp_define_builtin(Preprocessor* pp, IdentId name, PPBuiltin builtin, bool function_like)
@@ -1412,45 +1420,6 @@ static bool pp_same_definition(const Preprocessor* pp, const PPMacro* a, const P
         result = pp_same_file_token(pp, a_data, ai, b_data, bi) && (i == 0 || pp_file_space(a_data, ai) == pp_file_space(b_data, bi));
     }
     return result;
-}
-
-static void pp_scan_body_vector(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
-{
-    uint64_t found_pastes = 0;
-    uint64_t found_hashes = 0;
-    uint64_t found_va_opt = 0;
-    for (uint32_t t = begin; t < end; t += 64)
-    {
-        const __mmask64 lanes = _bzhi_u64(~0ull, end - t < 64 ? end - t : 64);
-        const __m512i kind = _mm512_and_si512(_mm512_maskz_loadu_epi8(lanes, kinds + t), _mm512_set1_epi8(0x7F));
-        found_pastes |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_HASHHASH));
-        found_hashes |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_HASH));
-        // An identifier's value is its id; another token's is its end, which may equal __VA_OPT__'s id.
-        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
-        for (uint32_t j = 0; j < 4 && (identifiers >> (16 * j)) != 0; j += 1)
-        {
-            const __mmask16 named = (__mmask16)(identifiers >> (16 * j));
-            const __m512i ids = _mm512_maskz_loadu_epi32(named, values + t + 16 * j);
-            found_va_opt |= _mm512_mask_cmpeq_epi32_mask(named, ids, _mm512_set1_epi32(C_NAME_VA_OPT));
-        }
-    }
-    *pastes = found_pastes != 0;
-    *hashes = found_hashes != 0;
-    *va_opt = found_va_opt != 0;
-}
-
-// pp_scan_body_vector's scalar twin.
-static void pp_scan_body_scalar(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
-{
-    *pastes = false;
-    *hashes = false;
-    *va_opt = false;
-    for (uint32_t t = begin; t < end; t += 1)
-    {
-        *pastes |= (kinds[t] & 0x7F) == C_TOKEN_HASHHASH;
-        *hashes |= (kinds[t] & 0x7F) == C_TOKEN_HASH;
-        *va_opt |= (kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && values[t] == C_NAME_VA_OPT;
-    }
 }
 
 // Where clang reports token t of a definition's line, [.., end): the token, or the line's end if t is past its last.
@@ -1916,22 +1885,26 @@ BUSTER_INLINE bool pp_define_parameters(Preprocessor* pp, const PPFileData* data
     return result;
 }
 
-// The frequent empty and one-name lists need neither a duplicate scan nor the general grammar loop. Only complete,
-// valid shapes take this path; variadics and every malformed list keep the ordered reader and its first diagnostic.
+// Recognize complete (), (name), (...) and (name, ...) lists before entering the general parameter reader.
 BUSTER_INLINE bool pp_define_parameters_tiny(const PPFileData* data, PPMacro* macro, uint32_t open, uint32_t end)
 {
     const uint32_t first = open + 1;
-    const uint8_t kind = first < end ? data->kinds[first] & 0x7F : C_TOKEN_UNKNOWN;
+    const uint32_t count = end - first;
+    const uint8_t kind = count ? data->kinds[first] & 0x7f : C_TOKEN_UNKNOWN;
     const bool named = kind == C_TOKEN_RAW_IDENTIFIER;
-    const bool result = kind == C_TOKEN_R_PAREN || (named && first + 1 < end && (data->kinds[first + 1] & 0x7F) == C_TOKEN_R_PAREN);
-    if (result)
+    const bool one = named && count >= 2 && (data->kinds[first + 1] & 0x7f) == C_TOKEN_R_PAREN;
+    const bool variadic = (kind == C_TOKEN_ELLIPSIS && count >= 2 && (data->kinds[first + 1] & 0x7f) == C_TOKEN_R_PAREN) ||
+                          (named && count >= 4 && (data->kinds[first + 1] & 0x7f) == C_TOKEN_COMMA &&
+                           (data->kinds[first + 2] & 0x7f) == C_TOKEN_ELLIPSIS && (data->kinds[first + 3] & 0x7f) == C_TOKEN_R_PAREN);
+    const bool complete = kind == C_TOKEN_R_PAREN || one || variadic;
+    if (complete)
     {
-        macro->flags |= BUSTER_PP_MACRO_FUNCTION;
+        macro->flags |= BUSTER_PP_MACRO_FUNCTION | (variadic ? BUSTER_PP_MACRO_VARIADIC : 0);
         macro->parameters_begin = first;
-        macro->parameter_count = named;
-        macro->body_begin = first + 1 + named;
+        macro->parameter_count = named + variadic;
+        macro->body_begin = first + (variadic ? (named ? 4 : 2) : 1 + named);
     }
-    return result;
+    return complete;
 }
 
 // The feature-test macros clang's isFeatureTestMacro lists (#2222, pp_reserved_macro_check), each its length and bytes.
@@ -2272,6 +2245,158 @@ static __attribute__((noinline, cold)) void pp_defined_live(Preprocessor* pp, ui
     }
 }
 
+// Classify replacement operators. A locally validated stringize or optional argument needs no second pass.
+static void pp_scan_definition_body(const PPFileData* data, const PPMacro* macro, bool* paste, bool* hash, bool* opt)
+{
+    const uint32_t begin = macro->body_begin;
+    const uint32_t end = macro->body_end;
+    uint32_t found_paste = 0;
+    uint32_t found_hash = 0;
+    uint32_t found_opt = 0;
+    for (uint32_t t = begin; t < end;)
+    {
+        const uint32_t left = end - t;
+        uint32_t count = 64;
+        uint64_t hashes;
+        uint64_t optional;
+        if (left >= 64)
+        {
+            const __m512i kinds = _mm512_and_si512(_mm512_loadu_si512(data->kinds + t), _mm512_set1_epi8(0x7f));
+            hashes = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_HASH));
+            found_paste |= _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_HASHHASH)) != 0;
+            const uint64_t named = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+            optional = 0;
+            if (named != 0)
+            {
+                // Saturation to a byte is exact for this name comparison. Restore the token order after lane-local packs.
+                _Static_assert(C_NAME_VA_OPT > 0 && C_NAME_VA_OPT < UINT8_MAX, "optional name lies within the saturation limits");
+                const uint32_t* values = data->values + t;
+                const __m512i ab = _mm512_packs_epi32(_mm512_loadu_si512(values), _mm512_loadu_si512(values + 16));
+                const __m512i cd = _mm512_packs_epi32(_mm512_loadu_si512(values + 32), _mm512_loadu_si512(values + 48));
+                const __m512i order = _mm512_setr_epi32(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+                const __m512i ids = _mm512_permutexvar_epi32(order, _mm512_packus_epi16(ab, cd));
+                optional = _mm512_mask_cmpeq_epi8_mask(named, ids, _mm512_set1_epi8(C_NAME_VA_OPT));
+            }
+        }
+        else if (left > 16)
+        {
+            // The first and last complete identifier vectors can overlap. Each matching bit still names its original token.
+            count = left;
+            const __mmask64 active = _bzhi_u64(UINT64_MAX, count);
+            const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(active, data->kinds + t), _mm512_set1_epi8(0x7f));
+            hashes = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_HASH));
+            found_paste |= _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_HASHHASH)) != 0;
+            const uint64_t named = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+            optional = 0;
+            if (named != 0)
+            {
+                const uint32_t* const ids = data->values + t;
+                const __m512i name = _mm512_set1_epi32(C_NAME_VA_OPT);
+                optional = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(ids), name);
+                {
+                    const uint32_t last = count - 16;
+                    optional |= (uint64_t)_mm512_cmpeq_epi32_mask(_mm512_loadu_si512(ids + last), name) << last;
+                    if (count > 32)
+                    {
+                        optional |= (uint64_t)_mm512_cmpeq_epi32_mask(_mm512_loadu_si512(ids + 16), name) << 16;
+                        if (count > 48)
+                        {
+                            optional |= (uint64_t)_mm512_cmpeq_epi32_mask(_mm512_loadu_si512(ids + 32), name) << 32;
+                        }
+                    }
+                }
+                optional &= named;
+            }
+        }
+        else
+        {
+            count = left;
+            const __mmask16 active = (__mmask16)_bzhi_u32(UINT16_MAX, count);
+            const __m128i kinds = _mm_and_si128(_mm_maskz_loadu_epi8(active, data->kinds + t), _mm_set1_epi8(0x7f));
+            const __mmask16 identifiers = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+            const __m512i ids = _mm512_maskz_loadu_epi32(active, data->values + t);
+            optional = _mm512_mask_cmpeq_epi32_mask(identifiers, ids, _mm512_set1_epi32(C_NAME_VA_OPT));
+            hashes = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(C_TOKEN_HASH));
+            found_paste |= _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(C_TOKEN_HASHHASH));
+        }
+        if (hashes | optional)
+        {
+            if (hashes != 0 && macro->parameter_count == 1 && (macro->flags & BUSTER_PP_MACRO_VARIADIC) == 0)
+            {
+                const IdentId formal = data->values[macro->parameters_begin];
+                for (uint64_t todo = hashes; todo != 0; todo &= todo - 1u)
+                {
+                    const uint32_t token = t + (uint32_t)__builtin_ctzll(todo);
+                    if (end - token > 1 && (data->kinds[token + 1] & 0x7f) == C_TOKEN_RAW_IDENTIFIER && data->values[token + 1] == formal)
+                    {
+                        hashes &= hashes - 1u;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+            found_hash |= hashes != 0;
+
+            if (optional != 0 && (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0)
+            {
+                for (uint64_t todo = optional; todo != 0; todo &= todo - 1u)
+                {
+                    const uint32_t token = t + (uint32_t)__builtin_ctzll(todo);
+                    if (end - token > 3 && (data->kinds[token + 1] & 0x7f) == C_TOKEN_L_PAREN &&
+                        (data->kinds[token + 2] & 0x7f) == C_TOKEN_RAW_IDENTIFIER && data->values[token + 2] != C_NAME_VA_OPT &&
+                        (data->kinds[token + 3] & 0x7f) == C_TOKEN_R_PAREN)
+                    {
+                        optional &= optional - 1u;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+            found_opt |= optional != 0;
+        }
+        t += count;
+    }
+    *paste = found_paste != 0;
+    *hash = found_hash != 0;
+    *opt = found_opt != 0;
+}
+
+// Preserve Clang's diagnostic order for marked definitions.
+static __attribute__((noinline)) bool pp_define_marked(Preprocessor* pp, const PPFileData* data, PPMacro* macro,
+                                                        const PPParameterIndex* parameters, bool hashes, bool va_opt)
+{
+    bool valid = true;
+    const uint32_t base = macro->base;
+    const uint32_t end = macro->body_end;
+    const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
+    for (uint32_t t = macro->body_begin; va_opt && !variadic && t < macro->body_end; t += 1)
+    {
+        if ((data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT)
+        {
+            pp_diagnose_group(pp, PP_WARNING_VARIADIC_MACROS, pp_define_location(pp, data, base, t, end), "__VA_OPT__ can only appear in the expansion of a variadic macro");
+        }
+    }
+    if ((data->kinds[macro->body_begin] & 0x7F) == C_TOKEN_HASHHASH)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, base, macro->body_begin, end), "'##' cannot appear at start of macro expansion");
+        valid = false;
+    }
+    // A function-like macro with a '#' or __VA_OPT__ gets the whole check: clang reads __VA_OPT__ in any
+    // function-like macro (with a warning in one that isn't variadic, where its content is never used).
+    const bool to_check = hashes || va_opt;
+    valid = valid && (!to_check || !(macro->flags & BUSTER_PP_MACRO_FUNCTION) || pp_check_replacement_list(pp, data, macro, parameters));
+    if (valid && (data->kinds[macro->body_end - 1] & 0x7F) == C_TOKEN_HASHHASH)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, base, macro->body_end - 1, end), "'##' cannot appear at end of macro expansion");
+        valid = false;
+    }
+    return valid;
+}
+
 // #define, on the line [begin, end) of a file's tokens (the name's token first), read in the range at `base`. Its
 // constraints (C 6.10.4) are checked as clang checks them, in its order, and reported where and as it reports them.
 static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint32_t begin, uint32_t end)
@@ -2330,36 +2455,12 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
             bool pastes;
             bool hashes;
             bool va_opt;
-            if (BUSTER_VECTOR_PATH(pp->vectorized))
-            {
-                pp_scan_body_vector(data->kinds, data->values, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
-            }
-            else
-            {
-                pp_scan_body_scalar(data->kinds, data->values, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
-            }
+            pp_scan_definition_body(data, &macro, &pastes, &hashes, &va_opt);
             macro.flags |= pastes ? BUSTER_PP_MACRO_PASTES : 0;
-            const bool variadic = (macro.flags & BUSTER_PP_MACRO_VARIADIC) != 0;
-            for (uint32_t t = macro.body_begin; va_opt && !variadic && t < macro.body_end; t += 1)
+            const bool bad_end = pastes && ((data->kinds[macro.body_begin] & 0x7f) == C_TOKEN_HASHHASH || (data->kinds[macro.body_end - 1] & 0x7f) == C_TOKEN_HASHHASH);
+            if (bad_end || hashes || va_opt)
             {
-                if ((data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT)
-                {
-                    pp_diagnose_group(pp, PP_WARNING_VARIADIC_MACROS, pp_define_location(pp, data, base, t, end), "__VA_OPT__ can only appear in the expansion of a variadic macro");
-                }
-            }
-            if ((data->kinds[macro.body_begin] & 0x7F) == C_TOKEN_HASHHASH)
-            {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, base, macro.body_begin, end), "'##' cannot appear at start of macro expansion");
-                valid = false;
-            }
-            // A function-like macro with a '#' or __VA_OPT__ gets the whole check: clang reads __VA_OPT__ in any
-            // function-like macro (with a warning in one that isn't variadic, where its content is never used).
-            const bool to_check = hashes || va_opt;
-            valid = valid && (!to_check || !(macro.flags & BUSTER_PP_MACRO_FUNCTION) || pp_check_replacement_list(pp, data, &macro, parameters));
-            if (valid && (data->kinds[macro.body_end - 1] & 0x7F) == C_TOKEN_HASHHASH)
-            {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, base, macro.body_end - 1, end), "'##' cannot appear at end of macro expansion");
-                valid = false;
+                valid = pp_define_marked(pp, data, &macro, parameters, hashes, va_opt);
             }
         }
         if (valid)
@@ -2387,11 +2488,10 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
                     pp_diagnose_note(pp, severity, location, &note, "'%.*s' macro redefined%s", (int)intern_length(pp->table, name), intern_bytes(pp->table, name), flag);
                 }
             }
-            const PPMacroId id = pp_new_macro(pp, name);
+            const PPMacroId id = pp_append_macro(pp, &macro);
             if (id != 0)
             {
-                pp->macros[id] = macro;
-                pp_set_macro(pp, name, id);
+                pp_record_macro(pp, name, id);
                 if (BUSTER_UNLIKELY(pp->options.dump_defines))
                 {
                     pp_output_event(pp, PP_OUTPUT_DEFINE, location, id, 0, false, 0);
@@ -5522,7 +5622,15 @@ static void pp_collect_step(Preprocessor* pp)
         else if (context->next_directive < data->directive_count)
         {
             const uint32_t d = context->next_directive;
-            const char* rejected = invocation->builtin || !pp->in_macro_arguments ? 0 : pp_embedded_directive_name(data->directive_kind[d]);
+            const bool embedded = !invocation->builtin && pp->in_macro_arguments;
+            const char* rejected = embedded ? pp_embedded_directive_name(data->directive_kind[d]) : NULL;
+            if (embedded && rejected == NULL && (pp->conditional_count == context->conditional_base || !pp->conditionals[pp->conditional_count - 1].skipping))
+            {
+                // Clang diagnoses at the name, or at the end of the line for a null directive.
+                const uint32_t name = data->directive_hash[d] + 1;
+                const uint32_t location = name < data->directive_end[d] ? base + data->starts[name] : pp_line_end_location(pp, data, base, name - 1);
+                pp_diagnose_group(pp, PP_WARNING_EMBEDDED_DIRECTIVE, location, "embedding a directive within macro arguments has undefined behavior");
+            }
             if (rejected != 0)
             {
                 // At the directive's name, as clang reports it.
@@ -5534,7 +5642,7 @@ static void pp_collect_step(Preprocessor* pp)
             else
             {
                 // Undefined behavior that clang allows, and warns about only with -pedantic (-Wembedded-directive).
-                pp_directive(pp, context);
+                pp_directive(pp, context, false);
             }
         }
         else if (pp->context_count > 1)
@@ -8928,7 +9036,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
             pp->keywords_resolved = pp->output.count;
         }
-        pp_directive(pp, context);
+        pp_directive(pp, context, true);
     }
     else
     {
@@ -11784,7 +11892,6 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
 {
     const uint32_t d = context->next_directive;
     const PPFileData* data = &pp->datas[context->data];
-    const uint32_t data_index = context->data;
     const uint32_t hash = data->directive_hash[d];
     const uint32_t end = data->directive_end[d];
     const uint8_t kind = data->directive_kind[d];
@@ -11817,9 +11924,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
     switch (kind)
     {
         case PP_DIRECTIVE_NULL:
-            break;
-        case PP_DIRECTIVE_DEFINE:
-            pp_define(pp, data_index, base, hash + 2, end);
+        case PP_DIRECTIVE_DEFINE: // Already handled by pp_directive.
             break;
         case PP_DIRECTIVE_UNDEF:
             // As clang: the name, then the line's end, then whether it undefines a builtin.
@@ -11926,11 +12031,41 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
 
 // Only a directive the main loop is executing can establish an active opaque message. Skipped lines retain their
 // original lexing; a recovery failure is fatal and never dispatches the incomplete prepared directive.
-static void pp_directive(Preprocessor* pp, PPContext* context)
+static void pp_directive(Preprocessor* pp, PPContext* context, bool file_run)
 {
     const uint32_t directive = context->next_directive;
     const PPFileData* data = &pp->datas[context->data];
     const uint8_t kind = data->directive_kind[directive];
+    if (kind == PP_DIRECTIVE_DEFINE)
+    {
+        const uint32_t base = pp->ranges[context->range].base;
+        // Definitions emit no ordinary tokens and leave this file active. Argument collection still needs to
+        // visit each directive separately to enforce the rules for embedded directives.
+        const bool uninterrupted = file_run && (pp->stream_count | pp->limit_count | pp->capture_count) == 0;
+        const bool inspect = (data->raw_error_count | data->unterminated_comment | pp->poison_count) != 0;
+        uint32_t d = directive;
+        do
+        {
+            const uint32_t hash = data->directive_hash[d];
+            const uint32_t end = data->directive_end[d];
+            if (inspect)
+            {
+                pp_read_directive_comment(pp, context, d);
+                pp_read_raw_errors(pp, context, hash, end);
+            }
+            context->position = end;
+            d += 1;
+            context->next_directive = d;
+            pp->statistics.directives += pp->options.timing;
+            if (inspect && pp->poison_count != 0)
+            {
+                pp_check_poison_range(pp, data, base, 0, hash + 1, end, BUSTER_PP_NONE, true);
+            }
+            pp_define(pp, context->data, base, hash + 2, end);
+        } while (uninterrupted && !pp->fatal && d < data->directive_count && context->position == data->directive_hash[d] &&
+                 data->directive_kind[d] == PP_DIRECTIVE_DEFINE);
+        return;
+    }
     const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
     // Only a header name's line can need the raw or comment repairs (pp_recover_direct_raw and
     // pp_recover_direct_header_comment test the kind first themselves).
@@ -14394,8 +14529,6 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp->history_quiet = options->quiet;
     pp->options.no_history |= pp->history_deferred;
     const PPPrepare prepare = pp_prepare_options(options);
-    // pp_define's body scan by its scalar arm (PPOptions.scalar).
-    pp->vectorized = BUSTER_VECTOR_PATH(!options->scalar);
     pp->drop_argument_comments = prepare.comments == 1;
     pp->refine_flags = prepare.refine_flags;
     pp->split_kinds = prepare.split_kinds;

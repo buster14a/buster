@@ -262,7 +262,16 @@ byte per deduplicated CFG edge. Its worklist queues
 changed SSA users and instructions affected by newly executable edges, phis in a
 queue of their own (below).
 
-The passes are these worklists alone since #2924. The vector passes beside them
+Dead-code removal classifies sixteen instructions of each reachable block at
+a time. An opcode lookup identifies unconditional effects, possible faults and
+floating-point SIMD effects. The constant state and lane type decide which
+instructions must survive. Forwarded instructions enter the worklist only if
+another live instruction needs them. The initial pass marks each root and
+appends its instruction number. The operand walk marks each newly live
+instruction before appending it, so a function needs at most one worklist
+entry per instruction. Phi operands enter only along executable edges.
+
+The earlier vector passes
 (SCCP sweeping executable blocks in reverse postorder with 16-instruction fold
 batches, dead-code sweeps, pointer jumping for the threads, sixteen-lane ranks,
 roots and identity candidates) took 1.02 to 1.44 times their ticks when forced,
@@ -282,8 +291,8 @@ owner's decision
 ([7112387760](https://github.com/buster14a/buster/issues/2924#issuecomment-7112387760))
 was asked without it, corrected in
 [7122231079](https://github.com/buster14a/buster/issues/2924#issuecomment-7122231079).
-#3445 is a vectorized form that would have to win at every size, that shape
-included. Integer
+#3445 compares the current worklist on that shape and on the verified pipeline
+over the real compiler inputs. Integer
 operations support all IR integer widths, including scalar i128 handling.
 Copies, phis, selects, integer/pointer conversions, bitcasts and floating sign
 negation preserve exact constant bits. Floating arithmetic, comparisons and
@@ -377,8 +386,8 @@ one-off run of 409,600 pairs also passed. Tier 1's existing native MXCSR fixture
 
 Scalar `fadd`, `fsub`, `fmul`, `fdiv` and `fcmp` of `f32` and `f64` fold as a
 one-lane vector of the transfer above, so a result folds only where every
-floating environment gives the same bits. A folded scalar row is a kind-2 root
-(`ir_optimize_roots`): its constant discharges it and the row goes, so nothing
+floating environment gives the same bits. A folded scalar row is a potentially trapping root
+(`IROPT_MAY_TRAP`): its constant discharges it and the row goes, so nothing
 is left to raise a flag. A scalar operation therefore folds only where it raises
 no exception flag at all: beyond the lanes' rule (an exact, normal result of
 normal operands), no operand may be a NaN (a signaling one raises invalid, and

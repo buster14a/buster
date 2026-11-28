@@ -168,17 +168,13 @@ or `test-preprocessor --tables path...`:
   `--fixtures DIR`, before the checks are dealt; a malformed catalog, a
   missing file, a repeated ID, an unknown flag or tree, a file no line names
   or no case at all fails the run, and no check runs. A new case is its files
-  and its line, and rebuilds nothing. Each case is preprocessed
-  twice, the second time with `PPOptions.scalar` (since #2924 it selects
-  `pp_define`'s scalar body scan alone). They run in 32 parts, the
+  and its line, and rebuilds nothing. Each case runs with its recorded outputs and expected diagnostics. They run in 32 parts, the
   header sets below (`--clang`) in 16 and the files (below) a part each (a
   range each past 64), each part in a child process with a directory of its
   own, at most `test_process_cpus()` at once, the output in their order
   (`pp_test_children`, #465). In file mode, any completed part frees a CPU
-  for the next part while the parent collects results in input order. They must give the same stream
-  token for token (kind, flags, value and location) and the same directive
-  tables, with the expected spellings and the expected number of warnings. The
-  vectorized kernels' outputs must also give their digests in
+  for the next part while the parent collects results in input order. The fixtures check
+  token spellings and diagnostic counts. The stream and directive tables must give their digests in
   `tests/preprocessor-kernels/digests.tsv` (`pp_kernel_digest`: the stream, the
   expansion history, the directive tables and the diagnostics' counts), a line
   per kernel comparison of the built-in cases (`test-x86-target`'s `-march`
@@ -290,7 +286,7 @@ or `test-preprocessor --tables path...`:
   end where ours do in both texts), with `--clang` its emulation of clang's
   -P printer checked on fixtures of its own, then 1,500 cases of the
   independent harness's generator in each of C17 and C23
-  (`c_preprocessor_fuzz.c`), which both kernels must give
+  (`c_preprocessor_fuzz.c`), which default and 64-byte window preparations must give
   alike (streams, directive tables, diagnostics' counts, history and both
   printers' bytes), with -P text that lexes back into the stream. Then the directive tables (#118,
   `c_preprocessor_directives_test.c`): 2,000 random sources (`--count N`,
@@ -338,7 +334,7 @@ or `test-preprocessor --tables path...`:
   `pp_line_of`'s lines and columns near each line end from the cursor and from
   the pages;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
-  `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
+  `-ffreestanding`, `-target TRIPLE`, ...), with the requested preparation and a second window size, which must agree;
   `--window-bytes N` (ours alone, like `--location-limit`) sends every file of
   two windows or more through windows of N bytes, so that the vectorized side's
   windowed preparation of a whole unit is compared too;
@@ -713,10 +709,7 @@ refresh are in [the measurement record](https://github.com/buster14a/buster-perf
 Its invocation scripts take a separate normal shared-host lock for each command.
 
 `./build/compiler benchmark-preprocessor [--clang] [--markers] [--only
-vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] [options] file...` preprocesses each file from nothing per
-run (a new intern table and preprocessor), with the vectorized kernels and again
-with `pp_define`'s scalar body scan (`--only scalar`, the one twin #2924 left in
-the preprocessor), 21 passes after a warm-up, and reports the medians of time, cycles
+vectorized|control] [--read-limit N,...] [--listing-misses N,...] [options] file...` preprocesses each file with a new intern table and preprocessor. It measures 21 passes after a warm-up and reports median time, cycles
 and instructions per input token and per output token, IPC, each phase's share
 and time (read, lex, refine, directive tables, main loop/setup), the release after the
 run (the files' mappings among it), `-E -P`'s throughput with its printing
@@ -762,17 +755,16 @@ and without it on every other run that measures the preprocessor: clang's times,
 about 6 s of the step's 12, measure clang rather than this compiler. Like the
 others, its measurements are informational.
 
-`./build/compiler benchmark-preprocessor --defines [--only vectorized|scalar]
+`./build/compiler benchmark-preprocessor --defines [--only vectorized]
 path...` times definitions and lookups alone (#121): every `.c` and `.h` file
 under the paths is read and prepared once, then each of 21 passes after a
 warm-up, file by file, defines its `#define`s, compiles its macros and looks up
-its identifiers as the main loop's runs test them, with the body scan's vector
-and scalar arms, which must make the same macros. It reports the medians in cycles per `#define`, per macro
+its identifiers as the main loop does. Each pass must reproduce the same macro digest. It reports the medians in cycles per `#define`, per macro
 compiled and per lookup. `docs/c-preprocessor.md` has the numbers for the C
 library corpus.
 
 `--guard-cost` times the vectorized kernels with the skip of guarded files and
-without it (`PPOptions.no_guard_skip`), in place of the scalar body scan: the
+without it (`PPOptions.no_guard_skip`). In this control, the
 output's tokens must be the same (#120).
 
 `--markers` runs and prints as `-E` without `-P` does: with the expansion starts
@@ -782,7 +774,7 @@ markers and reported as `-E with printing`; of the controls it takes
 `--spelling-cost` alone, and refuses `--clang`. `--spelling-cost` times the
 vectorized kernels with the printer's spellings by `pp_print_spellings`
 (`spellings`) and by its general loop for every chunk (`per-token`,
-`PPOptions.print_per_token`), in place of the scalar body scan (#649). Every run's
+`PPOptions.print_per_token`) (#649). Every run's
 warm-up print, with markers or without, must give the same bytes, whatever the
 implementation and the read limit. Both take the printer's own copies, its
 line markers' batches among them, so the two rows differ in the spellings

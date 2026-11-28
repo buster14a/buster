@@ -19,7 +19,7 @@
 // 32, and all but one at most eight classes; #2699), so preparation classes items against a register of up to eight
 // distinct class keys (tier1_frame_classes) and sorts up to BUSTER_TIER1_FRAME_RANK_EVENTS events by rank, every key
 // compared with eight others at a time (tier1_frame_rank). Larger inputs (a ninth class, more events) sort by stable
-// radix passes over the key bytes that differ (tier1_frame_sort); both sorts give one order. One ordered, branch-free
+// radix passes over the key bits that differ (tier1_frame_sort). Both sorts give one order. One ordered, branch-free
 // pass then colors (tier1_frame_color): a class's free colors are a stack, so each class uses exactly its maximum live
 // pressure. The scalar twin went in #2924, after the vector path read 0.31 to 0.96 of its time at every frame size of
 // sqlite3.c's, Lua's and musl's real frames on the 9700X. The tests check each plan independently, preparation's order
@@ -216,109 +216,229 @@ static __m512i tier1_frame_scan64(__m512i values)
     return values;
 }
 
-// Stable eight-bit radix passes over the key bytes that differ between keys, so a function's small positions and few
-// classes take two or three passes of the eight (#2699). Event positions have the full u32 range: a dense counting
-// table would make memory depend on the producer's position numbering. The ordered scatter is shared; its cost is
-// included in preparation. Returns whether the sorted columns are the temporary ones: an odd number of passes ran.
-static bool tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_key, uint32_t* temporary_id, uint32_t count)
+// Each eight-byte selector picks eight significant bits, in increasing order, from each 64-bit key.
+// A ninth bit can avoid another whole radix pass. All other key bits are equal or belong to another pass.
+typedef struct Tier1FrameDigit Tier1FrameDigit;
+struct Tier1FrameDigit
 {
-    uint64_t differing = 0;
-    for (uint32_t i = 1; i < count; i += 1)
+    uint64_t selector;
+    uint64_t byte_mask;
+    uint64_t ninth;
+    uint32_t buckets;
+};
+
+BUSTER_INLINE void tier1_frame_digit_rows(const uint64_t* key, const uint32_t* id, uint64_t* target_key, uint32_t* target_id,
+                                          uint32_t count, uint32_t* offsets, __m512i selector, uint64_t byte_mask, __m512i ninth,
+                                          bool wide, bool distribute, bool keep_key)
+{
+    const __mmask8 live = (__mmask8)_bzhi_u32(255, count);
+    const __m512i keys = _mm512_maskz_loadu_epi64(live, key);
+    const uint64_t digits = _mm512_bitshuffle_epi64_mask(keys, selector) & byte_mask;
+    const uint32_t high = wide ? _mm512_test_epi64_mask(keys, ninth) : 0;
+    for (uint32_t lane = 0; lane < count; lane += 1)
     {
-        differing |= key[i] ^ key[0];
-    }
-    bool swapped = false;
-    for (uint32_t shift = 0; shift < 64; shift += 8)
-    {
-        if (((differing >> shift) & 255) != 0)
+        const uint32_t bucket = (uint8_t)(digits >> (8 * lane)) | (((high >> lane) & 1) << 8);
+        // Equal digits advance the same cursor in input order. The positions therefore keep ties stable.
+        const uint32_t at = offsets[bucket]++;
+        if (distribute)
         {
-            uint32_t offsets[256] = {0};
-            for (uint32_t i = 0; i < count; i += 1)
+            target_id[at] = id[lane];
+            if (keep_key)
             {
-                offsets[(key[i] >> shift) & 255] += 1;
+                target_key[at] = key[lane];
             }
-            uint32_t sum = 0;
-            for (uint32_t bucket = 0; bucket < 256; bucket += 1)
-            {
-                const uint32_t amount = offsets[bucket];
-                offsets[bucket] = sum;
-                sum += amount;
-            }
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const uint32_t bucket = (key[i] >> shift) & 255;
-                const uint32_t at = offsets[bucket];
-                offsets[bucket] += 1;
-                temporary_key[at] = key[i];
-                temporary_id[at] = id[i];
-            }
-            uint64_t* swap_key = key;
-            key = temporary_key;
-            temporary_key = swap_key;
-            uint32_t* swap_id = id;
-            id = temporary_id;
-            temporary_id = swap_id;
-            swapped = !swapped;
         }
     }
-    return swapped;
 }
 
-// Preparation's sort of up to BUSTER_TIER1_FRAME_RANK_EVENTS events (#2699): an event's rank is the count of keys
-// below its own, and every key is compared with eight others at a time. The keys are distinct, each event's class,
-// position and input place (tier1_frame_prepare), so the ranks are the stable radix sort's order. `vectors` is a
-// constant at each call, which keeps the keys and the ranks in registers; the lanes past `events` hold key 0, below
-// nothing, and their ranks aren't read.
-static inline __attribute__((always_inline)) void tier1_frame_rank_vectors(const uint64_t* key, uint32_t events, uint32_t vectors, uint32_t* rank)
+BUSTER_INLINE void tier1_frame_digit_pass(uint64_t* key, uint32_t* id, uint64_t* target_key, uint32_t* target_id,
+                                          uint32_t count, uint32_t* offsets, Tier1FrameDigit digit, bool wide, bool distribute, bool keep_key)
 {
+    const __m512i selector = _mm512_set1_epi64((long long)digit.selector);
+    const __m512i ninth = _mm512_set1_epi64((long long)digit.ninth);
+    uint32_t first = 0;
+    for (; count - first >= 8; first += 8)
+    {
+        tier1_frame_digit_rows(key + first, id + first, target_key, target_id, 8, offsets, selector, digit.byte_mask, ninth, wide, distribute, keep_key);
+    }
+    if (first < count)
+    {
+        tier1_frame_digit_rows(key + first, id + first, target_key, target_id, count - first, offsets, selector, digit.byte_mask, ninth, wide, distribute, keep_key);
+    }
+}
+
+// A one-bit digit has two contiguous output streams. Count set bits or compress the two groups directly.
+BUSTER_INLINE void tier1_frame_bit_pass(const uint64_t* key, const uint32_t* id, uint64_t* target_key, uint32_t* target_id,
+                                        uint32_t count, uint32_t* offsets, uint64_t selector, bool distribute, bool keep_key)
+{
+    const __m512i bit = _mm512_set1_epi64((long long)(UINT64_C(1) << (selector & 63)));
+    uint32_t lo = 0;
+    uint32_t hi = distribute ? offsets[1] : 0;
+    for (uint32_t first = 0; first < count; first += 8)
+    {
+        const uint32_t left = count - first;
+        const __mmask8 live = left >= 8 ? 255 : (__mmask8)_bzhi_u32(255, left);
+        const __m512i keys = _mm512_maskz_loadu_epi64(live, key + first);
+        const __mmask8 high = _mm512_test_epi64_mask(keys, bit);
+        const __mmask8 low = live ^ high;
+        if (distribute)
+        {
+            const __m256i ids = _mm256_maskz_loadu_epi32(live, id + first);
+            _mm256_mask_compressstoreu_epi32(target_id + lo, low, ids);
+            _mm256_mask_compressstoreu_epi32(target_id + hi, high, ids);
+            if (keep_key)
+            {
+                _mm512_mask_compressstoreu_epi64(target_key + lo, low, keys);
+                _mm512_mask_compressstoreu_epi64(target_key + hi, high, keys);
+            }
+            lo += (uint32_t)__builtin_popcount(low);
+        }
+        hi += (uint32_t)__builtin_popcount(high);
+    }
+    if (!distribute)
+    {
+        offsets[0] = count - hi;
+        offsets[1] = hi;
+    }
+}
+
+BUSTER_INLINE void tier1_frame_radix_pass(uint64_t* key, uint32_t* id, uint64_t* target_key, uint32_t* target_id,
+                                          uint32_t count, uint32_t* offsets, Tier1FrameDigit digit, bool distribute, bool keep_key)
+{
+    if (digit.buckets == 2)
+    {
+        tier1_frame_bit_pass(key, id, target_key, target_id, count, offsets, digit.selector, distribute, keep_key);
+    }
+    else if (digit.ninth != 0)
+    {
+        tier1_frame_digit_pass(key, id, target_key, target_id, count, offsets, digit, true, distribute, keep_key);
+    }
+    else
+    {
+        tier1_frame_digit_pass(key, id, target_key, target_id, count, offsets, digit, false, distribute, keep_key);
+    }
+}
+
+static void tier1_frame_bucket_offsets(uint32_t* offsets, uint32_t count)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    uint32_t carry = 0;
+    for (uint32_t first = 0; first < count; first += 16)
+    {
+        const uint32_t left = count - first;
+        const __mmask16 live = left >= 16 ? 0xffff : (__mmask16)_bzhi_u32(0xffff, left);
+        const __m512i amounts = _mm512_maskz_loadu_epi32(live, offsets + first);
+        __m512i sums = _mm512_add_epi32(amounts, _mm512_alignr_epi32(amounts, zero, 15));
+        sums = _mm512_add_epi32(sums, _mm512_alignr_epi32(sums, zero, 14));
+        sums = _mm512_add_epi32(sums, _mm512_alignr_epi32(sums, zero, 12));
+        sums = _mm512_add_epi32(sums, _mm512_alignr_epi32(sums, zero, 8));
+        const __m512i starts = _mm512_add_epi32(_mm512_sub_epi32(sums, amounts), _mm512_set1_epi32((int)carry));
+        _mm512_mask_storeu_epi32(offsets + first, live, starts);
+        carry += (uint32_t)_mm_extract_epi32(_mm512_extracti32x4_epi32(sums, 3), 3);
+    }
+}
+
+// Stable LSD radix over the key bits that vary. Memory is independent of the numeric key range.
+// Return whether the sorted IDs (and keys when requested) are in the temporary columns.
+// Keep the large-frame code away from the instruction pages of the ordinary frame planner.
+static __attribute__((noinline, section(".text.unlikely.tier1_frame_sort"))) bool tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_key, uint32_t* temporary_id, uint32_t count, bool need_keys)
+{
+    const __m512i first = _mm512_set1_epi64(count == 0 ? 0 : (long long)key[0]);
+    __m512i changed = _mm512_setzero_si512();
+    for (uint32_t i = 0; i < count; i += 8)
+    {
+        const uint32_t left = count - i;
+        const __mmask8 live = left >= 8 ? 255 : (__mmask8)_bzhi_u32(255, left);
+        changed = _mm512_or_si512(changed, _mm512_xor_si512(first, _mm512_mask_loadu_epi64(first, live, key + i)));
+    }
+    uint64_t bits = (uint64_t)_mm512_reduce_or_epi64(changed);
+    Tier1FrameDigit digits[8];
+    uint32_t offsets[8][512];
+    uint32_t passes = 0;
+    while (bits != 0)
+    {
+        const uint32_t remaining = (uint32_t)__builtin_popcountll(bits);
+        const bool wide = (remaining + 8) / 9 < (remaining + 7) / 8;
+        Tier1FrameDigit digit = { 0 };
+        uint32_t width = 0;
+        do
+        {
+            digit.selector |= (uint64_t)__builtin_ctzll(bits) << (width * 8);
+            bits &= bits - 1;
+            width += 1;
+        } while (bits != 0 && width < 8);
+        digit.byte_mask = UINT64_C(0x0101010101010101) * ((1u << width) - 1);
+        if (wide)
+        {
+            digit.ninth = bits & -bits;
+            bits &= bits - 1;
+            width += 1;
+        }
+        digit.buckets = 1u << width;
+        digits[passes] = digit;
+        memset(offsets[passes], 0, digit.buckets * sizeof(uint32_t));
+        tier1_frame_radix_pass(key, id, temporary_key, temporary_id, count, offsets[passes], digit, false, false);
+        passes += 1;
+    }
+    for (uint32_t pass = 0; pass < passes; pass += 1)
+    {
+        tier1_frame_bucket_offsets(offsets[pass], digits[pass].buckets);
+        tier1_frame_radix_pass(key, id, temporary_key, temporary_id, count, offsets[pass], digits[pass], true, need_keys || pass + 1 < passes);
+        uint64_t* swap_key = key;
+        key = temporary_key;
+        temporary_key = swap_key;
+        uint32_t* swap_id = id;
+        id = temporary_id;
+        temporary_id = swap_id;
+    }
+    return (passes & 1) != 0;
+}
+
+// Event keys include the original input position, so their ranks are distinct. An inactive
+// lane holds UINT64_MAX and cannot contribute to a count of strictly smaller keys.
+static inline __attribute__((always_inline)) void tier1_frame_rank_vectors(const uint64_t* key, uint32_t count, uint32_t vectors, uint32_t* event)
+{
+    const uint32_t events = count * 2;
     __m512i keys[BUSTER_TIER1_FRAME_RANK_EVENTS / 8];
-    __m512i ranks[BUSTER_TIER1_FRAME_RANK_EVENTS / 8];
     for (uint32_t vector = 0; vector < vectors; vector += 1)
     {
         const uint32_t first = vector * 8;
         const uint32_t live = events <= first ? 0 : (events - first < 8 ? events - first : 8);
-        keys[vector] = _mm512_maskz_loadu_epi64((__mmask8)((1u << live) - 1), key + (live != 0 ? first : 0));
-        ranks[vector] = _mm512_setzero_si512();
+        keys[vector] = _mm512_mask_loadu_epi64(_mm512_set1_epi64(-1), (__mmask8)((1u << live) - 1), key + (live != 0 ? first : 0));
     }
-    for (uint32_t other = 0; other < events; other += 1)
+    for (uint32_t i = 0; i < events; i += 1)
     {
-        const __m512i value = _mm512_set1_epi64((long long)key[other]);
+        const __m512i value = _mm512_set1_epi64((long long)key[i]);
+        uint32_t rank = 0;
         for (uint32_t vector = 0; vector < vectors; vector += 1)
         {
-            ranks[vector] = _mm512_mask_add_epi64(ranks[vector], _mm512_cmpgt_epu64_mask(keys[vector], value), ranks[vector], _mm512_set1_epi64(1));
+            rank += (uint32_t)__builtin_popcount(_mm512_cmplt_epu64_mask(keys[vector], value));
         }
-    }
-    for (uint32_t vector = 0; vector < vectors; vector += 1)
-    {
-        _mm256_storeu_si256((__m256i*)(rank + vector * 8), _mm512_cvtepi64_epi32(ranks[vector]));
+        event[rank] = i < count ? i * 2 : (i - count) * 2 + 1;
     }
 }
 
-// `key` holds count ends' keys, then count starts'; `event` takes the sorted event IDs.
 static void tier1_frame_rank(const uint64_t* key, uint32_t count, uint32_t* event)
 {
-    const uint32_t events = count * 2;
-    uint32_t rank[BUSTER_TIER1_FRAME_RANK_EVENTS];
-    if (events <= 8)
+    if (count <= 4)
     {
-        tier1_frame_rank_vectors(key, events, 1, rank);
+        tier1_frame_rank_vectors(key, count, 1, event);
     }
-    else if (events <= 16)
+    else if (count <= 8)
     {
-        tier1_frame_rank_vectors(key, events, 2, rank);
+        tier1_frame_rank_vectors(key, count, 2, event);
     }
-    else if (events <= 32)
+    else if (count <= 16)
     {
-        tier1_frame_rank_vectors(key, events, 4, rank);
+        tier1_frame_rank_vectors(key, count, 4, event);
+    }
+    else if (count <= 24)
+    {
+        tier1_frame_rank_vectors(key, count, 6, event);
     }
     else
     {
-        tier1_frame_rank_vectors(key, events, 8, rank);
-    }
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        event[rank[i]] = i * 2;
-        event[rank[count + i]] = i * 2 + 1;
+        tier1_frame_rank_vectors(key, count, 8, event);
     }
 }
 
@@ -379,11 +499,18 @@ static Tier1FrameError tier1_frame_header(const Tier1FrameRequest* request)
     {
         error = TIER1_FRAME_INVALID;
     }
-    for (uint32_t i = 0; error == TIER1_FRAME_OK && slots->indices != 0 && i < slots->count; i += 1)
+    if (slots->indices != NULL && error == TIER1_FRAME_OK)
     {
-        if (slots->indices[i] >= slots->column_count)
+        const __m512i bound = _mm512_set1_epi32((int32_t)slots->column_count);
+        for (uint32_t i = 0; error == TIER1_FRAME_OK && i < slots->count; i += 16)
         {
-            error = TIER1_FRAME_INVALID;
+            const uint32_t left = slots->count - i;
+            const __mmask16 live = (__mmask16)_bzhi_u32(UINT16_MAX, left < 16 ? left : 16);
+            const __m512i rows = _mm512_maskz_loadu_epi32(live, slots->indices + i);
+            if (_mm512_mask_cmpge_epu32_mask(live, rows, bound) != 0)
+            {
+                error = TIER1_FRAME_INVALID;
+            }
         }
     }
     return error;
@@ -558,7 +685,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
             candidate.class_slot = candidate.class_colors + count;
         }
     }
-    if (error == TIER1_FRAME_OK && request->slots.indices != 0 && count != 0)
+    if (error == TIER1_FRAME_OK && request->slots.indices != 0 && count > 1)
     {
         // Distinct indices: each row is stamped with its item, and an item whose row holds another's stamp shares it.
         // Only stamped rows are read, so the column isn't cleared. Without room for a stamp a row, the indices are sorted.
@@ -585,7 +712,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
                 key[i] = indices[i];
                 candidate.event[i] = i;
             }
-            const uint64_t* const sorted = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count) ? temporary_key : key;
+            const uint64_t* const sorted = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count, true) ? temporary_key : key;
             for (uint32_t i = 1; i < count; i += 1)
             {
                 different |= sorted[i] == sorted[i - 1];
@@ -623,7 +750,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
             {
                 candidate.event[i] = i;
             }
-            const bool swapped = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count);
+            const bool swapped = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count, true);
             const uint64_t* const sorted_key = swapped ? temporary_key : key;
             const uint32_t* const sorted_item = swapped ? temporary_event : candidate.event;
             for (uint32_t i = 0; i < count; i += 1)
@@ -665,7 +792,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
                 key[count + i] = (uint64_t)group << 32 | request->slots.start[row];
                 candidate.event[count + i] = i * 2 + 1;
             }
-            if (tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, events))
+            if (tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, events, false))
             {
                 candidate.event = temporary_event;
             }
@@ -758,12 +885,10 @@ static void tier1_frame_steps(const Tier1FrameRequest* request, const Tier1Frame
         tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_SET_POINTER, BUSTER_ABI_RBP, BUSTER_ABI_RSP, 0, 0);
     }
     // Ascending encoder numbers are the unwind order: RBX, RBP, R12, R13, R14, R15.
-    for (uint32_t reg = 0; reg < 16; reg += 1)
+    for (uint32_t saved = frame->saved_registers; saved != 0; saved &= saved - 1)
     {
-        if ((frame->saved_registers & (1u << reg)) != 0)
-        {
-            tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_PUSH_REGISTER, reg, BUSTER_ABI_RSP, -8, 8);
-        }
+        const uint32_t reg = (uint32_t)__builtin_ctz(saved);
+        tier1_frame_step(frame->prologue, &frame->prologue_count, TIER1_FRAME_PUSH_REGISTER, reg, BUSTER_ABI_RSP, -8, 8);
     }
     // Under PROBE_STACK a realigned frame probes its subtraction whatever its size, so that the alignment gap's probe
     // starts from a touched address: the two together could otherwise cross an unprobed page. So does a frame whose body
@@ -813,12 +938,11 @@ static void tier1_frame_steps(const Tier1FrameRequest* request, const Tier1Frame
     {
         tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_RELEASE, BUSTER_ABI_RSP, BUSTER_ABI_RSP, 0, frame->stack_adjust_bytes);
     }
-    for (uint32_t reg = 16; reg > 0; reg -= 1)
+    for (uint32_t saved = frame->saved_registers; saved != 0; )
     {
-        if ((frame->saved_registers & (1u << (reg - 1))) != 0)
-        {
-            tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_POP_REGISTER, reg - 1, BUSTER_ABI_RSP, 0, 8);
-        }
+        const uint32_t reg = 31 - (uint32_t)__builtin_clz(saved);
+        saved ^= 1u << reg;
+        tier1_frame_step(frame->epilogue, &frame->epilogue_count, TIER1_FRAME_POP_REGISTER, reg, BUSTER_ABI_RSP, 0, 8);
     }
     if (frame->frame_pointer)
     {
@@ -881,7 +1005,7 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
     data_alignment = candidate.variadic && data_alignment < 16 ? 16 : data_alignment;
     // A red-zone base must compensate for that residue, including sixteen-byte objects. The red zone is below the
     // pushes' rsp.
-    const uint32_t residue = data_alignment <= 16 ? pushed_residue % data_alignment : 0;
+    const uint32_t residue = data_alignment <= 16 ? pushed_residue & (data_alignment - 1) : 0;
     const uint64_t red_span = tier1_frame_align(position + residue, data_alignment) - residue;
     candidate.red_zone = request->call_count == 0 && !candidate.frame_pointer && !requirements.dynamic_stack &&
         (request->flags & BUSTER_TIER1_FRAME_NO_RED_ZONE) == 0 && red_span <= BUSTER_ABI_RED_ZONE_BYTES;
@@ -924,14 +1048,12 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
         // The k-th push's word is 8 (k + 1) bytes below rbp, or below entry RSP, which is the subtraction and the pushes
         // above the post-prologue rsp.
         uint32_t saved_index = 0;
-        for (uint32_t reg = 0; reg < 16; reg += 1)
+        for (uint32_t saved = candidate.saved_registers; saved != 0; saved &= saved - 1)
         {
-            if ((candidate.saved_registers & (1u << reg)) != 0)
-            {
-                const int64_t below = 8 * (int64_t)(saved_index + 1);
-                candidate.save_offset[reg] = (int32_t)(candidate.frame_pointer ? -below : (int64_t)adjustment + 8 * (int64_t)pushes - below);
-                saved_index += 1;
-            }
+            const uint32_t reg = (uint32_t)__builtin_ctz(saved);
+            const int64_t below = 8 * (int64_t)(saved_index + 1);
+            candidate.save_offset[reg] = (int32_t)(candidate.frame_pointer ? -below : (int64_t)adjustment + 8 * (int64_t)pushes - below);
+            saved_index += 1;
         }
         tier1_frame_steps(request, &requirements, &candidate);
         *result = candidate;

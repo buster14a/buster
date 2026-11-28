@@ -530,46 +530,99 @@ static InflateError inflate_symbols(InflateBits* in, const InflateCode* literals
     return error;
 }
 
-// The Adler-32 of `bytes`, 64 bytes at a time. Over n bytes x_0 .. x_n-1 from a and b, a gains the bytes' sum and b
-// gains n times a and each byte times n - t, its place from the end: for chunk j of k, 64 (k - 1 - j) times the chunk's
-// sum plus the sum of its byte i times 64 - i. Each chunk's sum comes from vpsadbw (eight bytes to a quadword lane), its
-// weighted sum from vpdpbusd (four bytes times their weights to a doubleword lane); and the sums of the chunks after
-// each, from adding the chunks' running sum before each chunk. A block of 4,096 chunks keeps a doubleword lane's
-// weighted sums under 2^28, then the sums fold into a and b modulo 65,521; the last bytes go a byte at a time.
+// Over n bytes, a gains the byte sum and b gains n times the incoming a plus the bytes weighted n down to 1.
+// Two dot products compute the partial block's sums. Full blocks use vpsadbw for byte sums and vpdpbusd for
+// the within-chunk weights. Each earlier chunk contributes its sum once for every following chunk, times 64.
+// Reducing after at most 4,096 chunks keeps the accumulated weights within an unsigned dword.
 static uint32_t inflate_adler32_vector(const uint8_t* bytes, uint64_t length)
 {
     const __m512i weights = _mm512_set_epi8(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
                                             33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64);
     uint64_t a = 1;
     uint64_t b = 0;
-    uint64_t at = 0;
+    // A partial block goes first, so its contribution starts from the initial checksum (a = 1, b = 0).
+    const uint32_t prefix = (uint32_t)length & 63;
+    if (prefix != 0)
+    {
+        __m128i totals = _mm_setzero_si128();
+        const uint32_t short_count = prefix & 3u;
+        if (short_count != 0)
+        {
+            const uint8_t* rest = bytes + (prefix - short_count);
+            const uint32_t packed = (uint32_t)rest[0] | ((uint32_t)rest[short_count >> 1] << 8) | ((uint32_t)rest[short_count - 1] << 16);
+            const __m128i data = _mm_set1_epi32((int)packed);
+            // The first, middle and last byte may coincide. These weights count each byte once in A
+            // and weight it by its distance from the end in B. Both dot products use the same loaded bytes.
+            static const uint8_t short_weights[4][8] = {
+                { 0 },
+                { 1, 0, 0, 0, 1, 0, 0, 0 },
+                { 1, 0, 1, 0, 2, 0, 1, 0 },
+                { 1, 1, 1, 0, 3, 2, 1, 0 },
+            };
+            const __m128i coefficients = _mm_loadl_epi64((const __m128i*)short_weights[short_count]);
+            totals = _mm_dpbusd_epi32(totals, data, coefficients);
+        }
+        // Each dot product adds four consecutive bytes to A and the same four weighted bytes to B.
+        // Their weights descend by four between words. The short group above contributes the final bytes.
+        const uint32_t words = prefix & ~3u;
+        __m128i factors = _mm_setr_epi32(0x01010101, (int)(0x01010101u * prefix - 0x03020100u), 0, 0);
+        for (uint32_t pos = 0; pos < words; pos += 4)
+        {
+            uint32_t word;
+            memcpy(&word, bytes + pos, sizeof(word));
+            const __m128i data = _mm_set1_epi32((int)word);
+            totals = _mm_dpbusd_epi32(totals, data, factors);
+            factors = _mm_sub_epi8(factors, _mm_setr_epi32(0, 0x04040404, 0, 0));
+        }
+        a += (uint32_t)_mm_cvtsi128_si32(totals);
+        uint32_t weighted = prefix + (uint32_t)_mm_extract_epi32(totals, 1);
+        if (weighted >= 65521)
+        {
+            weighted %= 65521;
+        }
+        b = weighted;
+    }
+    uint64_t at = prefix;
     while (length - at >= 64)
     {
         const uint64_t chunks = (length - at) / 64 < 4096 ? (length - at) / 64 : 4096;
         __m512i sums = _mm512_setzero_si512();
         __m512i before = _mm512_setzero_si512();
         __m512i weighted = _mm512_setzero_si512();
-        for (uint64_t chunk = 0; chunk < chunks; chunk += 1)
+        __m512i odd_weighted = _mm512_setzero_si512();
+        __m512i even_sums = _mm512_setzero_si512();
+        // In each pair the earlier sum contributes twice, and the first chunk once more.
+        uint64_t chunk = 0;
+        for (; chunk + 1 < chunks; chunk += 2)
         {
-            const __m512i data = _mm512_loadu_si512(bytes + at + chunk * 64);
+            const __m512i first = _mm512_loadu_si512(bytes + at + chunk * 64);
+            const __m512i second = _mm512_loadu_si512(bytes + at + chunk * 64 + 64);
+            const __m512i first_sum = _mm512_sad_epu8(first, _mm512_setzero_si512());
+            const __m512i second_sum = _mm512_sad_epu8(second, _mm512_setzero_si512());
             before = _mm512_add_epi64(before, sums);
-            sums = _mm512_add_epi64(sums, _mm512_sad_epu8(data, _mm512_setzero_si512()));
-            weighted = _mm512_dpbusd_epi32(weighted, data, weights);
+            even_sums = _mm512_add_epi64(even_sums, first_sum);
+            sums = _mm512_add_epi64(sums, _mm512_add_epi64(first_sum, second_sum));
+            weighted = _mm512_dpbusd_epi32(weighted, first, weights);
+            odd_weighted = _mm512_dpbusd_epi32(odd_weighted, second, weights);
+        }
+        before = _mm512_add_epi64(_mm512_add_epi64(before, before), even_sums);
+        weighted = _mm512_add_epi32(weighted, odd_weighted);
+        if (chunk < chunks)
+        {
+            const __m512i first = _mm512_loadu_si512(bytes + at + chunk * 64);
+            before = _mm512_add_epi64(before, sums);
+            sums = _mm512_add_epi64(sums, _mm512_sad_epu8(first, _mm512_setzero_si512()));
+            weighted = _mm512_dpbusd_epi32(weighted, first, weights);
         }
         const uint64_t sum = (uint64_t)_mm512_reduce_add_epi64(sums);
         const uint64_t prefixes = (uint64_t)_mm512_reduce_add_epi64(before);
         const uint64_t weight = (uint64_t)(uint32_t)_mm512_reduce_add_epi32(weighted);
-        b = (b + chunks * 64 * a + 64 * prefixes + weight) % 65521;
-        a = (a + sum) % 65521;
+        const uint64_t accumulated = b + chunks * 64 * a + 64 * prefixes + weight;
+        b = accumulated < 65521 ? accumulated : accumulated % 65521;
+        a += sum;
+        a = a < 65521 ? a : a % 65521;
         at += chunks * 64;
     }
-    for (; at < length; at += 1)
-    {
-        a += bytes[at];
-        b += a;
-    }
-    a %= 65521;
-    b %= 65521;
     return (uint32_t)(b << 16 | a);
 }
 
