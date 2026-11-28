@@ -4351,14 +4351,16 @@ static void parse_scalar_paren(ParseScalar* parser, uint32_t i, ParseFrame* fram
     }
     else if (kind != PARSE_KIND_L_PAREN)
     {
-        // The keyword clang names: the one before, or for asm the one before its qualifiers. __builtin_available's
-        // balanced delimiters name none, just after the keyword (#148, ExpectAndConsume).
+        // asm can have qualifiers between its keyword and the expected parenthesis.
         uint32_t keyword = i - 1;
         while (mode == PARSE_MODE_ASM_PAREN && keyword > 0 && parser->kinds[keyword] != PARSE_KIND_ASM)
         {
             keyword -= 1;
         }
-        if (parser->names[keyword] == C_NAME_BUILTIN_AVAILABLE && parser->kinds[keyword] == PARSE_KIND_TYPE_ARGUMENT)
+        // Clang points just past these keywords, even when the following token is on another line.
+        const IdentId name = parser->names[keyword];
+        if ((parser->kinds[keyword] == PARSE_KIND_TYPE_ARGUMENT && name == C_NAME_BUILTIN_AVAILABLE) ||
+            (parser->kinds[keyword] == PARSE_KIND_TYPEOF && (name == C_NAME_BITINT || name == C_NAME_EXTINT)))
         {
             parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_L_PAREN, BUSTER_PARSE_AFTER_PREVIOUS);
         }
