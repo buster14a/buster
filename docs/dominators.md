@@ -127,8 +127,8 @@ membership/parents to group reducible loops, and retain RPO in flagged regions.
 
 ## Algorithms and bounded storage
 
-An iterative DFS from entry produces RPO, DFS ancestry intervals, and each
-preorder number's block and DFS parent. SEMI-NCA works in preorder numbers. It
+An iterative DFS from entry records preorder, reverse postorder and the DFS
+parent of each reachable block. SEMI-NCA works in preorder numbers. It
 computes semidominators in decreasing order: a predecessor numbered below the
 block is a candidate itself, and one above contributes the least semidominator
 on its path through the forest of already-processed vertices, which an
