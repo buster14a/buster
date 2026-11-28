@@ -3459,6 +3459,127 @@ static bool c_direct_test_assert(const char* obj_path)
     return ok && left;
 }
 
+typedef int (*CDirectTestConstantP)(int*);
+
+// glibc's tolower and toupper under __OPTIMIZE__ (#3592) are __tobody's statement expression, whose definition the direct
+// path takes, token for token, as the conditional expression it computes: a unit with glibc's definition compiles to the
+// object of the same unit with that expression written out, over each arm (an int, a char, constants in and out of the
+// table's range, a call's value, tolower_l's table and arguments). Only the arms the constants select name functions:
+// tolower, toupper and g, and __builtin_constant_p's operand makes no code and names nothing, run in-process. A use of
+// another body, or of glibc's under another name, leaves.
+static bool c_direct_test_tobody(const char* obj_path)
+{
+#define BUSTER_TOBODY_TEST_DECLARATIONS \
+    "extern const int **__ctype_tolower_loc(void);\nextern const int **__ctype_toupper_loc(void);\n" \
+    "extern int tolower(int c);\nextern int toupper(int c);\n" \
+    "typedef struct { const int *lower; } *Locale;\nextern int __tolower_l(int c, Locale l);\nint g(void);\n"
+#define BUSTER_TOBODY_TEST_USES \
+    "#define tolower(c) __tobody (c, tolower, *__ctype_tolower_loc (), (c))\n" \
+    "#define toupper(c) __tobody (c, toupper, *__ctype_toupper_loc (), (c))\n" \
+    "#define __tolower_l(c, l) __tobody (c, __tolower_l, (l)->lower, (c, l))\n" \
+    "int t_int(int c) { return tolower(c); }\n" \
+    "int t_char(const unsigned char *s) { return toupper(*s) + tolower((unsigned char)s[1]) + toupper((signed char)s[2]); }\n" \
+    "int t_constant(void) { return toupper('q') + tolower(300) * 3 + toupper(-200) * 5; }\n" \
+    "int t_once(void) { return tolower(g()); }\n" \
+    "int t_locale(int c, Locale l) { return __tolower_l(c, l) + __tolower_l((unsigned char)c, l); }\n" \
+    "int t_expression(int c, int d) { return tolower(c) == toupper(d) ? tolower(c + d) : 0; }\n"
+    static const char shaped[] =
+        BUSTER_TOBODY_TEST_DECLARATIONS
+        "#define __tobody(c, f, a, args) \\\n"
+        "  (__extension__\t\t\t\t\t\t\t\t      \\\n"
+        "   ({ int __res;\t\t\t\t\t\t\t      \\\n"
+        "      if (sizeof (c) > 1)\t\t\t\t\t\t      \\\n"
+        "\t{\t\t\t\t\t\t\t\t      \\\n"
+        "\t  if (__builtin_constant_p (c))\t\t\t\t\t      \\\n"
+        "\t    {\t\t\t\t\t\t\t\t      \\\n"
+        "\t      int __c = (c);\t\t\t\t\t\t      \\\n"
+        "\t      __res = __c < -128 || __c > 255 ? __c : (a)[__c];\t\t      \\\n"
+        "\t    }\t\t\t\t\t\t\t\t      \\\n"
+        "\t  else\t\t\t\t\t\t\t\t      \\\n"
+        "\t    __res = f args;\t\t\t\t\t\t      \\\n"
+        "\t}\t\t\t\t\t\t\t\t      \\\n"
+        "      else\t\t\t\t\t\t\t\t      \\\n"
+        "\t__res = (a)[(int) (c)];\t\t\t\t\t      \\\n"
+        "      __res; }))\n"
+        BUSTER_TOBODY_TEST_USES;
+    static const char written[] =
+        BUSTER_TOBODY_TEST_DECLARATIONS
+        "#define __tobody(c, f, a, args) ((int) (sizeof (c) > 1 ? (__builtin_constant_p (c) ? ((int) (c) < -128 || (int) (c) > 255 ? (int) (c) : (a)[(int) (c)]) : f args) : (a)[(int) (c)]))\n"
+        BUSTER_TOBODY_TEST_USES;
+#undef BUSTER_TOBODY_TEST_USES
+    char written_path[300];
+    snprintf(written_path, sizeof(written_path), "%s.written", obj_path);
+    bool ok = c_direct_test_compile_source_keep(shaped, obj_path, NULL, 0, NULL, NULL, NULL) &&
+              c_direct_test_compile_source_keep(written, written_path, NULL, 0, NULL, NULL, NULL);
+    size_t shaped_size = 0;
+    size_t written_size = 0;
+    uint8_t* shaped_bytes = ok ? c_direct_test_file(obj_path, &shaped_size) : NULL;
+    uint8_t* written_bytes = ok ? c_direct_test_file(written_path, &written_size) : NULL;
+    const bool same = shaped_bytes != NULL && written_bytes != NULL && shaped_size == written_size && memcmp(shaped_bytes, written_bytes, shaped_size) == 0;
+    if (ok && !same)
+    {
+        fprintf(stderr, "test-direct: glibc's __tobody compiles to another object than its conditional expression\n");
+    }
+    // The selected arms' calls, and no other: the constants' arms and the char's index the tables.
+    const bool named = c_direct_test_symbol(obj_path, "tolower").count == 1u && c_direct_test_symbol(obj_path, "toupper").count == 1u &&
+                       c_direct_test_symbol(obj_path, "g").count == 1u && c_direct_test_symbol(obj_path, "__tolower_l").count == 1u &&
+                       c_direct_test_symbol(obj_path, "__ctype_toupper_loc").count == 1u;
+    if (same && !named)
+    {
+        fprintf(stderr, "test-direct: glibc's __tobody names other functions than its selected arms call\n");
+    }
+    ok = same && named;
+    free(shaped_bytes);
+    free(written_bytes);
+    unlink(written_path);
+    // __builtin_constant_p's operand, compiled without code: a call it holds names nothing, and its side effects, run,
+    // happen nowhere.
+    static const char constant_p[] =
+        "int g(void);\nint t_named(void) { return __builtin_constant_p(g()); }\n"
+        "int t_effects(int *p) { return __builtin_constant_p(++*p) + __builtin_constant_p(*p = 7) * 2 + __builtin_constant_p(3 + 4) * 4 + *p * 8; }\n";
+    ok = ok && c_direct_test_compile_source_keep(constant_p, obj_path, NULL, 0, NULL, NULL, NULL) && c_direct_test_symbol(obj_path, "g").count == 0;
+#if !__has_feature(memory_sanitizer)
+    void* mapping = NULL;
+    size_t mapped = 0;
+    const void* code = ok ? c_direct_test_code(obj_path, "t_effects", &mapping, &mapped) : NULL;
+    int value = 5;
+    ok = code != NULL && ((CDirectTestConstantP)(uintptr_t)code)(&value) == 4 + 5 * 8 && value == 5;
+    if (mapping != NULL)
+    {
+        munmap(mapping, mapped);
+    }
+#endif
+    if (same && named && !ok)
+    {
+        fprintf(stderr, "test-direct: __builtin_constant_p's operand is evaluated\n");
+    }
+    unlink(obj_path);
+    // glibc's body with one token changed, and glibc's under another name.
+    static const char* const leaves[] = {
+        BUSTER_TOBODY_TEST_DECLARATIONS
+        "#define __tobody(c, f, a, args) (__extension__ ({ int __res; if (sizeof (c) > 1) { if (__builtin_constant_p (c)) { int __c = (c); __res = __c < -128 || __c > 256 ? __c : (a)[__c]; } else __res = f args; } else __res = (a)[(int) (c)]; __res; }))\n"
+        "int f(int c) { return __tobody (c, tolower, *__ctype_tolower_loc (), (c)); }\n",
+        BUSTER_TOBODY_TEST_DECLARATIONS
+        "#define __tobody(c, f, a, args) (__extension__ ({ int __res; if (sizeof (c) > 1) { if (__builtin_constant_p (c)) { int __c = (c); __res = __c < -128 || __c > 255 ? __c : (a)[__c]; } else __res = f args; } else __res = (a)[(int) (c)]; __res; }))\n"
+        "#define __tobody2(c, f, a, args) (__extension__ ({ int __res; if (sizeof (c) > 1) { if (__builtin_constant_p (c)) { int __c = (c); __res = __c < -128 || __c > 255 ? __c : (a)[__c]; } else __res = f args; } else __res = (a)[(int) (c)]; __res; }))\n"
+        "int f(int c) { return __tobody2 (c, tolower, *__ctype_tolower_loc (), (c)); }\n",
+        BUSTER_TOBODY_TEST_DECLARATIONS
+        "#define __tobody(c, f, a, b) (__extension__ ({ int __res; if (sizeof (c) > 1) { if (__builtin_constant_p (c)) { int __c = (c); __res = __c < -128 || __c > 255 ? __c : (a)[__c]; } else __res = f b; } else __res = (b)[(int) (c)]; __res; }))\n"
+        "int f(int c) { return __tobody (c, tolower, *__ctype_tolower_loc (), (c)); }\n",
+    };
+#undef BUSTER_TOBODY_TEST_DECLARATIONS
+    bool left = true;
+    for (uint32_t i = 0; left && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        left = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!left)
+        {
+            fprintf(stderr, "test-direct: a body that isn't glibc's __tobody took the direct path: %s", leaves[i]);
+        }
+    }
+    return ok && left;
+}
+
 typedef double (*CDirectTestRound)(double);
 typedef float (*CDirectTestRoundf)(float);
 typedef double (*CDirectTestMixed)(double, int);
@@ -6005,6 +6126,16 @@ static int c_direct_unit_tests(void)
     else
     {
         fprintf(stderr, "test-direct: FAIL glibc's assert\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_tobody(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL glibc's tolower and toupper, and __builtin_constant_p's operand (#3592)\n");
         failed += 1u;
     }
 

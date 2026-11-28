@@ -5710,7 +5710,11 @@ static __attribute__((noinline)) void fval_emit_builtin_call(FastExprCtx* ex, ui
     }
     if (id == cc->id_builtin_constant_p)
     {
-        const bool is_c = argc >= 1u && (args[0].kind == FVAL_IMM || args[0].kind == FVAL_FIMM);
+        // #3592: an operand with a side effect, compiled without code since the callee's name (its imm, which OUT is), is
+        // no constant.
+        const uint32_t unevaluated = (uint32_t)out->imm;
+        ex->eval_only = (uint8_t)(ex->eval_only - unevaluated);
+        const bool is_c = unevaluated == 0 && argc >= 1u && (args[0].kind == FVAL_IMM || args[0].kind == FVAL_FIMM);
         for (uint32_t i = 0; i < argc; i += 1) { fval_release(ex, &args[i]); }
         *out = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = is_c ? 1 : 0 };
         return;
@@ -8089,6 +8093,48 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
     ex->vsp += 1u;
 }
 
+// #3592: __builtin_constant_p's operand is not evaluated, by the full pipeline as by clang, and with a side effect it is
+// no constant. The direct path compiled it as a call's argument, with its code: glibc's tolower(g()) called g twice.
+// Whether the operand, the tokens after the call's `(` at OPEN to its `)`, may have a side effect: an increment, a
+// decrement, an assignment, a brace (a statement expression's, a compound literal's) or a call, which is a `(` after a
+// name, a `]` or a `)` that doesn't close a cast's type name. Such an operand is compiled without code and the builtin's
+// value is 0 (fval_emit_builtin_call); any other is compiled as before, its value and its code unchanged. It is no
+// unevaluated operand of sizeof's: the full pipeline gives no -Wunevaluated-expression for a side effect there. Read
+// where the builtin's name is (no other call pays for it); a name with no `(` after it has no operand here.
+static __attribute__((cold, noinline)) uint32_t fast_cc_constant_p_effects(const FastCCState* cc, uint32_t open)
+{
+    uint32_t opens[32];
+    uint32_t depth = 0;
+    uint32_t closed = open;
+    uint32_t effects = 0;
+    bool done = open >= cc->tcount || cc->tk[open] != FTOK_LPAREN;
+    for (uint32_t i = open + 1u; i < cc->tcount && !done && effects == 0; i += 1)
+    {
+        const uint8_t k = cc->tk[i];
+        const uint8_t before = cc->tk[i - 1u];
+        if (k == FTOK_LPAREN)
+        {
+            const uint32_t cast = (uint32_t)(before == FTOK_RPAREN) && fast_cc_is_type_start(cc, closed + 1u);
+            effects |= (uint32_t)(before == FTOK_IDENT) | (uint32_t)(before == FTOK_RBRACKET) | ((uint32_t)(before == FTOK_RPAREN) & (cast ^ 1u)) |
+                       (uint32_t)(depth == 32u);
+            opens[depth & 31u] = i;
+            depth += 1u;
+        }
+        else if (k == FTOK_RPAREN)
+        {
+            done = depth == 0;
+            depth -= (uint32_t)(depth != 0);
+            closed = opens[depth & 31u];
+        }
+        else
+        {
+            effects |= (uint32_t)(k == FTOK_INC) | (uint32_t)(k == FTOK_DEC) | ((uint32_t)(k >= FTOK_ASSIGN) & (uint32_t)(k <= FTOK_SHR_ASSIGN)) |
+                       (uint32_t)(k == FTOK_LBRACE);
+        }
+    }
+    return effects;
+}
+
 // glibc's assert in GNU's modes (#3592) is a statement expression:
 //     ((void) sizeof ((e) ? 1 : 0), __extension__ ({ if (e) ; else __assert_fail (#e, __FILE__, __LINE__, f); }))
 // and SQLite's ALWAYS and NEVER put one in an expression. The direct path compiles no statement in an expression, so
@@ -8555,7 +8601,11 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                     id == cc->id_builtin_memcmp || id == cc->id_builtin_strlen ||
                     id == cc->id_sync_synchronize || id == cc->id_atomic_load_n || id == cc->id_atomic_store_n)
                 {
-                    if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_BUILTIN, .sym_idx = id }; }
+                    // #3592: __builtin_constant_p's operand with a side effect is compiled without code from here to the
+                    // call's end (fast_cc_constant_p_effects; fval_emit_builtin_call ends it), marked in the callee's imm.
+                    const uint32_t unevaluated = id == cc->id_builtin_constant_p ? fast_cc_constant_p_effects(cc, cc->pos) : 0u;
+                    ex.eval_only = (uint8_t)(ex.eval_only + unevaluated);
+                    if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_BUILTIN, .imm = unevaluated, .sym_idx = id }; }
                     expect_val = false;
                     continue;
                 }

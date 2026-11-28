@@ -5442,6 +5442,135 @@ static inline uint8_t fast_pp_one_token_mode(FastPP* pp, FastTok bt, uint8_t* ou
     return fmode;
 }
 
+// glibc's <ctype.h> (#3592): where __OPTIMIZE__ is defined, tolower and toupper (and tolower_l and toupper_l) expand to
+// __tobody, a statement expression, which the direct path doesn't compile:
+//     #define __tobody(c, f, a, args) (__extension__ ({ int __res; if (sizeof (c) > 1) { if (__builtin_constant_p (c))
+//         { int __c = (c); __res = __c < -128 || __c > 255 ? __c : (a)[__c]; } else __res = f args; }
+//         else __res = (a)[(int) (c)]; __res; }))
+// That definition, token for token, takes the conditional expression it computes as its body, made of its own tokens:
+//     ((int) (sizeof (c) > 1 ? (__builtin_constant_p (c) ? ((int) (c) < -128 || (int) (c) > 255 ? (int) (c)
+//         : (a)[(int) (c)]) : f args) : (a)[(int) (c)]))
+// Each arm is what its branch assigns to __res, and the whole is an int's value, as __res's is. Both conditions are
+// constants, so the direct path compiles the arm they select and checks the others without code (#3592's dead arms): c
+// is evaluated once, by that arm, as in glibc's, since sizeof's and __builtin_constant_p's operands are not evaluated.
+// The constant arm names c four times, where c is a constant. A redefinition is still checked against the definition's
+// text (macro_texts), and any other body keeps its tokens: a use of it leaves the direct path at its `({`.
+#define BUSTER_FPP_TOBODY_TOKENS 80u
+static const char* const buster_fpp_tobody_glibc[] = {
+    "(", "__extension__", "(", "{", "int", "__res", ";",
+    "if", "(", "sizeof", "(", "c", ")", ">", "1", ")",
+    "{",
+    "if", "(", "__builtin_constant_p", "(", "c", ")", ")",
+    "{", "int", "__c", "=", "(", "c", ")", ";",
+    "__res", "=", "__c", "<", "-", "128", "||", "__c", ">", "255", "?", "__c", ":", "(", "a", ")", "[", "__c", "]", ";",
+    "}",
+    "else", "__res", "=", "f", "args", ";",
+    "}",
+    "else", "__res", "=", "(", "a", ")", "[", "(", "int", ")", "(", "c", ")", "]", ";",
+    "__res", ";", "}", ")", ")",
+};
+static const char* const buster_fpp_tobody_conditional[] = {
+    "(", "(", "int", ")", "(",
+    "sizeof", "(", "c", ")", ">", "1", "?",
+    "(", "__builtin_constant_p", "(", "c", ")", "?",
+    "(", "(", "int", ")", "(", "c", ")", "<", "-", "128", "||", "(", "int", ")", "(", "c", ")", ">", "255", "?",
+    "(", "int", ")", "(", "c", ")", ":", "(", "a", ")", "[", "(", "int", ")", "(", "c", ")", "]", ")",
+    ":", "f", "args", ")",
+    ":", "(", "a", ")", "[", "(", "int", ")", "(", "c", ")", "]",
+    ")", ")",
+};
+_Static_assert(sizeof(buster_fpp_tobody_glibc) / sizeof(buster_fpp_tobody_glibc[0]) == BUSTER_FPP_TOBODY_TOKENS, "glibc's __tobody body");
+_Static_assert(sizeof(buster_fpp_tobody_conditional) / sizeof(buster_fpp_tobody_conditional[0]) <= BUSTER_FPP_TOBODY_TOKENS,
+               "__tobody's conditional body fits where glibc's stood");
+
+// A word of the bodies above that is a punctuator: its kind, or FTOK_EOF.
+static uint8_t fast_pp_tobody_punctuator(const char* word)
+{
+    static const struct { char spelling[3]; uint8_t kind; } punctuators[] = {
+        { "(", FTOK_LPAREN }, { ")", FTOK_RPAREN }, { "{", FTOK_LBRACE }, { "}", FTOK_RBRACE }, { "[", FTOK_LBRACKET },
+        { "]", FTOK_RBRACKET }, { ";", FTOK_SEMI }, { "=", FTOK_ASSIGN }, { "<", FTOK_LT }, { ">", FTOK_GT },
+        { "-", FTOK_MINUS }, { "||", FTOK_LOR }, { "?", FTOK_QUESTION }, { ":", FTOK_COLON },
+    };
+    uint8_t kind = FTOK_EOF;
+    for (uint32_t i = 0; kind == FTOK_EOF && i < (uint32_t)(sizeof(punctuators) / sizeof(punctuators[0])); i += 1)
+    {
+        kind = strcmp(word, punctuators[i].spelling) == 0 ? punctuators[i].kind : FTOK_EOF;
+    }
+    return kind;
+}
+
+// A body word's parameter, c, f, a and args numbered from 1 as a body's tokens number them (extra), or 0.
+static uint32_t fast_pp_tobody_parameter(const char* word)
+{
+    static const char* const names[] = { "c", "f", "a", "args" };
+    uint32_t number = 0;
+    for (uint32_t i = 0; number == 0 && i < 4u; i += 1)
+    {
+        number = strcmp(word, names[i]) == 0 ? i + 1u : 0u;
+    }
+    return number;
+}
+
+// The body of a macro named __tobody that is glibc's, token for token, made the conditional expression above in place;
+// its new count, or body_count for any other. FOUR_PARAMETERS: a function-like macro's of four, not variadic. Read where
+// a definition has 80 tokens (each <ctype.h> of a compile, once).
+static __attribute__((cold, noinline)) uint32_t fast_pp_tobody_body(const FastPP* pp, uint32_t name_id, bool four_parameters, FastTok* body, uint32_t body_count)
+{
+    enum { conditional_count = sizeof(buster_fpp_tobody_conditional) / sizeof(buster_fpp_tobody_conditional[0]) };
+    const FastIdentEntry* const name = pp->idents.entries + name_id;
+    bool same = four_parameters && body_count == BUSTER_FPP_TOBODY_TOKENS && name->length == 8u && memcmp(pp->idents.strings + name->str_offset, "__tobody", 8) == 0;
+    for (uint32_t i = 0; same && i < BUSTER_FPP_TOBODY_TOKENS; i += 1)
+    {
+        const char* const word = buster_fpp_tobody_glibc[i];
+        const FastTok t = body[i];
+        const bool named = t.kind == FTOK_IDENT || (t.kind >= 64u && t.kind < 126u);
+        const uint32_t parameter = fast_pp_tobody_parameter(word);
+        if (parameter != 0)
+        {
+            same = named && t.extra == parameter;
+        }
+        else if (word[0] >= '0' && word[0] <= '9')
+        {
+            const uint32_t suffixed = BUSTER_FTOK_UNSIGNED | BUSTER_FTOK_LONG | BUSTER_FTOK_LONGLONG | BUSTER_FTOK_HEX | BUSTER_FTOK_IN_POOL;
+            same = t.kind == FTOK_INT_LIT && (t.flags & suffixed) == 0 && t.data == (uint32_t)strtoul(word, NULL, 10);
+        }
+        else if (word[0] == '_' || (word[0] >= 'a' && word[0] <= 'z'))
+        {
+            // A keyword's data is its name's IdentId, as an identifier's is.
+            const FastIdentEntry* const e = named ? pp->idents.entries + t.data : NULL;
+            same = e != NULL && t.extra == 0 && e->length == strlen(word) && memcmp(pp->idents.strings + e->str_offset, word, e->length) == 0;
+        }
+        else
+        {
+            same = t.kind == fast_pp_tobody_punctuator(word);
+        }
+    }
+    // Each word of the conditional is glibc's token of the same word, the first it has.
+    uint8_t from[conditional_count];
+    for (uint32_t i = 0; same && i < (uint32_t)conditional_count; i += 1)
+    {
+        uint32_t j = 0;
+        while (j < BUSTER_FPP_TOBODY_TOKENS && strcmp(buster_fpp_tobody_glibc[j], buster_fpp_tobody_conditional[i]) != 0)
+        {
+            j += 1u;
+        }
+        same = j < BUSTER_FPP_TOBODY_TOKENS;
+        from[i] = (uint8_t)j;
+    }
+    uint32_t count = body_count;
+    if (same)
+    {
+        FastTok glibc[BUSTER_FPP_TOBODY_TOKENS];
+        memcpy(glibc, body, sizeof(glibc));
+        for (uint32_t i = 0; i < (uint32_t)conditional_count; i += 1)
+        {
+            body[i] = glibc[from[i]];
+        }
+        count = (uint32_t)conditional_count;
+    }
+    return count;
+}
+
 static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncludeFile* f)
 {
     FastTok name_tok = { 0 };
@@ -5578,7 +5707,7 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
         }
         memmove(body, body + at, (size_t)(line_count - at) * sizeof(FastTok));
     }
-    const uint32_t body_count = line_count - at;
+    uint32_t body_count = line_count - at;
     bool has_ops = false;
     // #3577: an object-like macro's body that starts with no blank after the name (C99's warning), one that starts with
     // ##, and __VA_OPT__ in any but a variadic macro's (which leaves below): the full pipeline's.
@@ -5672,6 +5801,12 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
             fast_pp_bail(pp, "macro redefined");
             return;
         }
+    }
+    // glibc's __tobody (#3592) is looked at where a body has as many tokens as its: one test a definition.
+    if (__builtin_expect(body_count == BUSTER_FPP_TOBODY_TOKENS, 0))
+    {
+        body_count = fast_pp_tobody_body(pp, name_id, is_func && !is_variadic && param_count == 4u, body, body_count);
+        pp->macro_tok_count = body_start + body_count;
     }
 
     // The parameters the body names plainly, by the walk fast_pp_run_calls's substitution makes: '#' and a parameter,

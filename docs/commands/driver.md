@@ -433,11 +433,30 @@ Three of Lua 5.4.8's constructs kept 13 of its 34 units off the direct path
   Before a block's declaration or a `for`'s first clause it is quiet
   (`fast_cc_is_declaration_start`).
 
-What keeps Lua's other three off: `lvm.c`'s computed `goto` (`&&L_OP_MOVE` in
-its dispatch table), a conditional of two enumerators passed to an enum
-parameter (a conditional's arms carry no enum), and glibc's `tolower` and
-`toupper` under `-O2` (`lbaselib.c`, `lstrlib.c`), a statement expression
-(`__tobody`).
+Two more of Lua's units, `lbaselib.c` and `lstrlib.c`, compile on it since
+glibc's `tolower` and `toupper` do (#3592), so 33 of its 34 units do:
+- **glibc's `__tobody`.** Under `__OPTIMIZE__`, `<ctype.h>` makes `tolower`,
+  `toupper`, `tolower_l` and `toupper_l` a statement expression. A definition of
+  `__tobody` that is glibc's, token for token, takes as its body the
+  conditional expression it computes, made of its own tokens
+  (`fast_pp_tobody_body`): `((int) (sizeof (c) > 1 ? (__builtin_constant_p (c)
+  ? ((int) (c) < -128 || (int) (c) > 255 ? (int) (c) : (a)[(int) (c)]) : f args)
+  : (a)[(int) (c)]))`. Both conditions are constants, so the arm they select is
+  compiled and the others are checked as dead arms. `c` is evaluated once, by
+  that arm. A redefinition is still checked against the definition's text, and
+  any other body keeps its tokens, so a use of it leaves at its `({`.
+  `tolower(*p++)` still leaves: the increment is in `sizeof`'s operand.
+- **`__builtin_constant_p`'s operand** with a side effect is compiled without
+  code and gives 0, as the full pipeline and clang give
+  (`fast_cc_constant_p_effects`). A side effect means an increment, a decrement,
+  an assignment, a brace, or a call (a `(` after a name, a `]` or a `)` that
+  doesn't close a cast's type name). Main's direct path compiled the operand as
+  a call's argument, so `__builtin_constant_p(g())` called `g`. Any other
+  operand compiles as before.
+
+What keeps `lvm.c` off: its computed `goto` (`&&L_OP_MOVE` in its dispatch
+table), and a conditional of two enumerators passed to an enum parameter (a
+conditional's arms carry no enum).
 `if (x);` and `switch (x);` leave on any line. A loop's empty body (`for (...);`)
 is `-Wempty-body` only where the `;` is on the `)`'s line, the loop is a block's
 own statement and the next statement is a block or starts past the keyword's
