@@ -184,7 +184,8 @@ struct FastSym
     uint8_t referenced;    // 1 if referenced (for dead static elimination / diagnostics); 2 used in a checked body alone
     uint8_t is_tentative;  // 1 if uninitialized file-scope tentative definition
     uint8_t is_const_var;  // 1 if const-qualified
-    uint8_t is_noreturn;
+    uint8_t is_noreturn;   // a function some declaration so far says is noreturn (#3592), as the full pipeline's binder
+                           // carries it to later ones: a call that is its statement's whole expression ends the path
     uint8_t is_weak;
     uint8_t use_flags;     // BUSTER_FSYM_*: what a use of the symbol must look at first (one test at every use)
     uint8_t visibility_set; // a declaration gave the visibility, so another one that differs is clang's error (#3595)
@@ -396,6 +397,12 @@ struct FastCCState
     uint32_t cur_last_param;   // the function's last named parameter, va_start's second argument (#3577)
     uint8_t cur_variadic;      // the function takes `...`: va_start may be used (#3577)
     uint8_t cur_array_params;  // a parameter is declared an array (its symbol's pad_sym[0]): sizeof looks (#3577)
+    uint8_t cur_func_noreturn; // the function is declared noreturn (#3592): a return, or an end that may be reached, is
+                               // the full pipeline's -Winvalid-noreturn
+    // #3577: whether the statement compiled may be reached, as the full pipeline's -Wreturn-type sees it at the body's end
+    // (fast_cc_compile_func); #3592: a call of a noreturn function that is its statement's whole expression ends it
+    // (fast_cc_noreturn_statement).
+    uint8_t live;
     uint8_t init_kind;         // the last scalar initializer's FastValKind and value, for a const local's fold class (#3577)
     int64_t init_value;
     uint32_t cur_va_fp_init;   // initial fp_offset (48 + 16 * num_fp_params)
@@ -1062,9 +1069,15 @@ static inline bool fast_cc_is_typedef_name(const FastCCState* cc, uint32_t id)
     BUSTER_FTOK_BIT(FTOK_KW_BUILTIN_VA_LIST) | BUSTER_FTOK_BIT(FTOK_KW_ATOMIC) | BUSTER_FTOK_BIT(FTOK_KW_COMPLEX) | \
     BUSTER_FTOK_BIT(FTOK_KW_INT128) | BUSTER_FTOK_BIT(FTOK_KW_FLOAT128) | BUSTER_FTOK_BIT(FTOK_KW_FLOAT16) | \
     BUSTER_FTOK_BIT(FTOK_KW_THREAD_LOCAL) | BUSTER_FTOK_BIT(FTOK_KW_TYPEOF))
+// The keywords that start a type name (a cast's, sizeof's, a compound literal's): all but `__extension__`, which is GNU's
+// unary operator there (#3592: clang's and the full pipeline's "expected expression" at `(__extension__ int) x`; Lua's
+// `cast_func(p)`, `(__extension__ (lua_CFunction)(p))`, and glibc's `tolower` with -O2, `(__extension__ ({ ... }))`, are
+// parenthesized expressions). Before a declaration it is quiet (fast_cc_is_declaration_start).
+#define BUSTER_FTOK_TYPE_NAME_KEYWORDS (BUSTER_FTOK_TYPE_START_KEYWORDS & ~BUSTER_FTOK_BIT(FTOK_KW_EXTENSION))
 
-// Check if current token starts a C type specifier / qualifier / storage class. A keyword is a bit test, inline at each
-// caller; an identifier asks whether it names a typedef (sqlite3.c: 50,000 questions a compile, #3581).
+// Check if current token starts a C type name: a specifier, a qualifier or a storage class (but `__extension__`). A
+// keyword is a bit test, inline at each caller; an identifier asks whether it names a typedef (sqlite3.c: 50,000
+// questions a compile, #3581).
 static inline __attribute__((always_inline)) bool fast_cc_is_type_start(const FastCCState* cc, uint32_t at)
 {
     bool starts = false;
@@ -1072,8 +1085,27 @@ static inline __attribute__((always_inline)) bool fast_cc_is_type_start(const Fa
     {
         const uint32_t k = cc->tk[at];
         if (k == FTOK_IDENT) { starts = fast_cc_is_typedef_name(cc, cc->td[at]); }
-        else { starts = ((uint32_t)(k >= 64u) & (uint32_t)(BUSTER_FTOK_TYPE_START_KEYWORDS >> ((k - 64u) & 63u))) != 0; }
+        else { starts = ((uint32_t)(k >= 64u) & (uint32_t)(BUSTER_FTOK_TYPE_NAME_KEYWORDS >> ((k - 64u) & 63u))) != 0; }
     }
+    return starts;
+}
+
+// #3592: whether a block's statement or a for's first clause at AT is a declaration: a type name's start, or any
+// `__extension__` before one (`__extension__ long long v = 1;`), which the full pipeline takes quietly.
+static __attribute__((cold, noinline)) bool fast_cc_extension_declaration(const FastCCState* cc, uint32_t at)
+{
+    uint32_t p = at;
+    while (p < cc->tcount && cc->tk[p] == FTOK_KW_EXTENSION)
+    {
+        p += 1u;
+    }
+    return fast_cc_is_type_start(cc, p);
+}
+
+static inline __attribute__((always_inline)) bool fast_cc_is_declaration_start(const FastCCState* cc, uint32_t at)
+{
+    bool starts = fast_cc_is_type_start(cc, at);
+    if (at < cc->tcount && cc->tk[at] == FTOK_KW_EXTENSION) { starts = fast_cc_extension_declaration(cc, at); }
     return starts;
 }
 

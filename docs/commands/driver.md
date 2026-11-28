@@ -400,6 +400,44 @@ is the full pipeline's error or warning, or a type it doesn't model, and leaves
 where it is declared. An attribute after a bit-field's width (`int a : 3
 __attribute__((packed))`) was taken for another member's start, an int; it
 leaves.
+
+Three of Lua 5.4.8's constructs kept 13 of its 34 units off the direct path
+(#3592); with them, 31 compile on it with its Makefile's flags but `-Wall
+-Wextra` and the host's glibc headers:
+- **Noreturn functions.** A function is noreturn where any declaration so far
+  says so: GNU's attribute, from the specifiers (every declarator's) or its own
+  declarator, or `_Noreturn` (`FastSym.is_noreturn`, as the full pipeline's
+  binder carries it to later declarations). A call of one by name, or of
+  `__builtin_unreachable`, that is its expression's whole (`f(args);`, the name
+  the expression's first token and a `;` after its `)`) ends the path
+  (`fast_cc_noreturn_statement` clears `cc->live`). The full pipeline's
+  warning CFG stops at any evaluated call that never returns, so this is its
+  narrower part: a cast's, `sizeof`'s, a conditional's or `&&`'s call, a
+  function pointer's, a shadowing parameter's and a typedef's noreturn keep the
+  path live. A noreturn definition's (Lua's `l_noret`, musl's `_Exit` and its
+  kin) `return`, reached or not, and an end that may be reached are
+  `-Winvalid-noreturn`, and leave; so does a definition without the attribute
+  after a declaration with it, which main's direct path compiled quietly where
+  the full pipeline warns. A non-void function's end past such a call is no
+  longer `-Wreturn-type`'s.
+- **A function pointer against `void *`** for `==` and `!=` (Lua's `f !=
+  NULL`): clang questions the pair only with `-pedantic`. A relational
+  comparison is `-Wcompare-distinct-pointer-types`, and a conditional's arms
+  `-Wpointer-type-mismatch` (`fast_cc_pointer_pair_valid`'s `FTOK_QUESTION`);
+  both leave.
+- **`__extension__` in a type name.** It is GNU's unary operator there, so
+  `(__extension__ (lua_CFunction)(p))`, Lua's `cast_func`, is a parenthesized
+  expression. `(__extension__ long) x`, `sizeof (__extension__ int)` and
+  `(__extension__ T) 1` are the full pipeline's "expected expression", which
+  main's direct path compiled as casts (`BUSTER_FTOK_TYPE_NAME_KEYWORDS`).
+  Before a block's declaration or a `for`'s first clause it is quiet
+  (`fast_cc_is_declaration_start`).
+
+What keeps Lua's other three off: `lvm.c`'s computed `goto` (`&&L_OP_MOVE` in
+its dispatch table), a conditional of two enumerators passed to an enum
+parameter (a conditional's arms carry no enum), and glibc's `tolower` and
+`toupper` under `-O2` (`lbaselib.c`, `lstrlib.c`), a statement expression
+(`__tobody`).
 `if (x);` and `switch (x);` leave on any line. A loop's empty body (`for (...);`)
 is `-Wempty-body` only where the `;` is on the `)`'s line, the loop is a block's
 own statement and the next statement is a block or starts past the keyword's
