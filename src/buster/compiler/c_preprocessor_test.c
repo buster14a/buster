@@ -839,9 +839,9 @@ static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* o
     return result;
 }
 
-static bool pp_test_scalar_compile(const PPOptions* options, const char* path, const Preprocessor* vector, bool vector_ran, const char* label);
+static bool pp_test_system_levels(const Preprocessor* a, const Preprocessor* b, const char* label);
+static bool pp_test_invocation_places(const Preprocessor* a, const char* label);
 
-// The recorded vector compile is the reference for the scalar compile and the replay checks.
 // A run as the drivers make one, with its history deferred (PPOptions.defer_history), against one that records it, both
 // by the vectorized kernels without expansion starts: the same stream, errors and warnings, and the same diagnostics
 // printed byte for byte, notes and all (the deferred run prints its own by recording the history at its end); then a
@@ -855,42 +855,42 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
     size_t lengths[2] = { 0, 0 };
     FILE* streams[2] = { 0, 0 };
     bool ready[2] = { false, false };
+    bool ran[2] = { false, false };
     char label[4200];
     snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
-    bool scalar_matches = true;
-    for (uint32_t k = 0; scalar_matches && k < 2; k += 1)
+    bool initial_matches = true;
+    for (uint32_t k = 0; initial_matches && k < 2; k += 1)
     {
         PPOptions run = *options;
-        run.scalar = false;
         run.expansion_starts = false;
         run.defer_history = k == 1;
         run.timing = true;
         streams[k] = open_memstream(&texts[k], &lengths[k]);
         run.diagnostics = streams[k];
         ready[k] = streams[k] != 0 && intern_initialize(&tables[k]) && pp_initialize(&runs[k], &run, &tables[k]);
-        const bool ran = ready[k] && pp_run(&runs[k], path);
+        ran[k] = ready[k] && pp_run(&runs[k], path);
         if (streams[k] != 0)
         {
             fflush(streams[k]);
         }
         if (k == 0)
         {
-            // The recorded vector run serves both comparisons. Forward its initial diagnostics as the scalar run does.
-            run.diagnostics = options->diagnostics;
-            FILE* output = run.diagnostics != 0 ? run.diagnostics : stderr;
-            scalar_matches = ready[k] && (lengths[k] == 0 || fwrite(texts[k], 1, lengths[k], output) == lengths[k]) &&
-                             pp_test_scalar_compile(&run, path, &runs[k], ran, label) && (!frozen || pp_kernel_digest_check(&runs[k], "compile", name));
+            // Forward the original diagnostics before replay can add any of its own.
+            FILE* output = options->diagnostics != 0 ? options->diagnostics : stderr;
+            initial_matches = ready[k] && (lengths[k] == 0 || fwrite(texts[k], 1, lengths[k], output) == lengths[k]) &&
+                              pp_test_invocation_places(&runs[k], label) && (!frozen || pp_kernel_digest_check(&runs[k], "compile", name));
         }
     }
-    bool result = scalar_matches && ready[1] && pp_tokens_same(&runs[0].output, &runs[1].output) && runs[0].errors == runs[1].errors &&
-                  runs[0].warnings == runs[1].warnings && lengths[0] == lengths[1] && (lengths[0] == 0 || memcmp(texts[0], texts[1], lengths[0]) == 0);
-    if (scalar_matches && !result)
+    bool result = initial_matches && ready[1] && ran[0] == ran[1] && pp_test_system_levels(&runs[0], &runs[1], label) &&
+                  pp_tokens_same(&runs[0].output, &runs[1].output) && runs[0].errors == runs[1].errors && runs[0].warnings == runs[1].warnings &&
+                  lengths[0] == lengths[1] && (lengths[0] == 0 || memcmp(texts[0], texts[1], lengths[0]) == 0);
+    if (initial_matches && !result)
     {
         printf("%s: with its history deferred, a run gives other tokens or diagnostics (%u and %u errors, %u and %u warnings, %zu and %zu bytes printed)\n",
                label, runs[0].errors, runs[1].errors, runs[0].warnings, runs[1].warnings, lengths[0], lengths[1]);
     }
     // The statistics but the timing ones, which the deferred run's paths (the templates among them) must count as the
-    // recorded run's do.
+    // recording run's do.
     PPStatistics statistics[2] = { runs[0].statistics, runs[1].statistics };
     for (uint32_t k = 0; k < 2; k += 1)
     {
@@ -1051,41 +1051,6 @@ static bool pp_test_invocation_places(const Preprocessor* a, const char* label)
             result = false;
         }
     }
-    return result;
-}
-
-// Compare the scalar compile with the recorded vector compile before the deferred-history probe adds a diagnostic.
-static bool pp_test_scalar_compile(const PPOptions* options, const char* path, const Preprocessor* vector, bool vector_ran, const char* label)
-{
-    static InternTable table;
-    static Preprocessor scalar;
-    PPOptions run = *options;
-    run.scalar = true;
-    const bool ready = intern_initialize(&table) && pp_initialize(&scalar, &run, &table);
-    const bool ran = ready && pp_run(&scalar, path);
-    bool result = ready && pp_same_streams(vector, &scalar, label);
-    if (result && (vector_ran != ran || vector->errors != scalar.errors || vector->warnings != scalar.warnings))
-    {
-        printf("%s: the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", label, vector->errors, scalar.errors, vector->warnings, scalar.warnings);
-        result = false;
-    }
-    PPStatistics statistics[2] = { vector->statistics, scalar.statistics };
-    for (uint32_t k = 0; k < 2; k += 1)
-    {
-        statistics[k].include_ticks = 0;
-        statistics[k].embed_ticks = 0;
-    }
-    if (result && memcmp(&statistics[0], &statistics[1], sizeof(PPStatistics)) != 0)
-    {
-        printf("%s: the vectorized and scalar kernels count different statistics\n", label);
-        result = false;
-    }
-    result = result && pp_test_system_levels(vector, &scalar, label) && pp_test_invocation_places(vector, label);
-    if (ready)
-    {
-        pp_release(&scalar);
-    }
-    intern_release(&table);
     return result;
 }
 
@@ -2592,35 +2557,25 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     result = result && argument_count >= 0 && pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
     // The cases are compared with clang: the feature queries answer as clang's.
     options.clang_features = true;
-    static InternTable tables[2];
-    static Preprocessor runs[2];
-    bool ran[2] = { false, false };
-    for (uint32_t k = 0; result && k < 2; k += 1)
-    {
-        options.scalar = k == 1;
-        // A case that fails prints its error; the expected output is then not compared.
-        ran[k] = pp_test_run(&runs[k], &tables[k], &options, path);
-    }
+    static InternTable table;
+    static Preprocessor run;
+    const bool ran = result && pp_test_run(&run, &table, &options, path);
     if (result)
     {
-        result = pp_same_streams(&runs[0], &runs[1], test->name) && pp_same_directive_tables(&runs[0], &runs[1], test->name) && ran[0] == ran[1] &&
-                 ran[0] != test->fails && pp_test_compile_kernels(&options, path, key, true) && pp_kernel_digest_check(&runs[0], "case", key);
-        if (ran[0] == test->fails)
+        result = ran != test->fails && pp_test_compile_kernels(&options, path, key, true) && pp_kernel_digest_check(&run, "case", key);
+        if (ran == test->fails)
         {
             printf("%s: %s\n", test->name, test->fails ? "should fail but doesn't" : "fails");
         }
-        for (uint32_t k = 0; k < 2; k += 1)
+        if (run.warnings != test->warnings)
         {
-            if (runs[k].warnings != test->warnings)
-            {
-                printf("%s: %u warnings (%s kernels), not %u\n", test->name, runs[k].warnings, k == 0 ? "vectorized" : "scalar", test->warnings);
-                result = false;
-            }
-            if (test->errors != 0 && runs[k].errors != test->errors)
-            {
-                printf("%s: %u errors (%s kernels), not %u\n", test->name, runs[k].errors, k == 0 ? "vectorized" : "scalar", test->errors);
-                result = false;
-            }
+            printf("%s: %u warnings, expected %u\n", test->name, run.warnings, test->warnings);
+            result = false;
+        }
+        if (test->errors != 0 && run.errors != test->errors)
+        {
+            printf("%s: %u errors, expected %u\n", test->name, run.errors, test->errors);
+            result = false;
         }
     }
     if (result && (!test->fails || test->expected[0] != 0))
@@ -2628,18 +2583,18 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
         String8 marked = { 0 };
-        result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &expected) &&
-                 pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name, key, &marked) &&
+        result = pp_stream_spellings(&run, &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), run.split_kinds, pp_test_lex_flags(&run), &expected) &&
+                 pp_compare_spellings(&run, &ours, &expected, test->name, "wanted") && pp_test_printed(&run, &ours, test->name, key, &marked) &&
                  (test->markers == 0 || pp_test_markers(marked.pointer, marked.length, test, directory));
         if (result && with_clang)
         {
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
-            const bool plain = !runs[0].options.dump_defines && !runs[0].options.dump_includes;
-            result = clang_text != 0 && (plain || pp_test_dumped_directives(&runs[0], marked, clang_text, length, test->name)) &&
-                     pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
-                     pp_compare_printed_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], marked, &theirs, test->name);
+            const bool plain = !run.options.dump_defines && !run.options.dump_includes;
+            result = clang_text != 0 && (plain || pp_test_dumped_directives(&run, marked, clang_text, length, test->name)) &&
+                     pp_placed_tokens((const uint8_t*)clang_text, length, run.split_kinds, pp_test_lex_flags(&run), &theirs) &&
+                     pp_compare_printed_spellings(&run, &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&run, marked, &theirs, test->name);
             pp_placed_release(&theirs);
             free(clang_text);
         }
@@ -2647,11 +2602,8 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
         arena_release(&ours.arena);
         arena_release(&expected.arena);
     }
-    for (uint32_t k = 0; k < 2; k += 1)
-    {
-        pp_release(&runs[k]);
-        intern_release(&tables[k]);
-    }
+    pp_release(&run);
+    intern_release(&table);
     arena_release(&arena);
     pp_test_remove_case(test, directory);
     return result;
@@ -4123,7 +4075,7 @@ static bool pp_test_assembly_printing(const char* directory)
 
 static int64_t pp_directive_test_clang_guards(char** arguments, int argument_count, const char* path);
 
-// One accepted file, by both kernels, and (when supplied) against Clang's already-collected output. Adds to *guards
+// One accepted file, with the requested preparation and a second window size, and (when supplied) against Clang's already-collected output. Adds to *guards
 // (if it isn't null) the inclusions the run skipped by their guards, which pp_test_file compares with clang's (#120).
 static bool pp_test_file_output(const PPOptions* base, const char* path, bool with_clang, const char* text, size_t length, uint64_t* tokens, uint64_t* guards)
 {
@@ -4133,7 +4085,8 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
     bool ran[2];
     for (uint32_t k = 0; k < 2; k += 1)
     {
-        options.scalar = k == 1;
+        // Exercise the opposite preparation on the comparison run, including files given an explicit window size.
+        options.window_bytes = k == 0 ? base->window_bytes : base->window_bytes == UINT32_MAX ? 64 : UINT32_MAX;
         ran[k] = pp_test_run(&runs[k], &tables[k], &options, path);
     }
     bool result = ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], path) && pp_same_directive_tables(&runs[0], &runs[1], path) &&
@@ -5273,7 +5226,7 @@ static bool pp_test_direct_argument_failures(void)
         const uint32_t captures = initialized ? pp.captures.capacity : 0;
         pp.fail_origin_growth = initialized && fault == 0;
         pp.arguments.capacity = initialized && fault == 1 ? 64 : capacity;
-        pp.captures.capacity = initialized && fault == 1 && !pp.vectorized ? 64 : captures;
+        pp.captures.capacity = initialized && fault == 1 && run >= 3 ? 64 : captures;
         const bool ran = initialized && pp_run_source(&pp, "direct-argument-failure.c", (const uint8_t*)source, length);
         const bool passed = initialized && (fault == 2 ? ran && !pp.fatal && pp.output.count == PP_TEST_DIRECT_TOKENS + 2
                                                        : !ran && pp.fatal && pp.errors == 1 && pp.output.count == 0);
@@ -6369,12 +6322,38 @@ static bool pp_test_parameter_index(void)
     return result;
 }
 
+// A single optional name at any position of the final partial replacement word must reach grammar validation.
+static bool pp_test_partial_body_names(void)
+{
+    uint8_t kinds[64];
+    uint32_t values[64] = { 0 };
+    memset(kinds, C_TOKEN_RAW_IDENTIFIER, sizeof(kinds));
+    const PPFileData data = { .kinds = kinds, .values = values };
+    for (uint32_t count = 1; count < 64; count += 1)
+    {
+        const PPMacro macro = { .body_end = count, .flags = BUSTER_PP_MACRO_VARIADIC };
+        for (uint32_t at = 0; at < count; at += 1)
+        {
+            bool pastes, hashes, optional;
+            values[at] = C_NAME_VA_OPT;
+            pp_scan_definition_body(&data, &macro, &pastes, &hashes, &optional);
+            values[at] = 0;
+            if (pastes || hashes || !optional)
+            {
+                printf("replacement body of %u tokens missed the optional name at %u\n", count, at);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 // Large definitions, unused and invoked twice, with replacement identifiers in reverse order. These exercise every
 // stored ordinal rather than just the first/last, plus the small/vector/hash boundaries and the legal maximum.
 static bool pp_test_many_parameters(const char* directory, bool with_clang)
 {
     static const uint32_t counts[] = { 0, 1, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 1000, 2000, 4000, BUSTER_PP_MAX_PARAMETERS };
-    bool result = pp_test_parameter_index();
+    bool result = pp_test_parameter_index() && pp_test_partial_body_names();
     for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(counts); c += 1)
     {
         const uint32_t count = counts[c];
@@ -6434,6 +6413,26 @@ static bool pp_test_many_parameters(const char* directory, bool with_clang)
         free(expected);
     }
     static const PPTestCase operators[] = {
+        {
+            .name = "replacement operators across a full token packet",
+            .source = "#define E\n"
+                      "#define S(x) "
+                      "E E E E E E E E E E E E E E E E "
+                      "E E E E E E E E E E E E E E E E "
+                      "E E E E E E E E E E E E E E E E "
+                      "E E E E E E E E E E E E E E E #x\n"
+                      "#define V(x, ...) "
+                      "E E E E E E E E E E E E E E E E "
+                      "E E E E E E E E E E E E E E E E "
+                      "E E E E E E E __VA_OPT__(x) E E E E E E E E "
+                      "E E E E E E E E E E E E E E E E "
+                      "E E E x ## suffix\n"
+                      "S(word)\n"
+                      "V(arg)\n"
+                      "V(arg, yes)\n",
+            .standard = "c23",
+            .expected = "\"word\" argsuffix arg argsuffix",
+        },
         {
             .name = "indexed parameters: #, ##, variadics and __VA_OPT__",
             .source = "#define F(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,...) #q a##q __VA_OPT__(#a q __VA_ARGS__) other\n"

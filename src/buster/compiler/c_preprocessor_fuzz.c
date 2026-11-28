@@ -57,7 +57,7 @@ struct PPFuzzTally
     uint64_t cases;
     // The cases we accept.
     uint64_t accepted;
-    // The cases the vectorized kernels and their scalar twins disagree on.
+    // The cases the default and 64-byte window preparations disagree on.
     uint64_t kernels;
     // The cases compared with clang, the ones that differ from clang on the case alone, the ones clang read alone (to
     // confirm a difference, or sampled), and the ones whose batch gave another result than the case alone.
@@ -84,12 +84,12 @@ struct PPFuzzTally
     uint64_t digest;
 };
 
-// A worker's preprocessors (the vectorized kernels' and the scalar twins'), and their intern tables, which each case
+// A worker's preprocessors with default and 64-byte window preparation, and their intern tables, which each case
 // resets.
 typedef struct PPFuzzState PPFuzzState;
 struct PPFuzzState
 {
-    // The vectorized kernels' run and the scalar twins', with expansion starts (for the printers' line markers), and
+    // The default and 64-byte window runs, with expansion starts (for the printers' line markers), and
     // when both kernels run, theirs again as a compile runs them, without (pp_fuzz_run).
     Preprocessor runs[4];
     InternTable tables[4];
@@ -109,9 +109,9 @@ static const char* pp_fuzz_difference_name(PreprocessorFuzzDifference difference
         "token count",
         "token kind",
         "token spelling",
-        "the vectorized kernels and their scalar twins accept differently or give other numbers of diagnostics",
-        "the vectorized kernels and their scalar twins give different streams",
-        "the vectorized kernels and their scalar twins give different directive tables",
+        "the default and 64-byte window preparations accept differently or give other numbers of diagnostics",
+        "the default and 64-byte window preparations give different streams",
+        "the default and 64-byte window preparations give different directive tables",
         "the vectorized and scalar printers give different text",
         "the -P text doesn't lex back into the stream",
         "invalid",
@@ -124,16 +124,14 @@ static const char* pp_fuzz_difference_name(PreprocessorFuzzDifference difference
 
 // clang's oracle configuration (preprocessor_fuzz_clang): -undef -nostdinc -std=c17 or -std=c23. The runs keep their
 // expansion starts, since the kernels' check prints them with line markers too.
-static PPOptions pp_fuzz_options(bool c23, bool scalar, bool quiet)
+static PPOptions pp_fuzz_options(bool c23, bool windowed, bool quiet)
 {
-    (void)scalar;
-
     const PPOptions result = {
         .language = {
             .standard = c23 ? 2023 : 2017,
             .gnu = false,
         },
-        .scalar = BUSTER_SCALAR_PATH(scalar),
+        .window_bytes = windowed ? 64 : 0,
         .no_standard_includes = true,
         .expansion_starts = true,
         .trigraphs = !c23,
@@ -167,8 +165,7 @@ static bool pp_fuzz_text(Arena* arena, const PreprocessorFuzzCase* test_case, St
     return result;
 }
 
-// Preprocesses `text` with the first `kernels` sets of kernels: state->runs[0] the vectorized ones, state->runs[1] the
-// scalar twins, each from a reset intern table; state->ran[k] says whether run k had no errors. With both sets, also
+// Preprocesses the text with default windows in run 0 and 64-byte windows in run 1, each from a reset intern table; state->ran[k] says whether run k had no errors. With both sets, also
 // state->runs[2] and [3], the same without expansion starts, as a compile runs them: the main loop takes some direct
 // paths only then (pp_fuzz_kernels compares them too); and run 2 defers its history (PPOptions.defer_history), as -E
 // and `parse` do, which pp_fuzz_kernels records by preprocessing the text again (pp_run_source's replay). The runs stay
@@ -868,7 +865,7 @@ static PreprocessorFuzzDifference pp_fuzz_kernels(PPFuzzState* state, const char
         result = BUSTER_PPF_KERNEL_RESULTS;
         if (!pp_test_quiet)
         {
-            printf("%s: the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", name, runs[0].errors, runs[1].errors, runs[0].warnings,
+            printf("%s: the default and 64-byte window preparations give %u and %u errors and %u and %u warnings\n", name, runs[0].errors, runs[1].errors, runs[0].warnings,
                    runs[1].warnings);
         }
     }
@@ -885,7 +882,7 @@ static PreprocessorFuzzDifference pp_fuzz_kernels(PPFuzzState* state, const char
         result = BUSTER_PPF_KERNEL_RESULTS;
         if (!pp_test_quiet)
         {
-            printf("%s (as a compile runs it): the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", name, runs[2].errors,
+            printf("%s (as a compile runs it): the default and 64-byte window preparations give %u and %u errors and %u and %u warnings\n", name, runs[2].errors,
                    runs[3].errors, runs[2].warnings, runs[3].warnings);
         }
     }
@@ -965,7 +962,7 @@ static PreprocessorFuzzDifference pp_fuzz_clang_difference(Arena* scratch, const
     return result;
 }
 
-// BUSTER_PPF_ORACLE_KERNELS: `source`, as case oracle->id, by the vectorized kernels against their scalar twins.
+// BUSTER_PPF_ORACLE_KERNELS: `source`, as case oracle->id, with default and 64-byte windows.
 static PreprocessorFuzzDifference pp_fuzz_kernels_difference(Arena* scratch, const PreprocessorFuzzOracle* oracle, String8 source)
 {
     const uint64_t begin = scratch->length;

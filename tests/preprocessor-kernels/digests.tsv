@@ -440,6 +440,7 @@ case/raw-looking warning text preserves following source #860ea692a112c309	afc67
 case/redefinition with other spacing #ba7f36097cf07d8c	a3d018e781ecd06f
 case/redefinitions with other spellings #1db2b96934a09117	abd2cc4f104e9038
 case/repeated raw-looking direct headers use one recovery #6dcebcfd07ece9c0	3459db9d5d09cea0
+case/replacement operators across a full token packet #a12cd3f3c214e961	64945055097ff8c5
 case/rescanning, redefinitions and painting #a1e8f9a146f1f303	5f3ad3d23a4dfb57
 case/right shifts in #if #8c3c15c14ff8e909	79747021577353a8
 case/several characters in a wide character constant #8e0d7f27358543f3	4f85c36bb0754637
@@ -927,6 +928,7 @@ compile/raw-looking warning text preserves following source #860ea692a112c309	af
 compile/redefinition with other spacing #ba7f36097cf07d8c	5f888519f34f902f
 compile/redefinitions with other spellings #1db2b96934a09117	285dc96134b72a78
 compile/repeated raw-looking direct headers use one recovery #6dcebcfd07ece9c0	3459db9d5d09cea0
+compile/replacement operators across a full token packet #a12cd3f3c214e961	64945055097ff8c5
 compile/rescanning, redefinitions and painting #a1e8f9a146f1f303	1488e4db772a6597
 compile/right shifts in #if #8c3c15c14ff8e909	79747021577353a8
 compile/several characters in a wide character constant #8e0d7f27358543f3	4f85c36bb0754637
@@ -1725,6 +1727,7 @@ print/raw-looking warning text preserves following source #860ea692a112c309	dbd2
 print/redefinition with other spacing #ba7f36097cf07d8c	67b5a02f458f289f
 print/redefinitions with other spellings #1db2b96934a09117	76eb6b6baca0f0e1
 print/repeated raw-looking direct headers use one recovery #6dcebcfd07ece9c0	9e64546837dc4b72
+print/replacement operators across a full token packet #a12cd3f3c214e961	64545963e145be21
 print/rescanning, redefinitions and painting #a1e8f9a146f1f303	4fb4140d26c8ed93
 print/right shifts in #if #8c3c15c14ff8e909	1a19f91921d9561f
 print/short wchar in #if #310ffbfa40f19291	7c941349776afaae

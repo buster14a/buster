@@ -6,7 +6,7 @@
 
 // Keep a complete owner prefix alive, rewind only its appended tail, then borrow both an owner invocation and a
 // nested invocation from that prefix after indexing the replacement tail. Every delimiter link is checked exactly.
-static bool pp_test_argument_partial_rewind(bool vectorized)
+static bool pp_test_argument_partial_rewind(void)
 {
     uint8_t kinds[32] = { C_TOKEN_L_PAREN, C_TOKEN_RAW_IDENTIFIER, C_TOKEN_COMMA, C_TOKEN_L_PAREN,
                           C_TOKEN_RAW_IDENTIFIER, C_TOKEN_COMMA, C_TOKEN_RAW_IDENTIFIER, C_TOKEN_R_PAREN,
@@ -19,7 +19,6 @@ static bool pp_test_argument_partial_rewind(bool vectorized)
     PPContext context = { .kind = BUSTER_PP_CONTEXT_BUFFER, .barrier = true, .end = 9 };
     PPCapture capture = { .kind = BUSTER_PP_CAPTURE_ARGUMENT };
     Preprocessor pp = {
-        .vectorized = vectorized,
         .arguments = { .kinds = kinds, .flags = flags, .values = values, .locations = locations, .origins = origins, .count = 12, .capacity = 32 },
         .argument_records = records,
         .contexts = &context,
@@ -56,7 +55,7 @@ static bool pp_test_argument_partial_rewind(bool vectorized)
 
 // A real invocation attempts the lazy index allocation. The initialized argument/context storage needs no allocation
 // after the child's address-space limit is lowered; failure must remain fatal instead of producing fallback output.
-static bool pp_test_argument_invoke_failure(bool vectorized)
+static bool pp_test_argument_invoke_failure(void)
 {
     const pid_t child = fork();
     if (child == 0)
@@ -74,7 +73,6 @@ static bool pp_test_argument_invoke_failure(bool vectorized)
         PPCapture capture = { .kind = BUSTER_PP_CAPTURE_ARGUMENT };
         Preprocessor pp = {
             .options = { .quiet = true, .no_history = true },
-            .vectorized = vectorized,
             .arguments = { .kinds = kinds, .flags = flags, .values = values, .locations = locations, .origins = origins, .count = 130, .capacity = 130 },
             .argument_records = &record,
             .invocations = &invocation,
@@ -113,10 +111,9 @@ static bool pp_test_argument_links(void)
     bool result = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
     Preprocessor pp = { 0 };
     uint64_t seed = 616;
-    for (uint32_t mode = 0; result && mode < 2; mode += 1)
+    result = result && pp_test_argument_partial_rewind() && pp_test_argument_invoke_failure();
+    for (uint32_t sample = 0; result && sample < 2; sample += 1)
     {
-        pp.vectorized = mode == 0;
-        result = pp_test_argument_partial_rewind(pp.vectorized) && pp_test_argument_invoke_failure(pp.vectorized);
         for (uint32_t n = 0; result && n <= 130; n += 1)
         {
             const uint32_t count = n == 130 ? page : n;
@@ -171,7 +168,7 @@ static bool pp_test_argument_links(void)
             }
             if (!result)
             {
-                printf("argument links: mode %u, count %u\n", mode, count);
+                printf("argument links: sample %u, count %u\n", sample, count);
             }
         }
     }
@@ -197,7 +194,7 @@ static bool pp_test_argument_links(void)
     {
         munmap(mapping, 2 * page);
     }
-    printf("argument links: %s (independent pairing, protected tails, stack reuse, allocation failure, both kernels)\n", result ? "pass" : "FAIL");
+    printf("argument links: %s (independent pairing, protected tails, stack reuse, allocation failure)\n", result ? "pass" : "FAIL");
     return result;
 }
 
