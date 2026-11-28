@@ -1222,6 +1222,8 @@ static const ParseTestFixture parse_test_fixtures[] =
     { "void g(int a, int b, int c, int x, int y, int z) { if (a) x = b * c; else y = -z; }\n", 39,
       { 38, 20, 20, 5, 3, 8, 5, 6, 11, 8, 9, 14, 11, 12, 17, 14, 15, 20, 17, 18, 0, 38, 25, 25, 25, 38, 27, 31, 29, 27, 29, 25, 25, 34, 37, 34, 35,
         32, -1 } },
+    { "void f(void){ __asm__ volatile (\"\" : : : \"memory\"); }\n", 17, { 16, 4, 4, 4, 0, 16, 14, 14, 14, 10, 11, 12, 14, 12, 15, 16, -1 }, true },
+    { "__asm__(\"\" \"two\");\n", 6, { 4, 4, 4, 2, 5, -1 }, true },
     { "int (f)(void) { return 1; }\n", 12, { 11, 3, 3, 6, 6, 6, 0, 11, 10, 8, 11, -1 }, true },
     { "int (*a[3])(double);\n", 12, { 11, 7, 7, 6, 6, 6, 2, 10, 10, 10, 0, -1 } },
     { "void f(void *p) { goto *p ? p : p; goto *p + 0; goto *p, p; }\n", 29,

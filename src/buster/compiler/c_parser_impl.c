@@ -8069,6 +8069,162 @@ static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input, 
     result->tokens += end + 1 - begin;
 }
 
+// K2 and K6 have already written the roles, depths and parents of a file-scope
+// asm declaration with a string template. No token in it can bind a name.
+static bool parse_basic_asm_item(const ParseInput* input, uint32_t begin, uint32_t end)
+{
+    const uint8_t* kinds = input->kinds;
+    if (end - begin < 4 || kinds[begin] != PARSE_KIND_ASM || kinds[begin + 1] != PARSE_KIND_L_PAREN ||
+        kinds[end - 1] != PARSE_KIND_R_PAREN || kinds[end] != PARSE_KIND_SEMI)
+    {
+        return false;
+    }
+    const __m512i string = _mm512_set1_epi8(PARSE_KIND_STRING);
+    const uint32_t close = end - 1;
+    for (uint32_t first = begin + 2; first < close;)
+    {
+        const uint32_t remaining = close - first;
+        const uint32_t width = remaining < 64 ? remaining : 64;
+        const __mmask64 active = _bzhi_u64(UINT64_MAX, width);
+        if (_mm512_mask_cmpneq_epi8_mask(active, _mm512_maskz_loadu_epi8(active, kinds + first), string) != 0)
+        {
+            return false;
+        }
+        first += width;
+    }
+    return true;
+}
+
+// A comma-separated list of string constraints on plain identifiers or their dereferences.
+// All masks are relative to the first token after the colon. Empty operand lists are valid.
+static bool parse_asm_operands(__m512i kinds, uint32_t first, uint32_t count)
+{
+    if (count == 0)
+    {
+        return true;
+    }
+    const uint64_t live = _bzhi_u64(UINT64_MAX, count);
+    const uint64_t strings = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_STRING)) >> first) & live;
+    const uint64_t opens = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_L_PAREN)) >> first) & live;
+    const uint64_t stars = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_STAR)) >> first) & live;
+    const uint64_t names = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_IDENTIFIER)) >> first) & live;
+    const uint64_t closes = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_R_PAREN)) >> first) & live;
+    const uint64_t commas = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_COMMA)) >> first) & live;
+    return (strings | opens | stars | names | closes | commas) == live &&
+           strings == (1 | (commas << 1)) && opens == (strings << 1) && (stars & ~(opens << 1)) == 0 &&
+           names == (((opens << 1) & ~stars) | (stars << 1)) && closes == (names << 1) && commas == ((closes << 1) & live);
+}
+
+// Return the end of a complete asm statement whose syntax and tree the kernels have already resolved.
+// The operand and clobber fields fit in one packet. Named operands, labels and arbitrary operand expressions
+// continue through the general parser.
+static uint32_t parse_inline_asm_close(const ParseKernels* kernels, const ParseInput* input, uint32_t keyword, uint32_t end)
+{
+    const uint32_t body = kernels->enclosing[keyword];
+    if (keyword == 0 || keyword >= end || input->kinds[keyword] != PARSE_KIND_ASM || body >= keyword ||
+        kernels->roles[body] != PARSE_ROLE_OPEN_BODY || (kernels->roles[keyword - 1] != PARSE_ROLE_TERMINATOR && keyword - 1 != body))
+    {
+        return BUSTER_PARSE_NONE;
+    }
+    uint32_t open = keyword + 1;
+    if (input->kinds[open] == PARSE_KIND_QUALIFIER)
+    {
+        const IdentId name = input->names[open];
+        if (name != C_NAME_VOLATILE && name != C_NAME_GNU_VOLATILE && name != C_NAME_GNU_VOLATILE2)
+        {
+            return BUSTER_PARSE_NONE;
+        }
+        open += 1;
+    }
+    if (open >= end || kernels->roles[open] != PARSE_ROLE_OPEN_ASM)
+    {
+        return BUSTER_PARSE_NONE;
+    }
+    const uint32_t close = kernels->parents[open];
+    if (close <= open + 1 || close >= end || close - open > 65 || kernels->enclosing[close] != open || kernels->roles[close] != PARSE_ROLE_CLOSE_ASM ||
+        kernels->roles[close + 1] != PARSE_ROLE_TERMINATOR || input->kinds[close + 1] != PARSE_KIND_SEMI || input->kinds[open + 1] != PARSE_KIND_STRING)
+    {
+        return BUSTER_PARSE_NONE;
+    }
+    const uint32_t length = close - open - 1;
+    const uint64_t live = _bzhi_u64(UINT64_MAX, length);
+    const __m512i kinds = _mm512_maskz_loadu_epi8(live, kernels->vkinds + open + 1);
+    uint64_t colons = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_COLON));
+    if (colons == 0)
+    {
+        return length == 1 ? close : BUSTER_PARSE_NONE;
+    }
+    if ((colons & 2) == 0 || __builtin_popcountll(colons) > 3)
+    {
+        return BUSTER_PARSE_NONE;
+    }
+    uint32_t field = 0;
+    while (colons != 0)
+    {
+        const uint32_t first = (uint32_t)__builtin_ctzll(colons) + 1;
+        colons &= colons - 1;
+        const uint32_t next = colons == 0 ? length : (uint32_t)__builtin_ctzll(colons);
+        const uint32_t count = next - first;
+        if (field < 2)
+        {
+            if (!parse_asm_operands(kinds, first, count))
+            {
+                return BUSTER_PARSE_NONE;
+            }
+        }
+        else if (count != 0)
+        {
+            const uint64_t clobbers = _bzhi_u64(UINT64_MAX, count);
+            const uint64_t expected = clobbers & UINT64_C(0x5555555555555555);
+            const uint64_t strings = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_STRING)) >> first) & clobbers;
+            const uint64_t commas = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_COMMA)) >> first) & clobbers;
+            if (count % 2 == 0 || strings != expected || commas != (clobbers ^ expected))
+            {
+                return BUSTER_PARSE_NONE;
+            }
+        }
+        field += 1;
+    }
+    return close;
+}
+
+// Every flagged token must belong to a validated statement. A flag before its keyword or
+// after its closing parenthesis still sends the enclosing top-level declaration to the fallback.
+static bool parse_resolved_asm_item(const ParseKernels* kernels, const ParseInput* input, uint32_t begin, uint32_t end)
+{
+    if (parse_basic_asm_item(input, begin, end))
+    {
+        return true;
+    }
+    uint32_t first = begin;
+    while (first <= end)
+    {
+        const uint32_t width = end - first >= 63 ? 64 : end - first + 1;
+        const uint64_t live = _bzhi_u64(UINT64_MAX, width);
+        const __m512i flags = _mm512_maskz_loadu_epi8(live, kernels->flags + first);
+        const uint64_t marked = _mm512_test_epi8_mask(flags, flags);
+        if (marked == 0)
+        {
+            if (width > end - first)
+            {
+                break;
+            }
+            first += width;
+        }
+        else
+        {
+            const uint32_t close = parse_inline_asm_close(kernels, input, first + (uint32_t)__builtin_ctzll(marked), end);
+            if (close == BUSTER_PARSE_NONE)
+            {
+                return false;
+            }
+            first = close + 1;
+        }
+    }
+    return true;
+}
+
+
 // Parses every top-level declaration that has a flagged token with the scalar parser, in place: roles, depths and
 // parents of its tokens. The scalar parser sees the file-scope typedef names declared before each one. With
 // `everything`, the whole unit is one range (unbalanced brackets, a typedef the pass can't read, or what K5 can't
@@ -8112,7 +8268,7 @@ static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* inp
                     const uint64_t through = lane == 63 ? ~(uint64_t)0 : (((uint64_t)1 << (lane + 1)) - 1);
                     flagged |= (flags & through) != 0;
                     flags &= ~through;
-                    if (flagged)
+                    if (flagged && !parse_resolved_asm_item(kernels, input, begin, block + lane))
                     {
                         parse_fallback_item(kernels, input, begin, block + lane, earlier, &visible, &result);
                     }
