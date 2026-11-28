@@ -254,18 +254,16 @@ static bool check_debug_rows_protocol(const uint32_t* entry_records, const uint3
         .source_count = event_count,
         .origin_count = BUSTER_EMISSION_NO_ORIGIN,
     };
-    EmissionMetadataPlan plan;
-    EmissionCheck check = emission_metadata_plan(&metadata, &layout, scalar, &plan);
-    bool valid = check.error == EMISSION_OK && plan.source_count == event_count && plan.frame_count == 0;
+    // This producer already owns space for every event. Resolution checks the layout and events before writing.
+    const EmissionStorage storage = {
+        .sources = resolved,
+        .source_capacity = event_count,
+    };
+    EmissionResolved result;
+    const EmissionCheck check = emission_metadata_resolve(&metadata, &layout, &storage, scalar, &result);
+    bool valid = check.error == EMISSION_OK && result.source_count == event_count && result.frame_count == 0;
     if (valid)
     {
-        const EmissionStorage storage = {
-            .sources = resolved,
-            .source_capacity = event_count,
-        };
-        EmissionResolved result;
-        check = emission_metadata_resolve(&metadata, &layout, &storage, scalar, &result);
-        valid = check.error == EMISSION_OK && result.source_count == event_count;
         // The declaration is dropped by the raw rows when the first entry starts at zero; the protocol keeps both
         // anchors, so the comparison starts after the declaration in that case.
         uint32_t expected = 0;

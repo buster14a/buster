@@ -607,6 +607,11 @@ static void test_guard_release(TestGuard guard)
 
 static void test_guarded_tails(void)
 {
+    const EmissionMetadata empty = { 0 };
+    const EmissionMetadata missing_sources = { .source_count = 1 };
+    const EmissionCheck no_layout = { .error = EMISSION_INVALID, .part = EMISSION_LAYOUT };
+    const EmissionCheck no_metadata = { .error = EMISSION_INVALID, .part = EMISSION_DESCRIPTOR };
+    BUSTER_EMISSION_TEST(test_same_check(emission_metadata_check(&empty, NULL, false), no_layout));
     for (uint32_t count = 0; count <= 65; count += 1)
     {
         const TestGuard sg = test_guard((size_t)count * sizeof(uint32_t));
@@ -628,6 +633,20 @@ static void test_guarded_tails(void)
                 .count = count,
                 .size = 4 * count,
             };
+            for (uint32_t present = 0; present < 3; present += 1)
+            {
+                const EmissionLayout missing = {
+                    .starts = (present & 1) != 0 ? starts : NULL,
+                    .ends = (present & 2) != 0 ? ends : NULL,
+                    .count = count,
+                    .size = layout.size,
+                };
+                const EmissionCheck expected = count == 0 ? (EmissionCheck){ .error = EMISSION_OK } :
+                                                          (EmissionCheck){ .error = EMISSION_INVALID, .part = EMISSION_LAYOUT };
+                BUSTER_EMISSION_TEST(test_same_check(emission_metadata_check(&empty, &missing, false), expected));
+                BUSTER_EMISSION_TEST(test_same_check(emission_metadata_check(&empty, &missing, true), expected));
+                BUSTER_EMISSION_TEST(test_same_check(emission_metadata_check(&missing_sources, &missing, false), no_metadata));
+            }
             const EmissionCheck valid_layout = emission_layout_check(&layout, false);
             BUSTER_EMISSION_TEST(valid_layout.error == EMISSION_OK && valid_layout.part == EMISSION_NONE);
             for (uint32_t i = 0; i < count; i += 1)
