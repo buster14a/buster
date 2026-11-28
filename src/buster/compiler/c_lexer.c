@@ -43,6 +43,7 @@
 // starts, chunks read in place from the source, the previous chunk's bitstrings carried as their last lanes, and a
 // one-permute byte shift; then (2026-10-22) raw string literals in C (C_TOKENIZER_RAW_STRINGS), found at prefixed
 // literals' starts by bitstrings; then (2026-10-25) the entry points' linkage from BUSTER_LEXER_ENTRY (#270).
+// Local changes (2026-11-28): classify prefixed and unknown literal kinds from the source vectors before compression.
 // Measurements: docs/c-lexer.md.
 // Local changes (2026-10-25): guarded native/intrinsic bitstring operations preserve Clang's instruction selection
 // while supporting MSVC, with matching alignment, inlining, bit counts and compiler barriers.
@@ -2605,21 +2606,6 @@ BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], un
     *previous_pairs = pairs;
 }
 
-// The kind of the prefixed literal whose prefix starts at `position`: L, u8, u or U and then a quote.
-static uint8_t prefixed_literal_kind(const uint8_t* source, uint64_t begin, uint64_t length, int64_t position)
-{
-    const uint8_t letter = source_byte(source, begin, length, position);
-    int64_t opener = position + 1;
-    uint8_t prefix = letter == 'L' ? 1 : letter == 'U' ? 4 : 3;
-    if (letter == 'u' && source_byte(source, begin, length, position + 1) == '8')
-    {
-        prefix = 2;
-        opener = position + 2;
-    }
-    const uint8_t base = source_byte(source, begin, length, opener) == '"' ? C_TOKEN_STRING_LITERAL : C_TOKEN_CHAR_CONSTANT;
-    return (uint8_t)(base + prefix);
-}
-
 // The literals and comments of a chunk, found line by line in parallel: each cursor seeks the next delimiter on its
 // line, then the end of what that starts. A block comment can end on a later line; then whatever was found on the
 // lines it covers is forgotten, and the line it ends on is scanned again from its end. (A block comment that the
@@ -2809,7 +2795,7 @@ struct OutputCursors
 
 // III. Write-out: compresses the kinds, starts and ends of a chunk's tokens into the output, a 64-byte vector at a
 // time.
-BUSTER_INLINE OutputCursors write_chunk(const ChunkTokens* t, const uint8_t* source, uint64_t begin, uint64_t length, OutputCursors cursors)
+BUSTER_INLINE OutputCursors write_chunk(const ChunkTokens* t, OutputCursors cursors)
 {
     uint8_t* cur_kind = cursors.kind;
     uint32_t* cur_start = cursors.start;
@@ -2847,19 +2833,27 @@ BUSTER_INLINE OutputCursors write_chunk(const ChunkTokens* t, const uint8_t* sou
         if (BUSTER_UNLIKELY(special))
         {
             kinds = _mm512_mask_mov_epi8(kinds, t->dot_numbers[j], splat8(C_TOKEN_NUMERIC_CONSTANT));
+            // The chunk has a full lookahead vector, including at the source boundary. All prefix
+            // lanes can read their second and third characters before the token kinds are compressed.
+            if (t->prefixes[j] != 0)
+            {
+                const __mmask64 utf8 = _mm512_cmpeq_epi8_mask(next_characters, splat8('8'));
+                const __m512i third = _mm512_loadu_si512((const uint8_t*)&raw[j] + 2);
+                // The low six ASCII bits distinguish L, u and U.
+                BUSTER_LEX_ALIGN(64) static const uint8_t character[64] = {
+                    ['L' & 63] = C_TOKEN_WIDE_CHAR_CONSTANT, ['u' & 63] = C_TOKEN_UTF16_CHAR_CONSTANT, ['U' & 63] = C_TOKEN_UTF32_CHAR_CONSTANT,
+                };
+                __m512i literal = _mm512_permutexvar_epi8(raw[j], _mm512_load_si512(character));
+                literal = _mm512_mask_set1_epi8(literal, utf8, C_TOKEN_UTF8_CHAR_CONSTANT);
+                const __m512i quote = _mm512_mask_blend_epi8(utf8, next_characters, third);
+                const __mmask64 strings = _mm512_cmpeq_epi8_mask(quote, splat8('"'));
+                literal = _mm512_mask_add_epi8(literal, strings, literal, splat8(C_TOKEN_STRING_LITERAL - C_TOKEN_CHAR_CONSTANT));
+                kinds = _mm512_mask_mov_epi8(kinds, t->prefixes[j], literal);
+            }
+            kinds = _mm512_mask_set1_epi8(kinds, t->unknowns[j], C_TOKEN_UNKNOWN);
         }
         kinds = _mm512_mask_mov_epi8(kinds, _load_mask64((__mmask64*)&t->start_of_line[j]), _mm512_or_si512(kinds, splat8(BUSTER_C_TOKEN_START_OF_LINE)));
         _mm512_storeu_si512(cur_kind, _mm512_maskz_compress_epi8(starts_mask, kinds));
-
-        // Prefixed and unknown literals (rare).
-        for (uint64_t bits = special ? t->prefixes[j] | t->unknowns[j] : 0; BUSTER_UNLIKELY(bits != 0); bits &= bits - 1)
-        {
-            const int64_t lane_position = t->chunk_position + BUSTER_LEX_VECTOR_BYTES * j;
-            const uint32_t bit = (uint32_t)BUSTER_LEX_CTZ64(bits);
-            const uint64_t index = (uint64_t)BUSTER_LEX_POPCOUNT64(t->starts[j] & _bzhi_u64(~0ull, bit));
-            const uint8_t kind = (t->unknowns[j] >> bit) & 1 ? C_TOKEN_UNKNOWN : prefixed_literal_kind(source, begin, length, lane_position + bit);
-            cur_kind[index] = kind | (cur_kind[index] & BUSTER_C_TOKEN_START_OF_LINE);
-        }
 
         // The starts and ends: always the first 24 of each, and the rest when there are more. A 64-byte vector has 9
         // tokens on average, more than 16 in 9% of vectors and more than 24 in 0.6%, and a branch at 16 mispredicts
@@ -2894,9 +2888,9 @@ BUSTER_INLINE OutputCursors write_chunk(const ChunkTokens* t, const uint8_t* sou
 }
 
 // The write-out of a source's last chunk, out of line (the chunk loop has its own copy).
-BUSTER_LEX_NOINLINE static OutputCursors write_chunk_outlined(const ChunkTokens* t, const uint8_t* source, uint64_t begin, uint64_t length, OutputCursors cursors)
+BUSTER_LEX_NOINLINE static OutputCursors write_chunk_outlined(const ChunkTokens* t, OutputCursors cursors)
 {
-    return write_chunk(t, source, begin, length, cursors);
+    return write_chunk(t, cursors);
 }
 
 // Tokenizes the source from `begin` (the start of the source, or of a line) to its end, or until a chunk that needs
@@ -3011,7 +3005,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         // III. Write-out of the previous chunk.
         if (pending)
         {
-            const OutputCursors cursors = write_chunk(&deferred, source, begin, length, (OutputCursors){ cur_kind, cur_start, cur_end });
+            const OutputCursors cursors = write_chunk(&deferred, (OutputCursors){ cur_kind, cur_start, cur_end });
             cur_kind = cursors.kind;
             cur_start = cursors.start;
             cur_end = cursors.end;
@@ -3598,7 +3592,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
 
         if (last_chunk)
         {
-            cur_kind = write_chunk_outlined(&deferred, source, begin, length, (OutputCursors){ cur_kind, cur_start, cur_end }).kind;
+            cur_kind = write_chunk_outlined(&deferred, (OutputCursors){ cur_kind, cur_start, cur_end }).kind;
             break;
         }
     }
