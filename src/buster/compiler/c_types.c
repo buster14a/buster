@@ -3809,12 +3809,38 @@ static uint32_t type_lookup_member_scalar(const TypeTable* table, TypeId record,
     return type_lookup_member_with(table, record, name, offset, qualifiers, true);
 }
 
-// The walk: depth first, in declaration order, with an explicit stack of the anonymous members still to search, as clang's
-// lookup through anonymous structs and unions finds the first member with the name: for a record whose index didn't fit,
-// and as the tests' oracle. It enters each record once, however many anonymous members hold it: a record entered before
-// and searched to its end has no member with the name. The records entered are a sparse set over type indices, which
-// nothing clears: `entered` lists them, and `places` gives each its place in the list, where an index that isn't entered
-// has whatever value, never pointing at it.
+// Skip ordinary members that cannot match. Anonymous fields remain in declaration order with direct hits.
+static inline uint32_t type_lookup_next_candidate(const TypeTable* table, uint32_t begin, uint32_t end, uint32_t name)
+{
+    const __m512i wanted = _mm512_set1_epi32((int)name);
+    while (begin < end)
+    {
+        const uint32_t count = end - begin;
+        const __mmask16 live = count >= 16 ? UINT16_MAX : (__mmask16)((1u << count) - 1);
+        const __m512i names = _mm512_maskz_loadu_epi32(live, table->members.name + begin);
+        const __mmask16 direct = _mm512_cmpeq_epi32_mask(names, wanted);
+        const __mmask16 unnamed = _mm512_mask_cmpeq_epi32_mask(live, names, _mm512_setzero_si512());
+        __mmask16 possible = direct;
+        if (unnamed != 0)
+        {
+            const __m128i flags = _mm_maskz_loadu_epi8(unnamed, table->members.flags + begin);
+            possible |= unnamed & ~_mm_test_epi8_mask(flags, _mm_set1_epi8(BUSTER_TYPE_MEMBER_BIT_FIELD));
+        }
+        if (possible != 0)
+        {
+            return begin + (uint32_t)__builtin_ctz(possible);
+        }
+        if (count <= 16)
+        {
+            break;
+        }
+        begin += 16;
+    }
+    return end;
+}
+
+// Search in declaration order when the record's index did not fit. Keep pending siblings on a stack and visit
+// each nonleaf type once. A small, unindexed child has no anonymous records and fits in the existing name scan.
 static uint32_t type_lookup_walk(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
 {
     typedef struct TypeMemberFrame TypeMemberFrame;
@@ -3825,73 +3851,122 @@ static uint32_t type_lookup_walk(const TypeTable* table, TypeId record, uint32_t
         uint32_t qualifiers;
         uint64_t offset;
     };
-    Scratch scratch = scratch_begin(0);
     const TypeId root = type_strip_aligned(table, record);
     const uint8_t kind = type_kind(table, root);
     const bool searching = name != 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION);
-    // A frame for each record entered, at most one a tag.
-    const uint32_t room = table->tags.count;
-    TypeMemberFrame* stack = searching ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeMemberFrame, room) : 0;
-    uint32_t* entered = stack != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, room) : 0;
-    uint32_t* places = entered != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, table->types.count) : 0;
-    uint32_t result = searching && places == 0 ? BUSTER_TYPE_MEMBER_UNKNOWN : 0;
-    uint32_t depth = 0;
-    uint32_t count = 0;
-    uint64_t found_offset = 0;
-    uint32_t found_qualifiers = 0;
-    if (searching && result == 0)
+    if (!searching)
     {
-        const uint32_t index = type_index(root);
-        const uint32_t tag = table->types.index[index];
-        places[index] = count;
-        entered[count++] = index;
-        stack[depth++] = (TypeMemberFrame){
-            .next = table->tags.member_begin[tag],
-            .end = table->tags.member_begin[tag] + table->tags.member_count[tag],
-            .qualifiers = type_qualifiers(root),
-            .offset = 0,
-        };
+        *offset = 0;
+        *qualifiers = 0;
+        return 0;
     }
-    while (result == 0 && depth != 0)
+    const uint32_t root_tag = table->types.index[type_index(root)];
+    const uint32_t root_end = table->tags.member_begin[root_tag] + table->tags.member_count[root_tag];
+    const uint32_t first = type_lookup_next_candidate(table, table->tags.member_begin[root_tag], root_end, name);
+    if (first == root_end || table->members.name[first] == name)
     {
-        TypeMemberFrame* top = &stack[depth - 1];
-        if (top->next == top->end)
+        const bool found = first != root_end;
+        *offset = found ? table->members.offset[first] : 0;
+        *qualifiers = found ? type_qualifiers(root) : 0;
+        return found ? first : 0;
+    }
+    // Eight type indices fit in one register. Larger walks use the sparse set indexed by type.
+    enum { LOCAL_TAGS = 8 };
+    TypeMemberFrame local_stack[LOCAL_TAGS];
+    uint32_t local_seen[LOCAL_TAGS] = {type_index(root)};
+    TypeMemberFrame* stack = local_stack;
+    uint32_t* seen = local_seen;
+    uint32_t* places = NULL;
+    Scratch scratch = {0};
+    uint32_t depth = 0;
+    uint32_t seen_count = 1;
+    TypeMemberFrame current = {.next = first, .end = root_end, .qualifiers = type_qualifiers(root)};
+    uint32_t member = first;
+    uint32_t result = 0;
+    for (;;)
+    {
+        if (member == current.end)
         {
-            depth -= 1;
+            if (depth == 0)
+            {
+                break;
+            }
+            current = stack[--depth];
+        }
+        else if (table->members.name[member] == name)
+        {
+            result = member;
+            current.offset += table->members.offset[member];
+            break;
         }
         else
         {
-            const uint32_t member = top->next++;
-            const uint64_t member_offset = top->offset + table->members.offset[member];
-            if (table->members.name[member] == name)
+            current.next = member + 1;
+            const TypeId inner = type_strip_aligned(table, table->members.type[member]);
+            const uint8_t kind = type_kind(table, inner);
+            if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
             {
-                result = member;
-                found_offset = member_offset;
-                found_qualifiers = top->qualifiers;
-            }
-            else if (type_lookup_anonymous(table, member) != 0)
-            {
-                const TypeId inner = type_strip_aligned(table, table->members.type[member]);
                 const uint32_t index = type_index(inner);
-                const bool seen = places[index] < count && entered[places[index]] == index;
-                if (!seen)
+                const uint32_t tag = table->types.index[index];
+                const uint32_t begin = table->tags.member_begin[tag];
+                const uint32_t size = table->tags.member_count[tag];
+                if (table->tags.lookup[tag] == 0)
                 {
-                    const uint32_t tag = table->types.index[index];
-                    places[index] = count;
-                    entered[count++] = index;
-                    stack[depth++] = (TypeMemberFrame){
-                        .next = table->tags.member_begin[tag],
-                        .end = table->tags.member_begin[tag] + table->tags.member_count[tag],
-                        .qualifiers = top->qualifiers | type_qualifiers(inner),
-                        .offset = member_offset,
-                    };
+                    result = type_lookup_scan(table->members.name, begin, size, name);
+                    if (result != 0)
+                    {
+                        current.offset += table->members.offset[member] + table->members.offset[result];
+                        current.qualifiers |= type_qualifiers(inner);
+                        break;
+                    }
+                }
+                else
+                {
+                    const bool visited = places != NULL ? places[index] < seen_count && seen[places[index]] == index :
+                                         _mm256_cmpeq_epi32_mask(_mm256_loadu_si256((const __m256i*)local_seen), _mm256_set1_epi32((int)index)) != 0;
+                    if (!visited)
+                    {
+                        if (seen_count == LOCAL_TAGS && places == NULL)
+                        {
+                            scratch = scratch_begin(0);
+                            stack = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeMemberFrame, table->tags.count);
+                            seen = stack != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, table->tags.count) : NULL;
+                            places = seen != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, table->types.count) : NULL;
+                            if (places == NULL)
+                            {
+                                result = BUSTER_TYPE_MEMBER_UNKNOWN;
+                                break;
+                            }
+                            memcpy(stack, local_stack, depth * sizeof(*stack));
+                            memcpy(seen, local_seen, sizeof(local_seen));
+                            _mm256_i32scatter_epi32(places, _mm256_loadu_si256((const __m256i*)local_seen), _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), 4);
+                        }
+                        if (places != NULL)
+                        {
+                            places[index] = seen_count;
+                        }
+                        seen[seen_count++] = index;
+                        if (current.next < current.end)
+                        {
+                            stack[depth++] = current;
+                        }
+                        current.next = begin;
+                        current.end = begin + size;
+                        current.offset += table->members.offset[member];
+                        current.qualifiers |= type_qualifiers(inner);
+                    }
                 }
             }
         }
+        member = type_lookup_next_candidate(table, current.next, current.end, name);
     }
-    scratch_end(scratch);
-    *offset = found_offset;
-    *qualifiers = found_qualifiers;
+    if (scratch.arena != NULL)
+    {
+        scratch_end(scratch);
+    }
+    const bool found = result != 0 && result != BUSTER_TYPE_MEMBER_UNKNOWN;
+    *offset = found ? current.offset : 0;
+    *qualifiers = found ? current.qualifiers : 0;
     return result;
 }
 
