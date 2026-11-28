@@ -139,6 +139,9 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_NARROW_BINARY,
     TIER1_BURS_OP_NARROW_UNARY,
     TIER1_BURS_OP_SIGNED_PRODUCT,
+    TIER1_BURS_OP_SIGNED_BITS,
+    TIER1_BURS_OP_SIGNED_CHAIN,
+    TIER1_BURS_OP_SIGNED_PROJECTION,
     TIER1_BURS_OP_FLOAT_CONVERT,
     TIER1_BURS_OP_FLOAT_CONVERT_LOAD,
     TIER1_BURS_OP_FLOAT_CONVERT_CONSTANT,
@@ -201,6 +204,7 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_X87,
     TIER1_BURS_FAMILY_NARROW,
     TIER1_BURS_FAMILY_SIGNED_PRODUCT,
+    TIER1_BURS_FAMILY_SIGNED_WIDENING,
     TIER1_BURS_FAMILY_FLOAT_CONVERT,
     TIER1_BURS_FAMILY_SIGN_LOAD,
     TIER1_BURS_FAMILY_FLOAT_LOAD,
@@ -228,6 +232,9 @@ typedef enum Tier1BursAction
     TIER1_BURS_ACTION_FLOAT_ADDRESS,
     TIER1_BURS_ACTION_NARROW,
     TIER1_BURS_ACTION_SIGNED_PRODUCT,
+    TIER1_BURS_ACTION_SIGNED_BITS,
+    TIER1_BURS_ACTION_SIGNED_CHAIN,
+    TIER1_BURS_ACTION_SIGNED_PROJECTION,
     TIER1_BURS_ACTION_PLAIN,
 } Tier1BursAction;
 
@@ -315,6 +322,11 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_CONVERT, 1, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 2, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_NONE },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_CONVERT, 1, { TIER1_BURS_LOADF, BUSTER_TIER1_BURS_NO_KID }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_CONVERT_LOAD },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_CONVERT, 2, { BUSTER_TIER1_BURS_NO_KID, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_CONSTANT },
+    // For a signed widening, the candidate walk proves which operand an operation can absorb.
+    // A nested extension can also bring a load into the widened access.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGNED_WIDENING, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_SIGNED_BITS, TIER1_RULE_NONE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGNED_WIDENING, 1, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_SIGNED_CHAIN, TIER1_RULE_NONE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGNED_WIDENING, 2, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_SIGNED_PROJECTION, TIER1_RULE_NONE },
     // The widening multiply has a register extension and, when range and use proofs allow it,
     // a signed 64-bit multiply with an immediate or register operand.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGNED_PRODUCT, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_SIGNED_PRODUCT, TIER1_RULE_NONE },
@@ -545,6 +557,9 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
         break;
     case TIER1_BURS_FAMILY_FLOAT_CONVERT:
         member = op == TIER1_BURS_OP_FLOAT_CONVERT + kinds;
+        break;
+    case TIER1_BURS_FAMILY_SIGNED_WIDENING:
+        member = op == TIER1_BURS_OP_SIGNED_BITS + kinds;
         break;
     case TIER1_BURS_FAMILY_SIGNED_PRODUCT:
         member = op == TIER1_BURS_OP_SIGNED_PRODUCT;
@@ -1160,6 +1175,9 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         __mmask16 narrow_binary = 0;
         __mmask16 narrow_unary = 0;
         __mmask16 signed_products = 0;
+        __mmask16 signed_bits = 0;
+        __mmask16 signed_chains = 0;
+        __mmask16 signed_projections = 0;
         if ((truncs | sexts) != 0)
         {
             const __m512i a_op = _mm512_and_si512(a_word, byte);
@@ -1188,11 +1206,17 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
                                       _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_ASHR));
             conversions |= signed_inputs & ~(chained | from_load | (signed_arithmetic & algebra));
             signed_products = signed_arithmetic & multiply;
+            signed_bits = signed_arithmetic & algebra & ~(arithmetic | multiply);
+            signed_chains = _mm512_mask_cmpeq_epi32_mask(signed_inputs, a_op, _mm512_set1_epi32(IR_SEXT));
+            signed_projections = _mm512_mask_cmpeq_epi32_mask(signed_inputs, a_op, _mm512_set1_epi32(IR_TRUNC));
             sign_loads = signed_inputs & from_load & integer;
             conversions |= signed_inputs & from_load & ~integer;
         }
         __m512i result = _mm512_mask_mov_epi32(_mm512_set1_epi32(TIER1_BURS_OP_REG), direct | parameters | phis | returns | copies | unary | conversions, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
         result = _mm512_mask_mov_epi32(result, sign_loads, _mm512_set1_epi32(TIER1_BURS_OP_SIGN_LOAD));
+        result = _mm512_mask_mov_epi32(result, signed_bits, _mm512_set1_epi32(TIER1_BURS_OP_SIGNED_BITS));
+        result = _mm512_mask_mov_epi32(result, signed_chains, _mm512_set1_epi32(TIER1_BURS_OP_SIGNED_CHAIN));
+        result = _mm512_mask_mov_epi32(result, signed_projections, _mm512_set1_epi32(TIER1_BURS_OP_SIGNED_PROJECTION));
         result = _mm512_mask_mov_epi32(result, signed_products, _mm512_set1_epi32(TIER1_BURS_OP_SIGNED_PRODUCT));
         result = _mm512_mask_mov_epi32(result, narrow_binary, _mm512_set1_epi32(TIER1_BURS_OP_NARROW_BINARY));
         result = _mm512_mask_mov_epi32(result, narrow_unary, _mm512_set1_epi32(TIER1_BURS_OP_NARROW_UNARY));
@@ -1640,6 +1664,19 @@ static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_
         case TIER1_BURS_ACTION_LEA_IMMEDIATE:
             match = pattern->rule == TIER1_RULE_LEA_ADD && pattern->values[1] == BUSTER_IR_NONE;
             break;
+        case TIER1_BURS_ACTION_SIGNED_BITS:
+            match = p == 0 ? (pattern->rule == TIER1_RULE_COPY || pattern->rule == TIER1_RULE_SIGN_EXTEND) :
+                    pattern->fold_count != 0 && (pattern->rule == TIER1_RULE_REGISTER || pattern->rule == TIER1_RULE_IMMEDIATE || pattern->rule == TIER1_RULE_UNARY || pattern->rule == TIER1_RULE_COPY);
+            break;
+        case TIER1_BURS_ACTION_SIGNED_CHAIN:
+            match = pattern->rule == TIER1_RULE_SIGN_EXTEND || pattern->rule == TIER1_RULE_LOAD_ADDRESS || (p == 0 && pattern->rule == TIER1_RULE_COPY);
+            break;
+        case TIER1_BURS_ACTION_SIGNED_PROJECTION:
+            // An already-shared truncation can expose a copy with no covered nodes. If the register
+            // pattern is already a copy, keep the original operand and the first equal-cost match.
+            match = (p == 0 || pattern->fold_count != 0 || (pattern->rule == TIER1_RULE_COPY && candidates->patterns[0].rule == TIER1_RULE_SIGN_EXTEND)) &&
+                    (pattern->rule == TIER1_RULE_SIGN_EXTEND || pattern->rule == TIER1_RULE_COPY);
+            break;
         case TIER1_BURS_ACTION_SIGNED_PRODUCT:
             match = (p == 0 && (pattern->rule == TIER1_RULE_COPY || pattern->rule == TIER1_RULE_SIGN_EXTEND)) ||
                     (pattern->operation == X86_OPERATION_IMUL && pattern->fold_count != 0 && (pattern->rule == TIER1_RULE_IMMEDIATE || pattern->rule == TIER1_RULE_REGISTER));
@@ -1670,7 +1707,8 @@ static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_
             break;
         }
         // The first match, or for a load, a store and a walked copy, a later walked one over an earlier plain one.
-        const bool walked = rule->action == TIER1_BURS_ACTION_SIGNED_PRODUCT || rule->action == TIER1_BURS_ACTION_NARROW || rule->action == TIER1_BURS_ACTION_FLOAT_ADDRESS || rule->action == TIER1_BURS_ACTION_LOAD || rule->action == TIER1_BURS_ACTION_STORE || rule->action == TIER1_BURS_ACTION_STORE_IMMEDIATE ||
+        const bool walked = (rule->action >= TIER1_BURS_ACTION_SIGNED_BITS && rule->action <= TIER1_BURS_ACTION_SIGNED_PROJECTION) ||
+                            rule->action == TIER1_BURS_ACTION_SIGNED_PRODUCT || rule->action == TIER1_BURS_ACTION_NARROW || rule->action == TIER1_BURS_ACTION_FLOAT_ADDRESS || rule->action == TIER1_BURS_ACTION_LOAD || rule->action == TIER1_BURS_ACTION_STORE || rule->action == TIER1_BURS_ACTION_STORE_IMMEDIATE ||
                             rule->action == TIER1_BURS_ACTION_WALKED_COPY;
         chosen = match && (chosen == UINT32_MAX || walked) ? p : chosen;
     }

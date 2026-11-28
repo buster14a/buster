@@ -279,6 +279,11 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
             {
                 check->mismatches += munched || candidates.count == 0 || candidates.count > 2 || chosen != tier1_select_munch(&candidates);
             }
+            if (class >= TIER1_BURS_OP_SIGNED_BITS && class <= TIER1_BURS_OP_SIGNED_PROJECTION)
+            {
+                check->mismatches += munched || candidates.count == 0 || candidates.count > (class == TIER1_BURS_OP_SIGNED_CHAIN ? 3 : 2) ||
+                                     chosen != tier1_select_munch(&candidates);
+            }
             if (class == TIER1_BURS_OP_X87)
             {
                 check->mismatches += munched || candidates.count != 1 || candidates.patterns[0].rule != TIER1_RULE_X87 ||
