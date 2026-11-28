@@ -129,6 +129,7 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_SELECT,
     // An I1 copy of the floating comparison right before it, a truth value's link (tier1_select_truth, #2791).
     TIER1_BURS_OP_COPY_TRUTH,
+    TIER1_BURS_OP_SIGN_LOAD,
     TIER1_BURS_OP_FLOAT_LOAD_F,
     TIER1_BURS_OP_FLOAT_LOAD_N,
     TIER1_BURS_OP_FLOAT_STORE,
@@ -190,6 +191,7 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_FCMP_EQ,
     TIER1_BURS_FAMILY_CBR_ADJ,
     TIER1_BURS_FAMILY_SELECT,
+    TIER1_BURS_FAMILY_SIGN_LOAD,
     TIER1_BURS_FAMILY_FLOAT_LOAD,
     TIER1_BURS_FAMILY_FLOAT_STORE,
     TIER1_BURS_FAMILY_FLOAT_BINARY,
@@ -294,6 +296,10 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     // Shifts, by a constant count below their width, or by a register's (cl).
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SHIFT, 0, { TIER1_BURS_REG, TIER1_BURS_SHAMT }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_IMMEDIATE },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SHIFT, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 4, TIER1_BURS_ACTION_KIND, TIER1_RULE_SHIFT },
+    // A signed widening reads a scalar load directly when its single use can fold
+    // without crossing a memory barrier. Otherwise only the register extension remains.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGN_LOAD, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_NONE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SIGN_LOAD, 0, { TIER1_BURS_LOADF, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_KIND, TIER1_RULE_LOAD_ADDRESS },
     // A floating binary operation reads a register or a foldable scalar load. When the right operand is a
     // load it always has priority. Addition and multiplication can otherwise take the left memory operand.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_FLOAT_BINARY, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_BINARY },
@@ -522,6 +528,9 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
         break;
     case TIER1_BURS_FAMILY_SHL:
         member = op == TIER1_BURS_OP_SHL;
+        break;
+    case TIER1_BURS_FAMILY_SIGN_LOAD:
+        member = op == TIER1_BURS_OP_SIGN_LOAD;
         break;
     case TIER1_BURS_FAMILY_FLOAT_BINARY:
         member = (op == TIER1_BURS_OP_FLOAT_BINARY_RIGHT && kinds != 2) || (op == TIER1_BURS_OP_FLOAT_BINARY_LEFT && kinds != 1);
@@ -1099,6 +1108,7 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __mmask16 truncs = _mm512_mask_cmpeq_epi32_mask(a_valid, op, _mm512_set1_epi32(IR_TRUNC));
         const __mmask16 sexts = _mm512_mask_cmpeq_epi32_mask(a_valid, op, _mm512_set1_epi32(IR_SEXT));
         __mmask16 conversions = 0;
+        __mmask16 sign_loads = 0;
         if ((truncs | sexts) != 0)
         {
             const __m512i a_op = _mm512_and_si512(a_word, byte);
@@ -1117,9 +1127,21 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
             const __mmask16 terminal = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_CONST)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_PARAM)) |
                                        _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_PHI)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_CALL)) |
                                        _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_CALL_INDIRECT));
-            conversions |= signed_inputs & terminal;
+            const __mmask16 from_load = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_LOAD));
+            const __mmask16 wide_result = _mm512_mask_cmpeq_epi32_mask(signed_inputs, type, _mm512_set1_epi32(IR_I64));
+            const __mmask16 signed_arithmetic = _mm512_mask_cmpeq_epi32_mask(wide_result, a_type, _mm512_set1_epi32(IR_I32));
+            const __mmask16 chained = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_SEXT)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_TRUNC));
+            // Algebraic extension patterns operate on an I32 definition widened to I64.
+            // Other widths have one register pattern unless the definition is itself a conversion or load.
+            conversions |= signed_inputs & (terminal | ~(signed_arithmetic | chained | from_load));
+            const __mmask16 from_integer = _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_COPY)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_ZEXT)) |
+                                          _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_SHL)) | _mm512_cmpeq_epi32_mask(a_op, _mm512_set1_epi32(IR_LSHR));
+            conversions |= signed_inputs & from_integer;
+            sign_loads = signed_inputs & from_load & integer;
+            conversions |= signed_inputs & from_load & ~integer;
         }
         __m512i result = _mm512_mask_mov_epi32(_mm512_set1_epi32(TIER1_BURS_OP_REG), direct | parameters | phis | returns | copies | unary | conversions, _mm512_set1_epi32(TIER1_BURS_OP_DIRECT));
+        result = _mm512_mask_mov_epi32(result, sign_loads, _mm512_set1_epi32(TIER1_BURS_OP_SIGN_LOAD));
         // Constants: their class bits, 8 values at a time.
         const __mmask16 constant = _mm512_mask_cmpeq_epi32_mask(active & tier1_burs_types(active, type, width4 | width8), op, _mm512_set1_epi32(IR_CONST));
         if (constant != 0)

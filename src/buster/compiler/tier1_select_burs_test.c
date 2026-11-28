@@ -235,6 +235,11 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
                            (op == IR_SEXT && (type == IR_I16 || type == IR_I32 || type == IR_I64) && function->op[function->a[node]] == IR_PARAM &&
                             (function->type[function->a[node]] >= IR_I8 && function->type[function->a[node]] <= IR_I32)) || (op == IR_RET && function->a[node] == BUSTER_IR_NONE);
         const bool floating = type == IR_F32 || type == IR_F64;
+        if (op == IR_SEXT && (type == IR_I32 || type == IR_I64) && function->op[function->a[node]] == IR_LOAD &&
+            function->type[function->a[node]] >= IR_I8 && function->type[function->a[node]] <= IR_I32)
+        {
+            check->mismatches += class != TIER1_BURS_OP_SIGN_LOAD;
+        }
         if (floating && op >= IR_FADD && op <= IR_FDIV)
         {
             const bool left = (op == IR_FADD || op == IR_FMUL) && function->op[function->b[node]] != IR_LOAD;
@@ -268,7 +273,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
             const Tier1SelectCandidates candidates = tier1_select_candidates(&costed, node, TIER1_RULE_NONE);
             bool munched = false;
             const uint32_t chosen = tier1_burs_pick(&candidates, columns[3][node], &munched);
-            if (class >= TIER1_BURS_OP_FLOAT_LOAD_F && class <= TIER1_BURS_OP_FLOAT_BINARY_LEFT)
+            if (class >= TIER1_BURS_OP_SIGN_LOAD && class <= TIER1_BURS_OP_FLOAT_BINARY_LEFT)
             {
                 check->mismatches += candidates.count == 0 || munched || chosen != tier1_select_munch(&candidates);
             }

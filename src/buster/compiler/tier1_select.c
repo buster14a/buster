@@ -6170,13 +6170,6 @@ static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier
     return address.folds != 0;
 }
 
-// Inlined at each of its two calls, the test reference's batch (tier1_select_cover_munch) and the bottom-up path's pattern
-// (tier1_select_burs_pattern), and so are its helpers (tier1_select_add_candidate, tier1_select_memory,
-// tier1_select_load_folds), whose inlining clang decided by their callers. With a second caller, clang outlined it, its
-// 356 bytes returned through memory, and inlined fewer of its helpers: the former scalar maximal-munch path took 304 core cycles
-// per IR instruction on the frozen sqlite3.c and 841 instructions, against 274 and 747 before the second caller and 276
-// and 752 inlined by force, in tier1_select_cover_munch (benchmark-tier1-select-source, the 9700X). One copy out of line
-// for both calls took 300 and 815.
 // A verified call has at most one machine pattern. The classifier and independent candidate walk
 // use the same ABI checks. The bottom-up production carries the checked kind to the pattern builder.
 static Tier1SelectRule tier1_select_call_rule(const IrFunction* function, uint32_t node)
@@ -6193,6 +6186,13 @@ static Tier1SelectRule tier1_select_call_rule(const IrFunction* function, uint32
     return tier1_select_call_supported(function, node) ? TIER1_RULE_CALL : TIER1_RULE_NONE;
 }
 
+// Inlined at each of its two calls, the test reference's batch (tier1_select_cover_munch) and the bottom-up path's pattern
+// (tier1_select_burs_pattern), and so are its helpers (tier1_select_add_candidate, tier1_select_memory,
+// tier1_select_load_folds), whose inlining clang decided by their callers. With a second caller, clang outlined it, its
+// 356 bytes returned through memory, and inlined fewer of its helpers: the former scalar maximal-munch path took 304 core cycles
+// per IR instruction on the frozen sqlite3.c and 841 instructions, against 274 and 747 before the second caller and 276
+// and 752 inlined by force, in tier1_select_cover_munch (benchmark-tier1-select-source, the 9700X). One copy out of line
+// for both calls took 300 and 815.
 static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* forest, uint32_t node, Tier1SelectRule call_rule)
 {
     const IrFunction* function = forest->function;
@@ -6205,7 +6205,9 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const bool sign_storage = type == IR_I32 && forest->canonical != 0 &&
                               (forest->canonical[node] & (BUSTER_TIER1_STORAGE_ZERO | BUSTER_TIER1_STORAGE_SIGN)) == BUSTER_TIER1_STORAGE_SIGN;
     const bool sign_result = sign_storage && (op == IR_PARAM || tier1_select_sign_birth(function, node));
-    Tier1SelectCandidates candidates = {0};
+    // Only the prefix below count is read. Each addition writes both the pattern and its cost.
+    Tier1SelectCandidates candidates;
+    candidates.count = 0;
     Tier1SelectPattern base =
     {
         .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
@@ -6215,6 +6217,65 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         .storage_width = type == IR_I32 && forest->canonical != 0 && (forest->canonical[node] & BUSTER_TIER1_STORAGE_WIDE) != 0 ? 8 : 0,
         .sign_result = sign_result,
     };
+    switch (op)
+    {
+    case IR_BR:
+    {
+        base.rule = TIER1_RULE_JUMP;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+        return candidates;
+    }
+    case IR_BR_INDIRECT:
+    {
+        base.rule = TIER1_RULE_JUMP_INDIRECT;
+        base.values[0] = a;
+        base.width = 8;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+        return candidates;
+    }
+    case IR_CALL:
+    case IR_CALL_INDIRECT:
+    {
+        const Tier1SelectRule kind = call_rule == TIER1_RULE_NONE ? tier1_select_call_rule(function, node) : call_rule;
+        if (kind == TIER1_RULE_ASM)
+        {
+            // An asm body (#1839): its records in the node's place, its operand block the frame object its argument addresses.
+            base.rule = TIER1_RULE_ASM;
+            base.immediate = function->calls[b].body - 1;
+            base.intrinsic_cost = (uint8_t)(function->asm_bodies[function->calls[b].body - 1].count < 254 ? 1 + function->asm_bodies[function->calls[b].body - 1].count : 255);
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (kind == TIER1_RULE_ROW)
+        {
+            // A machine row (#141): its records, its operands' moves and its result's.
+            base.rule = TIER1_RULE_ROW;
+            base.immediate = function->calls[b].row - 1;
+            base.intrinsic_cost = (uint8_t)(1 + function->rows[function->calls[b].row - 1].record_count);
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (kind == TIER1_RULE_CALL)
+        {
+            base.rule = TIER1_RULE_CALL;
+            base.immediate = a;
+            // A floating result's width too (#141), which the consumer moves from xmm0.
+            base.width = (uint8_t)(width | tier1_select_float_width(type));
+            // Structural lowering estimate: call plus possible argument/result copies; preservation is emitter-owned.
+            base.intrinsic_cost = (uint8_t)(1 + function->calls[b].argument_count + (type != IR_VOID));
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        return candidates;
+    }
+    case IR_UNREACHABLE:
+    {
+        base.rule = TIER1_RULE_UNREACHABLE;
+        base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+        return candidates;
+    }
+    default: break;
+    }
     const bool integer = type == IR_I32 || type == IR_I64;
     // A narrow value's and, or and xor (#2677): their 32-bit operations, as each narrow value's storage is (tier1_select_width).
     // Zero-extended operands give a zero-extended result (tier1_select_canonical), and an I1's 0 or 1 another 0 or 1; a
@@ -7939,20 +8000,6 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
-    else if (op == IR_BR)
-    {
-        base.rule = TIER1_RULE_JUMP;
-        base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
-    }
-    else if (op == IR_BR_INDIRECT)
-    {
-        base.rule = TIER1_RULE_JUMP_INDIRECT;
-        base.values[0] = a;
-        base.width = 8;
-        base.intrinsic_cost = 1;
-        tier1_select_add_candidate(forest, node, &candidates, base);
-    }
     else if (op == IR_ALLOCA && function->type[a] == IR_I64)
     {
         // The dynamic stack (#141). A constant size whose rounding to any frame's alignment fits a sub's imm32 folds.
@@ -8009,36 +8056,6 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
-    else if (op == IR_CALL || op == IR_CALL_INDIRECT)
-    {
-        const Tier1SelectRule kind = call_rule == TIER1_RULE_NONE ? tier1_select_call_rule(function, node) : call_rule;
-        if (kind == TIER1_RULE_ASM)
-        {
-            // An asm body (#1839): its records in the node's place, its operand block the frame object its argument addresses.
-            base.rule = TIER1_RULE_ASM;
-            base.immediate = function->calls[b].body - 1;
-            base.intrinsic_cost = (uint8_t)(function->asm_bodies[function->calls[b].body - 1].count < 254 ? 1 + function->asm_bodies[function->calls[b].body - 1].count : 255);
-            tier1_select_add_candidate(forest, node, &candidates, base);
-        }
-        else if (kind == TIER1_RULE_ROW)
-        {
-            // A machine row (#141): its records, its operands' moves and its result's.
-            base.rule = TIER1_RULE_ROW;
-            base.immediate = function->calls[b].row - 1;
-            base.intrinsic_cost = (uint8_t)(1 + function->rows[function->calls[b].row - 1].record_count);
-            tier1_select_add_candidate(forest, node, &candidates, base);
-        }
-        else if (kind == TIER1_RULE_CALL)
-        {
-            base.rule = TIER1_RULE_CALL;
-            base.immediate = a;
-            // A floating result's width too (#141), which the consumer moves from xmm0.
-            base.width = (uint8_t)(width | float_width);
-            // Structural lowering estimate: call plus possible argument/result copies; preservation is emitter-owned.
-            base.intrinsic_cost = (uint8_t)(1 + function->calls[b].argument_count + (type != IR_VOID));
-            tier1_select_add_candidate(forest, node, &candidates, base);
-        }
-    }
     else if (op == IR_ASM_RESULT && tier1_select_asm_supported(function, a))
     {
         base.rule = TIER1_RULE_ASM_RESULT;
@@ -8058,12 +8075,6 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[0] = a != BUSTER_IR_NONE && function->type[a] == IR_F80 ? BUSTER_IR_NONE : a;
         base.width = a == BUSTER_IR_NONE || function->result_size != 0 ? 0 : (uint8_t)tier1_select_width(function->type[a]);
         base.intrinsic_cost = a == BUSTER_IR_NONE ? 1 : 2;
-        tier1_select_add_candidate(forest, node, &candidates, base);
-    }
-    else if (op == IR_UNREACHABLE)
-    {
-        base.rule = TIER1_RULE_UNREACHABLE;
-        base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (op == IR_PHI && (width != 0 || type == IR_F80))
@@ -8705,7 +8716,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         // Check operations that previously used the generic register leaf in their original dependency order,
         // including values later absorbed by a memory operand. Preserve the first unsupported node.
         const uint32_t op = classes[node];
-        if ((op == TIER1_BURS_OP_REG || (op >= TIER1_BURS_OP_DIRECT && op <= TIER1_BURS_OP_CALL_ROW) || op >= TIER1_BURS_OP_FLOAT_LOAD_F) && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
+        if ((op == TIER1_BURS_OP_REG || (op >= TIER1_BURS_OP_DIRECT && op <= TIER1_BURS_OP_CALL_ROW) || op >= TIER1_BURS_OP_SIGN_LOAD) && !tier1_select_burs_pattern(&forest, rules, built, &plan, node))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;
