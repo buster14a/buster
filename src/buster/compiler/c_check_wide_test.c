@@ -138,10 +138,72 @@ static void check_test_wide_values(CheckTest* test, TypeTable* table)
     check_test_expect(test, valid, "wide constants convert, fold, read and print as clang's");
 }
 
+// Each dividend is constructed from an independently chosen quotient, divisor and remainder.
+static void check_test_wide_division(CheckTest* test)
+{
+    uint64_t dividend[2 * BUSTER_CHECK_WIDE_TEST_LIMBS];
+    uint64_t divisor[BUSTER_CHECK_WIDE_TEST_LIMBS];
+    uint64_t expected_q[BUSTER_CHECK_WIDE_TEST_LIMBS];
+    uint64_t expected_r[BUSTER_CHECK_WIDE_TEST_LIMBS];
+    uint64_t quotient[BUSTER_CHECK_WIDE_TEST_LIMBS];
+    uint64_t remainder[BUSTER_CHECK_WIDE_TEST_LIMBS];
+    bool valid = true;
+    for (uint32_t count = 3; count <= BUSTER_CHECK_WIDE_TEST_LIMBS && valid; count += 1)
+    {
+        for (uint32_t round = 0; round < 12 && valid; round += 1)
+        {
+            const uint32_t used = 1 + check_test_random(test) % (count - 1);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                divisor[i] = i < used ? check_test_wide_limb(test, round % 4) : 0;
+                expected_q[i] = i < count - used ? check_test_wide_limb(test, (round / 3) % 4) : 0;
+                expected_r[i] = i + 1 < used ? check_test_wide_limb(test, 0) : 0;
+            }
+            divisor[used - 1] |= 1;
+            check_wide_multiply(dividend, expected_q, divisor, count);
+            // The constructed product plus the remainder fits the original count of limbs.
+            uint64_t carry = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const unsigned __int128 sum = (unsigned __int128)dividend[i] + expected_r[i] + carry;
+                dividend[i] = (uint64_t)sum;
+                carry = (uint64_t)(sum >> 64);
+            }
+            check_wide_divide(quotient, remainder, dividend, divisor, count);
+            valid = carry == 0 && memcmp(quotient, expected_q, count * sizeof(*quotient)) == 0 &&
+                    memcmp(remainder, expected_r, count * sizeof(*remainder)) == 0;
+        }
+    }
+    check_test_expect(test, valid, "wide quotient and remainder reconstruct operands across vector boundaries");
+
+    // These windows overestimate the quotient digit by one and two respectively.
+    const uint64_t inputs[][3] = {
+        { UINT64_C(0x55df97bb43ad9e8b), UINT64_C(0x881ff996d618e756), 0 },
+        { UINT64_C(0x272af3b981fdd45c), UINT64_C(0xdca73590ea673c14), 0 },
+    };
+    const uint64_t divisors[][3] = {
+        { UINT64_C(0x706643cdb893ef3a), UINT32_C(0xb72c562d), 0 },
+        { UINT64_C(0xf53bf78d20f8f21a), UINT32_C(0xe00404b8), 0 },
+    };
+    const uint32_t quotients[] = { UINT32_C(0xbe3efccf), UINT32_C(0xfc284977) };
+    const uint64_t remainders[][3] = {
+        { UINT64_C(0xad9fc350688616a5), UINT32_C(0x7bfd5edc), 0 },
+        { UINT64_C(0x74316d80c52be046), UINT32_C(0xd4e2f31e), 0 },
+    };
+    valid = true;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(inputs); i += 1)
+    {
+        check_wide_divide(quotient, remainder, inputs[i], divisors[i], 3);
+        valid &= quotient[0] == quotients[i] && quotient[1] == 0 && quotient[2] == 0 && memcmp(remainder, remainders[i], sizeof(remainders[i])) == 0;
+    }
+    check_test_expect(test, valid, "wide division restores the divisor for each excess unit in the quotient estimate");
+}
+
 static __attribute__((noinline)) void check_test_wide(CheckTest* test, TypeTable* table)
 {
     check_test_wide_kernels(test);
     check_test_wide_values(test, table);
+    check_test_wide_division(test);
 }
 
 #endif

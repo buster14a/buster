@@ -21,11 +21,11 @@
 // representation, for static data).
 //
 // Kernels. The bitwise operations, sums, differences and negations, compares and shifts take 8 limbs a zmm, with masked
-// tails, and each has an exact scalar twin (CheckWideKernels.scalar, the checker's scalar path; test-wide compares
+// tails, and each has an exact scalar twin (CheckWideKernels.scalar, the checker's scalar path; test-checker compares
 // them). A sum's carries cross the limbs of a zmm through its compare masks: a limb generates a carry where its sum
 // wrapped and propagates one where its sum is all ones, and the carries into the limbs are ((G << 1 | c) + P) ^ P,
-// the mask add. Products (64 x 64 -> 128-bit limb products, which AVX-512 has no instruction for), quotients and
-// remainders (shift and subtract) and decimal printing stay scalar. Faults follow check_action_fold_integer and GNU's
+// the mask add. Division estimates a base-2^32 quotient digit at a time and subtracts products in vector chunks.
+// Multiplication and decimal printing stay scalar. Faults follow check_action_fold_integer and GNU's
 // check_integer_extension, so the same contexts fold or refuse as clang's evaluator does.
 #ifndef BUSTER_C_CHECK_WIDE_INCLUDED
 #define BUSTER_C_CHECK_WIDE_INCLUDED
@@ -420,7 +420,7 @@ static void check_wide_shift(CheckWideKernels kernels, bool left, uint64_t* dest
     }
 }
 
-// --- Scalar parts: products, quotients and remainders, and their helpers. ---
+// --- Products, quotients and remainders, and their helpers. ---
 
 static bool check_wide_is_zero(const uint64_t* a, uint32_t count)
 {
@@ -464,31 +464,140 @@ static void check_wide_multiply(uint64_t* destination, const uint64_t* a, const 
     }
 }
 
-// quotient and remainder (`count` limbs each) of a / b, b nonzero, by shift and subtract from a's top bit.
-static void check_wide_divide(uint64_t* quotient, uint64_t* remainder, const uint64_t* a, const uint64_t* b, uint32_t count)
+// On this little-endian host, each limb holds two base-2^32 digits. Access through either type is valid.
+typedef uint32_t CheckWideDigit __attribute__((__may_alias__));
+
+// Subtract eight product digits and the borrow from the previous chunk. Equal digits propagate a borrow.
+static __m256i check_wide_subtract_digits(__m256i x, __m256i y, __mmask8 live, uint32_t lanes, uint32_t* borrow)
 {
-    for (uint32_t i = 0; i < count; i += 1)
+    const uint32_t generate = _mm256_mask_cmplt_epu32_mask(live, x, y);
+    const uint32_t propagate = _mm256_mask_cmpeq_epi32_mask(live, x, y);
+    const uint32_t total = ((generate << 1) | *borrow) + propagate;
+    const __m256i difference = _mm256_sub_epi32(x, y);
+    *borrow = (total >> lanes) & 1u;
+    return _mm256_mask_sub_epi32(difference, (__mmask8)(total ^ propagate), difference, _mm256_set1_epi32(1));
+}
+
+// Subtract digit * divisor from the remainder window. Its extra leading digit is held in a register.
+// The low and high halves of each product occupy adjacent columns and carry independent borrows.
+static int64_t check_wide_subtract_product(CheckWideDigit* remainder, uint32_t top, const CheckWideDigit* divisor, uint32_t length, uint32_t digit)
+{
+    const __m512i multiplier = _mm512_set1_epi64(digit);
+    uint32_t low_borrow = 0;
+    uint32_t high_borrow = 0;
+    __m256i upper = _mm256_setzero_si256();
+    for (uint32_t i = 0; i < length; i += 8)
     {
-        quotient[i] = 0;
-        remainder[i] = 0;
+        const uint32_t lanes = length - i < 8 ? length - i : 8;
+        const __mmask8 live = (__mmask8)_bzhi_u32(UINT8_MAX, lanes);
+        const __m256i digits = _mm256_maskz_loadu_epi32(live, divisor + i);
+        const __m512i products = _mm512_mul_epu32(_mm512_cvtepu32_epi64(digits), multiplier);
+        const __m256i low = _mm512_cvtepi64_epi32(products);
+        const __m256i previous = upper;
+        upper = _mm512_cvtepi64_epi32(_mm512_srli_epi64(products, 32));
+        const __m256i high = _mm256_alignr_epi32(upper, previous, 7);
+        const __m256i x = _mm256_maskz_loadu_epi32(live, remainder + i);
+        const __m256i difference = check_wide_subtract_digits(x, low, live, lanes, &low_borrow);
+        _mm256_mask_storeu_epi32(remainder + i, live, check_wide_subtract_digits(difference, high, live, lanes, &high_borrow));
     }
-    for (uint32_t bit = check_wide_bits(a, count); bit != 0; bit -= 1)
+    const __m256i last = _mm256_permutevar8x32_epi32(upper, _mm256_set1_epi32((length - 1) & 7));
+    return (int64_t)top - (uint32_t)_mm256_extract_epi32(last, 0) - low_borrow - high_borrow;
+}
+
+// Restore one divisor when a quotient estimate was high. Return the carry into the extra leading digit.
+static uint32_t check_wide_restore_divisor(CheckWideDigit* remainder, const CheckWideDigit* divisor, uint32_t length)
+{
+    uint32_t carry = 0;
+    for (uint32_t i = 0; i < length; i += 16)
     {
-        const uint32_t index = bit - 1;
-        // remainder = remainder << 1 | a's bit; it stays below 2b, so its top bit never falls off below count limbs.
-        uint64_t carry = (a[index / BUSTER_CHECK_WIDE_LIMB_BITS] >> (index % BUSTER_CHECK_WIDE_LIMB_BITS)) & 1u;
-        uint64_t over = 0;
-        for (uint32_t i = 0; i < count; i += 1)
+        const uint32_t lanes = length - i < 16 ? length - i : 16;
+        const __mmask16 live = (__mmask16)_bzhi_u32(UINT16_MAX, lanes);
+        const __m512i x = _mm512_maskz_loadu_epi32(live, remainder + i);
+        const __m512i sum = _mm512_add_epi32(x, _mm512_maskz_loadu_epi32(live, divisor + i));
+        const uint32_t generate = _mm512_mask_cmplt_epu32_mask(live, sum, x);
+        const uint32_t propagate = _mm512_mask_cmpeq_epi32_mask(live, sum, _mm512_set1_epi32(-1));
+        const uint32_t total = ((generate << 1) | carry) + propagate;
+        const __m512i result = _mm512_mask_add_epi32(sum, (__mmask16)(total ^ propagate), sum, _mm512_set1_epi32(1));
+        _mm512_mask_storeu_epi32(remainder + i, live, result);
+        carry = (total >> lanes) & 1u;
+    }
+    return carry;
+}
+
+// Unsigned division of count limbs with a nonzero divisor. Take one base-2^32 quotient digit per step.
+static __attribute__((noinline, cold)) void check_wide_divide(uint64_t* quotient, uint64_t* remainder, const uint64_t* a, const uint64_t* b, uint32_t count)
+{
+    const CheckWideDigit* dividend = (const CheckWideDigit*)a;
+    const CheckWideDigit* divisor = (const CheckWideDigit*)b;
+    CheckWideDigit* quot = (CheckWideDigit*)quotient;
+    CheckWideDigit* rem = (CheckWideDigit*)remainder;
+    uint32_t dividend_length = 0;
+    uint32_t divisor_length = 0;
+    int32_t order = 0;
+    for (uint32_t i = 0; i < 2 * count; i += 16)
+    {
+        const uint32_t left = 2 * count - i;
+        const __mmask16 live = left >= 16 ? UINT16_MAX : (__mmask16)((1u << left) - 1);
+        const __m512i x = _mm512_maskz_loadu_epi32(live, dividend + i);
+        const __m512i y = _mm512_maskz_loadu_epi32(live, divisor + i);
+        _mm512_mask_storeu_epi32(quot + i, live, _mm512_setzero_si512());
+        _mm512_mask_storeu_epi32(rem + i, live, x);
+        // The highest unequal digit determines the ordering. Inactive digits read as zero on both sides.
+        const uint32_t greater = _mm512_cmpgt_epu32_mask(x, y);
+        const uint32_t less = _mm512_cmplt_epu32_mask(x, y);
+        if ((greater | less) != 0)
         {
-            const uint64_t limb = remainder[i];
-            remainder[i] = (limb << 1) | carry;
-            carry = limb >> 63;
+            order = greater > less ? 1 : -1;
         }
-        over = carry;
-        if (over != 0 || check_wide_compare_scalar(remainder, b, count) >= 0)
+        const uint32_t x_nonzero = _mm512_test_epi32_mask(x, x);
+        const uint32_t y_nonzero = _mm512_test_epi32_mask(y, y);
+        if (x_nonzero != 0)
         {
-            check_wide_add_scalar(remainder, remainder, b, count, true, 1);
-            quotient[index / BUSTER_CHECK_WIDE_LIMB_BITS] |= UINT64_C(1) << (index % BUSTER_CHECK_WIDE_LIMB_BITS);
+            dividend_length = i + 32u - (uint32_t)__builtin_clz(x_nonzero);
+        }
+        if (y_nonzero != 0)
+        {
+            divisor_length = i + 32u - (uint32_t)__builtin_clz(y_nonzero);
+        }
+    }
+    if (order <= 0)
+    {
+        if (order == 0)
+        {
+            quot[0] = 1;
+            memset(rem, 0, divisor_length * sizeof(*rem));
+        }
+        return;
+    }
+
+    // Normalize just the leading digits used by the estimate. The stored remainder and divisor keep their scale.
+    const uint32_t shift = (uint32_t)__builtin_clz(divisor[divisor_length - 1]);
+    const uint64_t next_divisor = divisor_length > 1 ? divisor[divisor_length - 2] : 0;
+    const uint32_t leading = (divisor[divisor_length - 1] << shift) | (uint32_t)(next_divisor >> (32 - shift));
+    for (uint32_t position = dividend_length - divisor_length + 1; position != 0; position -= 1)
+    {
+        const uint32_t j = position - 1;
+        const uint32_t end = j + divisor_length;
+        const uint32_t top = end < dividend_length ? rem[end] : 0;
+        const uint32_t next = rem[end - 1];
+        const uint32_t following = end >= 2 ? rem[end - 2] : 0;
+        const uint32_t high = (top << shift) | (uint32_t)((uint64_t)next >> (32 - shift));
+        const uint32_t low = (next << shift) | (uint32_t)((uint64_t)following >> (32 - shift));
+        // The normalized leading digit is at least 2^31. Dividing by it can overestimate by at most two.
+        uint32_t digit = high >= leading ? UINT32_MAX : (uint32_t)((((uint64_t)high << 32) | low) / leading);
+        if (digit != 0)
+        {
+            int64_t balance = check_wide_subtract_product(rem + j, top, divisor, divisor_length, digit);
+            while (balance < 0)
+            {
+                balance += check_wide_restore_divisor(rem + j, divisor, divisor_length);
+                digit -= 1;
+            }
+            if (end < dividend_length)
+            {
+                rem[end] = (uint32_t)balance;
+            }
+            quot[j] = digit;
         }
     }
 }

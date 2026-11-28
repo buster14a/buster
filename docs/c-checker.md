@@ -1897,11 +1897,11 @@ at every count to 80 limbs). A sum's carries cross the limbs through the compare
 masks: where a limb's sum wrapped it generates a carry, where it is all ones it
 propagates one, and the carries into the limbs are `((G << 1 | c) + P) ^ P`.
 Shifts are `vpshldvq`/`vpshrdvq` of masked loads of neighbouring limbs.
-Products (64 x 64 -> 128-bit limb products, which AVX-512 has no instruction
-for), quotients and remainders (shift and subtract from the dividend's top bit)
-and decimal printing (`check_wide_decimal`, repeated division by 10^19) stay
-scalar: no unit of the corpus has a wide constant, and these run once a
-folded node.
+Wide division estimates one base-2^32 quotient digit from the leading digits of
+the remainder and divisor, then subtracts eight partial products per vector.
+When the estimate is high, it restores the divisor in groups of sixteen digits.
+Both operations mask their final chunk. Products of whole wide constants and
+decimal printing (`check_wide_decimal`, repeated division by 10^19) stay scalar.
 
 `float`, `double` and x86 `long double` folding uses those formats, including
 rounding arithmetic results to their destination precision. Converting a
