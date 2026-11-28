@@ -1028,9 +1028,27 @@ static bool pp_test_line_ends(void)
 // ---------------------------------------------------------------------------------------------------------------------
 // pp_test_windows
 
-// BUSTER_PP_WINDOW_TEST_SOURCES sources from `seed`, each in one of five language modes (with C's raw strings and
-// without, digit separators or not, without "//" comments and digraphs, and with literal prefixes to split), prepared
-// whole by both kernels and in windows of several sizes, each window's line pages against a count a byte at a time.
+// Only the first and last bitmap pages need storage to check the end of the token ID space.
+static uint64_t pp_window_test_last_line_word(uint64_t* checks)
+{
+    const uint64_t last_word = UINT32_MAX / 64;
+    const uint64_t bytes = (last_word + 1) * sizeof(uint64_t);
+    uint64_t* lines = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (lines == MAP_FAILED)
+    {
+        return 1;
+    }
+    const uint32_t begin = UINT32_MAX & ~63u;
+    lines[0] = 1;
+    lines[last_word] = UINT64_C(1) << 61;
+    const bool found = pp_next_line(lines, UINT32_MAX, begin) == begin + 61;
+    const bool exhausted = pp_next_line(lines, UINT32_MAX, begin + 61) == UINT32_MAX;
+    const bool last = pp_next_line(lines, UINT32_MAX, UINT32_MAX - 1) == UINT32_MAX;
+    munmap(lines, bytes);
+    *checks += 3;
+    return !found + !exhausted + !last;
+}
+
 // Whole files and lexer windows now publish the same table. Check its columns against fixed token positions.
 static uint64_t pp_window_test_whole_directives(uint64_t* checks)
 {
@@ -1081,6 +1099,9 @@ static uint64_t pp_window_test_whole_directives(uint64_t* checks)
     return failures;
 }
 
+// BUSTER_PP_WINDOW_TEST_SOURCES sources from `seed`, each in one of five language modes (with C's raw strings and
+// without, digit separators or not, without "//" comments and digraphs, and with literal prefixes to split), prepared
+// whole by both kernels and in windows of several sizes, each window's line pages against a count a byte at a time.
 static bool pp_test_windows(uint64_t seed)
 {
     static const uint32_t windows[] = { 1, 7, 64, 100, 333, 1024, 4096, 8192 };
@@ -1100,7 +1121,7 @@ static bool pp_test_windows(uint64_t seed)
     }
     uint64_t random = seed ^ 0x116116116ull;
     uint64_t line_end_checks = 0;
-    const uint64_t line_end_failures = pp_window_test_line_ends(&random, &line_end_checks) + pp_window_test_cut_fixtures(&line_end_checks);
+    const uint64_t line_end_failures = pp_window_test_line_ends(&random, &line_end_checks) + pp_window_test_cut_fixtures(&line_end_checks) + pp_window_test_last_line_word(&line_end_checks);
     uint64_t place_checks = 0;
     const uint64_t place_failures = pp_window_test_places(&random, &place_checks) + pp_window_test_whole_directives(&place_checks);
     uint64_t failures = 0;

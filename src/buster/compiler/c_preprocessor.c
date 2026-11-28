@@ -2654,17 +2654,17 @@ static uint8_t pp_directive_kind_of(IdentId name)
 static uint32_t pp_next_line(const uint64_t* lines, uint32_t count, uint32_t after)
 {
     uint32_t result = count;
-    uint32_t i = after + 1;
+    uint64_t i = (uint64_t)after + 1;
     bool found = false;
     while (!found && i < count)
     {
         const uint64_t bits = lines[i / 64] & ~_bzhi_u64(~0ull, i % 64);
         if (bits != 0)
         {
-            result = (i & ~63u) + (uint32_t)__builtin_ctzll(bits);
+            result = ((uint32_t)i & ~63u) + (uint32_t)__builtin_ctzll(bits);
             found = true;
         }
-        i = (i & ~63u) + 64;
+        i = (i & ~UINT64_C(63)) + 64;
     }
     return result < count ? result : count;
 }
