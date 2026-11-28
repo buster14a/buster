@@ -915,6 +915,8 @@ static const ParseTestSnippet parse_test_snippets[] =
     // labels names, which nothing continues; an asm label is string literals, and a top-level asm block its template.
     { "int x asm(\"a\" \"b\"), y __asm__(\"c\") = 1; void f(int z) { asm(\"a\" \"b\" : \"=r\" \"m\"(z), [b] \"=r\"(z) : \"r\"(z) : \"memory\", \"cc\"); }\n", "", 0 },
     { "void f(void) { asm(\"\" + 1); }\n", "1:23: expected ')'", 0 },
+    { "void f(int p){asm(\"\" : \"=r\"(p) : \"r\"(p)];}\n", "1:40: expected ')'", 0 },
+    { "void f(void *p){asm volatile(\"\"::\"m\"(*(void *volatile *)p):\"memory\"};}\n", "1:68: expected ')'", 0 },
     { "void f(void) { asm(\"a\", \"b\"); }\n", "1:23: expected ')'", 0 },
     { "void f(int x) { asm(\"\" : \"=r\"(x) + 1); }\n", "1:34: expected ')'", 0 },
     { "void f(void) { asm(\"\" ::: \"memory\" + 1); }\n", "1:36: expected ')'", 0 },

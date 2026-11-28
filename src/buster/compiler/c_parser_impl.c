@@ -8177,12 +8177,13 @@ static uint32_t parse_inline_asm_close(const ParseKernels* kernels, const ParseI
         }
         open += 1;
     }
-    if (open >= end || kernels->roles[open] != PARSE_ROLE_OPEN_ASM)
+    if (open >= end || input->kinds[open] != PARSE_KIND_L_PAREN || kernels->roles[open] != PARSE_ROLE_OPEN_ASM)
     {
         return BUSTER_PARSE_NONE;
     }
     const uint32_t close = kernels->parents[open];
-    if (close <= open + 1 || close >= end || close - open > 65 || kernels->enclosing[close] != open || kernels->roles[close] != PARSE_ROLE_CLOSE_ASM ||
+    if (close <= open + 1 || close >= end || close - open > 65 || input->kinds[close] != PARSE_KIND_R_PAREN ||
+        kernels->enclosing[close] != open || kernels->roles[close] != PARSE_ROLE_CLOSE_ASM ||
         kernels->roles[close + 1] != PARSE_ROLE_TERMINATOR || input->kinds[close + 1] != PARSE_KIND_SEMI || input->kinds[open + 1] != PARSE_KIND_STRING)
     {
         return BUSTER_PARSE_NONE;
@@ -8245,7 +8246,7 @@ static bool parse_static_parameter_bound(const ParseKernels* kernels, const Pars
     const uint32_t close = kernels->parents[open];
     if (parameters >= open || kernels->roles[parameters] != PARSE_ROLE_OPEN_FUNCTION || kernels->enclosing[token - 2] != parameters ||
         kernels->enclosing[token] != open || close <= token + 1 || close > end || close - token - 1 > 64 ||
-        kernels->roles[close] != PARSE_ROLE_CLOSE_SUBSCRIPT || kernels->enclosing[close] != open)
+        input->kinds[close] != PARSE_KIND_R_SQUARE || kernels->roles[close] != PARSE_ROLE_CLOSE_SUBSCRIPT || kernels->enclosing[close] != open)
     {
         return false;
     }
@@ -8255,9 +8256,9 @@ static bool parse_static_parameter_bound(const ParseKernels* kernels, const Pars
     const __m512i roles = _mm512_maskz_loadu_epi8(live, kernels->roles + first);
     const uint64_t numbers = parse_equal8(kinds, PARSE_KIND_NUMBER) & parse_equal8(roles, PARSE_ROLE_OPERAND);
     const uint64_t sizes = parse_equal8(kinds, PARSE_KIND_SIZEOF) & parse_equal8(roles, PARSE_ROLE_PREFIX);
-    const uint64_t opens = parse_equal8(roles, PARSE_ROLE_OPEN_SIZEOF);
+    const uint64_t opens = parse_equal8(roles, PARSE_ROLE_OPEN_SIZEOF) & parse_equal8(kinds, PARSE_KIND_L_PAREN);
     const uint64_t types = parse_equal8(kinds, PARSE_KIND_TYPE) & parse_equal8(roles, PARSE_ROLE_SPECIFIER);
-    const uint64_t closes = parse_equal8(roles, PARSE_ROLE_CLOSE_SIZEOF);
+    const uint64_t closes = parse_equal8(roles, PARSE_ROLE_CLOSE_SIZEOF) & parse_equal8(kinds, PARSE_KIND_R_PAREN);
     const uint64_t binary = _mm512_cmpge_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_MULTIPLICATIVE)) &
                             _mm512_cmple_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LOGICAL_OR));
     return (numbers & 1) != 0 && (((numbers | closes) >> (close - first - 1)) & 1) != 0 && (numbers | sizes | opens | types | closes | binary) == live &&
