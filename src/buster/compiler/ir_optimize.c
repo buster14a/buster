@@ -959,20 +959,62 @@ static const uint8_t ir_optimize_effects[BUSTER_IR_OP_TABLE] = {
 
 #include "ir_optimize_simd.c"
 
+// Newly executable blocks activate every instruction. An additional predecessor changes only the
+// executable-input set of the leading phis. SSA values notify their own users through the use list.
+static void ir_optimize_enqueue_block(IrOptimizeWork* work, uint32_t block, bool phis_only)
+{
+    const IrFunction* function = work->function;
+    const uint32_t end = function->block_offsets[(uint64_t)block + 1];
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    uint32_t tail = work->tail;
+    uint32_t added = 0;
+    for (uint32_t i = function->block_offsets[block]; i < end;)
+    {
+        // Limit the input packet to the writable span at the end of the ring. Its compressed
+        // output always fits, including when a phi already occupies the deferred-phi queue.
+        const uint32_t span = function->instruction_count - tail;
+        const uint32_t available = end - i < span ? end - i : span;
+        const uint32_t count = available < 16 ? available : 16;
+        const __mmask16 valid = (__mmask16)_bzhi_u32(UINT16_MAX, count);
+        __mmask16 active = valid;
+        if (phis_only)
+        {
+            const __m128i operations = _mm_maskz_loadu_epi8(valid, function->op + i);
+            active = _mm_mask_cmpeq_epi8_mask(valid, operations, _mm_set1_epi8(IR_PHI));
+        }
+        const __m128i queued = _mm_maskz_loadu_epi8(active, work->queued + i);
+        const __mmask16 fresh = _mm_mask_cmpeq_epi8_mask(active, queued, _mm_setzero_si128());
+        _mm_mask_storeu_epi8(work->queued + i, active, _mm_set1_epi8(1));
+        _mm512_mask_compressstoreu_epi32(work->queue + tail, fresh, _mm512_add_epi32(_mm512_set1_epi32((int32_t)i), lanes));
+        const uint32_t entries = (uint32_t)__builtin_popcount(fresh);
+        added += entries;
+        tail += entries;
+        if (tail == function->instruction_count)
+        {
+            tail = 0;
+        }
+        if (active != valid)
+        {
+            break;
+        }
+        i += count;
+    }
+    work->tail = tail;
+    work->queued_count += added;
+}
+
 static bool ir_optimize_mark_edge(IrOptimizeWork* work, uint32_t edge, bool queue)
 {
     const bool changed = work->edges[edge] == 0;
     if (changed)
     {
         const uint32_t block = work->cfg.successors[edge];
+        const bool executable = work->blocks[block] != 0;
         work->edges[edge] = 1;
         work->blocks[block] = 1;
         if (queue)
         {
-            for (uint32_t i = work->function->block_offsets[block]; i < work->function->block_offsets[(uint64_t)block + 1]; i += 1)
-            {
-                ir_optimize_enqueue(work, i);
-            }
+            ir_optimize_enqueue_block(work, block, executable);
         }
     }
     return changed;
@@ -1071,11 +1113,27 @@ static __attribute__((aligned(64))) bool ir_optimize_visit(IrOptimizeWork* work,
 static bool ir_optimize_settle_unknown(IrOptimizeWork* work, bool queue)
 {
     bool changed = false;
-    for (uint32_t i = 0; i < work->function->instruction_count; i += 1)
+    const IrFunction* function = work->function;
+    for (uint32_t block = 0; block < function->block_count; block += 1)
     {
-        if (work->blocks[work->cfg.instruction_blocks[i]] != 0 && work->states[i] == IROPT_UNKNOWN)
+        if (work->blocks[block] == 0)
         {
-            changed = ir_optimize_publish(work, i, IROPT_OVERDEFINED, (IrConstant){ 0 }, queue) || changed;
+            continue;
+        }
+        const uint32_t end = function->block_offsets[(uint64_t)block + 1];
+        for (uint32_t i = function->block_offsets[block]; i < end;)
+        {
+            const uint32_t count = end - i < 64 ? end - i : 64;
+            const __mmask64 valid = _bzhi_u64(UINT64_MAX, count);
+            const __m512i states = _mm512_maskz_loadu_epi8(valid, work->states + i);
+            uint64_t unknown = _mm512_mask_cmpeq_epi8_mask(valid, states, _mm512_set1_epi8(IROPT_UNKNOWN));
+            while (unknown != 0)
+            {
+                const uint32_t instruction = i + (uint32_t)__builtin_ctzll(unknown);
+                unknown &= unknown - 1;
+                changed = ir_optimize_publish(work, instruction, IROPT_OVERDEFINED, (IrConstant){ 0 }, queue) || changed;
+            }
+            i += count;
         }
     }
     return changed;
@@ -1083,12 +1141,9 @@ static bool ir_optimize_settle_unknown(IrOptimizeWork* work, bool queue)
 
 static __attribute__((aligned(64))) void ir_optimize_sccp_worklist(IrOptimizeWork* work)
 {
-    for (uint32_t i = 0; i < work->function->instruction_count; i += 1)
+    if (work->function->block_count != 0)
     {
-        if (work->blocks[work->cfg.instruction_blocks[i]] != 0)
-        {
-            ir_optimize_enqueue(work, i);
-        }
+        ir_optimize_enqueue_block(work, 0, false);
     }
     bool pending = true;
     while (pending)

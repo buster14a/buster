@@ -2039,6 +2039,71 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test);
 
 #include "tier1_schedule_ir_test.c"
 
+// A newly executable block can land on either side of the ring's wrap, with some of its
+// instructions already in the main or deferred queue. A second edge activates only leading phis.
+static void ir_optimize_test_sccp_queue(IrOptimizeTest* test)
+{
+    const uint32_t sizes[] = {1, 2, 15, 16, 17, 31, 32, 33, 64, 65};
+    for (uint32_t size = 0; size < BUSTER_ARRAY_LENGTH(sizes); size += 1)
+    {
+        const uint32_t count = sizes[size];
+        uint32_t offsets[] = {0, 3, 3 + count};
+        const uint32_t capacity = offsets[2];
+        uint8_t operations[68] = {0};
+        const IrFunction function = {.block_count = 2, .instruction_count = capacity, .block_offsets = offsets, .op = operations};
+        for (uint32_t phis = 0; phis <= count; phis += 1)
+        {
+            memset(operations + 3, IR_PHI, phis);
+            memset(operations + 3 + phis, IR_COPY, count - phis);
+            for (uint32_t tail = 0; tail < capacity; tail += 1)
+            {
+                for (uint32_t phi_only = 0; phi_only < 2; phi_only += 1)
+                {
+                    uint8_t queued[69] = {0};
+                    uint32_t queue[69];
+                    memset(queue, 0xff, sizeof(queue));
+                    uint32_t active = 0;
+                    for (uint32_t i = 0; i < capacity; i += 1)
+                    {
+                        queued[i] = i % 5 == 2 || (i < 3 + phis && i >= 3 && i % 7 == 4);
+                        active += i % 5 == 2;
+                    }
+                    const uint32_t head = (tail + capacity - active) % capacity;
+                    uint32_t at = head;
+                    for (uint32_t i = 0; i < capacity; i += 1)
+                    {
+                        if (i % 5 == 2)
+                        {
+                            queue[at] = i;
+                            at = (at + 1) % capacity;
+                        }
+                    }
+                    uint8_t expected_queued[69];
+                    uint32_t expected_queue[69];
+                    memcpy(expected_queue, queue, sizeof(queue));
+                    memcpy(expected_queued, queued, sizeof(queued));
+                    uint32_t added = 0;
+                    for (uint32_t i = 3; i < (phi_only ? 3 + phis : capacity); i += 1)
+                    {
+                        if (expected_queued[i] == 0)
+                        {
+                            expected_queued[i] = 1;
+                            expected_queue[at] = i;
+                            at = (at + 1) % capacity;
+                            added += 1;
+                        }
+                    }
+                    IrOptimizeWork work = {.function = &function, .queued = queued, .queue = queue, .head = head, .tail = tail, .queued_count = active};
+                    ir_optimize_enqueue_block(&work, 1, phi_only != 0);
+                    ir_optimize_test_expect(test, work.tail == at && work.head == head && work.queued_count == active + added &&
+                                            memcmp(queued, expected_queued, sizeof(queued)) == 0 && memcmp(queue, expected_queue, sizeof(queue)) == 0,
+                                            "SCCP enqueues eligible instructions once in order and stays inside the ring");
+                }
+            }
+        }
+    }
+}
+
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
 {
     IrOptimizeTest test = {
@@ -2079,6 +2144,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         const uint64_t seed = test.random;
         ir_optimize_test_folds(&test);
         ir_optimize_test_fold_guards(&test);
+        ir_optimize_test_sccp_queue(&test);
         ir_optimize_test_ir(&test);
         ir_optimize_test_layout(&test);
         ir_optimize_test_simd(&test);
