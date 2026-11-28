@@ -545,6 +545,7 @@ static __attribute__((noinline)) BranchSizing branch_sizing_benchmark_through(X8
         length = branch_sizing_lengths(records, count, offsets);
         result.error = branch_sizing_too_large(length, branch_count) ? BRANCH_SIZING_ERROR_TOO_LARGE : BRANCH_SIZING_OK;
     }
+    const bool spans = path == BRANCH_SIZING_BENCHMARK_VECTOR && branch_sizing_direct_spans(count, branch_count);
     bool changed = false;
     uint32_t current = 0;
     if (result.error == BRANCH_SIZING_OK && stop >= BRANCH_SIZING_BENCHMARK_SETUP)
@@ -559,7 +560,7 @@ static __attribute__((noinline)) BranchSizing branch_sizing_benchmark_through(X8
         }
         result.rounds = 1;
     }
-    if (result.error == BRANCH_SIZING_OK && stop >= BRANCH_SIZING_BENCHMARK_RANKS && changed)
+    if (result.error == BRANCH_SIZING_OK && stop >= BRANCH_SIZING_BENCHMARK_RANKS && changed && !spans)
     {
         if (path == BRANCH_SIZING_BENCHMARK_COMPRESS)
         {
@@ -582,6 +583,10 @@ static __attribute__((noinline)) BranchSizing branch_sizing_benchmark_through(X8
                 {
                     memset(columns.prefix[1], 0, (branch_count + 1) * sizeof(uint32_t));
                 }
+                if (spans)
+                {
+                    branch_sizing_ranks_direct(branches, targets, branch_count, &columns);
+                }
                 result.evaluations = branch_sizing_worklist(branch_count, &columns, current);
                 branch_sizing_prefix_vector(branch_count, &columns, current ^ 1);
                 current ^= 1;
@@ -593,7 +598,7 @@ static __attribute__((noinline)) BranchSizing branch_sizing_benchmark_through(X8
             }
             else
             {
-                changed = branch_sizing_round_vector(branch_count, &columns, current);
+                changed = branch_sizing_round_vector(branches, targets, branch_count, &columns, current, spans);
             }
             current ^= 1;
             result.rounds += 1;
@@ -617,7 +622,10 @@ static __attribute__((noinline)) BranchSizing branch_sizing_benchmark_through(X8
         else
         {
             result.length = length;
-            result.long_branches = branch_sizing_write(records, branches, branch_count, &columns, columns.displacement0);
+            if (branch_count > BUSTER_BRANCH_SIZING_LANES || path == BRANCH_SIZING_BENCHMARK_COMPRESS)
+            {
+                result.long_branches = branch_sizing_write(records, branches, branch_count, &columns, columns.displacement0);
+            }
         }
     }
     scratch_end(scratch);

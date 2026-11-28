@@ -34,8 +34,8 @@ Contracts 1 and 2 of
 `size_branches` has one implementation, the vector one: #2924 removed its
 scalar twin, `size_branches_scalar`, after
 [the gate](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17)
-measured the vector path 6.4 to 20 times as fast in every row (two of its phase
-timings still lose on small functions: #2946). The tests' oracle is their own
+measured the vector path 6.4 to 20 times as fast in every row. #2946 tracks
+the rank and write phases on small functions. The tests' oracle is their own
 relaxation over the records. Like `x86_encode`, `size_branches` is an internal
 function of the code generator: it takes what `branch_sizing_validate` accepts
 and checks nothing about it in its loops, as the owner decided for the encoder in #182
@@ -133,9 +133,9 @@ exclusive prefix sums over the branches, its displacement is
 
     d_k = D0_k + P[rank_k] - P[k + 1]
 
-where rank_k is the number of branches before record t_k: the growth between
-its end and its target, which for a backward branch (rank_k ≤ k) is negative
-and holds its own. So a round is one pass over the branches, 16 at a time:
+where rank_k counts the branches before record t_k. This difference is the net growth between
+a branch’s end and its target. For a backward branch (rank_k ≤ k) it includes
+the branch’s own growth with a negative sign. So a round is one pass over the branches, 16 at a time:
 gather P at the ranks, compare the displacements with the rel8 range into a
 mask, grow the masked branches (a long branch stays long), and take the next
 round's prefix sums with in-register scans (four `valignd` and adds, and the
@@ -146,8 +146,7 @@ A displacement's magnitude only grows with the growths in its span, so the
 rounds grow a branch only when it is out of range with lengths no longer than
 the smallest fixpoint's: every order of growing ends at that fixpoint, the
 unique smallest one, which is also GNU as's (it starts every branch short and
-grows the ones out of range until none is). Both paths do the same Jacobi
-rounds, so the twin agrees with the vector path round for round.
+grows the ones out of range until none is). The rounds use the previous round’s growths for every target.
 
 ### A short branch's reach, and the worklist
 
@@ -172,38 +171,39 @@ their growths against zero, as a mask).
 
 ### Ranks
 
-The ranks are computed only once a branch has grown in the first round: most
-small functions settle there, with every displacement D0. The table has an
-entry per 32 records, their branch bits in the low half and the number of
-branches before them in the high half, so a rank is an entry's count plus a
-popcount of its bits below the target's. The offsets phase reads it too.
+If the first round leaves all branches short, each final displacement equals D0.
+When all branches fit in one 16-lane packet, setup scatters these displacements
+directly into the records. The function keeps the offsets from `x86_measure`.
 
-- **Functions of fewer than 512 records** have at most 16 entries, a
-  register's dwords, and build them in registers without memory, 8 branches a
-  pass (`branch_sizing_ranks_direct` and `branch_sizing_ranks_register`).
-  - **The bits:** a branch broadcast, less each entry's first record, is its
-    bit's position in its own entry and 32 or more (unsigned) in every other,
-    where `vpsllvd` gives 0, so ORing the shifts sets its bit alone.
-  - **The counts and the store:** the counts are the bits' exclusive prefix
-    sums. The table goes to memory once, for the offsets phase.
-  - **Up to 16 branches:** each rank is counted directly, a compare and a
-    subtraction per branch, so the rounds' gathers don't wait for the table.
-  - **More branches:** a rank is two `vpermd` lookups in the table.
+- **Fewer than 512 records and at most 16 branches.** Each subsequent round
+  visits the long branches in the packet. A long branch contributes its
+  growth to every target whose record index is strictly greater than the
+  branch's index. A masked vector add accumulates these contributions for up
+  to 16 targets together. This computes P at each target directly. Only the
+  worklist needs target ranks, which it computes on entry by counting
+  preceding branch records.
+- **Fewer than 512 records and more than 16 branches.** A register holds
+  the branch bits for up to sixteen groups of 32 records. Each target's rank
+  comes from the group's exclusive count and the population of its bits
+  below that target. The offsets pass reuses the table.
 - **Larger functions** build the bits from a byte map with `vptestmb` (64
   records at a time), gather each target's entry as a qword (8 at a time) and
   count with `vpopcntd` (`branch_sizing_ranks_table`).
 
-Before #2946 every function took the byte map: a `memset`, a store per branch
+The first #2946 refinement replaced a byte map previously built for every function. That map cost a `memset`, a store per branch
 and a 64-byte load of those stores, then gathers of the table just stored. The
-register build takes 4.2 and 4.7 cycles per branch on the 40-record rows
+first register build took 4.2 and 4.7 cycles per branch on the 40-record rows
 against 5.3 and 6.2, and 2.0 to 3.3 on the rows of 250 records and the mix
 against 3.6 to 4.7, below the removed scalar path's figures in nine of the
 eleven rows.
 
 ### Offsets
 
-Each record's final offset is its first round's plus P at its rank. The pass
-starts at the table entry that holds the first long branch, since the records
+Each record's final offset is its first round's plus P at its rank. In the
+single-packet case below 512 records, every record after a long branch
+through the next long branch receives the same increment. Masked updates
+apply that increment to 16 offsets at a time and stop at the record count.
+For functions that built the rank table, the pass starts at the table entry that holds the first long branch, since the records
 before it keep theirs. It takes 16 records at a time: the branches
 before them come from the table, the branches among them before each record
 from a `vpopcntd` of their branch bits masked per lane (at most 15), and a
@@ -227,12 +227,14 @@ times the removed scalar path's cycles with the same code. Setup stored six
   round when the round limit is 1 (the tests'), where `branch_sizing_run`
   zeroes them for it.
 
-A function no branch grew in also skips the offsets pass, whose records all
-keep `x86_measure`'s offsets, and its write takes the displacements from D0.
+A function whose branches stay short keeps all its measured offsets. With more
+than one packet it reads D0 for the final write.
 
-The write still stores every branch's form, as `form + 0` where it stays
-short. Leaving those stores out, so that the write of a function with no long
-branch touched the displacements alone, made sizing 1.5% faster and the
+For a function that still needs a final write, the code counts the long
+branches from each 16-lane growth mask and stores the records in branch order.
+
+The earlier separate write stored every form, including `form + 0` for a short
+branch. Skipping those form stores in that loop made sizing 1.5% faster and the
 caller's sizing and encoding together (`size_encode`) 5 to 6% **slower** on
 the 40-record rows: the encode reads every record's form straight after.
 
@@ -253,16 +255,16 @@ the functions of 250 records 2% of the whole path.
 
 ### What the phase figures mean
 
-The ranks phase reads 4.2 cycles per branch on tier0-40 and 4.7 on
+The first register-table refinement measured 4.2 cycles per branch on tier0-40 and 4.7 on
 optimized-40, above the removed scalar path's 2.7 and 3.4, and the write 7.2
 and 6.5 against 3.0 and 2.0, although the whole path is 4.7 and 5.4% faster
-there than before #2946 (4.1% on the mix) and the caller's sizing and encoding
+there than before that refinement (4.1% on the mix) and the caller's sizing and encoding
 together 3.0 and 3.7% faster (3.3% on the mix). The
 figures hold the stores of the phases before them: with the growth columns
 moved into a pass of their own, the same ranks code read 1.2 to 1.5 cycles per
 branch, and with an `mfence` closing every run, so that each phase pays only
 for its own stores, the write read 3.6 to 3.9 with the 8-branch passes below.
-#2946 stays open for the rest.
+The [small-function measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/branch-sizing-small-2946-2026-11-23) record these earlier experiments and the comparison with direct target growth.
 
 ### Lengths and memory
 
