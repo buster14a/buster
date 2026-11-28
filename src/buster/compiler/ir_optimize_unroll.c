@@ -1022,51 +1022,106 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
     return outcome;
 }
 
+typedef struct IrUnrollOperands IrUnrollOperands;
+struct IrUnrollOperands
+{
+    __m512i a, b, c;
+    __mmask16 use_a, use_b, use_c;
+    __m128i classes;
+};
+
+// Copy the byte columns once and identify the value operands among these rows.
+static inline __attribute__((always_inline)) IrUnrollOperands ir_unroll_load_operands(const IrFunction* f, uint32_t first, IrFunction* view, uint32_t out, __mmask16 active)
+{
+    const __m128i operations = _mm_maskz_loadu_epi8(active, f->op + first);
+    _mm_mask_storeu_epi8(view->op + out, active, operations);
+    _mm_mask_storeu_epi8(view->type + out, active, _mm_maskz_loadu_epi8(active, f->type + first));
+    _mm_mask_storeu_epi8(view->flags + out, active, _mm_maskz_loadu_epi8(active, f->flags + first));
+    _mm_mask_storeu_epi8(view->alignment_log2 + out, active, _mm_maskz_loadu_epi8(active, f->alignment_log2 + first));
+    const __m128i operands = _mm512_castsi512_si128(_mm512_permutex2var_epi8(_mm512_loadu_si512(ir_value_columns), _mm512_zextsi128_si512(operations), _mm512_loadu_si512(ir_value_columns + 64)));
+    const __m512i a = _mm512_maskz_loadu_epi32(active, f->a + first);
+    const __m512i b = _mm512_maskz_loadu_epi32(active, f->b + first);
+    const __m512i c = _mm512_maskz_loadu_epi32(active, f->c + first);
+    // A checked fixed value operand always has an id. Optional operands can be absent.
+    const __mmask16 use_a = active & _mm_test_epi8_mask(operands, _mm_set1_epi8(1)) & _mm512_cmpneq_epi32_mask(a, _mm512_set1_epi32(-1));
+    const __mmask16 use_b = active & _mm_test_epi8_mask(operands, _mm_set1_epi8(2)) & _mm512_cmpneq_epi32_mask(b, _mm512_set1_epi32(-1));
+    const __mmask16 use_c = active & _mm_test_epi8_mask(operands, _mm_set1_epi8(4)) & _mm512_cmpneq_epi32_mask(c, _mm512_set1_epi32(-1));
+    return (IrUnrollOperands){ a, b, c, use_a, use_b, use_c, operands };
+}
+
+static inline __attribute__((always_inline)) __m512i ir_unroll_gather(__m512i values, __mmask16 mask, const uint32_t* middle, __m512i origin)
+{
+    return _mm512_mask_i32gather_epi32(values, mask, _mm512_sub_epi32(values, origin), middle, 4);
+}
+
+static inline __attribute__((always_inline)) void ir_unroll_store_operands(IrFunction* view, uint32_t out, __mmask16 active, __m512i a, __m512i b, __m512i c)
+{
+    _mm512_mask_storeu_epi32(view->a + out, active, a);
+    _mm512_mask_storeu_epi32(view->b + out, active, b);
+    _mm512_mask_storeu_epi32(view->c + out, active, c);
+}
+
 // The fixed operands of instructions [first, first + count) of `f`, through `map` where they are values, into `a`, `b`
 // and `c` from `out`; their opcode, type, flags and alignment copied. Phis', calls' and extra values' operands, which
-// the extra array holds, are the caller's.
-static void ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count, const uint32_t* map, IrFunction* view, uint32_t out)
+// the extra array holds, are the caller's. Return whether any opcode in the slice can own one of those lists.
+static bool ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count, const uint32_t* map, IrFunction* view, uint32_t out)
 {
-    memcpy(view->op + out, f->op + first, count);
-    memcpy(view->type + out, f->type + first, count);
-    memcpy(view->flags + out, f->flags + first, count);
-    memcpy(view->alignment_log2 + out, f->alignment_log2 + first, count);
-    if (f->instruction_count <= INT32_MAX)
+    // Every valid unsigned id lies within a signed dword of the middle of its map.
+    const uint32_t center = f->instruction_count / 2;
+    const __m512i origin = _mm512_set1_epi32((int)center);
+    const uint32_t* middle = map + center;
+    __m128i classes = _mm_setzero_si128();
+    uint64_t at = 0;
+    for (; at + 16 <= count; at += 16)
     {
-        const __m512i none = _mm512_set1_epi32(-1);
-        const __m512i one = _mm512_set1_epi32(1);
-        const __m512i two = _mm512_set1_epi32(2);
-        const __m512i four = _mm512_set1_epi32(4);
-        for (uint32_t at = 0; at < count; at += 16)
-        {
-            const uint32_t lanes = count - at < 16 ? count - at : 16;
-            const __mmask16 active = (__mmask16)((1u << lanes) - 1u);
-            const __m128i operations = _mm_maskz_loadu_epi8(active, f->op + first + at);
-            const __m512i operands = ir_lookup_bytes(ir_operand_table, operations);
-            const __m512i optional = ir_lookup_bytes(ir_optional_table, operations);
-            const __m512i a = _mm512_maskz_loadu_epi32(active, f->a + first + at);
-            const __m512i b = _mm512_maskz_loadu_epi32(active, f->b + first + at);
-            const __m512i c = _mm512_maskz_loadu_epi32(active, f->c + first + at);
-            // ir_value_mask: an opcode's operands, and its optional ones where they aren't BUSTER_IR_NONE.
-            const __mmask16 use_a = active & (_mm512_test_epi32_mask(operands, one) | (_mm512_test_epi32_mask(optional, one) & _mm512_cmpneq_epi32_mask(a, none)));
-            const __mmask16 use_b = active & (_mm512_test_epi32_mask(operands, two) | (_mm512_test_epi32_mask(optional, two) & _mm512_cmpneq_epi32_mask(b, none)));
-            const __mmask16 use_c = active & (_mm512_test_epi32_mask(operands, four) | (_mm512_test_epi32_mask(optional, four) & _mm512_cmpneq_epi32_mask(c, none)));
-            _mm512_mask_storeu_epi32(view->a + out + at, active, _mm512_mask_i32gather_epi32(a, use_a, a, map, 4));
-            _mm512_mask_storeu_epi32(view->b + out + at, active, _mm512_mask_i32gather_epi32(b, use_b, b, map, 4));
-            _mm512_mask_storeu_epi32(view->c + out + at, active, _mm512_mask_i32gather_epi32(c, use_c, c, map, 4));
-        }
+        const IrUnrollOperands rows = ir_unroll_load_operands(f, first + (uint32_t)at, view, out + (uint32_t)at, UINT16_MAX);
+        classes = _mm_or_si128(classes, rows.classes);
+        ir_unroll_store_operands(view, out + (uint32_t)at, UINT16_MAX, ir_unroll_gather(rows.a, rows.use_a, middle, origin),
+                                 ir_unroll_gather(rows.b, rows.use_b, middle, origin), ir_unroll_gather(rows.c, rows.use_c, middle, origin));
     }
-    else
+    if (at < count)
     {
-        for (uint32_t k = 0; k < count; k += 1)
+        const __mmask16 active = (__mmask16)((1u << (count - (uint32_t)at)) - 1);
+        const IrUnrollOperands rows = ir_unroll_load_operands(f, first + (uint32_t)at, view, out + (uint32_t)at, active);
+        classes = _mm_or_si128(classes, rows.classes);
+        __m512i gathered_a;
+        __m512i gathered_b;
+        __m512i gathered_c = rows.c;
+        // A partial packet can combine columns whose active value lanes fit in five lanes per column, or eight lanes in each of the first two columns.
+        if (((rows.use_a | rows.use_b | rows.use_c) & 0xffe0u) == 0)
         {
-            const uint32_t i = first + k;
-            const uint32_t mask = ir_value_mask(f, i);
-            view->a[out + k] = (mask & 1) != 0 ? map[f->a[i]] : f->a[i];
-            view->b[out + k] = (mask & 2) != 0 ? map[f->b[i]] : f->b[i];
-            view->c[out + k] = (mask & 4) != 0 ? map[f->c[i]] : f->c[i];
+            const __m512i ab = _mm512_mask_alignr_epi32(rows.a, 0x03e0, rows.b, rows.b, 11);
+            const __m512i abc = _mm512_mask_alignr_epi32(ab, 0x7c00, rows.c, rows.c, 6);
+            const __mmask16 lanes_abc = rows.use_a | (unsigned)rows.use_b << 5 | (unsigned)rows.use_c << 10;
+            const __m512i got = lanes_abc == 0 ? abc : ir_unroll_gather(abc, lanes_abc, middle, origin);
+            gathered_a = _mm512_mask_mov_epi32(rows.a, 0x001f, got);
+            gathered_b = _mm512_mask_alignr_epi32(rows.b, 0x001f, got, got, 5);
+            gathered_c = _mm512_mask_alignr_epi32(rows.c, 0x001f, got, got, 10);
         }
+        else if (((rows.use_a | rows.use_b) & 0xff00u) == 0)
+        {
+            const __m512i ab = _mm512_inserti64x4(rows.a, _mm512_castsi512_si256(rows.b), 1);
+            const __mmask16 lanes_ab = (unsigned)rows.use_a | (unsigned)rows.use_b << 8;
+            const __m512i got = ir_unroll_gather(ab, lanes_ab, middle, origin);
+            gathered_a = _mm512_mask_mov_epi32(rows.a, 0xff, got);
+            gathered_b = _mm512_inserti64x4(rows.b, _mm512_extracti64x4_epi64(got, 1), 0);
+            if (rows.use_c != 0)
+            {
+                gathered_c = ir_unroll_gather(rows.c, rows.use_c, middle, origin);
+            }
+        }
+        else
+        {
+            gathered_a = ir_unroll_gather(rows.a, rows.use_a, middle, origin);
+            gathered_b = ir_unroll_gather(rows.b, rows.use_b, middle, origin);
+            if (rows.use_c != 0)
+            {
+                gathered_c = ir_unroll_gather(rows.c, rows.use_c, middle, origin);
+            }
+        }
+        ir_unroll_store_operands(view, out + (uint32_t)at, active, gathered_a, gathered_b, gathered_c);
     }
+    return _mm_movemask_epi8(classes) != 0;
 }
 
 // The rewrite's state: the new function's columns and the next free extra word, call and constant.
@@ -1398,12 +1453,17 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
                 const uint32_t prefix = t == 0 ? (copy == 0 ? loop->main_phis : 2u) : 0u;
                 const uint32_t terminator = offsets[(uint64_t)out_block + 1] - 1u;
                 const uint32_t branch = end - 1u;
-                ir_unroll_remap(f, first, branch - first, map, view, offsets[out_block] + prefix);
-                ir_unroll_remap(f, branch, 1, map, view, terminator);
-                ir_unroll_extras(emit, f, first, branch, offsets[out_block] + prefix, map, blocks_map);
-                for (uint32_t i = first; view->debug != NULL && i < end; i += 1)
+                const uint32_t body = offsets[out_block] + prefix;
+                // Latch and exiting branches are rebuilt below. Other branches immediately follow the copied body.
+                const bool keep_branch = block != loop->latch && block != loop->exiting;
+                if (ir_unroll_remap(f, first, branch - first + keep_branch, map, view, body))
                 {
-                    view->debug->origins[map[i]] = f->debug->origins[i];
+                    ir_unroll_extras(emit, f, first, branch, body, map, blocks_map);
+                }
+                if (view->debug != NULL)
+                {
+                    memcpy(view->debug->origins + body, f->debug->origins + first, (uint64_t)(branch - first) * sizeof(*view->debug->origins));
+                    view->debug->origins[terminator] = f->debug->origins[branch];
                 }
                 // An address of the induction's copy: the main induction (or copy 0's extension of it) and the copy's
                 // offset in the displacement, exact since no copy's induction wraps.
@@ -1679,10 +1739,20 @@ static IrError ir_unroll_rewrite(IrUnrollWork* work, Arena* output, Arena* scrat
         {
             const uint32_t first = f->block_offsets[b];
             const uint32_t end = f->block_offsets[(uint64_t)b + 1];
-            ir_unroll_remap(f, first, end - first - 1, values, &view, offsets[b]);
-            ir_unroll_remap(f, end - 1, 1, values, &view, offsets[(uint64_t)b + 1] - 1);
-            ir_unroll_extras(&emit, f, first, end - 1, offsets[b], values, NULL);
-            ir_unroll_extras(&emit, f, end - 1, end, offsets[(uint64_t)b + 1] - 1, values, NULL);
+            // Only a preheader with inserted instructions separates its old terminator from its body.
+            const uint32_t contiguous_end = inserts[b] == 0 ? end : end - 1;
+            if (ir_unroll_remap(f, first, contiguous_end - first, values, &view, offsets[b]))
+            {
+                ir_unroll_extras(&emit, f, first, contiguous_end, offsets[b], values, NULL);
+            }
+            if (contiguous_end != end)
+            {
+                const uint32_t terminator = offsets[(uint64_t)b + 1] - 1;
+                if (ir_unroll_remap(f, end - 1, 1, values, &view, terminator))
+                {
+                    ir_unroll_extras(&emit, f, end - 1, end, terminator, values, NULL);
+                }
+            }
         }
         for (uint32_t k = 0; error == IR_OK && k < work->accepted_count; k += 1)
         {

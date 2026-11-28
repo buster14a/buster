@@ -1043,6 +1043,73 @@ static void ir_unroll_test_rollback(IrOptimizeTest* test)
     arena_release(&scratch);
 }
 
+// One operand batch crosses the signed gather boundary in each column. The
+// holes are inaccessible so literals and absent optional values cannot be read.
+static void ir_unroll_test_wide_remap(IrOptimizeTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t span = (UINT64_C(1) << 32) * sizeof(uint32_t);
+    uint8_t* storage = mmap(NULL, span + 2 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    bool ready = storage != MAP_FAILED;
+    if (ready)
+    {
+        uint8_t* start = storage + page;
+        ready = mprotect(start, page, PROT_READ | PROT_WRITE) == 0 &&
+                mprotect(start + span / 2 - page, 2 * page, PROT_READ | PROT_WRITE) == 0 &&
+                mprotect(start + span - page, page, PROT_READ | PROT_WRITE) == 0;
+    }
+    ir_optimize_test_expect(test, ready, "wide remap reserves its sparse operand map");
+    if (ready)
+    {
+        uint32_t* map = (uint32_t*)(storage + page);
+        const uint32_t low = 3, before = INT32_MAX, after = UINT32_C(1) << 31, last = UINT32_MAX - 1;
+        map[low] = 11;
+        map[before] = 22;
+        map[after] = 33;
+        map[last] = 44;
+        uint8_t op[] = { IR_FMA, IR_ADDRESS, IR_CALL, IR_RET, IR_INTRINSIC, IR_ADDRESS };
+        uint8_t type[] = { IR_V4I32, IR_PTR, IR_VOID, IR_VOID, IR_I32, IR_PTR };
+        uint8_t flags[] = { 1, 2, 3, 4, 5, 6 };
+        uint8_t align[] = { 0, 1, 2, 3, 4, 5 };
+        uint32_t a[] = { low, after, 123456, BUSTER_IR_NONE, last, before };
+        uint32_t b[] = { before, BUSTER_IR_NONE, 234567, 345678, after, last };
+        uint32_t c[] = { last, 987654, after, 876543, 765432, 654321 };
+        const uint32_t expected_a[] = { 11, 33, 123456, BUSTER_IR_NONE, 44, 22 };
+        const uint32_t expected_b[] = { 22, BUSTER_IR_NONE, 234567, 345678, 33, 44 };
+        const uint32_t expected_c[] = { 44, 987654, 33, 876543, 765432, 654321 };
+        IrFunction input = { .instruction_count = UINT32_MAX, .op = op, .type = type, .flags = flags, .alignment_log2 = align, .a = a, .b = b, .c = c };
+        uint8_t result_bytes[4][8];
+        uint32_t result_values[3][8];
+        IrFunction output = { .op = result_bytes[0], .type = result_bytes[1], .flags = result_bytes[2], .alignment_log2 = result_bytes[3],
+                              .a = result_values[0], .b = result_values[1], .c = result_values[2] };
+        for (uint32_t count = 0; count <= 6; count += 1)
+        {
+            memset(result_bytes, 0xa5, sizeof(result_bytes));
+            memset(result_values, 0xa5, sizeof(result_values));
+            const bool extras = ir_unroll_remap(&input, 0, count, map, &output, 1);
+            ir_optimize_test_expect(test, extras == (count >= 3), "only slices reaching the call or intrinsic can own extra operands");
+            const bool values = memcmp(output.a + 1, expected_a, count * sizeof(uint32_t)) == 0 && memcmp(output.b + 1, expected_b, count * sizeof(uint32_t)) == 0 &&
+                                memcmp(output.c + 1, expected_c, count * sizeof(uint32_t)) == 0;
+            const bool columns = memcmp(output.op + 1, op, count) == 0 && memcmp(output.type + 1, type, count) == 0 &&
+                                 memcmp(output.flags + 1, flags, count) == 0 && memcmp(output.alignment_log2 + 1, align, count) == 0;
+            bool edges = true;
+            for (uint32_t col = 0; col < 4; col += 1)
+            {
+                edges = edges && result_bytes[col][0] == 0xa5 && result_bytes[col][count + 1] == 0xa5;
+            }
+            for (uint32_t col = 0; col < 3; col += 1)
+            {
+                edges = edges && result_values[col][0] == UINT32_C(0xa5a5a5a5) && result_values[col][count + 1] == UINT32_C(0xa5a5a5a5);
+            }
+            ir_optimize_test_expect(test, values && columns && edges, "wide remap gathers values and preserves literals, absent values and padding");
+        }
+    }
+    if (storage != MAP_FAILED)
+    {
+        munmap(storage, span + 2 * page);
+    }
+}
+
 // The budgets: a factor of 1 refuses every loop as too large, a growth of 0 as past the function's, and a factor of 2
 // gives 2 copies.
 static void ir_unroll_test_limits(IrOptimizeTest* test)
@@ -1191,19 +1258,22 @@ static void ir_unroll_test_scans(IrOptimizeTest* test)
                 .b = b,
                 .c = c,
             };
-            ir_unroll_remap(&f, first, count, map, &view, out);
+            const bool extras = ir_unroll_remap(&f, first, count, map, &view, out);
+            bool expected_extras = false;
             bool same = true;
             for (uint32_t k = 0; k < count; k += 1)
             {
                 const uint32_t i = first + k;
                 const uint32_t mask = ir_value_mask(&f, i);
+                const IrOp code = (IrOp)f.op[i];
+                expected_extras |= code == IR_PHI || code == IR_CALL || code == IR_CALL_INDIRECT || code == IR_SCATTER || code == IR_INTRINSIC;
                 same = same && op[out + k] == f.op[i] && type[out + k] == f.type[i] && flags[out + k] == f.flags[i] && alignment[out + k] == f.alignment_log2[i];
                 same = same && a[out + k] == ((mask & 1) != 0 ? map[f.a[i]] : f.a[i]);
                 same = same && b[out + k] == ((mask & 2) != 0 ? map[f.b[i]] : f.b[i]);
                 same = same && c[out + k] == ((mask & 4) != 0 ? map[f.c[i]] : f.c[i]);
             }
             same = same && (out == 0 || a[out - 1] == UINT32_C(0xa5a5a5a5)) && a[out + count] == UINT32_C(0xa5a5a5a5);
-            remapped &= same;
+            remapped &= same && extras == expected_extras;
         }
     }
     ir_optimize_test_expect(test, classified, "the unroller's opcode classes, against their definition");
@@ -1747,6 +1817,7 @@ static __attribute__((unused)) int run_ir_unroll_tests(int argc, char** argv)
         ir_unroll_test_shapes(&test, shapes);
         ir_unroll_test_refusals(&test);
         ir_unroll_test_limits(&test);
+        ir_unroll_test_wide_remap(&test);
         ir_unroll_test_rollback(&test);
         ir_unroll_test_countdown(&test);
         // The digest's random shapes are the default seed's 400.

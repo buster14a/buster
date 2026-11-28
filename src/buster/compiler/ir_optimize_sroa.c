@@ -1147,8 +1147,10 @@ static IrError ir_sroa_construct_view(const IrFunction* f, const IrSroaWork* wor
                 const bool kept = i < end && work->assembled[i] != BUSTER_IR_SROA_ASSEMBLED_LANES;
                 if (!kept && first < i)
                 {
-                    ir_unroll_remap(f, first, i - first, map, &view, map[first]);
-                    ir_unroll_extras(&emit.ir, f, first, i, map[first], map, NULL);
+                    if (ir_unroll_remap(f, first, i - first, map, &view, map[first]))
+                    {
+                        ir_unroll_extras(&emit.ir, f, first, i, map[first], map, NULL);
+                    }
                 }
                 if (!kept && i < end)
                 {
@@ -1744,8 +1746,10 @@ static IrCheck ir_sroa_widen(const IrFunction* function, Arena* output, Arena* s
                     const bool kept = i < end && kinds[i] == BUSTER_IR_SROA_WIDEN_KEEP;
                     if (!kept && first < i)
                     {
-                        ir_unroll_remap(f, first, i - first, map, &view, map[first]);
-                        ir_unroll_extras(&emit, f, first, i, map[first], map, NULL);
+                        if (ir_unroll_remap(f, first, i - first, map, &view, map[first]))
+                        {
+                            ir_unroll_extras(&emit, f, first, i, map[first], map, NULL);
+                        }
                     }
                     if (!kept && i < end)
                     {
@@ -2348,8 +2352,10 @@ static __attribute__((unused)) IrError ir_sroa_scalarize_calls(const IrFunction*
                     const bool kept = i < end && before[i] == 0;
                     if (!kept && first < i)
                     {
-                        ir_unroll_remap(f, first, i - first, map, &view, map[first]);
-                        ir_unroll_extras(&emit, f, first, i, map[first], map, NULL);
+                        if (ir_unroll_remap(f, first, i - first, map, &view, map[first]))
+                        {
+                            ir_unroll_extras(&emit, f, first, i, map[first], map, NULL);
+                        }
                     }
                     if (!kept && i < end)
                     {
