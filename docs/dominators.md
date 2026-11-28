@@ -174,9 +174,11 @@ loop cost the bodies' total size, quadratic in nesting depth, and the parent
 scan was quadratic in the number of loops. Depths follow the loop forest top
 down. There is no recursion and no stack grows past the block count.
 
-A reverse DFS walk assigns SCCs. A DFS retreating edge whose target does not
-dominate its source proves irreducibility; the module conservatively flags
-every block of that edge's full SCC, and every natural loop touching it.
+Each reachable edge to a DFS ancestor serves one of two purposes. If its
+target dominates its source, it identifies a natural-loop header. Otherwise
+the source witnesses irreducibility. Only graphs with such a witness need the
+reverse DFS walk to assign SCCs. Every block in a witness’s SCC and every
+natural loop touching it receives the conservative irreducibility flag.
 This deliberately excludes some legal motion in reducible subloops of such
 an SCC. It is a safe optimization boundary, not a minimal irreducible-cycle
 decomposition. Unreachable SCCs and acyclic exits remain unflagged.

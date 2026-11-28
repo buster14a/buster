@@ -469,54 +469,86 @@ static void dominators_frontiers(const DominatorCfg* cfg, Dominators* result)
     }
 }
 
-// Kosaraju's reverse walk, followed by DFS-ancestor edge tests. Mark whole SCCs, a conservative LICM boundary.
-static void dominators_components(const DominatorCfg* cfg, Dominators* result, uint32_t* component, uint32_t* stack, uint8_t* flags, const uint32_t* dfs_begin, const uint32_t* dfs_end)
+// Classify DFS back edges once. Dominance back edges mark natural-loop headers. A back edge to a
+// non-dominator calls for the reverse SCC walk and marks its whole component as a conservative LICM boundary.
+static void dominators_components(const DominatorCfg* cfg, Dominators* result, uint32_t* component, uint32_t* stack, uint8_t* headers, const uint32_t* dfs_begin, const uint32_t* dfs_end)
 {
-    memset(component, 0xff, (uint64_t)cfg->block_count * sizeof(uint32_t));
-    memset(flags, 0, cfg->block_count);
-    uint32_t components = 0;
-    for (uint32_t order = 0; order < result->reachable_count; order += 1)
-    {
-        const uint32_t root = result->rpo[order];
-        if (component[root] == BUSTER_DOMINATOR_NONE)
-        {
-            uint64_t depth = 1;
-            stack[0] = root;
-            component[root] = components;
-            while (depth != 0)
-            {
-                depth -= 1;
-                const uint32_t block = stack[depth];
-                for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
-                {
-                    const uint32_t source = cfg->predecessors[edge];
-                    if (result->rpo_index[source] != BUSTER_DOMINATOR_NONE && component[source] == BUSTER_DOMINATOR_NONE)
-                    {
-                        component[source] = components;
-                        stack[depth] = source;
-                        depth += 1;
-                    }
-                }
-            }
-            components += 1;
-        }
-    }
+    // loop_depth is available until the natural-loop forest is built.
+    uint32_t* witnesses = result->loop_depth;
+    uint32_t witness_count = 0;
+    memset(headers, 0, cfg->block_count);
     for (uint32_t order = 0; order < result->reachable_count; order += 1)
     {
         const uint32_t block = result->rpo[order];
+        bool irregular = false;
         for (uint32_t edge = cfg->successor_offsets[block]; edge < cfg->successor_offsets[(uint64_t)block + 1]; edge += 1)
         {
             const uint32_t target = cfg->successors[edge];
             const bool ancestor = dfs_begin[target] <= dfs_begin[block] && dfs_begin[block] < dfs_end[target];
-            if (ancestor && !dominators_dominates(result, target, block))
+            if (ancestor)
             {
-                flags[component[block]] = 1;
+                // A dominator of the source lies on its DFS path, so only ancestor edges can close a natural loop.
+                if (result->preorder[target] <= result->preorder[block] && result->preorder[block] < result->subtree_end[target])
+                {
+                    headers[target] = 1;
+                }
+                else
+                {
+                    irregular = true;
+                }
             }
         }
+        if (irregular)
+        {
+            witnesses[witness_count] = block;
+            witness_count += 1;
+        }
     }
-    for (uint32_t block = 0; block < cfg->block_count; block += 1)
+    if (witness_count == 0)
     {
-        result->irreducible[block] = component[block] == BUSTER_DOMINATOR_NONE ? 0 : flags[component[block]];
+        memset(result->irreducible, 0, cfg->block_count);
+    }
+    else
+    {
+        // Only a non-dominating DFS back edge requires the conservative whole-component LICM boundary.
+        memset(component, 0xff, (uint64_t)cfg->block_count * sizeof(uint32_t));
+        uint32_t components = 0;
+        for (uint32_t order = 0; order < result->reachable_count; order += 1)
+        {
+            const uint32_t root = result->rpo[order];
+            if (component[root] == BUSTER_DOMINATOR_NONE)
+            {
+                uint64_t depth = 1;
+                stack[0] = root;
+                component[root] = components;
+                while (depth != 0)
+                {
+                    depth -= 1;
+                    const uint32_t block = stack[depth];
+                    for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+                    {
+                        const uint32_t source = cfg->predecessors[edge];
+                        if (result->rpo_index[source] != BUSTER_DOMINATOR_NONE && component[source] == BUSTER_DOMINATOR_NONE)
+                        {
+                            component[source] = components;
+                            stack[depth] = source;
+                            depth += 1;
+                        }
+                    }
+                }
+                components += 1;
+            }
+        }
+        // The reverse walk is finished. Reuse its stack to mark components with a witness.
+        memset(stack, 0, (uint64_t)components * sizeof(uint32_t));
+        for (uint32_t i = 0; i < witness_count; i += 1)
+        {
+            stack[component[witnesses[i]]] = 1;
+        }
+        for (uint32_t block = 0; block < cfg->block_count; block += 1)
+        {
+            result->irreducible[block] = component[block] == BUSTER_DOMINATOR_NONE ? 0 : (uint8_t)stack[component[block]];
+        }
     }
 }
 
@@ -580,7 +612,8 @@ static void dominators_discover(const DominatorCfg* cfg, Dominators* result, con
                     const uint32_t source = predecessors[edge];
                     const bool reachable = rpo_index[source] != BUSTER_DOMINATOR_NONE;
                     // From the header, only its latches: the predecessors it dominates.
-                    if (reachable && source != header && (!latches || dominators_dominates(result, header, source)))
+                    // Absorbed inner loops have already added every member to this row.
+                    if (reachable && !dominators_bit(body, source) && (!latches || dominators_dominates(result, header, source)))
                     {
                         const uint32_t claimed = block_loop[source];
                         if (claimed == BUSTER_DOMINATOR_NONE)
@@ -637,16 +670,6 @@ static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const Domi
     if (status == DOMINATOR_OK)
     {
         dominators_components(cfg, result, workspace, stack, flags, dfs_begin, dfs_end);
-        memset(flags, 0, count);
-        for (uint32_t order = 0; order < result->reachable_count; order += 1)
-        {
-            const uint32_t block = result->rpo[order];
-            for (uint32_t edge = cfg->successor_offsets[block]; edge < cfg->successor_offsets[(uint64_t)block + 1]; edge += 1)
-            {
-                const uint32_t target = cfg->successors[edge];
-                flags[target] |= dominators_dominates(result, target, block);
-            }
-        }
         for (uint32_t block = 0; block < count; block += 1)
         {
             result->loop_count += flags[block];
