@@ -4,7 +4,7 @@
 // The directive tables' checks (#118), for test-preprocessor; c_preprocessor_test.c includes this file:
 //
 //   - Random token streams (pp_directive_test_streams): generated sources of directives, conditionals nested to many
-//     levels (balanced and not, past the vectorized pairing's depth limit too), '#' at the start of a line and
+//     levels (balanced and not, including groups over 30,000 levels deep), '#' at the start of a line and
 //     elsewhere, %:, '#' alone, line markers, unknown names, and '#'s that literals, comments and line splices hide.
 //     Each is prepared by the vectorized kernels and by their scalar twins (pp_prepare_data), whose tables must be the
 //     oracle's: a walk of the tokens one at a time, of its own, that finds each directive, its line's end and its kind
@@ -183,8 +183,7 @@ static void pp_directive_test_generate(uint64_t* random, PPDirectiveTestText* te
     }
 }
 
-// Conditionals nested `depth` deep, each group with an #else, then closed: past BUSTER_PP_PAIR_MAX_DEPTH, the vectorized
-// pairing leaves the file to the stack.
+// Open `depth` nested conditionals, give each an #else, and close them all.
 static void pp_directive_test_nest(PPDirectiveTestText* text, uint32_t depth)
 {
     text->length = 0;
@@ -520,7 +519,7 @@ static bool pp_directive_test_compare(PPDirectiveTest* test, const uint8_t* byte
 }
 
 // `count` random sources from `seed`, of up to 120 lines and, one in eight, up to 3,000, with conditionals nested up
-// to 2, 8 or 64 deep, half of them unbalanced; then nests past and below the vectorized pairing's depth limit.
+// to 2, 8 or 64 deep, half of them unbalanced; then exercise nesting around the former 30,000-level limit.
 static bool pp_directive_test_streams(uint64_t seed, uint64_t count)
 {
     static PPDirectiveTest test;
@@ -538,7 +537,7 @@ static bool pp_directive_test_streams(uint64_t seed, uint64_t count)
         snprintf(name, sizeof(name), "random source %lu", (unsigned long)i);
         failures += !pp_directive_test_compare(&test, (const uint8_t*)text.bytes, text.length, name);
     }
-    static const uint32_t nests[] = { BUSTER_PP_PAIR_MAX_DEPTH - 1, BUSTER_PP_PAIR_MAX_DEPTH, BUSTER_PP_PAIR_MAX_DEPTH + 1, BUSTER_PP_PAIR_MAX_DEPTH + 100 };
+    static const uint32_t nests[] = { 29999, 30000, 30001, 30100 };
     for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(nests); i += 1)
     {
         pp_directive_test_nest(&text, nests[i]);
