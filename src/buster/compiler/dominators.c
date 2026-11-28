@@ -228,8 +228,8 @@ static DominatorStatus dominators_validate(const DominatorCfg* cfg, Arena* scrat
     return status;
 }
 
-// DFS numbers reachable blocks in preorder and reverse postorder. Single-entry blocks inherit their
-// parent's immediate dominator. Joins retain their preorder number for the semidominator pass. If
+// DFS numbers reachable blocks in preorder and reverse postorder. The DFS parent immediately
+// dominates a block with just one incoming edge. Joins retain their preorder number for the semidominator pass. If
 // loops are requested, record the sources of edges to ancestors still on the active DFS stack.
 static uint32_t dominators_order(const DominatorCfg* cfg, Dominators* result, DominatorFrame* stack, uint32_t* dfs_begin, uint64_t* back_edge_sources, uint32_t* vertices, uint32_t* parents, uint32_t* joins)
 {
@@ -406,9 +406,13 @@ static void dominators_semi_nca(const DominatorCfg* cfg, Dominators* result, con
         for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
         {
             const uint32_t source = dfs_begin[cfg->predecessors[edge]];
-            if (source != BUSTER_DOMINATOR_NONE)
+            if (source < least)
             {
-                const uint32_t candidate = source <= number ? source : dominators_evaluate(links, stack, source, number + 1);
+                least = source;
+            }
+            else if (source > number && source != BUSTER_DOMINATOR_NONE && least != 0)
+            {
+                const uint32_t candidate = dominators_evaluate(links, stack, source, number + 1);
                 least = candidate < least ? candidate : least;
             }
         }
@@ -424,6 +428,11 @@ static void dominators_semi_nca(const DominatorCfg* cfg, Dominators* result, con
         const uint32_t number = joins[j];
         const uint32_t limit = semi[number];
         uint32_t candidate = parents[number];
+        if (candidate == limit)
+        {
+            // DFS already stored this parent in both representations.
+            continue;
+        }
         if (limit == 0)
         {
             candidate = 0;
