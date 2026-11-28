@@ -1028,6 +1028,77 @@ static bool pp_test_line_ends(void)
 // ---------------------------------------------------------------------------------------------------------------------
 // pp_test_windows
 
+// Only the first and last bitmap pages need storage to check the end of the token ID space.
+static uint64_t pp_window_test_last_line_word(uint64_t* checks)
+{
+    const uint64_t last_word = UINT32_MAX / 64;
+    const uint64_t bytes = (last_word + 1) * sizeof(uint64_t);
+    uint64_t* lines = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (lines == MAP_FAILED)
+    {
+        return 1;
+    }
+    const uint32_t begin = UINT32_MAX & ~63u;
+    lines[0] = 1;
+    lines[last_word] = UINT64_C(1) << 61;
+    const bool found = pp_next_line(lines, UINT32_MAX, begin) == begin + 61;
+    const bool exhausted = pp_next_line(lines, UINT32_MAX, begin + 61) == UINT32_MAX;
+    const bool last = pp_next_line(lines, UINT32_MAX, UINT32_MAX - 1) == UINT32_MAX;
+    munmap(lines, bytes);
+    *checks += 3;
+    return !found + !exhausted + !last;
+}
+
+// Whole files and lexer windows now publish the same table. Check its columns against fixed token positions.
+static uint64_t pp_window_test_whole_directives(uint64_t* checks)
+{
+    static const uint32_t lengths[] = { 0, 66, 127, 128, 129, 511, 512, 513, 1024, 1025 };
+    Arena arena = arena_reserve(1024 * 1024);
+    if (arena.base == NULL)
+    {
+        return 1;
+    }
+    uint64_t failures = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(lengths); i += 1)
+    {
+        const uint32_t n = lengths[i];
+        uint8_t kinds[1025] = { 0 };
+        uint32_t values[1025] = { 0 };
+        PPFileData data = { .kinds = kinds, .values = values, .token_count = n };
+        const uint32_t positions[] = { 0, 31, n >= 2 ? n - 2 : 0 };
+        const uint32_t names[] = { C_NAME_IF, C_NAME_ELSE, C_NAME_ENDIF };
+        const uint8_t directives[] = { PP_DIRECTIVE_IF, PP_DIRECTIVE_ELSE, PP_DIRECTIVE_ENDIF };
+        const uint32_t ends[] = { 15, positions[2], n };
+        const uint32_t next[] = { 1, 2, BUSTER_PP_NONE };
+        if (n != 0)
+        {
+            kinds[15] = C_TOKEN_NUMERIC_CONSTANT | BUSTER_C_TOKEN_START_OF_LINE;
+            kinds[16] = C_TOKEN_HASH;
+            for (uint32_t d = 0; d < 3; d += 1)
+            {
+                kinds[positions[d]] = C_TOKEN_HASH | BUSTER_C_TOKEN_START_OF_LINE;
+                kinds[positions[d] + 1] = C_TOKEN_RAW_IDENTIFIER;
+                values[positions[d] + 1] = names[d];
+            }
+        }
+        arena.length = 0;
+        bool valid = pp_directive_table(&arena, &data) && data.directive_count == (n == 0 ? 0 : 3) && data.note_count == 0 && data.guard == 0;
+        for (uint32_t d = 0; valid && d < data.directive_count; d += 1)
+        {
+            valid = data.directive_hash[d] == positions[d] && data.directive_end[d] == ends[d] &&
+                    data.directive_kind[d] == directives[d] && data.directive_next[d] == next[d];
+        }
+        *checks += 1;
+        if (!valid)
+        {
+            fprintf(stderr, "whole-file directive table differs at %u tokens\n", n);
+            failures += 1;
+        }
+    }
+    arena_release(&arena);
+    return failures;
+}
+
 // BUSTER_PP_WINDOW_TEST_SOURCES sources from `seed`, each in one of five language modes (with C's raw strings and
 // without, digit separators or not, without "//" comments and digraphs, and with literal prefixes to split), prepared
 // whole by both kernels and in windows of several sizes, each window's line pages against a count a byte at a time.
@@ -1050,9 +1121,9 @@ static bool pp_test_windows(uint64_t seed)
     }
     uint64_t random = seed ^ 0x116116116ull;
     uint64_t line_end_checks = 0;
-    const uint64_t line_end_failures = pp_window_test_line_ends(&random, &line_end_checks) + pp_window_test_cut_fixtures(&line_end_checks);
+    const uint64_t line_end_failures = pp_window_test_line_ends(&random, &line_end_checks) + pp_window_test_cut_fixtures(&line_end_checks) + pp_window_test_last_line_word(&line_end_checks);
     uint64_t place_checks = 0;
-    const uint64_t place_failures = pp_window_test_places(&random, &place_checks);
+    const uint64_t place_failures = pp_window_test_places(&random, &place_checks) + pp_window_test_whole_directives(&place_checks);
     uint64_t failures = 0;
     uint64_t windowed = 0;
     uint64_t tokens = 0;

@@ -505,15 +505,17 @@ static bool pp_benchmark_tables_pass(PPBenchmarkTables* tables, int cycles_fd, i
         largest = tables->datas[f].token_count > largest ? tables->datas[f].token_count : largest;
     }
     Scratch scratch = scratch_begin(0);
-    uint64_t* lines = arena_push_array(scratch.arena, (uint64_t)largest / 64 + 1, sizeof(uint64_t), 64);
+    const uint64_t words = (uint64_t)largest / 64 + 1;
+    uint64_t* lines = arena_push_array(scratch.arena, words * 2, sizeof(uint64_t), 64);
     uint32_t* hashes = arena_push_array(scratch.arena, (uint64_t)largest + 1, sizeof(uint32_t), 64);
     result = result && lines != 0 && hashes != 0;
     const uint64_t scan_cycles = pp_benchmark_read_counter(cycles_fd);
     for (uint32_t f = 0; result && f < tables->count; f += 1)
     {
         const PPFileData* data = &tables->datas[f];
-        pp_scan_directives_vector(data->kinds, data->token_count, 0, lines);
-        pp_scan_directives_vector(data->kinds, data->token_count, hashes, lines);
+        uint64_t* directives = lines + words;
+        pp_scan_directives_window(data->kinds, 0, data->token_count, lines, directives);
+        pp_directive_places(directives, (uint32_t)(((uint64_t)data->token_count + 63) / 64), hashes);
     }
     sample->scan_cycles = pp_benchmark_read_counter(cycles_fd) - scan_cycles;
     scratch_end(scratch);
