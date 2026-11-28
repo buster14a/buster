@@ -173,23 +173,6 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         check->functions += 1;
         check->nodes += count;
     }
-    // The candidates need the costs column the plan keeps: zero, which the candidates' costs alone read.
-    uint32_t* costs = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
-    valid = valid && costs != 0;
-    if (valid)
-    {
-        memset(costs, 0, (uint64_t)count * sizeof(uint32_t));
-    }
-    const Tier1SelectForest costed = {
-        .function = function,
-        .blocks = blocks,
-        .uses = uses,
-        .costs = costs,
-        .barriers = barriers,
-        .canonical = canonical,
-        .known_bits = known_bits,
-        .vectors = ir_function_has_vectors(function),
-    };
     for (uint32_t node = 0; valid && node < count; node += 1)
     {
         // A visible child is the node's own operand, an earlier node; its state and rule are their equations' (tier1_burs_test_equations).
@@ -270,7 +253,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         }
         if (columns[0][node] != TIER1_BURS_OP_REG)
         {
-            const Tier1SelectCandidates candidates = tier1_select_candidates(&costed, node, TIER1_RULE_NONE);
+            const Tier1SelectCandidates candidates = tier1_select_candidates(&forest, node, TIER1_RULE_NONE);
             bool munched = false;
             const uint32_t chosen = tier1_burs_pick(&candidates, columns[3][node], &munched);
             if (class >= TIER1_BURS_OP_SIGN_LOAD && class <= TIER1_BURS_OP_FLOAT_BINARY_LEFT)
