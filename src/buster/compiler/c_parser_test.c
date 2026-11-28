@@ -1290,6 +1290,62 @@ static uint32_t parse_test_check_fixtures(const char* directory)
     return failures;
 }
 
+// Exercise expression carries, discarded type tokens and joined string literals across packet boundaries.
+static uint32_t parse_test_check_long_declarations(const char* directory)
+{
+    static const char* const sources[] = {
+        "#define FOUR + 1 + 1 + 1 + 1\n"
+        "#define SIXTEEN FOUR FOUR FOUR FOUR\n"
+        "#define TERMS SIXTEEN SIXTEEN SIXTEEN SIXTEEN\n"
+        "#define WORDS \"a\" \"b\" \"c\" \"d\"\n"
+        "#define STRINGS WORDS WORDS WORDS WORDS\n"
+        "int select_type(int x) { return _Generic(x TERMS, struct S *: 2, default: x TERMS); }\n"
+        "void literal(char *p) { use(&(char *){p TERMS}); use(&(char *){STRINGS STRINGS STRINGS STRINGS WORDS}); }\n"
+        "void bound(int a[static 1 TERMS + sizeof(int)]) {}\n",
+        "#define FOUR + 1 + 1 + 1 + 1\n"
+        "#define SIXTEEN FOUR FOUR FOUR FOUR\n"
+        "int f(int x) { return _Generic(x SIXTEEN SIXTEEN, struct S *: 2, default: x + ); }\n",
+    };
+    uint32_t failures = 0;
+    char path[4096];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/long_declaration_%u.c", directory, i);
+        const ParseTestSnippet snippet = { .source = sources[i], .error = "", .std = 0 };
+        const PPOptions options = parse_test_snippet_options(&snippet);
+        const ParseOptions parse_options = { 0 };
+        static InternTable table;
+        static Preprocessor pp;
+        static Parser parser;
+        bool ok = parse_test_write(path, sources[i], strlen(sources[i])) && intern_initialize(&table) && pp_initialize(&pp, &options, &table) &&
+                  parse_initialize(&parser, &parse_options, options.language) && pp_run(&pp, path);
+        if (ok)
+        {
+            parse_translation_unit(&parser, &pp);
+            if (i == 0)
+            {
+                ok = parser.tokens.count == 653 && parser.errors == 0 && parser.fatal == PARSE_MESSAGE_NONE &&
+                     parser.statistics.fallback_items == 0 && !parser.statistics.whole;
+            }
+            else
+            {
+                ok = parser.errors == 1 && parser.diagnostic_count == 1 && parser.diagnostics[0].token == 86 &&
+                     parser.diagnostics[0].message == PARSE_MESSAGE_EXPECTED_EXPRESSION;
+            }
+        }
+        if (!ok)
+        {
+            printf("long declaration %u failed\n", i);
+            failures += 1;
+        }
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&table);
+        remove(path);
+    }
+    return failures;
+}
+
 // clang's recovery after a declaration's missing `;` before a declaration specifier (#147, ParseDiagnostic.resumed): it
 // reads the specifier as the next declaration's, so that a file-scope declaration's errors after it are its own; a
 // `#pragma pack` between, `_Static_assert` and a name that is no type leave the rest skipped. Every diagnostic, its place
@@ -5164,6 +5220,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             failures += parse_test_check_snippets(directory, clang);
             failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
             failures += parse_test_check_fixtures(directory);
+            failures += parse_test_check_long_declarations(directory);
             failures += parse_test_check_resumed(directory);
         }
         if (input_count == 0)

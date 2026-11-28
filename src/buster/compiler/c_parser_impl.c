@@ -8269,7 +8269,7 @@ static bool parse_resolved_parameter_bound(const ParseKernels* kernels, const Pa
     const uint32_t parameters = kernels->enclosing[open];
     const uint32_t close = kernels->parents[open];
     if (parameters >= open || kernels->roles[parameters] != PARSE_ROLE_OPEN_FUNCTION || kernels->enclosing[token - 2] != parameters ||
-        kernels->enclosing[token] != open || close <= token || close > end || close - token - 1 > 64 ||
+        kernels->enclosing[token] != open || close <= token || close > end ||
         input->kinds[close] != PARSE_KIND_R_SQUARE || kernels->roles[close] != PARSE_ROLE_CLOSE_SUBSCRIPT || kernels->enclosing[close] != open)
     {
         return false;
@@ -8278,20 +8278,44 @@ static bool parse_resolved_parameter_bound(const ParseKernels* kernels, const Pa
     {
         return qualified && close == token + 1;
     }
-    const uint32_t first = token + 1;
-    const uint64_t live = _bzhi_u64(UINT64_MAX, close - first);
-    const __m512i kinds = _mm512_maskz_loadu_epi8(live, kernels->vkinds + first);
-    const __m512i roles = _mm512_maskz_loadu_epi8(live, kernels->roles + first);
-    const uint64_t numbers = parse_equal8(kinds, PARSE_KIND_NUMBER) & parse_equal8(roles, PARSE_ROLE_OPERAND);
-    const uint64_t sizes = parse_equal8(kinds, PARSE_KIND_SIZEOF) & parse_equal8(roles, PARSE_ROLE_PREFIX);
-    const uint64_t opens = parse_equal8(roles, PARSE_ROLE_OPEN_SIZEOF) & parse_equal8(kinds, PARSE_KIND_L_PAREN);
-    const uint64_t types = parse_equal8(kinds, PARSE_KIND_TYPE) & parse_equal8(roles, PARSE_ROLE_SPECIFIER);
-    const uint64_t closes = parse_equal8(roles, PARSE_ROLE_CLOSE_SIZEOF) & parse_equal8(kinds, PARSE_KIND_R_PAREN);
-    const uint64_t binary = _mm512_cmpge_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_MULTIPLICATIVE)) &
-                            _mm512_cmple_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LOGICAL_OR));
-    return (numbers & 1) != 0 && (((numbers | closes) >> (close - first - 1)) & 1) != 0 && (numbers | sizes | opens | types | closes | binary) == live &&
-           opens == (sizes << 1) && types == (opens << 1) && closes == (types << 1) &&
-           binary == (((numbers | closes) << 1) & live) && (numbers | sizes) == ((binary << 1) | 1);
+    if (kernels->vkinds[token + 1] != PARSE_KIND_NUMBER)
+    {
+        return false;
+    }
+    bool after_sizeof = false;
+    bool after_open = false;
+    bool after_type = false;
+    bool after_value = false;
+    bool expect_operand = true;
+    for (uint32_t first = token + 1; first < close;)
+    {
+        const uint32_t width = close - first < 64 ? close - first : 64;
+        const uint64_t live = _bzhi_u64(UINT64_MAX, width);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(live, kernels->vkinds + first);
+        const __m512i roles = _mm512_maskz_loadu_epi8(live, kernels->roles + first);
+        const uint64_t numbers = parse_equal8(kinds, PARSE_KIND_NUMBER) & parse_equal8(roles, PARSE_ROLE_OPERAND);
+        const uint64_t sizes = parse_equal8(kinds, PARSE_KIND_SIZEOF) & parse_equal8(roles, PARSE_ROLE_PREFIX);
+        const uint64_t opens = parse_equal8(roles, PARSE_ROLE_OPEN_SIZEOF) & parse_equal8(kinds, PARSE_KIND_L_PAREN);
+        const uint64_t types = parse_equal8(kinds, PARSE_KIND_TYPE) & parse_equal8(roles, PARSE_ROLE_SPECIFIER);
+        const uint64_t closes = parse_equal8(roles, PARSE_ROLE_CLOSE_SIZEOF) & parse_equal8(kinds, PARSE_KIND_R_PAREN);
+        const uint64_t binary = _mm512_cmpge_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_MULTIPLICATIVE)) &
+                                _mm512_cmple_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LOGICAL_OR));
+        if ((numbers | sizes | opens | types | closes | binary) != live ||
+            opens != (((sizes << 1) | after_sizeof) & live) || types != (((opens << 1) | after_open) & live) ||
+            closes != (((types << 1) | after_type) & live) || binary != ((((numbers | closes) << 1) | after_value) & live) ||
+            (numbers | sizes) != (((binary << 1) | expect_operand) & live))
+        {
+            return false;
+        }
+        const uint32_t last = width - 1;
+        after_sizeof = (sizes >> last) & 1;
+        after_open = (opens >> last) & 1;
+        after_type = (types >> last) & 1;
+        after_value = ((numbers | closes) >> last) & 1;
+        expect_operand = (binary >> last) & 1;
+        first += width;
+    }
+    return after_value;
 }
 
 // K6 flags the closing parenthesis when a pointer compound literal is the operand of '&'.
@@ -8309,7 +8333,7 @@ static bool parse_addressed_pointer_literal(const ParseKernels* kernels, const P
     const uint32_t close = kernels->parents[body];
     if (open == 0 || open >= token || kernels->roles[open] != PARSE_ROLE_OPEN_COMPOUND || kernels->parents[open] != token ||
         input->kinds[open - 1] != PARSE_KIND_AMP || kernels->roles[open - 1] != PARSE_ROLE_PREFIX ||
-        kernels->parents[token] != close || close <= body + 1 || close > end || close - body - 1 > 64 ||
+        kernels->parents[token] != close || close <= body + 1 || close > end ||
         input->kinds[close] != PARSE_KIND_R_BRACE || kernels->roles[close] != PARSE_ROLE_CLOSE_COMPOUND_BODY || kernels->enclosing[close] != body)
     {
         return false;
@@ -8321,21 +8345,33 @@ static bool parse_addressed_pointer_literal(const ParseKernels* kernels, const P
     {
         return false;
     }
-    const uint64_t live = _bzhi_u64(UINT64_MAX, close - body - 1);
-    const __m512i kinds = _mm512_maskz_loadu_epi8(live, kernels->vkinds + body + 1);
-    const __m512i roles = _mm512_maskz_loadu_epi8(live, kernels->roles + body + 1);
-    const uint64_t strings = parse_equal8(kinds, PARSE_KIND_STRING) & live;
-    const uint64_t operands = parse_equal8(roles, PARSE_ROLE_OPERAND) & (strings | parse_equal8(kinds, PARSE_KIND_IDENTIFIER) |
-                              parse_equal8(kinds, PARSE_KIND_NUMBER) | parse_equal8(kinds, PARSE_KIND_CHARACTER));
-    const uint64_t joined = parse_equal8(roles, PARSE_ROLE_STRING_NEXT) & strings & (strings << 1);
-    const uint64_t operators = _mm512_cmpge_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_MULTIPLICATIVE)) &
-                               _mm512_cmple_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LOGICAL_OR));
-    return (operands | joined | operators) == live && operands == (1 | (operators << 1)) &&
-           operators == (((operands | joined) << 1) & live & ~joined);
+    bool previous_string = false;
+    bool expect_operand = true;
+    for (uint32_t first = body + 1; first < close;)
+    {
+        const uint32_t width = close - first < 64 ? close - first : 64;
+        const uint64_t live = _bzhi_u64(UINT64_MAX, width);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(live, kernels->vkinds + first);
+        const __m512i roles = _mm512_maskz_loadu_epi8(live, kernels->roles + first);
+        const uint64_t strings = parse_equal8(kinds, PARSE_KIND_STRING) & live;
+        const uint64_t operands = parse_equal8(roles, PARSE_ROLE_OPERAND) & (strings | parse_equal8(kinds, PARSE_KIND_IDENTIFIER) |
+                                  parse_equal8(kinds, PARSE_KIND_NUMBER) | parse_equal8(kinds, PARSE_KIND_CHARACTER));
+        const uint64_t joined = parse_equal8(roles, PARSE_ROLE_STRING_NEXT) & strings & ((strings << 1) | previous_string);
+        const uint64_t operators = _mm512_cmpge_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_MULTIPLICATIVE)) &
+                                   _mm512_cmple_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LOGICAL_OR));
+        if ((operands | joined | operators) != live || operands != (((operators << 1) | expect_operand) & live) ||
+            operators != ((((operands | joined) << 1) | !expect_operand) & live & ~joined))
+        {
+            return false;
+        }
+        previous_string = (strings >> (width - 1)) & 1;
+        expect_operand = (operators >> (width - 1)) & 1;
+        first += width;
+    }
+    return !expect_operand;
 }
 
-// One builtin or visible typedef name, optionally qualified and optionally a pointer.
-// The caller checks which token ends this type name, a cast's ')' or an association's ':'.
+// A builtin type, visible typedef or tagged type with an optional qualifier and pointer.
 static uint32_t parse_generic_type_end(const ParseKernels* kernels, const ParseInput* input, uint32_t at, uint32_t limit)
 {
     if (at < limit && kernels->vkinds[at] == PARSE_KIND_QUALIFIER &&
@@ -8343,18 +8379,34 @@ static uint32_t parse_generic_type_end(const ParseKernels* kernels, const ParseI
     {
         at += 1;
     }
-    if (at >= limit || kernels->roles[at] != PARSE_ROLE_SPECIFIER ||
-        (kernels->vkinds[at] != PARSE_KIND_TYPE && kernels->vkinds[at] != PARSE_VKIND_TYPE_NAME))
+    if (at >= limit)
     {
         return BUSTER_PARSE_NONE;
     }
-    at += 1;
+    const uint8_t kind = kernels->vkinds[at];
+    if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
+    {
+        if (limit - at < 2 || kernels->roles[at] != PARSE_ROLE_LEAF_RIGHT || input->kinds[at + 1] != PARSE_KIND_IDENTIFIER ||
+            kernels->roles[at + 1] != PARSE_ROLE_TAG)
+        {
+            return BUSTER_PARSE_NONE;
+        }
+        at += 2;
+    }
+    else
+    {
+        if ((kind != PARSE_KIND_TYPE && kind != PARSE_VKIND_TYPE_NAME) || kernels->roles[at] != PARSE_ROLE_SPECIFIER)
+        {
+            return BUSTER_PARSE_NONE;
+        }
+        at += 1;
+    }
     return at + (at < limit && kernels->vkinds[at] == PARSE_KIND_STAR && kernels->roles[at] == PARSE_ROLE_PREFIX);
 }
 
-// Verify an expression-sized generic selection against its vector roles. Remove the interiors of
-// validated casts and association type names from the packet. In the remaining token sequence an
-// operand or closing delimiter must precede each infix operator, postfix opener and closing delimiter.
+// Validate generic selections in packets. A cast or association can span two packets, so remember
+// the end of its type and whether the previous retained token finished an operand. An operand or
+// closer must precede each infix operator, postfix opener and closing delimiter.
 static uint32_t parse_generic_close(const ParseKernels* kernels, const ParseInput* input, uint32_t token, uint32_t end)
 {
     if (input->kinds[token] != PARSE_KIND_GENERIC || token == 0 || token >= end ||
@@ -8364,90 +8416,105 @@ static uint32_t parse_generic_close(const ParseKernels* kernels, const ParseInpu
         return BUSTER_PARSE_NONE;
     }
     const uint32_t open = token + 1;
-    const uint32_t first = open + 1;
+    const uint32_t start = open + 1;
     const uint32_t close = kernels->parents[open];
-    if (close <= first || close >= end || close - first > 64 || kernels->enclosing[close] != open ||
+    if (close <= start || close >= end || kernels->enclosing[close] != open ||
         kernels->roles[close] != PARSE_ROLE_CLOSE_KEYWORD || input->kinds[close] != PARSE_KIND_R_PAREN)
     {
         return BUSTER_PARSE_NONE;
     }
-    const uint64_t live = _bzhi_u64(UINT64_MAX, close - first);
-    const __m512i kinds = _mm512_maskz_loadu_epi8(live, kernels->vkinds + first);
-    const __m512i roles = _mm512_maskz_loadu_epi8(live, kernels->roles + first);
-    const uint64_t casts = parse_equal8(roles, PARSE_ROLE_OPEN_CAST);
-    const uint64_t round_closers = parse_equal8(roles, PARSE_ROLE_CLOSE_CAST) | parse_equal8(roles, PARSE_ROLE_CLOSE_CALL) | parse_equal8(roles, PARSE_ROLE_CLOSE_GROUP);
-    if (parse_equal8(kinds, PARSE_KIND_R_PAREN) != round_closers ||
-        parse_equal8(kinds, PARSE_KIND_R_SQUARE) != parse_equal8(roles, PARSE_ROLE_CLOSE_SUBSCRIPT) || parse_equal8(kinds, PARSE_KIND_R_BRACE) != 0)
-    {
-        return BUSTER_PARSE_NONE;
-    }
-    const uint64_t commas = parse_equal8(kinds, PARSE_KIND_COMMA);
-    uint64_t keep = live;
     bool association = false;
     bool seen_default = false;
-    for (uint64_t events = casts | commas; events != 0; events &= events - 1)
+    uint32_t discard_to = start;
+    bool previous_value = false;
+    for (uint32_t first = start; first < close;)
     {
-        const uint32_t lane = (uint32_t)__builtin_ctzll(events);
-        const uint32_t i = first + lane;
-        uint32_t delimiter;
-        if (kernels->roles[i] == PARSE_ROLE_OPEN_CAST)
+        const uint32_t length = close - first < 64 ? close - first : 64;
+        const uint64_t live = _bzhi_u64(UINT64_MAX, length);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(live, kernels->vkinds + first);
+        const __m512i roles = _mm512_maskz_loadu_epi8(live, kernels->roles + first);
+        const uint64_t casts = parse_equal8(roles, PARSE_ROLE_OPEN_CAST);
+        const uint64_t round_closers = parse_equal8(roles, PARSE_ROLE_CLOSE_CAST) | parse_equal8(roles, PARSE_ROLE_CLOSE_CALL) | parse_equal8(roles, PARSE_ROLE_CLOSE_GROUP);
+        if (parse_equal8(kinds, PARSE_KIND_R_PAREN) != round_closers ||
+            parse_equal8(kinds, PARSE_KIND_R_SQUARE) != parse_equal8(roles, PARSE_ROLE_CLOSE_SUBSCRIPT) || parse_equal8(kinds, PARSE_KIND_R_BRACE) != 0)
         {
-            delimiter = parse_generic_type_end(kernels, input, i + 1, close);
-            if (delimiter >= close || kernels->parents[i] != delimiter || kernels->roles[delimiter] != PARSE_ROLE_CLOSE_CAST)
-            {
-                return BUSTER_PARSE_NONE;
-            }
+            return BUSTER_PARSE_NONE;
         }
-        else if (kernels->enclosing[i] == open)
+        const uint64_t commas = parse_equal8(kinds, PARSE_KIND_COMMA);
+        uint64_t keep = live & ~_bzhi_u64(UINT64_MAX, discard_to > first ? discard_to - first : 0);
+        for (uint64_t events = casts | commas; events != 0; events &= events - 1)
         {
-            if (kernels->roles[i] != PARSE_ROLE_SEPARATOR || i + 1 >= close)
+            const uint32_t lane = (uint32_t)__builtin_ctzll(events);
+            const uint32_t i = first + lane;
+            uint32_t delimiter;
+            if (kernels->roles[i] == PARSE_ROLE_OPEN_CAST)
             {
-                return BUSTER_PARSE_NONE;
-            }
-            association = true;
-            if (kernels->vkinds[i + 1] == PARSE_KIND_DEFAULT)
-            {
-                if (seen_default || kernels->roles[i + 1] != PARSE_ROLE_OPERAND)
+                delimiter = parse_generic_type_end(kernels, input, i + 1, close);
+                if (delimiter >= close || kernels->parents[i] != delimiter || kernels->roles[delimiter] != PARSE_ROLE_CLOSE_CAST)
                 {
                     return BUSTER_PARSE_NONE;
                 }
-                seen_default = true;
-                delimiter = i + 2;
+            }
+            else if (kernels->enclosing[i] == open)
+            {
+                if (kernels->roles[i] != PARSE_ROLE_SEPARATOR || i + 1 >= close)
+                {
+                    return BUSTER_PARSE_NONE;
+                }
+                association = true;
+                if (kernels->vkinds[i + 1] == PARSE_KIND_DEFAULT)
+                {
+                    if (seen_default || kernels->roles[i + 1] != PARSE_ROLE_OPERAND)
+                    {
+                        return BUSTER_PARSE_NONE;
+                    }
+                    seen_default = true;
+                    delimiter = i + 2;
+                }
+                else
+                {
+                    delimiter = parse_generic_type_end(kernels, input, i + 1, close);
+                }
+                if (delimiter >= close || kernels->roles[delimiter] != PARSE_ROLE_ASSOCIATION || kernels->enclosing[delimiter] != open)
+                {
+                    return BUSTER_PARSE_NONE;
+                }
             }
             else
             {
-                delimiter = parse_generic_type_end(kernels, input, i + 1, close);
+                const uint32_t call = kernels->enclosing[i];
+                if (call <= open || call >= i || kernels->roles[call] != PARSE_ROLE_OPEN_CALL || kernels->roles[i] != PARSE_ROLE_SEPARATOR)
+                {
+                    return BUSTER_PARSE_NONE;
+                }
+                continue;
             }
-            if (delimiter >= close || kernels->roles[delimiter] != PARSE_ROLE_ASSOCIATION || kernels->enclosing[delimiter] != open)
-            {
-                return BUSTER_PARSE_NONE;
-            }
+            discard_to = delimiter + 1;
+            keep &= ~(_bzhi_u64(UINT64_MAX, discard_to - first) & ~_bzhi_u64(UINT64_MAX, lane + 1));
         }
-        else
+        const uint64_t atoms = parse_equal8(roles, PARSE_ROLE_OPERAND) & (parse_equal8(kinds, PARSE_KIND_IDENTIFIER) | parse_equal8(kinds, PARSE_KIND_NUMBER) |
+                               parse_equal8(kinds, PARSE_KIND_STRING) | parse_equal8(kinds, PARSE_KIND_CHARACTER));
+        const uint64_t unary = parse_equal8(roles, PARSE_ROLE_PREFIX) & (parse_equal8(kinds, PARSE_KIND_AMP) | parse_equal8(kinds, PARSE_KIND_STAR) |
+                               parse_equal8(kinds, PARSE_KIND_PLUS) | parse_equal8(kinds, PARSE_KIND_MINUS) | parse_equal8(kinds, PARSE_KIND_TILDE) | parse_equal8(kinds, PARSE_KIND_EXCLAIM));
+        const uint64_t binary = _mm512_cmpge_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_MULTIPLICATIVE)) &
+                                _mm512_cmple_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LOGICAL_OR));
+        const uint64_t closers = parse_equal8(roles, PARSE_ROLE_CLOSE_GROUP) | parse_equal8(roles, PARSE_ROLE_CLOSE_CALL) | parse_equal8(roles, PARSE_ROLE_CLOSE_SUBSCRIPT);
+        const uint64_t left = binary | commas | closers | parse_equal8(roles, PARSE_ROLE_OPEN_CALL) | parse_equal8(roles, PARSE_ROLE_OPEN_SUBSCRIPT) |
+                              parse_equal8(roles, PARSE_ROLE_OPEN_TERNARY) | parse_equal8(roles, PARSE_ROLE_CLOSE_TERNARY);
+        const uint64_t all = atoms | unary | left | casts | parse_equal8(roles, PARSE_ROLE_OPEN_GROUP);
+        const uint64_t values = _pext_u64(atoms | closers, keep);
+        const uint64_t sequence = _pext_u64(keep, keep);
+        if ((all & keep) != keep || _pext_u64(left, keep) != (((values << 1) | previous_value) & sequence))
         {
-            const uint32_t call = kernels->enclosing[i];
-            if (call <= open || call >= i || kernels->roles[call] != PARSE_ROLE_OPEN_CALL || kernels->roles[i] != PARSE_ROLE_SEPARATOR)
-            {
-                return BUSTER_PARSE_NONE;
-            }
-            continue;
+            return BUSTER_PARSE_NONE;
         }
-        keep &= ~(_bzhi_u64(UINT64_MAX, delimiter - i) << (lane + 1));
+        if (sequence != 0)
+        {
+            previous_value = (values & (sequence ^ (sequence >> 1))) != 0;
+        }
+        first += length;
     }
-    const uint64_t atoms = parse_equal8(roles, PARSE_ROLE_OPERAND) & (parse_equal8(kinds, PARSE_KIND_IDENTIFIER) | parse_equal8(kinds, PARSE_KIND_NUMBER) |
-                           parse_equal8(kinds, PARSE_KIND_STRING) | parse_equal8(kinds, PARSE_KIND_CHARACTER));
-    const uint64_t unary = parse_equal8(roles, PARSE_ROLE_PREFIX) & (parse_equal8(kinds, PARSE_KIND_AMP) | parse_equal8(kinds, PARSE_KIND_STAR) |
-                           parse_equal8(kinds, PARSE_KIND_PLUS) | parse_equal8(kinds, PARSE_KIND_MINUS) | parse_equal8(kinds, PARSE_KIND_TILDE) | parse_equal8(kinds, PARSE_KIND_EXCLAIM));
-    const uint64_t binary = _mm512_cmpge_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_MULTIPLICATIVE)) &
-                            _mm512_cmple_epu8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LOGICAL_OR));
-    const uint64_t closers = parse_equal8(roles, PARSE_ROLE_CLOSE_GROUP) | parse_equal8(roles, PARSE_ROLE_CLOSE_CALL) | parse_equal8(roles, PARSE_ROLE_CLOSE_SUBSCRIPT);
-    const uint64_t left = binary | commas | closers | parse_equal8(roles, PARSE_ROLE_OPEN_CALL) | parse_equal8(roles, PARSE_ROLE_OPEN_SUBSCRIPT) |
-                          parse_equal8(roles, PARSE_ROLE_OPEN_TERNARY) | parse_equal8(roles, PARSE_ROLE_CLOSE_TERNARY);
-    const uint64_t all = atoms | unary | left | casts | parse_equal8(roles, PARSE_ROLE_OPEN_GROUP);
-    const uint64_t values = _pext_u64(atoms | closers, keep);
-    const uint64_t sequence = _pext_u64(keep, keep);
-    return association && (all & keep) == keep && _pext_u64(left, keep) == ((values << 1) & sequence) &&
-           (values & (sequence ^ (sequence >> 1))) != 0 ? close : BUSTER_PARSE_NONE;
+    return association && previous_value ? close : BUSTER_PARSE_NONE;
 }
 
 // Each skipped flag belongs to a complete syntax form checked against the vector tree.
