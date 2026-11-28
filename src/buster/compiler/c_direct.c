@@ -4969,6 +4969,133 @@ static bool c_direct_test_empty_loop_bodies(const char* obj_path)
     return ok && under_w && system_quiet && user_left;
 }
 
+typedef int (*CDirectTestSelect)(int);
+typedef int (*CDirectTestPointerCompare)(int (*)(int));
+typedef int (*CDirectTestPointerEqual)(void*, int (*)(int));
+typedef long (*CDirectTestExtensionCast)(int);
+
+#if !__has_feature(memory_sanitizer)
+// A function whose address the comparisons' code is given (the code runs outside MemorySanitizer's builds alone).
+static int c_direct_test_identity(int x)
+{
+    return x;
+}
+#endif
+
+// What Lua 5.4.8's units left the direct path for (#3592), as the full pipeline has them, with the warnings' checks on:
+// - A function declared noreturn (GNU's attribute, from its specifiers or its own declarator, or _Noreturn, in any
+//   declaration so far) is defined where its body's end can't be reached: every path ends in a call of a noreturn
+//   function that is its statement's whole expression, or of __builtin_unreachable, an infinite loop or a goto. Such a
+//   call ends a non-void function's path too. A return in one, a body whose end may be reached (in a definition without
+//   the attribute after a declaration with it as well, which main's direct path compiled quietly), and a call that isn't
+//   the statement's whole (a cast's, sizeof's, a conditional's, a function pointer's, a shadowed name's, a declarator
+//   after the attributed one) leave; under -w the warnings don't count.
+// - A function pointer compared for equality with a pointer to void (`f != NULL`); relational comparisons and a
+//   conditional's arms leave.
+// - `__extension__` before a parenthesized cast, `(__extension__ (T)(p))`, or a declaration; before a type name
+//   (`(__extension__ long) x`) it is the full pipeline's error.
+static bool c_direct_test_noreturn(const char* obj_path)
+{
+    static const char* const taken[] = {
+        "void abort(void) __attribute__((__noreturn__));\nvoid __attribute__((noreturn)) f(int x) { if (x) abort(); else abort(); }\n",
+        "void abort(void) __attribute__((__noreturn__));\n__attribute__((noreturn)) void f(void);\nvoid f(void) { abort(); }\n",
+        "void g(void) __attribute__((noreturn));\nstatic void __attribute__((noreturn)) f(int x) { x += 1; g(); }\nvoid h(void) { f(1); }\n",
+        "_Noreturn void f(void) { for (;;) ; }\n",
+        "__attribute__((noreturn)) void f(void) { L: goto L; }\n",
+        "void abort(void) __attribute__((__noreturn__));\nint f(int x) { if (x) return 1; abort(); }\n",
+        "void abort(void) __attribute__((__noreturn__));\nint f(int x) { switch (x) { case 1: return 1; default: abort(); } }\n",
+        "int f(int x) { if (x) return 1; __builtin_unreachable(); }\n",
+        "__attribute__((noreturn)) void h(void), g(void);\nint f(int x) { if (x) return 1; g(); }\n",
+        "void * __attribute__((noreturn)) g(void);\nint f(int x) { if (x) return 1; g(); }\n",
+        "__attribute__((noreturn)) void g(void);\nvoid g(void);\nint f(int x) { if (x) return 1; g(); }\n",
+        "__attribute__((noreturn)) void g(int);\nint k(int);\nint f(int x) { if (x) return 1; g(k(x)); }\n",
+        "__attribute__((noreturn)) int g(void);\nint f(int x) { if (x) return 1; int y = g(); }\n",
+        "typedef int (*F)(int);\nint f(F g) { return g != ((void *)0); }\nint h(F g, const void *p) { return p == g; }\n",
+        "typedef int (*F)(int);\nvoid *d(void *, const char *);\nF f(void *l) { F g = (__extension__ (F)(d(l, \"x\"))); return g; }\n",
+        "long f(int x) { __extension__ long long v = x; for (__extension__ int i = 0; i < 2; i++) v += i; return (long)v; }\n",
+    };
+    static const char* const left[] = {
+        "void abort(void) __attribute__((__noreturn__));\n__attribute__((noreturn)) void f(int x) { if (x) abort(); }\n",
+        "__attribute__((noreturn)) void f(void) { return; }\n",
+        "void abort(void) __attribute__((__noreturn__));\n__attribute__((noreturn)) void f(void) { if (0) return; abort(); }\n",
+        "__attribute__((noreturn)) void f(void);\nvoid f(void) { }\n",
+        "void abort(void) __attribute__((__noreturn__));\n_Noreturn void f(int x) { if (x) abort(); }\n",
+        "__attribute__((noreturn)) int g(void);\nint f(int x) { if (x) return 1; (void)sizeof(g()); }\n",
+        "__attribute__((noreturn)) void g(void);\nint f(int x) { if (x) return 1; if (0) g(); }\n",
+        "__attribute__((noreturn)) void g(void);\nint f(int x) { if (x) goto L; g(); L: ; }\n",
+        "__attribute__((noreturn)) void g(void);\nint f(int x) { if (x) return 1; x > 1 ? g() : (void)0; }\n",
+        "__attribute__((noreturn)) int g(void);\nint f(int x) { if (x) return 1; (void)(x > 1 && g()); }\n",
+        "void (*g)(void);\nint f(int x) { if (x) return 1; g(); }\n",
+        "__attribute__((noreturn)) void g(void);\nint f(int x, void (*g)(void)) { if (x) return 1; g(); }\n",
+        "void h(void), __attribute__((noreturn)) g(void);\nint f(int x) { if (x) return 1; h(); }\n",
+        "void g(void);\nint f(int x) { if (x) return 1; g(); }\n__attribute__((noreturn)) void g(void);\n",
+        "typedef int (*F)(int);\nint f(F g, void *p) { return g < p; }\n",
+        "typedef int (*F)(int);\nvoid *f(int c, F g, void *p) { return c ? g : p; }\n",
+        "long long f(int x) { return (__extension__ long long) x; }\n",
+        "int f(void) { return (int)sizeof (__extension__ int); }\n",
+        "typedef int T;\nint f(void) { return (__extension__ T) 1; }\n",
+    };
+    bool ok = true;
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(taken) / sizeof(taken[0])); i += 1)
+    {
+        const bool compiled = c_direct_test_compile_mode(taken[i], obj_path, 0, NULL, NULL, (CDirectTestMode){ .warnings = true });
+        if (!compiled)
+        {
+            fprintf(stderr, "test-direct: a form the full pipeline takes quietly left the direct path: %s", taken[i]);
+        }
+        ok = ok && compiled;
+    }
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(left) / sizeof(left[0])); i += 1)
+    {
+        const bool refused = c_direct_test_compile_mode(left[i], obj_path, 1, NULL, NULL, (CDirectTestMode){ .warnings = true });
+        if (!refused)
+        {
+            fprintf(stderr, "test-direct: a form the full pipeline diagnoses took the direct path: %s", left[i]);
+        }
+        ok = ok && refused;
+    }
+    // Under -w the noreturn warnings don't count.
+    ok = ok && c_direct_test_compile_mode(left[0], obj_path, 0, NULL, NULL, (CDirectTestMode){ 0 }) &&
+         c_direct_test_compile_mode(left[2], obj_path, 0, NULL, NULL, (CDirectTestMode){ 0 });
+    // And the code: a non-void function's live path past a path __builtin_unreachable ends (a call of a function would
+    // be a relocation c_direct_test_code doesn't take), the comparisons and the cast.
+    static const char source[] =
+        "int t_select(int x) { if (x) return x + 1; __builtin_unreachable(); }\n"
+        "int t_compare(int (*f)(int)) { return f != ((void *)0); }\n"
+        "int t_equal(void *p, int (*f)(int)) { return p == f; }\n"
+        "long t_cast(int x) { return (__extension__ (long)(x)) + 1; }\n";
+    bool ran = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+#if !__has_feature(memory_sanitizer)
+    static const char* const names[] = { "t_select", "t_compare", "t_equal", "t_cast" };
+    enum { count = sizeof(names) / sizeof(names[0]) };
+    void* mappings[count] = { 0 };
+    size_t mapped[count] = { 0 };
+    const void* code[count] = { 0 };
+    for (uint32_t i = 0; ran && i < (uint32_t)count; i += 1)
+    {
+        code[i] = c_direct_test_code(obj_path, names[i], mappings + i, mapped + i);
+        ran = code[i] != NULL;
+    }
+    ran = ran && ((CDirectTestSelect)(uintptr_t)code[0])(4) == 5 && ((CDirectTestPointerCompare)(uintptr_t)code[1])(NULL) == 0 &&
+          ((CDirectTestPointerCompare)(uintptr_t)code[1])(c_direct_test_identity) == 1 &&
+          ((CDirectTestPointerEqual)(uintptr_t)code[2])((void*)(uintptr_t)c_direct_test_identity, c_direct_test_identity) == 1 &&
+          ((CDirectTestPointerEqual)(uintptr_t)code[2])(NULL, c_direct_test_identity) == 0 && ((CDirectTestExtensionCast)(uintptr_t)code[3])(-3) == -2;
+    for (uint32_t i = 0; i < (uint32_t)count; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+    if (!ran)
+    {
+        fprintf(stderr, "test-direct: a noreturn call's path, a function pointer's comparison or an __extension__ cast compiled wrong\n");
+    }
+    return ok && ran;
+}
+
 static int c_direct_unit_tests(void)
 {
     char obj_path[256];
@@ -5888,6 +6015,16 @@ static int c_direct_unit_tests(void)
     else
     {
         fprintf(stderr, "test-direct: FAIL a loop's empty body\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_noreturn(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL noreturn functions, function pointers against void * and __extension__ (#3592)\n");
         failed += 1u;
     }
 

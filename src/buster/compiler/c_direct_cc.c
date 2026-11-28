@@ -3959,17 +3959,19 @@ static const uint16_t fast_binary_refused[64] = {
 };
 
 // Whether two pointers of different types may meet in `op` as the full pipeline lets them (#3577): to compatible types
-// but for their qualifiers (a function's of one signature, an array's of one element), or for == and != one to void
-// and the other to an object; anything else is its error or warning (distinct pointer types, a function pointer against
-// void *).
+// but for their qualifiers (a function's of one signature, an array's of one element); for == and != one to void and
+// the other to anything, a function too (#3592: Lua's `f != NULL`; clang questions a function pointer against void *
+// only with -pedantic); and for a conditional's arms (FTOK_QUESTION) one to void and the other to an object. Anything
+// else is its error or warning (distinct pointer types, a conditional's function pointer against void *).
 static __attribute__((noinline)) bool fast_cc_pointer_pair_valid(FastCCState* cc, uint8_t op, FastType lt, FastType rt)
 {
     const FastType le = BUSTER_FTYPE_CODEGEN(ftype_unqual(ftype_deref(cc, lt)));
     const FastType re = BUSTER_FTYPE_CODEGEN(ftype_unqual(ftype_deref(cc, rt)));
     const bool equality = op == FTOK_EQ || op == FTOK_NE;
+    const bool arms = op == FTOK_QUESTION;
     const bool l_void = le == FTYPE_VOID;
     const bool r_void = re == FTYPE_VOID;
-    return le == re || (equality && ((l_void && !ftype_is_func(re)) || (r_void && !ftype_is_func(le)))) ||
+    return le == re || (equality && (l_void || r_void)) || (arms && ((l_void && !ftype_is_func(re)) || (r_void && !ftype_is_func(le)))) ||
            (!l_void && !r_void && fast_cc_types_redeclarable(cc, le, re));
 }
 
@@ -6583,6 +6585,23 @@ static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_argument
 }
 
 // Emit full SysV AMD64 ABI function call (direct or indirect, 6 GP + 8 XMM + stack args, 1-16B & >16B structs, variadic!)
+// #3592: a call of a function declared noreturn (its name's symbol, FastSym's is_noreturn), or of __builtin_unreachable,
+// ends the path where it is its expression's whole: its name the expression's first token (the expression context's
+// start, whatever the context: a statement's, a for's, a declarator's initializer), its `(` the next and its `)` before
+// a `;`. The full pipeline's warning CFG ends there too (a call that never returns, in any operand it evaluates, is
+// BUSTER_CHECK_RETURN_STOPS); that is the path's narrower part, and anything else keeps it live. cc->pos is past the
+// call's `)`.
+static __attribute__((cold, noinline)) void fast_cc_noreturn_statement(FastExprCtx* ex, uint32_t callee_id)
+{
+    FastCCState* cc = ex->cc;
+    const uint32_t name = ex->seq_start_pos;
+    if (ex->call_open == name + 1u && cc->tk[name] == FTOK_IDENT && cc->td[name] == callee_id && ex->unevaluated == 0 &&
+        fast_cc_peek(cc) == FTOK_SEMI)
+    {
+        cc->live = 0u;
+    }
+}
+
 static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc)
 {
     FastCCState* cc = ex->cc;
@@ -6608,6 +6627,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         else if (bid == cc->id_builtin_strlen)  { libc_name = "strlen";  ret_t = FTYPE_U64; }
         if (libc_name == NULL)
         {
+            if (bid == cc->id_builtin_unreachable) { fast_cc_noreturn_statement(ex, bid); }
             fval_emit_builtin_call(ex, bid, args, argc, callee);
             // A void builtin (__builtin_unreachable, __sync_synchronize, ...) is an effect; a value's is not (#3577).
             callee->marks = (uint8_t)(BUSTER_FVAL_MARK_EFFECT * (uint32_t)(callee->kind == FVAL_VOID));
@@ -6687,6 +6707,12 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
             fast_cc_bail(cc, "call argument count mismatch, or arguments without a prototype");
             return;
         }
+    }
+    // #3592: a noreturn function's call by name (its seq_ident; another callee's names no function, or none) may end the
+    // path (fast_cc_noreturn_statement).
+    {
+        const uint32_t callee_id = callee->seq_ident & (0u - (uint32_t)(callee->seq_ident < cc->env_cap));
+        if (cc->syms[cc->sym_cur[callee_id]].is_noreturn != 0) { fast_cc_noreturn_statement(ex, callee_id); }
     }
 
     if (ex->eval_only > 0)
@@ -7792,7 +7818,7 @@ static __attribute__((noinline)) void fast_expr_reduce_ternary(FastExprCtx* ex, 
     {
         // #3577: pointers to incompatible types (but for qualifiers, and void's with an object's) are the full
         // pipeline's -Wpointer-type-mismatch, in a dead branch's conditional too.
-        if (then_t != else_t && !fast_cc_pointer_pair_valid(cc, FTOK_EQ, then_t, else_t))
+        if (then_t != else_t && !fast_cc_pointer_pair_valid(cc, FTOK_QUESTION, then_t, else_t))
         {
             fast_cc_bail(cc, "a conditional's pointers to incompatible types");
             return;
@@ -11456,7 +11482,8 @@ typedef enum FastDeclEntity
 // Whether the attributes a declaration's specifiers (spec) and declarator (decl) carry are ones it may have, as the
 // full pipeline sees them; *out_flags receives the symbol's use flags (BUSTER_FSYM_*) they ask for. A function's
 // attributes elsewhere, packed (a record definition's, which the record parser reads), weak on what has no external
-// linkage, and noreturn or nonnull on a definition (whose body the full pipeline checks against them) are its.
+// linkage, and nonnull on a definition (whose body the full pipeline checks against it) are its. A noreturn
+// definition's body is checked here (#3592: cur_func_noreturn).
 static __attribute__((noinline)) bool fast_cc_decl_attributes_valid(const FastCCState* cc, const FastAttrInfo* spec, const FastAttrInfo* decl,
                                                                     FastType type, bool is_func, FastDeclEntity entity, bool is_static,
                                                                     uint8_t* out_flags)
@@ -11478,7 +11505,7 @@ static __attribute__((noinline)) bool fast_cc_decl_attributes_valid(const FastCC
     // #3577: and a declarator's mode this path can't give (fast_cc_mode_type) is a typedef's alone, whose uses are
     // refused.
     valid &= (uint32_t)(entity == FDECL_TYPEDEF) | (uint32_t)(decl->mode_size != BUSTER_FMODE_UNMODELED);
-    valid &= (definition ^ 1u) | (uint32_t)((spec->noreturn | decl->noreturn | spec->nonnull | decl->nonnull) == 0);
+    valid &= (definition ^ 1u) | (uint32_t)((spec->nonnull | decl->nonnull) == 0);
     if ((valid & format) != 0)
     {
         // format(printf|scanf, INDEX, FIRST) on one list, naming a character pointer parameter, and FIRST the
@@ -12593,6 +12620,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     // 3. Reset per-function state
     cc->cur_func_sym = sym_idx;
     cc->cur_func_name_id = fn_sym->ident_id;
+    cc->cur_func_noreturn = fn_sym->is_noreturn;
     cc->cur_func_body_pos = cc->pos;
     cc->cur_func_pretty = NULL;
     cc->cur_ret_type = ret_t;
@@ -12758,11 +12786,12 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     }
     FastUserLabel* ulabels = (FastUserLabel*)fast_arena_alloc(cc->scratch, 512u * sizeof(FastUserLabel), 8);
     uint32_t ulabel_count = 0;
-    // #3577: whether the point compiled may be reached, as the full pipeline's -Wreturn-type sees it at the body's end:
-    // over-approximated (an if's condition may be false, a loop's but a constant true one's ends it, a label is a
-    // goto's target), so that an end this path calls unreachable is one the full pipeline does. A break or a continue
-    // marks the frame of its target (break_frame, cont_frame).
-    bool live = true;
+    // #3577: whether the point compiled may be reached, as the full pipeline's -Wreturn-type sees it at the body's end
+    // (cc->live): over-approximated (an if's condition may be false, a loop's but a constant true one's ends it, a label
+    // is a goto's target), so that an end this path calls unreachable is one the full pipeline does. A break or a
+    // continue marks the frame of its target (break_frame, cont_frame); #3592: a noreturn call's statement ends it
+    // (fast_cc_noreturn_statement).
+    cc->live = 1u;
     uint8_t break_frame[64];
     uint8_t cont_frame[64];
 
@@ -12806,8 +12835,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     top->dead = (uint8_t)((uint32_t)dead_else * BUSTER_FDEAD_ELSE);
                     top->lbl0 = end_lbl;
                     top->entered_body = 0;
-                    top->then_live = (uint8_t)live;
-                    live = true;
+                    top->then_live = cc->live;
+                    cc->live = 1u;
                     continue;
                 }
                 if (top->trailing_else != 0)
@@ -12817,14 +12846,14 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 }
                 fast_label_bind(obj, top->lbl0);
                 ssp -= 1u;
-                live = true;
+                cc->live = 1u;
                 continue;
             }
             if (top->kind == FSTK_IF_ELSE)
             {
                 cc->dead -= (uint32_t)(top->dead == BUSTER_FDEAD_ELSE);
                 fast_label_bind(obj, top->lbl0);
-                live = live || top->then_live != 0;
+                cc->live = (uint8_t)((uint32_t)cc->live | (uint32_t)(top->then_live != 0));
                 if (top->labeled == 0)
                 {
                     BUSTER_FSTK_ENDS_IN_ELSE(sstack, ssp)
@@ -12836,7 +12865,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             {
                 x86_jmp_label(obj, top->lbl0); // cond_lbl
                 fast_label_bind(obj, top->lbl1); // break_lbl
-                live = ((uint32_t)(top->infinite == 0) | (uint32_t)(top->broke != 0)) != 0;
+                cc->live = (uint8_t)((uint32_t)(top->infinite == 0) | (uint32_t)(top->broke != 0));
                 break_sp -= 1u;
                 cont_sp -= 1u;
                 ssp -= 1u;
@@ -12862,7 +12891,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 cc->pos += 1u;
                 fast_label_bind(obj, top->lbl2); // break_lbl
                 // Left by a break, or by the condition, reached from the body's end or a continue, unless a constant true.
-                live = ((uint32_t)(top->broke != 0) | (((uint32_t)live | (uint32_t)(top->continued != 0)) & (infinite ^ 1u))) != 0;
+                cc->live = (uint8_t)((uint32_t)(top->broke != 0) | (((uint32_t)cc->live | (uint32_t)(top->continued != 0)) & (infinite ^ 1u)));
                 break_sp -= 1u;
                 cont_sp -= 1u;
                 ssp -= 1u;
@@ -12882,7 +12911,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 x86_jmp_label(obj, top->lbl0); // cond_lbl
                 fast_label_bind(obj, top->lbl2); // break_lbl
                 fast_cc_scope_leave(cc, top->scope_mark);
-                live = ((uint32_t)(top->infinite == 0) | (uint32_t)(top->broke != 0)) != 0;
+                cc->live = (uint8_t)((uint32_t)(top->infinite == 0) | (uint32_t)(top->broke != 0));
                 break_sp -= 1u;
                 cont_sp -= 1u;
                 ssp -= 1u;
@@ -12900,7 +12929,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 }
                 fast_cc_emit_switch_dispatch(cc, sw, sw_cases + sw->case_start);
                 fast_label_bind(obj, top->lbl1); // break_lbl
-                live = ((uint32_t)live | (uint32_t)(sw->default_lbl == UINT32_MAX) | (uint32_t)(top->broke != 0)) != 0;
+                cc->live = (uint8_t)((uint32_t)cc->live | (uint32_t)(sw->default_lbl == UINT32_MAX) | (uint32_t)(top->broke != 0));
                 // Pop this switch's hash chains. An enclosing switch can already have a case in the same bucket.
                 while (sw_case_used > sw->case_start)
                 {
@@ -12967,7 +12996,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     cur_sw->case_count += 1u;
                 }
                 else { fast_cc_bail(cc, "too many switch cases"); break; }
-                live = true;
+                cc->live = 1u;
                 continue;
             }
             if (pk == FTOK_KW_DEFAULT)
@@ -12980,7 +13009,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 const uint32_t dlbl = fast_label_new(obj);
                 fast_label_bind(obj, dlbl);
                 sw_stack[sw_sp - 1u].default_lbl = dlbl;
-                live = true;
+                cc->live = 1u;
                 continue;
             }
             if (pk == FTOK_IDENT && fast_cc_peek_at(cc, 1u) == FTOK_COLON)
@@ -12991,7 +13020,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 const uint32_t ll = fast_cc_get_user_label(obj, ulabels, &ulabel_count, 512u, lid_name, true, &lok);
                 if (!lok) { fast_cc_bail(cc, "duplicate or overflow label"); break; }
                 fast_label_bind(obj, ll);
-                live = true;
+                cc->live = 1u;
                 continue;
             }
             if (pk == FTOK_KW_ATTRIBUTE)
@@ -13137,7 +13166,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             {
                 cc->pos += 1u;
             }
-            else if (fast_cc_is_type_start(cc, cc->pos))
+            else if (fast_cc_is_declaration_start(cc, cc->pos))
             {
                 FastDeclSpecs ds = { 0 };
                 const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
@@ -13306,7 +13335,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             cc->pos += 1u;
             x86_jmp_label(obj, break_stack[break_sp - 1u]);
             sstack[break_frame[break_sp - 1u]].broke = 1u;
-            live = false;
+            cc->live = 0u;
             continue;
         }
         if (k == FTOK_KW_CONTINUE)
@@ -13318,7 +13347,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             cc->pos += 1u;
             x86_jmp_label(obj, cont_stack[cont_sp - 1u]);
             sstack[cont_frame[cont_sp - 1u]].continued = 1u;
-            live = false;
+            cc->live = 0u;
             continue;
         }
         if (k == FTOK_KW_GOTO)
@@ -13334,14 +13363,16 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             const uint32_t ll = fast_cc_get_user_label(obj, ulabels, &ulabel_count, 512u, lid, false, &lok);
             if (!lok) { fast_cc_bail(cc, "label table full"); break; }
             x86_jmp_label(obj, ll);
-            live = false;
+            cc->live = 0u;
             continue;
         }
 
         // 10. `return [expr];`
         if (k == FTOK_KW_RETURN)
         {
-            live = false;
+            // #3592: a return in a noreturn function is the full pipeline's -Winvalid-noreturn, reached or not.
+            if (cc->cur_func_noreturn != 0 && !cc->quiet) { fast_cc_bail(cc, "a return in a noreturn function"); break; }
+            cc->live = 0u;
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_SEMI)
             {
@@ -13429,7 +13460,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         }
 
         // 11. Local declaration (inside block)
-        if (top->kind == FSTK_BLOCK && fast_cc_is_type_start(cc, cc->pos))
+        if (top->kind == FSTK_BLOCK && fast_cc_is_declaration_start(cc, cc->pos))
         {
             FastDeclSpecs ds = { 0 };
             const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
@@ -13668,9 +13699,14 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         if (!ulabels[i].defined) { fast_cc_bail(cc, "undefined goto label"); }
     }
     // #3577: a non-void function's end that may be reached is the full pipeline's -Wreturn-type (main's returns 0).
-    if (!cc->bailout && !cc->quiet && !ftype_is_void(ret_t) && cc->cur_func_name_id != cc->id_main && live)
+    if (!cc->bailout && !cc->quiet && !ftype_is_void(ret_t) && cc->cur_func_name_id != cc->id_main && cc->live != 0)
     {
         fast_cc_bail(cc, "non-void function's end may be reached");
+    }
+    // #3592: and a noreturn function's end that may be reached is its -Winvalid-noreturn.
+    if (!cc->bailout && !cc->quiet && cc->cur_func_noreturn != 0 && cc->live != 0)
+    {
+        fast_cc_bail(cc, "a noreturn function's end may be reached");
     }
 
     // 7. Implicit `return 0` in `main`, epilogue, frame patch, jump fixup, FDE, ELF symbol!
@@ -14005,10 +14041,9 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             const bool is_def = first && is_func && fast_cc_peek(cc) == FTOK_LBRACE;
             const FastDeclJoin join = fast_cc_decl_join(&ds, &dr, is_func, is_def);
             const FastAttrInfo* alias = dr.attr.alias_name != NULL ? &dr.attr : ds.attr.alias_name != NULL ? &ds.attr : NULL;
-            // #3577: inline and _Noreturn belong to functions, and a _Noreturn body is the full pipeline's to check
-            // (-Winvalid-noreturn); the attributes, where there are any, must be the declared kind's.
-            if (((uint32_t)(ds.is_inline | ds.is_noreturn) &
-                 ((uint32_t)!is_func | (uint32_t)ds.is_typedef | ((uint32_t)is_def & (uint32_t)ds.is_noreturn))) != 0)
+            // #3577: inline and _Noreturn belong to functions (#3592: a _Noreturn body is checked as a noreturn
+            // attribute's, -Winvalid-noreturn); the attributes, where there are any, must be the declared kind's.
+            if (((uint32_t)(ds.is_inline | ds.is_noreturn) & ((uint32_t)!is_func | (uint32_t)ds.is_typedef)) != 0)
             {
                 fast_cc_bail(cc, "inline or _Noreturn where the full pipeline checks it");
                 break;
@@ -14028,6 +14063,10 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             // checks as an attribute's.
             const uint8_t use_flags = (uint8_t)(ds.is_unsupported_type | attr_flags |
                                                 (BUSTER_FSYM_FORMAT * (uint32_t)(cc->pp->idents.entries[dr.name_id].pp_kw == FPP_KW_FORMAT_FUNCTION)));
+            // #3592: a function's noreturn, from its specifiers (all its declarators') or its own declarator, as the full
+            // pipeline reads it; a later declaration keeps an earlier one's.
+            const uint8_t noreturn = (uint8_t)((uint32_t)((ds.attr.noreturn | dr.attr.noreturn | ds.is_noreturn) != 0) & (uint32_t)is_func &
+                                               (uint32_t)!ds.is_typedef);
             // A function's nonnull parameters go in its type (fast_cc_nonnull_arguments_clean), which must be this
             // declarator's own, not a typedef's that other functions share.
             const uint32_t nonnull_mask = ds.attr.nonnull_mask | dr.attr.nonnull_mask;
@@ -14080,13 +14119,14 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     cc->syms[si].type = dr.type;
                     if (stor == 1u || stor == 4u) { cc->syms[si].storage = stor; }
                     cc->syms[si].use_flags |= use_flags;
+                    cc->syms[si].is_noreturn |= noreturn;
                     fast_cc_join_declaration(cc, si, &join, false);
                     if (cc->bailout) { break; }
                 }
                 else
                 {
                     si = fast_cc_sym_bind(cc, dr.name_id, (FastSym){
-                        .kind = FSYM_FUNC, .storage = stor, .is_weak = join.weak, .visibility = join.visibility,
+                        .kind = FSYM_FUNC, .storage = stor, .is_noreturn = noreturn, .is_weak = join.weak, .visibility = join.visibility,
                         .visibility_set = join.visibility_set, .inline_rules = join.inline_rules,
                         .use_flags = use_flags, .type = dr.type,
                         .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
@@ -14246,6 +14286,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         fast_cc_join_declaration(cc, existing, &join, alias != NULL);
                         if (cc->bailout) { break; }
                         cc->syms[existing].use_flags |= use_flags;
+                        cc->syms[existing].is_noreturn |= noreturn;
                         if (alias != NULL)
                         {
                             fast_cc_alias_add(cc, existing, alias);
@@ -14255,7 +14296,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     {
                         const uint8_t stor = ds.is_static ? 1u : 2u;
                         const uint32_t si = fast_cc_sym_bind(cc, dr.name_id, (FastSym){
-                            .kind = FSYM_FUNC, .storage = stor, .is_weak = join.weak, .visibility = join.visibility,
+                            .kind = FSYM_FUNC, .storage = stor, .is_noreturn = noreturn, .is_weak = join.weak, .visibility = join.visibility,
                             .visibility_set = join.visibility_set, .inline_rules = join.inline_rules,
                             .use_flags = use_flags, .type = dr.type,
                             .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
