@@ -90,7 +90,7 @@ typedef struct PPFuzzState PPFuzzState;
 struct PPFuzzState
 {
     // The default and 64-byte window runs, with expansion starts (for the printers' line markers), and
-    // when both kernels run, theirs again as a compile runs them, without (pp_fuzz_run).
+    // with both configurations requested, the same runs without expansion starts (pp_fuzz_run).
     Preprocessor runs[4];
     InternTable tables[4];
     bool tables_ready[4];

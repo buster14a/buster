@@ -9,10 +9,9 @@
 // Without files, it runs the built-in cases (pp_test_cases, runtime data under tests/preprocessor since #2053; the
 // comment above pp_test_fixture_root): small sources on the topics of the C standard's examples
 // (6.10.4.5), the cases where GCC's and clang's behavior was probed (docs/c-preprocessor.md), and inputs past the
-// vectorized kernels' limits, each written to a new directory under $TMPDIR (or /tmp) and preprocessed by the vectorized and the
-// scalar kernels, whose output streams must be the same token for token (kind, flags, value and location), whose
-// directive tables must be the same (pp_same_directive_tables), whose tokens' spellings must be the expected ones, and
-// which must give the expected number of warnings. A case can name more files and options for both sides (%d stands
+// vectorized kernels' limits. Each case runs in a new directory under $TMPDIR (or /tmp). Its token spellings, warnings,
+// printed output, directive tables and history are checked against its expectations and recorded digests. A case can
+// name more files and options for both sides (%d stands
 // for its directory), and the text -E prints with line markers. Then __TIMESTAMP__ must be each file's modification
 // time (pp_test_timestamps), and the -f options of #281's families must be refused or taken as clang's -E needs
 // (pp_test_option_refusals). With --clang, each case is also preprocessed by `clang -E`: it must give the same
@@ -24,15 +23,15 @@
 // give clang's tokens (pp_test_option_refusals).
 //
 // After the cases comes the fuzz batch (c_preprocessor_fuzz.c, #109): --fuzz generated cases in each mode (1,500 by
-// default, 0 for none), from --seed, by both kernels, which must agree, and with --clang against clang too.
+// default, 0 for none), from --seed, with default and 64-byte preparation windows, and with --clang against clang too.
 //
-// With files, each is preprocessed with the options (-I, -isystem, -D, -std=, -ffreestanding, ... as for -E) by both
-// kernels, which must agree, and with --clang compared with `clang -E` and the same options, spellings and line
+// With files, each is preprocessed with the options (-I, -isystem, -D, -std=, -ffreestanding, ... as for -E) in two
+// preparation configurations, which must agree, and with --clang compared with `clang -E` and the same options, spellings and line
 // markers: our side then reads clang's own predefines (`clang -dM -E` with the options, as --predefines), so that both
 // start from the same macros, and clang gets ours' search for --buster-headers (pp_clang_arguments, whose links' names
 // in its text, as clang escapes them, become those of the files they lead to). The first difference is printed with
-// the tokens around it (pp_test_files). In both, the vectorized printer's text must be the scalar printer's byte for
-// byte, with line markers and without, and must lex back into the stream's tokens. The macros at the file's end
+// the tokens around it (pp_test_files). The unmarked text must lex back into the stream's tokens. The marked text
+// supplies the line and file positions for comparison with Clang. The macros at the file's end
 // also compare against clang -dM with our own predefines (pp_test_macros).
 //
 // main.c includes this file after c_preprocessor.c. Layout: the token spellings of a stream and of a text, the
@@ -4085,12 +4084,12 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
     bool ran[2];
     for (uint32_t k = 0; k < 2; k += 1)
     {
-        // Exercise the opposite preparation on the comparison run, including files given an explicit window size.
-        options.window_bytes = k == 0 ? base->window_bytes : base->window_bytes == UINT32_MAX ? 64 : UINT32_MAX;
+        // Compare the default or whole-file setup with small windows, and an explicit window size with whole-file preparation.
+        options.window_bytes = k == 0 ? base->window_bytes : base->window_bytes == 0 || base->window_bytes == UINT32_MAX ? 64 : UINT32_MAX;
         ran[k] = pp_test_run(&runs[k], &tables[k], &options, path);
     }
     bool result = ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], path) && pp_same_directive_tables(&runs[0], &runs[1], path) &&
-                  pp_test_compile_kernels(&options, path, path, false);
+                  pp_test_compile_kernels(base, path, path, false);
     *tokens += runs[0].output.count;
     PPSpellings ours = { 0 };
     String8 marked = { 0 };
@@ -4213,7 +4212,7 @@ static bool pp_test_resource_names(char** text, size_t* length, const char* link
     return result;
 }
 
-// One of test-preprocessor's files (pp_test_files): by both kernels, and with `with_clang` against clang with
+// One of test-preprocessor's files (pp_test_files): with two window sizes, and with `with_clang` against clang with
 // `arguments` (pp_clang_arguments, whose links are in `links`, or null without them), whose predefines ours reads.
 static bool pp_test_file(int argument_count, char** arguments, const char* links, const PPOptions* base, const char* path, bool with_clang, const char* directory,
                          bool predefined, uint64_t* tokens)
