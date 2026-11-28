@@ -3674,7 +3674,7 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     const PPPrepare mode = pp_prepare_config(pp);
     int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp_lex_flags(&mode)) : -1;
-    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count) : count;
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, kinds, starts, ends, (uint32_t)count) : count;
     *comment = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
     count -= *comment;
     uint32_t result = count >= 0 && pp_room(pp, into, (uint32_t)count) ? (uint32_t)count : BUSTER_PP_NONE;
@@ -9148,7 +9148,7 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     const PPPrepare mode = pp_prepare_config(pp);
     int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp_lex_flags(&mode)) : -1;
-    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count) : count;
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, kinds, starts, ends, (uint32_t)count) : count;
     // An unterminated block comment at their end runs to the file's end (pp_relex_end), which clang's lexer reports where
     // it starts: the file's tokens, which read it as part of a line comment, didn't.
     const bool unterminated = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
@@ -17000,7 +17000,7 @@ static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64
 // those bytes, and the prefetches cost 2-3%. Then, into all 64 lanes of `firsts` and `lasts` (64-byte aligned), a character
 // of the class of each token's first and last: by its kind (pp_print_kind_firsts, pp_print_kind_lasts), and the bytes
 // themselves of the kinds the table doesn't fix, of a bracket or a brace longer than one byte (a digraph) and, where
-// '$' is punctuation, of every identifier, which pp_split_dollars leaves without a '$' there, but the classes don't
+// '$' is punctuation, of every identifier, whose ends the lexer has already found. The classes don't
 // count on that (#649: reading every token's two bytes, and step 2's load of the 128 byte stores, were a third of -P's
 // printing on the 9700X). Returns false, for the general loop to give the chunk's spellings, when a token's location
 // is in no range, the other tokens (identifiers take no range) are in more ranges than that or a spelling is empty.
