@@ -1086,7 +1086,8 @@ static void ir_unroll_test_wide_remap(IrOptimizeTest* test)
         {
             memset(result_bytes, 0xa5, sizeof(result_bytes));
             memset(result_values, 0xa5, sizeof(result_values));
-            ir_unroll_remap(&input, 0, count, map, &output, 1);
+            const bool extras = ir_unroll_remap(&input, 0, count, map, &output, 1);
+            ir_optimize_test_expect(test, extras == (count >= 3), "only slices reaching the call or intrinsic can own extra operands");
             const bool values = memcmp(output.a + 1, expected_a, count * sizeof(uint32_t)) == 0 && memcmp(output.b + 1, expected_b, count * sizeof(uint32_t)) == 0 &&
                                 memcmp(output.c + 1, expected_c, count * sizeof(uint32_t)) == 0;
             const bool columns = memcmp(output.op + 1, op, count) == 0 && memcmp(output.type + 1, type, count) == 0 &&
@@ -1257,19 +1258,22 @@ static void ir_unroll_test_scans(IrOptimizeTest* test)
                 .b = b,
                 .c = c,
             };
-            ir_unroll_remap(&f, first, count, map, &view, out);
+            const bool extras = ir_unroll_remap(&f, first, count, map, &view, out);
+            bool expected_extras = false;
             bool same = true;
             for (uint32_t k = 0; k < count; k += 1)
             {
                 const uint32_t i = first + k;
                 const uint32_t mask = ir_value_mask(&f, i);
+                const IrOp code = (IrOp)f.op[i];
+                expected_extras |= code == IR_PHI || code == IR_CALL || code == IR_CALL_INDIRECT || code == IR_SCATTER || code == IR_INTRINSIC;
                 same = same && op[out + k] == f.op[i] && type[out + k] == f.type[i] && flags[out + k] == f.flags[i] && alignment[out + k] == f.alignment_log2[i];
                 same = same && a[out + k] == ((mask & 1) != 0 ? map[f.a[i]] : f.a[i]);
                 same = same && b[out + k] == ((mask & 2) != 0 ? map[f.b[i]] : f.b[i]);
                 same = same && c[out + k] == ((mask & 4) != 0 ? map[f.c[i]] : f.c[i]);
             }
             same = same && (out == 0 || a[out - 1] == UINT32_C(0xa5a5a5a5)) && a[out + count] == UINT32_C(0xa5a5a5a5);
-            remapped &= same;
+            remapped &= same && extras == expected_extras;
         }
     }
     ir_optimize_test_expect(test, classified, "the unroller's opcode classes, against their definition");

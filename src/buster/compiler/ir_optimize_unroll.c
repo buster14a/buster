@@ -1027,6 +1027,7 @@ struct IrUnrollOperands
 {
     __m512i a, b, c;
     __mmask16 use_a, use_b, use_c;
+    __m128i classes;
 };
 
 // Copy the byte columns once and identify the value operands among these rows.
@@ -1045,7 +1046,7 @@ static inline __attribute__((always_inline)) IrUnrollOperands ir_unroll_load_ope
     const __mmask16 use_a = active & _mm_test_epi8_mask(operands, _mm_set1_epi8(1)) & _mm512_cmpneq_epi32_mask(a, _mm512_set1_epi32(-1));
     const __mmask16 use_b = active & _mm_test_epi8_mask(operands, _mm_set1_epi8(2)) & _mm512_cmpneq_epi32_mask(b, _mm512_set1_epi32(-1));
     const __mmask16 use_c = active & _mm_test_epi8_mask(operands, _mm_set1_epi8(4)) & _mm512_cmpneq_epi32_mask(c, _mm512_set1_epi32(-1));
-    return (IrUnrollOperands){ a, b, c, use_a, use_b, use_c };
+    return (IrUnrollOperands){ a, b, c, use_a, use_b, use_c, operands };
 }
 
 static inline __attribute__((always_inline)) __m512i ir_unroll_gather(__m512i values, __mmask16 mask, const uint32_t* middle, __m512i origin)
@@ -1062,17 +1063,19 @@ static inline __attribute__((always_inline)) void ir_unroll_store_operands(IrFun
 
 // The fixed operands of instructions [first, first + count) of `f`, through `map` where they are values, into `a`, `b`
 // and `c` from `out`; their opcode, type, flags and alignment copied. Phis', calls' and extra values' operands, which
-// the extra array holds, are the caller's.
-static void ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count, const uint32_t* map, IrFunction* view, uint32_t out)
+// the extra array holds, are the caller's. Return whether any opcode in the slice can own one of those lists.
+static bool ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count, const uint32_t* map, IrFunction* view, uint32_t out)
 {
     // Every valid unsigned id lies within a signed dword of the middle of its map.
     const uint32_t center = f->instruction_count / 2;
     const __m512i origin = _mm512_set1_epi32((int)center);
     const uint32_t* middle = map + center;
+    __m128i classes = _mm_setzero_si128();
     uint64_t at = 0;
     for (; at + 16 <= count; at += 16)
     {
         const IrUnrollOperands rows = ir_unroll_load_operands(f, first + (uint32_t)at, view, out + (uint32_t)at, UINT16_MAX);
+        classes = _mm_or_si128(classes, rows.classes);
         ir_unroll_store_operands(view, out + (uint32_t)at, UINT16_MAX, ir_unroll_gather(rows.a, rows.use_a, middle, origin),
                                  ir_unroll_gather(rows.b, rows.use_b, middle, origin), ir_unroll_gather(rows.c, rows.use_c, middle, origin));
     }
@@ -1080,6 +1083,7 @@ static void ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count,
     {
         const __mmask16 active = (__mmask16)((1u << (count - (uint32_t)at)) - 1);
         const IrUnrollOperands rows = ir_unroll_load_operands(f, first + (uint32_t)at, view, out + (uint32_t)at, active);
+        classes = _mm_or_si128(classes, rows.classes);
         __m512i gathered_a;
         __m512i gathered_b;
         __m512i gathered_c = rows.c;
@@ -1117,6 +1121,7 @@ static void ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count,
         }
         ir_unroll_store_operands(view, out + (uint32_t)at, active, gathered_a, gathered_b, gathered_c);
     }
+    return _mm_movemask_epi8(classes) != 0;
 }
 
 // The rewrite's state: the new function's columns and the next free extra word, call and constant.
@@ -1448,12 +1453,17 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
                 const uint32_t prefix = t == 0 ? (copy == 0 ? loop->main_phis : 2u) : 0u;
                 const uint32_t terminator = offsets[(uint64_t)out_block + 1] - 1u;
                 const uint32_t branch = end - 1u;
-                ir_unroll_remap(f, first, branch - first, map, view, offsets[out_block] + prefix);
-                ir_unroll_remap(f, branch, 1, map, view, terminator);
-                ir_unroll_extras(emit, f, first, branch, offsets[out_block] + prefix, map, blocks_map);
-                for (uint32_t i = first; view->debug != NULL && i < end; i += 1)
+                const uint32_t body = offsets[out_block] + prefix;
+                // Latch and exiting branches are rebuilt below. Other branches immediately follow the copied body.
+                const bool keep_branch = block != loop->latch && block != loop->exiting;
+                if (ir_unroll_remap(f, first, branch - first + keep_branch, map, view, body))
                 {
-                    view->debug->origins[map[i]] = f->debug->origins[i];
+                    ir_unroll_extras(emit, f, first, branch, body, map, blocks_map);
+                }
+                if (view->debug != NULL)
+                {
+                    memcpy(view->debug->origins + body, f->debug->origins + first, (uint64_t)(branch - first) * sizeof(*view->debug->origins));
+                    view->debug->origins[terminator] = f->debug->origins[branch];
                 }
                 // An address of the induction's copy: the main induction (or copy 0's extension of it) and the copy's
                 // offset in the displacement, exact since no copy's induction wraps.
@@ -1729,10 +1739,20 @@ static IrError ir_unroll_rewrite(IrUnrollWork* work, Arena* output, Arena* scrat
         {
             const uint32_t first = f->block_offsets[b];
             const uint32_t end = f->block_offsets[(uint64_t)b + 1];
-            ir_unroll_remap(f, first, end - first - 1, values, &view, offsets[b]);
-            ir_unroll_remap(f, end - 1, 1, values, &view, offsets[(uint64_t)b + 1] - 1);
-            ir_unroll_extras(&emit, f, first, end - 1, offsets[b], values, NULL);
-            ir_unroll_extras(&emit, f, end - 1, end, offsets[(uint64_t)b + 1] - 1, values, NULL);
+            // Only a preheader with inserted instructions separates its old terminator from its body.
+            const uint32_t contiguous_end = inserts[b] == 0 ? end : end - 1;
+            if (ir_unroll_remap(f, first, contiguous_end - first, values, &view, offsets[b]))
+            {
+                ir_unroll_extras(&emit, f, first, contiguous_end, offsets[b], values, NULL);
+            }
+            if (contiguous_end != end)
+            {
+                const uint32_t terminator = offsets[(uint64_t)b + 1] - 1;
+                if (ir_unroll_remap(f, end - 1, 1, values, &view, terminator))
+                {
+                    ir_unroll_extras(&emit, f, end - 1, end, terminator, values, NULL);
+                }
+            }
         }
         for (uint32_t k = 0; error == IR_OK && k < work->accepted_count; k += 1)
         {

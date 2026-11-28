@@ -1542,9 +1542,13 @@ static const uint8_t ir_operand_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUS
 #define BUSTER_IR_OPTIONAL_ROW(op, uses, fields, types, rule, term) [op] = BUSTER_IR_OPTIONAL_BITS(op),
 static const uint8_t ir_optional_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_OPTIONAL_ROW) };
 #undef BUSTER_IR_OPTIONAL_ROW
-#define BUSTER_IR_VALUE_ROW(op, uses, fields, types, rule, term) [op] = (uses) | BUSTER_IR_OPTIONAL_BITS(op),
+// Keep the sign bit for opcodes that can own a separate operand list. A return from the remap
+// can then skip the extra-array pass for a slice containing only fixed operands.
+#define BUSTER_IR_EXTRA_OP(op) ((op) == IR_PHI || (op) == IR_CALL || (op) == IR_CALL_INDIRECT || (op) == IR_INTRINSIC || (op) == IR_SCATTER)
+#define BUSTER_IR_VALUE_ROW(op, uses, fields, types, rule, term) [op] = (uses) | BUSTER_IR_OPTIONAL_BITS(op) | (BUSTER_IR_EXTRA_OP(op) ? 0x80 : 0),
 static const uint8_t ir_value_columns[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_VALUE_ROW) };
 #undef BUSTER_IR_VALUE_ROW
+#undef BUSTER_IR_EXTRA_OP
 #undef BUSTER_IR_OPTIONAL_BITS
 #define BUSTER_IR_FIELD_ROW(op, uses, fields, types, rule, term) [op] = fields,
 static const uint8_t ir_field_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_FIELD_ROW) };

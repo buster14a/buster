@@ -931,8 +931,10 @@ static void ir_store_motion_copy(IrUnrollEmit* emit, const IrFunction* f, uint32
 {
     if (end > first)
     {
-        ir_unroll_remap(f, first, end - first, map, emit->view, map[first]);
-        ir_unroll_extras(emit, f, first, end, map[first], map, NULL);
+        if (ir_unroll_remap(f, first, end - first, map, emit->view, map[first]))
+        {
+            ir_unroll_extras(emit, f, first, end, map[first], map, NULL);
+        }
     }
 }
 
